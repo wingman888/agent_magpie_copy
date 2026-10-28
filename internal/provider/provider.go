@@ -37,11 +37,6 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName names the key in use, and Keys are the provider's other
-	// accounts: keys saved to switch to (see keys.go).
-	KeyName string       `json:"keyName,omitempty"`
-	Keys    []KeyAccount `json:"keys,omitempty"`
-
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -272,7 +267,6 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
 		// Presets own their request shape; custom headers are supported only
@@ -294,13 +288,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
-}
-
-// Catalogs are the models.dev ids the provider's models are looked up in,
-// first match wins: a gateway that resells several vendors names them all
-// ("openai, deepseek").
-func (p Provider) Catalogs() []string {
-	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
 }
 
 func cleanList(xs []string) []string {

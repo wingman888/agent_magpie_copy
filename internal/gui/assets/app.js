@@ -600,7 +600,7 @@ function renderProviders() {
       key = el("span", "key acct", accountPlan(p.account));
       key.title = t("{agent} is signed in; its models are here for every other agent", { agent: p.account.agentName });
     } else {
-      key = el("span", "key " + (p.key.set ? (keyPill(p) === p.key.masked ? "on" : "on acct") : p.ready ? "free" : "none"), p.key.set ? keyPill(p) : p.ready ? t("no key") : t("needs a key"));
+      key = el("span", "key " + (p.key.set ? "on" : p.ready ? "free" : "none"), p.key.set ? p.key.masked : p.ready ? t("no key") : t("needs a key"));
       key.title = p.key.set ? t("API key {masked}", { masked: p.key.masked }) : p.ready ? t("Local servers need no key") : t("Open the row and paste an API key");
     }
     const chev = el("span", "chev");
@@ -1078,16 +1078,6 @@ function renderAdd() {
     const f = presetQuery.trim().toLowerCase();
     const hit = (pr) => !f || pr.name.toLowerCase().includes(f) || pr.id.includes(f) || hostOf(pr.chat || pr.responses || pr.anthropic).includes(f) || (pr.note || "").toLowerCase().includes(f);
     let any = false;
-    const subs = SUBS.filter((x) => !f || x.name.toLowerCase().includes(f) || x.agent.includes(f) || "subscription".includes(f));
-    if (subs.length) {
-      any = true;
-      tiles.append(el("div", "kind", t("Subscriptions · sign in, no key")));
-      const grid = el("div", "grid");
-      for (const x of subs) grid.append(subTile(x));
-      tiles.append(grid);
-      const w = subs.find((x) => signing?.agent === x.agent);
-      if (w) tiles.append(renderSigning(w));
-    }
     for (const [kind, title] of [["vendor", "Vendors"], ["relay", "Relays · many vendors behind one key"], ["local", "On this machine"]]) {
       const ps = providers.presets.filter((p) => p.kind === kind && hit(p));
       if (!ps.length && !(kind === "local" && !f)) continue;
@@ -1117,20 +1107,6 @@ function renderAdd() {
   };
   drawTiles();
   return editing && typeof editing === "object" ? renderEditor(null, editing.preset) : null;
-}
-
-// subTile adds a subscription: one more account when the agent has some.
-function subTile(x) {
-  const have = providers.providers.find((p) => p.account?.agent === x.agent);
-  const n = have ? (have.account.logins?.length || 1) : 0;
-  const b = el("button", "tile" + (signing?.agent === x.agent ? " on" : ""));
-  b.append(icon(x.icon));
-  const tt = el("span", "tt");
-  tt.append(el("span", "n", t("{name} subscription", { name: x.name })),
-    el("span", "s", n ? t(n === 1 ? "1 account · add another" : "{n} accounts · add another", { n }) : x.plans));
-  b.append(tt);
-  b.onclick = () => startSignIn(x.agent);
-  return b;
 }
 
 function tile(pr) {
@@ -1432,13 +1408,10 @@ function renderEditor(p, presetID) {
   if (p?.account) {
     // the sign-in belongs to the agent; magpie only borrows it
     const a = p.account;
-    if (subOf(a.agent)) {
-      ed.append(...field(t("Accounts"), renderAccounts(a), t("{agent} and the gateway use the one in use. Sessions already running keep theirs until restarted.", { agent: a.agentName })));
-    } else {
-      const acct = el("div", "acct");
-      acct.append(icon(a.agentIcon), el("span", "n", a.user), el("span", "plan", accountPlan(a)));
-      ed.append(...field(t("Account"), acct, t("{agent}'s sign-in, read from its own files. Sign out there and this provider goes away.", { agent: a.agentName })));
-    }
+    const acct = el("div", "acct");
+    acct.append(icon(a.agentIcon), el("span", "n", a.user), el("span", "plan", accountPlan(a)));
+    ed.append(...field(t("Account"), acct, t("{agent}'s sign-in, read from its own files. Sign out there and this provider goes away.", { agent: a.agentName })));
+    if (a.logins) ed.append(...field(t("Other accounts"), renderLogins(a), t("To add one, sign in to it in {agent} ({how}); magpie remembers every account it sees there. Sessions already running keep their account until restarted.", { agent: a.agentName, how: a.agent === "codex" ? "codex login" : "claude → /login" })));
     ed.append(...field(t("Models"), renderModels(p), ""));
     ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
     ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
@@ -1480,8 +1453,7 @@ function renderEditor(p, presetID) {
   if (keysUrl) { const b = el("button", "link", t("Get a key ↗")); b.onclick = () => api("open", { url: keysUrl }); side.append(b); }
   const keyWrap = el("div", "pair");
   keyWrap.append(key, side);
-  if (p?.keyList?.length) ed.append(...field(t("Accounts"), renderKeyAccounts(p), t("Tick every key to use. Requests go to the first; when it runs out of quota or hits a rate limit, the next ticked key takes over.")));
-  else ed.append(...field(t("API key"), keyWrap, isNew ? t("Kept in ~/.config/magpie/providers.json, readable by you alone. Nothing is read from your shell.") : ""));
+  ed.append(...field(t("API key"), keyWrap, isNew ? t("Kept in ~/.config/magpie/providers.json, readable by you alone. Nothing is read from your shell.") : ""));
 
   // A user-defined provider can have its own picture; presets keep theirs.
   if (custom) ed.append(...field(t("Icon"), iconPicker(ed), ""));
@@ -1545,9 +1517,9 @@ function renderEditor(p, presetID) {
     if (draft.api === "anthropic") add("OpenAI URL", "chat", "https://…/v1", "if the vendor also serves chat completions");
     else add("Anthropic URL", "anthropic", "https://…", "if the vendor also serves Anthropic messages");
     add("Responses URL", "responses", "https://…/v1", "if the vendor serves the OpenAI Responses API (Codex uses it natively)");
-    const cat = input(draft.catalog, t("models.dev ids, e.g. openai, deepseek"));
+    const cat = input(draft.catalog, t("models.dev id, e.g. openai"));
     cat.oninput = () => { draft.catalog = cat.value; };
-    inner.append(...field(t("Catalog"), cat, t("Display names and reasoning levels for the models; for a gateway that serves several vendors, list them all, first match wins")));
+    inner.append(...field(t("Catalog"), cat, t("Display names and reasoning levels for the models")));
     more.append(inner);
     ed.append(more);
   }
@@ -1801,247 +1773,25 @@ function fallbackHint(p) {
   return t("When {name} is out of quota, rate limited or down, a request goes to these instead, top first. It only happens before any of the reply is sent, and {name} then sits out a minute.", { name: p.name });
 }
 
-// ---------- subscriptions ----------
-//
-// A Claude or ChatGPT subscription is added here, not in a terminal: magpie
-// opens the vendor's own sign-in in the browser, takes the account when it
-// comes back, and lists it with the others — any of them one click from
-// being the one in use.
-
-const SUBS = [
-  { agent: "claude", name: "Claude", icon: "claude-color", plans: "Pro · Max · Team" },
-  { agent: "codex", name: "ChatGPT", icon: "openai", plans: "Plus · Pro · Business" },
-];
-const subOf = (agent) => SUBS.find((x) => x.agent === agent);
-let signing = null; // the sign-in under way: { id, agent, url, state, error }
-let justAdded = ""; // the account that just came in, to greet it
-
-async function startSignIn(agent) {
-  if (signing?.state === "waiting") api("signin/" + signing.id + "/cancel", {}).catch(() => {});
-  signing = { agent, state: "starting" };
-  renderProviders();
-  try {
-    signing = await api("signin", { agent });
-    renderProviders();
-    followSignIn(signing.id);
-  } catch (e) {
-    signing = { agent, state: "failed", error: e.message };
-    renderProviders();
-  }
-}
-
-async function followSignIn(id) {
-  while (signing?.id === id && signing.state === "waiting") {
-    await new Promise((r) => setTimeout(r, 800));
-    let st;
-    try { st = await api("signin/" + id); } catch { continue; }
-    if (signing?.id !== id || st.state === "waiting") continue;
-    if (st.state === "done") {
-      signing = null;
-      justAdded = st.user;
-      providers = await api("providers");
-      const p = providers.providers.find((x) => x.account?.agent === st.agent);
-      if (p) { editing = p.id; draft = null; adding = false; presetQuery = ""; }
-      renderProviders();
-      status(st.using ? t("Signed in as {user}", { user: st.user }) : t("{user} added — switch to it any time", { user: st.user }), "ok");
-      state = await api("state");
-      renderAgents();
-      setTimeout(() => { justAdded = ""; }, 2000);
-      return;
-    }
-    signing = st.state === "canceled" ? null : st;
-    renderProviders();
-  }
-}
-
-function cancelSignIn() {
-  if (signing?.id) api("signin/" + signing.id + "/cancel", {}).catch(() => {});
-  signing = null;
-  renderProviders();
-}
-
-// renderSigning: where a sign-in stands, in place of the button that
-// started it — waiting on the browser, or what went wrong.
-function renderSigning(sub) {
-  const box = el("div", "signing" + (signing.state === "failed" ? " failed" : ""));
-  const tt = el("span", "tt");
-  if (signing.state === "failed") {
-    box.append(el("span", "mark", "!"));
-    tt.append(el("span", "n", t("Sign-in didn't finish")), el("span", "s", signing.error || ""));
-    box.append(tt);
-    const again = el("button", "text primary", t("Try again"));
-    again.onclick = () => startSignIn(sub.agent);
-    const close = el("button", "text", t("Cancel"));
-    close.onclick = cancelSignIn;
-    box.append(close, again);
-    return box;
-  }
-  box.append(el("span", "spinner"));
-  tt.append(el("span", "n", t("Finish signing in to {name} in your browser", { name: sub.name })),
-    el("span", "s", t("magpie opened the sign-in page. The account shows up here as soon as you're done.")));
-  box.append(tt);
-  if (signing.url) {
-    const acts = el("span", "acts");
-    const open = el("button", "link", t("Open again"));
-    open.onclick = () => api("open", { url: signing.url }).catch(() => {});
-    const cp = el("button", "link", t("Copy link"));
-    cp.onclick = () => copy(signing.url, t("Sign-in link"), cp);
-    acts.append(open, cp);
-    tt.append(acts);
-  }
-  const x = el("button", "text", t("Cancel"));
-  x.onclick = cancelSignIn;
-  box.append(x);
-  return box;
-}
-
-// renderAccounts: every account of an agent magpie has, the one in use
-// first, and a way to add another.
-function renderAccounts(a) {
-  const sub = subOf(a.agent);
-  const list = el("div", "accts");
-  let ls = a.logins?.length ? [...a.logins] : [{ user: a.user, plan: a.plan, active: true }];
-  ls.sort((x, y) => (y.active ? 1 : 0) - (x.active ? 1 : 0));
-  for (const l of ls) {
-    const row = el("div", "acc" + (l.active ? " in-use" : "") + (l.user === justAdded ? " new" : ""));
-    const dot = el("span", "dot");
-    if (l.active) dot.append(svg(CHECK, 10, 2.2));
-    row.append(dot, el("span", "n", l.user), el("span", "plan", accountPlan({ agent: a.agent, plan: l.plan })), el("span", "grow"));
-    if (l.active) {
-      row.append(el("span", "using", t("In use")));
-    } else {
-      const forget = el("button", "text quiet", t("Remove"));
-      forget.title = t("magpie forgets this account's sign-in; the account itself is untouched");
-      forget.onclick = () => accountAction("login/forget", { agent: a.agent, user: l.user }, t("{user} removed", { user: l.user }));
-      const use = el("button", "text", t("Use"));
-      use.title = t("Sign {agent} in to this account", { agent: a.agentName });
-      use.onclick = () => { use.classList.add("busy"); accountAction("login/switch", { agent: a.agent, user: l.user }, t("{agent} is now signed in as {user}", { agent: a.agentName, user: l.user })); };
-      row.append(forget, use);
-    }
+// renderLogins: the agent's other accounts magpie remembers, each one a
+// click away from being the one the agent is signed in to.
+function renderLogins(a) {
+  const list = el("div", "logins");
+  const others = a.logins.filter((l) => !l.active);
+  if (!others.length) list.append(el("div", "none", t("None yet")));
+  for (const l of others) {
+    const row = el("div", "acct");
+    row.append(el("span", "n", l.user), el("span", "plan", accountPlan({ agent: a.agent, plan: l.plan })), el("span", "grow"));
+    const forget = el("button", "text", t("Forget"));
+    forget.title = t("magpie forgets this account's sign-in; the account itself is untouched");
+    forget.onclick = () => providerAction("forget", { agent: a.agent, user: l.user }, t("{user} forgotten", { user: l.user }), "login/");
+    const use = el("button", "text", t("Switch"));
+    use.title = t("Sign {agent} in to this account", { agent: a.agentName });
+    use.onclick = () => { use.classList.add("busy"); providerAction("switch", { agent: a.agent, user: l.user }, t("{agent} is now signed in as {user}", { agent: a.agentName, user: l.user }), "login/"); };
+    row.append(forget, use);
     list.append(row);
   }
-  if (signing?.agent === a.agent) list.append(renderSigning(sub));
-  else {
-    const add = el("button", "acc add");
-    const ic = el("span", "dot");
-    ic.append(svg(PLUS, 10, 1.8));
-    add.append(ic, el("span", "n", t("Add another {name} account", { name: sub.name })));
-    add.onclick = () => startSignIn(a.agent);
-    list.append(add);
-  }
   return list;
-}
-
-// accountAction changes which account a provider uses, or which it has,
-// and leaves its editor open on the result.
-async function accountAction(path, body, okMsg) {
-  try {
-    providers = await api(path, body);
-    renderProviders();
-    state = await api("state");
-    renderAgents();
-    if (okMsg) status(okMsg, "ok");
-    return true;
-  } catch (e) {
-    if (!editorError(e.message, "err")) status(e.message, "err");
-    document.querySelector(".editor .busy")?.classList.remove("busy");
-    return false;
-  }
-}
-
-// renderKeyAccounts: a key provider's accounts, one per key, the same list
-// a subscription has. addingKey holds the half-typed new one.
-let addingKey = null;
-function renderKeyAccounts(p) {
-  const list = el("div", "accts");
-  const several = p.keyList.filter((k) => k.on).length > 1;
-  for (const k of p.keyList) {
-    const row = el("div", "acc" + (k.on ? " in-use" : " off") + (k.id === justAdded ? " new" : ""));
-    // the dot is the switch: every key ticked is in use
-    const dot = el("button", "dot tick");
-    if (k.on) dot.append(svg(CHECK, 10, 2.2));
-    dot.title = k.on ? t("Stop using this key") : t("Use this key too");
-    dot.onclick = () => accountAction("keys/" + (k.on ? "off" : "on"), { id: p.id, ref: k.id });
-    const name = el("button", "n rename" + (k.name ? "" : " mono"), k.name || k.masked);
-    name.title = t("Rename");
-    name.onclick = () => {
-      const i = input(k.name, t("Name, e.g. Personal or Team"));
-      i.className = "rename-in";
-      const done = (save) => {
-        if (save && i.value.trim() !== (k.name || "")) accountAction("keys/rename", { id: p.id, ref: k.id, name: i.value });
-        else renderProviders();
-      };
-      i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") done(true); else if (e.key === "Escape") done(false); };
-      i.onblur = () => done(true);
-      name.replaceWith(i);
-      i.focus();
-    };
-    row.append(dot, name);
-    if (k.name) row.append(el("span", "plan mono", k.masked));
-    row.append(el("span", "grow"));
-    if (!k.active || several) {
-      const rm = el("button", "text quiet", t("Remove"));
-      rm.onclick = () => accountAction("keys/remove", { id: p.id, ref: k.id }, t("Key removed"));
-      row.append(rm);
-    }
-    if (k.active) row.append(el("span", "using", several ? t("First") : t("In use")));
-    else if (k.on) {
-      const first = el("button", "text", t("Make first"));
-      first.onclick = () => { first.classList.add("busy"); accountAction("keys/use", { id: p.id, ref: k.id }, t("{name} tries {key} first", { name: p.name, key: k.name || k.masked })); };
-      row.append(first);
-    }
-    list.append(row);
-  }
-  if (addingKey?.id === p.id) {
-    const box = el("div", "acc adding");
-    const name = input(addingKey.name, t("Name, e.g. Team"));
-    name.oninput = () => { addingKey.name = name.value; };
-    const key = input(addingKey.key, t("paste an API key"), "password");
-    key.oninput = () => { addingKey.key = key.value; };
-    const add = el("button", "text primary", t("Add"));
-    const go = async () => {
-      add.classList.add("busy");
-      const id = await keyFingerprint(key.value.trim());
-      if (await accountAction("keys/add", { id: p.id, name: name.value, key: key.value }, t("Key added — it takes over when the ones before it run out"))) {
-        addingKey = null; justAdded = id; renderProviders(); setTimeout(() => { justAdded = ""; }, 2000);
-      }
-    };
-    add.onclick = go;
-    for (const i of [name, key]) i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") go(); else if (e.key === "Escape") { addingKey = null; renderProviders(); } };
-    const x = el("button", "text", t("Cancel"));
-    x.onclick = () => { addingKey = null; renderProviders(); };
-    const fields = el("div", "kf");
-    fields.append(name, key);
-    const bar = el("div", "kb");
-    if (p.keysUrl) { const g = el("button", "link", t("Get a key ↗")); g.onclick = () => api("open", { url: p.keysUrl }); bar.append(g); }
-    bar.append(el("span", "grow"), x, add);
-    box.append(fields, bar);
-    list.append(box);
-    queueMicrotask(() => (addingKey.name ? key : name).focus());
-  } else {
-    const add = el("button", "acc add");
-    const ic = el("span", "dot");
-    ic.append(svg(PLUS, 10, 1.8));
-    add.append(ic, el("span", "n", t("Add another key")));
-    add.onclick = () => { addingKey = { id: p.id, name: "", key: "" }; renderProviders(); };
-    list.append(add);
-  }
-  return list;
-}
-
-// keyPill is a key provider's row badge: the key in use, or how many are.
-function keyPill(p) {
-  const on = (p.keyList || []).filter((k) => k.on);
-  if (on.length > 1) return t("{n} keys", { n: on.length });
-  return on[0]?.name || p.key.masked;
-}
-
-// keyFingerprint is the id the backend gives a key, to greet a new one.
-async function keyFingerprint(key) {
-  try {
-    const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
-    return [...h.slice(0, 5)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  } catch { return ""; }
 }
 
 async function providerAction(action, body, okMsg, base = "provider/") {
@@ -2489,7 +2239,6 @@ $("#prefs").onclick = () => { if (mode === "window") show("settings"); else api(
 
 $("#sync").onclick = async () => {
   const b = $("#sync");
-  if (b.classList.contains("spin")) return;
   b.classList.add("spin");
   try {
     state = await api("sync", {});
@@ -2499,10 +2248,7 @@ $("#sync").onclick = async () => {
   } catch (e) {
     status(t("Sync failed: {e}", { e: e.message }), "err");
   } finally {
-    // stop at the end of a turn, not wherever the reply caught it (#16)
-    const svg = b.querySelector("svg");
-    if (svg.getAnimations().length) svg.addEventListener("animationiteration", () => b.classList.remove("spin"), { once: true });
-    else b.classList.remove("spin");
+    b.classList.remove("spin");
   }
 };
 $("#open").onclick = () => api("window/main", {});
