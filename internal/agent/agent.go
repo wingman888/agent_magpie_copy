@@ -78,10 +78,15 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key.
+// Field looks a field up by key, then by the label shown in the UI.
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
+			return &a.Fields[i]
+		}
+	}
+	for i := range a.Fields {
+		if a.Fields[i].Label == key {
 			return &a.Fields[i]
 		}
 	}
