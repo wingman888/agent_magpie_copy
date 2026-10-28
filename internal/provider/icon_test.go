@@ -16,7 +16,7 @@ import (
 var pngHead = []byte("\x89PNG\r\n\x1a\n")
 
 func TestStoreIcon(t *testing.T) {
-	isolate(t)
+	configHome(t)
 	data := append(append([]byte{}, pngHead...), "body"...)
 	ref, err := StoreIcon(data)
 	if err != nil || !strings.HasPrefix(ref, "file:") || !strings.HasSuffix(ref, ".png") || len(ref) != len("file:")+16+4 {
@@ -43,7 +43,7 @@ func TestStoreIcon(t *testing.T) {
 }
 
 func TestStoreIconErrors(t *testing.T) {
-	isolate(t)
+	configHome(t)
 	if _, err := StoreIcon([]byte("hello")); err == nil || !strings.HasPrefix(err.Error(), "not a picture") {
 		t.Errorf("hello: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestStoreIconErrors(t *testing.T) {
 }
 
 func TestIconFile(t *testing.T) {
-	isolate(t)
+	configHome(t)
 	for _, n := range []string{"../providers.json", "x.png", "0123456789abcdef.exe", ""} {
 		if IconFile(n) != "" {
 			t.Errorf("%q accepted", n)
@@ -78,7 +78,7 @@ func TestIconFile(t *testing.T) {
 }
 
 func TestSweepIcons(t *testing.T) {
-	isolate(t)
+	configHome(t)
 	used, _ := StoreIcon(append(append([]byte{}, pngHead...), "a"...))
 	old, _ := StoreIcon(append(append([]byte{}, pngHead...), "b"...))
 	fresh, _ := StoreIcon(append(append([]byte{}, pngHead...), "c"...))
@@ -107,7 +107,7 @@ func TestSweepIcons(t *testing.T) {
 }
 
 func TestHeadersSaved(t *testing.T) {
-	isolate(t)
+	configHome(t)
 	err := Save(Provider{Name: "R", Chat: "https://r.example.com/v1", Key: "k", Headers: map[string]string{" X-Org ": " acme ", "  ": "x"}})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestHeadersSaved(t *testing.T) {
 }
 
 func TestSignAndFetchHeaders(t *testing.T) {
-	isolate(t)
+	configHome(t)
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Clone()
@@ -160,4 +160,9 @@ func TestSignAndFetchHeaders(t *testing.T) {
 	if _, ok := req.Header["x-id"]; ok {
 		t.Error("account got custom headers")
 	}
+}
+
+func configHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 }
