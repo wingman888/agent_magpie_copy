@@ -161,7 +161,7 @@ func UseKey(id, keyRef string) error {
 	}
 	k := p.Keys[i]
 	rest := append([]KeyAccount{{Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol}}, append(p.Keys[:i:i], p.Keys[i+1:]...)...)
-	p.Key, p.KeyName, p.Keys = k.Key, k.Name, rest
+	p.Key, p.KeyName, p.KeyProtocol, p.Keys = k.Key, k.Name, k.Protocol, rest
 	return Save(*p)
 }
 

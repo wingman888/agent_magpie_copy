@@ -44,16 +44,18 @@ const (
 )
 
 func (u *relayUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	u.mu.Lock()
-	u.hits = append(u.hits, r.URL.Path+" "+r.Header.Get("x-api-key")+r.Header.Get("Authorization"))
-	u.mu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
 	anth := r.URL.Path == "/v1/messages"
 	got := r.Header.Get("Authorization")
+	ok := got == "Bearer "+relayChatKey
 	if anth {
 		got = r.Header.Get("x-api-key")
+		ok = got == relayAnthKey
 	}
-	if anth != (got == relayAnthKey || got == "Bearer "+relayAnthKey) || (!anth && got != "Bearer "+relayChatKey) {
+	u.mu.Lock()
+	u.hits = append(u.hits, r.URL.Path+" "+got)
+	u.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	if !ok {
 		w.WriteHeader(401)
 		w.Write([]byte(`{"error":{"message":"bad key"}}`))
 		return
