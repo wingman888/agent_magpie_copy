@@ -2,8 +2,8 @@
 
 package main
 
-import "github.com/yetone/magpie/internal/gui"
+import "github.com/yetone/dial/internal/gui"
 
 const hasGUI = true
 
-func runGUI(showMain bool, link string) error { return gui.Run(version, showMain, link) }
+func runGUI(showMain bool) error { return gui.Run(version, showMain) }
