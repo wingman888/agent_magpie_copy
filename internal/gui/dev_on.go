@@ -87,11 +87,11 @@ func devPage(next http.Handler) http.Handler {
 	})
 }
 
-// devListen also serves the whole UI over plain HTTP when DIAL_DEV_UI names
+// devListen also serves the whole UI over plain HTTP when MAGPIE_DEV_UI names
 // an address, so it can be opened in a browser with real devtools. The
 // window actions become no-ops there; everything else is the real thing.
 func devListen(h http.Handler) {
-	addr := os.Getenv("DIAL_DEV_UI")
+	addr := os.Getenv("MAGPIE_DEV_UI")
 	if addr == "" {
 		return
 	}
