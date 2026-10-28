@@ -128,7 +128,7 @@ func TestAffinityAfterAnAnswerReadFromCache(t *testing.T) {
 			if got := answerer(rec); got != "k1" {
 				t.Fatalf("first turn: %s %s", got, rec.Body)
 			}
-			if r.Affinity == nil || r.Affinity.Why != whyFirst || r.Affinity.Turn != 1 {
+			if first := map[bool]string{false: whyFirst, true: whyOff}[tc.affinity == provider.AffinityOff]; r.Affinity == nil || r.Affinity.Why != first || r.Affinity.Turn != 1 {
 				t.Fatalf("first: %+v", r.Affinity)
 			}
 			rec, r = ask1(t, s, "s1", chatBody("aff/m", tc.second...))
@@ -136,7 +136,7 @@ func TestAffinityAfterAnAnswerReadFromCache(t *testing.T) {
 				t.Fatalf("second landed on %s, want %s", got, tc.want)
 			}
 			a := r.Affinity
-			if a == nil || a.Why != tc.why || a.Last != "aff" && a.Last == "" || a.CacheRead != 2500 || a.Mode != tc.affinity {
+			if a == nil || a.Why != tc.why || a.Last == "" || a.CacheRead != 2500 || a.Mode != tc.affinity {
 				t.Fatalf("affinity %+v", a)
 			}
 			if wantTurns := map[bool]int{false: 2, true: 1}[tc.second[len(tc.second)-1] == tool]; a.Turn != wantTurns || a.Within != (wantTurns == 1) {
