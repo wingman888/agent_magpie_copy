@@ -85,11 +85,6 @@ func (a *Agent) Field(key string) *Field {
 			return &a.Fields[i]
 		}
 	}
-	for i := range a.Fields {
-		if a.Fields[i].Label == key { // `dial gemini auth …`: the label as shown
-			return &a.Fields[i]
-		}
-	}
 	return nil
 }
 
