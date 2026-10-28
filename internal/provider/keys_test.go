@@ -1,6 +1,9 @@
 package provider
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSeveralKeys(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -58,39 +61,65 @@ func TestSeveralKeys(t *testing.T) {
 	}
 }
 
-func TestKeyProtocol(t *testing.T) {
+func TestKeyProtocols(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1", Anthropic: "https://relay.test", Key: "sk-oai-1111"}); err != nil {
+	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1", Key: "sk-one-1111"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddKey("relay", "Claude", "sk-ant-2222", Anthropic); err != nil {
-		t.Fatal(err)
+	if err := AddKey("relay", "", "sk-bad-3333", "carrier-pigeon"); err == nil || !strings.Contains(err.Error(), `unknown protocol "carrier-pigeon"`) {
+		t.Fatalf("err %v", err)
 	}
-	if err := AddKey("relay", "", "sk-x-3333", "carrier-pigeon"); err == nil {
-		t.Fatal("took an unknown protocol")
+	if p, _ := Find("relay"); len(p.Keys) != 0 {
+		t.Fatalf("saved %+v", p.Keys)
 	}
-	if err := SetKeyProtocol("relay", keyID("sk-oai-1111"), Chat); err != nil {
+	if err := AddKey("relay", "A", "sk-anth-2222", Anthropic); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := Find("relay")
-	ks := p.KeyList()
-	if ks[0].Protocol != Chat || ks[1].Protocol != Anthropic {
-		t.Fatalf("keys %+v", ks)
+	if ks := p.KeyList(); ks[0].Protocol != "" || ks[1].Protocol != Anthropic {
+		t.Fatalf("%+v", ks)
 	}
-	// it goes with the key when the order changes
-	if err := UseKey("relay", keyID("sk-ant-2222")); err != nil {
+	if err := SetKeyProtocol("relay", keyID("sk-one-1111"), Chat); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetKeyProtocol("relay", "nope", Chat); err == nil || !strings.Contains(err.Error(), "has no such key") {
+		t.Fatalf("err %v", err)
+	}
+	if err := SetKeyProtocol("relay", keyID("sk-one-1111"), "x"); err == nil {
+		t.Fatal("bad protocol accepted")
+	}
+	p, _ = Find("relay")
+	if p.KeyList()[0].Protocol != Chat || p.KeysOn()[0].Protocol != Chat {
+		t.Fatalf("%+v", p.KeyList())
+	}
+	if err := UseKey("relay", keyID("sk-anth-2222")); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = Find("relay")
-	if p.Key != "sk-ant-2222" || p.KeyProtocol != Anthropic || p.Keys[0].Protocol != Chat {
+	if p.Key != "sk-anth-2222" || p.KeyProtocol != Anthropic || p.Keys[0].Protocol != Chat {
 		t.Fatalf("after use: %+v", p)
 	}
-	q := p.WithKey(p.Keys[0])
-	if q.Key != "sk-oai-1111" || q.Chat == "" || q.Anthropic != "" || q.Responses != "" {
-		t.Fatalf("with the OpenAI key: %+v", q)
+	// off on the first: the next takes over with its own protocol
+	if err := SetKeyOn("relay", keyID("sk-anth-2222"), false); err != nil {
+		t.Fatal(err)
 	}
-	if q := p.WithKey(KeyAccount{Key: "k"}); q.Chat == "" || q.Anthropic == "" {
-		t.Fatalf("a key for any protocol: %+v", q)
+	p, _ = Find("relay")
+	if p.Key != "sk-one-1111" || p.KeyProtocol != Chat || p.Keys[0].Protocol != Anthropic || !p.Keys[0].Off {
+		t.Fatalf("after off: %+v", p)
+	}
+}
+
+func TestWithKey(t *testing.T) {
+	p := Provider{Chat: "c", Responses: "r", Anthropic: "a", Key: "old"}
+	q := p.WithKey(KeyAccount{Name: "n", Key: "new", Protocol: Chat})
+	if q.Key != "new" || q.KeyName != "n" || q.KeyProtocol != Chat || q.Chat != "c" || q.Responses != "" || q.Anthropic != "" {
+		t.Fatalf("%+v", q)
+	}
+	if q = p.WithKey(KeyAccount{Key: "new"}); q.Chat == "" || q.Anthropic == "" || q.Responses == "" {
+		t.Fatalf("%+v", q)
+	}
+	if p.Anthropic != "a" {
+		t.Fatal("original changed")
 	}
 }

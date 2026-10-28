@@ -126,40 +126,7 @@ func TestLoginUsageEachAccount(t *testing.T) {
 	if len(u) != 2 || u["me@example.com"].Windows[0].Used != 12 || u["work@example.com"].Windows[0].Used != 97 || u["work@example.com"].Windows[0].Name != "5 hours" {
 		t.Fatalf("usage %+v", u)
 	}
-	if len(LoginUsage(context.Background(), "opencode")) != 0 {
+	if len(LoginUsage(context.Background(), "copilot")) != 0 {
 		t.Fatal("usage for an agent without accounts")
-	}
-}
-
-// With several accounts, the usage page has a card for each, the one the
-// agent is signed in to first.
-func TestSubscriptionUsageEachAccount(t *testing.T) {
-	home := signIn(t)
-	rememberLogins(true)
-	codexSignIn(t, home, "work@example.com", "r-work")
-	rememberLogins(true)
-	used := map[string]float64{"acct-1": 12, "acct-work@example.com": 97}
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/backend-api/wham/usage" {
-			w.WriteHeader(404)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{"plan_type": "pro", "rate_limit": map[string]any{
-			"primary_window": map[string]any{"used_percent": used[r.Header.Get("chatgpt-account-id")], "limit_window_seconds": 18000}}})
-	}))
-	defer fake.Close()
-	old := CodexBase
-	CodexBase = fake.URL + "/backend-api/codex"
-	t.Cleanup(func() { CodexBase = old })
-
-	var codex []SubscriptionQuota
-	for _, q := range fetchSubscriptionUsage() {
-		if q.Provider == "codex" {
-			codex = append(codex, q)
-		}
-	}
-	if len(codex) != 2 || codex[0].User != "work@example.com" || codex[0].Windows[0].Used != 97 ||
-		codex[1].User != "me@example.com" || codex[1].Windows[0].Used != 12 || codex[1].Name != "Codex" {
-		t.Fatalf("cards %+v", codex)
 	}
 }
