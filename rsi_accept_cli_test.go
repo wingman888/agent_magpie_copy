@@ -51,7 +51,7 @@ func TestAcceptProviderFallbackCLI(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 	// the provider list shows the chain
-	if out, err := run("provider"); err != nil || !strings.Contains(out, "a/b → c/d") {
+	if out, err := run("providers"); err != nil || !strings.Contains(out, "a/b → c/d") {
 		t.Fatalf("list: %q %v", out, err)
 	}
 	// unknown model: error, nothing saved
