@@ -27,7 +27,7 @@ func (b *keyUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if lim {
 		w.WriteHeader(429)
-		io.WriteString(w, `{"error":{"message":"rate limited for `+key+`"}}`)
+		io.WriteString(w, `{"error":{"message":"rate limited for `+strings.ToUpper(key[len(key)-3:])+`"}}`)
 		return
 	}
 	io.WriteString(w, `{"id":"from-`+key+`","choices":[]}`)
@@ -108,7 +108,7 @@ func TestAcceptAllKeysFailLastErrorReturned(t *testing.T) {
 		Key: "k1", Keys: []provider.KeyAccount{{Name: "Two", Key: "k2"}}}, up)
 	s := gateway.New()
 	code, body := send(s, "acc-dead/m1")
-	if code != 429 || !strings.Contains(body, "rate limited for k2") {
+	if code != 429 || !strings.Contains(body, "rate limited for K2") {
 		t.Fatalf("%d %s", code, body)
 	}
 	if got := up.take(); got != "k1,k2" {

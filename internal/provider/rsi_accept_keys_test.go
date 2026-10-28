@@ -68,7 +68,7 @@ func TestAcceptAddKey(t *testing.T) {
 }
 
 func TestAcceptAddKeyToEmptyProvider(t *testing.T) {
-	setup(t, provider.Provider{ID: "bare", Name: "Bare", Chat: "https://bare.test/v1"})
+	setup(t, provider.Provider{ID: "bare", Name: "Bare", Chat: "http://localhost:1/v1"})
 	if err := provider.AddKey("bare", "Main", "sk-main"); err != nil {
 		t.Fatal(err)
 	}
