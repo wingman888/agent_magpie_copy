@@ -6,6 +6,10 @@ const mode = params.get("mode") || "window";
 document.body.classList.add(mode);
 // Only the Mac window draws its title bar inside the page (the traffic lights).
 if (/^Mac/.test(navigator.platform)) document.body.classList.add("mac");
+// The window is dragged by its header, and only where the header says so
+// (--wails-draggable), so the tabs and buttons in it stay plain clicks.
+// Outside the app — a browser on the gateway's page — there is no runtime.
+if (mode === "window") import("/wails/runtime.js").catch(() => {});
 if (params.get("theme")) document.documentElement.dataset.theme = params.get("theme");
 
 let state = { agents: [], profiles: [], catalog: "", settings: {} };
@@ -19,6 +23,7 @@ let editing = null; // provider id being edited; { preset } or { custom: true } 
 let draft = null; // the editor's working copy
 let adding = false; // the preset sheet is open
 let importing = null; // a magpie://import link waiting for a yes: { provider, error, replaces }
+let importingApps = null; // the Import from other apps dialog: { sources, picks }
 // the gateway tab's choices, kept per machine
 let flavor = params.get("flavor") || localStorage.getItem("magpie.flavor") || "openai"; // which API the snippets speak
 let lang = params.get("lang") || localStorage.getItem("magpie.lang") || "shell";        // which snippet
@@ -214,6 +219,27 @@ async function load() {
   } catch (e) {
     status(e.message, "err");
   }
+  renderUpdateBadge();
+}
+
+// renderUpdateBadge shows the header's Update pill once a newer magpie is
+// downloaded (a click restarts into it) or, where magpie can't replace
+// itself, out (a click opens the release page).
+async function renderUpdateBadge() {
+  const b = $("#update");
+  const u = await api("update").catch(() => null);
+  const on = !!u && (u.state === "ready" || u.state === "available");
+  if (b.hidden !== !on) b.hidden = !on;
+  if (!on || b.classList.contains("busy")) return;
+  b.querySelector("span").textContent = t("Update");
+  b.title = u.state === "ready" ? t("Restart to update to {v}", { v: u.latest }) : t("{v} is out", { v: u.latest });
+  b.onclick = () => {
+    if (u.state === "ready") {
+      b.classList.add("busy");
+      b.querySelector("span").textContent = t("Restarting…");
+    }
+    api("update/install", {}).catch(() => b.classList.remove("busy"));
+  };
 }
 
 // ---------- picker ----------
@@ -520,7 +546,7 @@ $("#q").addEventListener("keydown", (e) => {
 document.addEventListener("mousedown", (e) => { if (pick && !$("#pop").contains(e.target)) closePicker(); });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || pick) return;
-  if (editing !== null) cancelEdit();
+  if (editing !== null || importingApps) cancelEdit();
   else if (mode === "panel") api("window/hide", {});
 });
 
@@ -572,6 +598,11 @@ async function loadProviders() {
 // One row per provider: logo, name, the agents pointed at it, key status.
 // Everything else lives in the editor, a dialog over the page.
 function renderProviders() {
+  // Rebuilding the list empties the page for a moment, which clamps its
+  // scroll to the top; put it back so closing the editor leaves the reader
+  // where they were.
+  const view = $("#view-providers"), top = view.scrollTop;
+  closeProtoMenu();
   const list = $("#providers");
   list.replaceChildren();
   list.hidden = !providers.providers.length;
@@ -600,20 +631,22 @@ function renderProviders() {
       key = el("span", "key acct", accountPlan(p.account));
       key.title = t("{agent} is signed in; its models are here for every other agent", { agent: p.account.agentName });
     } else {
-      key = el("span", "key " + (p.key.set ? "on" : p.ready ? "free" : "none"), p.key.set ? p.key.masked : p.ready ? t("no key") : t("needs a key"));
+      key = el("span", "key " + (p.key.set ? (keyPill(p) === p.key.masked ? "on" : "on acct") : p.ready ? "free" : "none"), p.key.set ? keyPill(p) : p.ready ? t("no key") : t("needs a key"));
       key.title = p.key.set ? t("API key {masked}", { masked: p.key.masked }) : p.ready ? t("Local servers need no key") : t("Open the row and paste an API key");
     }
     const chev = el("span", "chev");
     chev.append(svg(CHEV_R, 11, 1.7));
     row.append(icon(p.icon || "generic"), who, uses, key, chev);
-    row.onclick = () => { editing = open ? null : p.id; draft = null; adding = false; renderProviders(); };
+    row.onclick = () => { editing = open ? null : p.id; draft = null; renderProviders(); }; // the preset sheet stays as it is under the dialog
     list.append(row);
     if (open) dialog = renderEditor(p);
   }
   renderExcluded();
   dialog = renderAdd() || dialog;
   if (importing) dialog = renderImport(importing);
+  if (importingApps) dialog = renderImportApps(importingApps);
   if (dialog) openModal(dialog); else closeModal();
+  view.scrollTop = top;
 }
 
 // Sign-ins magpie found but leaves alone, so nobody wonders why an agent that
@@ -639,6 +672,8 @@ function accountPlan(a) {
   if (a.agent === "codex") return "ChatGPT" + (a.plan ? " " + a.plan[0].toUpperCase() + a.plan.slice(1) : "");
   if (a.agent === "copilot") return "GitHub";
   if (a.agent === "claude") return "Claude" + (a.plan ? " " + a.plan[0].toUpperCase() + a.plan.slice(1) : "");
+  if (a.agent === "cursor") return "Cursor" + (a.plan ? " " + a.plan[0].toUpperCase() + a.plan.slice(1) : "");
+  if (a.agent === "grok") return "Grok";
   return t("signed in");
 }
 
@@ -941,14 +976,36 @@ function highlight(code, lang) {
   return out;
 }
 
+let modelQuery = "";
 function renderGatewayModels() {
   const list = $("#gwModels");
   list.replaceChildren();
-  const models = gatewayModels();
+  const all = gatewayModels();
+  // the search sits in the section head, beside Copy all ids; typing
+  // redraws only the list, so it keeps its focus
+  let q = $("#findModel");
+  if (!q) {
+    q = input(modelQuery, t("Find a model…"));
+    q.id = "findModel";
+    q.className = "find";
+    q.oninput = () => { modelQuery = q.value; renderGatewayModels(); };
+    q.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape" && q.value) { q.value = modelQuery = ""; renderGatewayModels(); } };
+    $("#copyModels").before(q);
+  }
+  q.hidden = all.length < 8;
+  const words = modelQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const models = q.hidden ? all : all.filter((m) => {
+    const hay = `${m.id} ${m.name || ""} ${m.provider.name}`.toLowerCase();
+    return words.every((w) => hay.includes(w));
+  });
   $("#copyModels").hidden = !models.length;
   $("#copyModels").onclick = () => copy(models.map((m) => m.id).join("\n"), t("Model ids"));
-  if (!models.length) {
+  if (!all.length) {
     list.append(el("div", "empty-state", "")).append(el("b", "", t("No models exposed yet")), t("Add a provider, or sign in to Codex or Copilot; their models show up here for every agent."));
+    return;
+  }
+  if (!models.length) {
+    list.append(el("div", "none", t("No models match “{q}”", { q: modelQuery.trim() })));
     return;
   }
   for (const m of models) {
@@ -1065,6 +1122,10 @@ function renderAdd() {
   q.className = "find";
   q.oninput = () => { presetQuery = q.value; drawTiles(); };
   head.append(q);
+  const imp = el("button", "text", t("Import…"));
+  imp.title = t("Bring over providers set up in Alma or CC Switch");
+  imp.onclick = openImportApps;
+  head.append(imp);
   if (providers.providers.length) {
     const x = el("button", "text", t("Close"));
     x.onclick = () => { adding = false; editing = null; draft = null; presetQuery = ""; renderProviders(); };
@@ -1078,6 +1139,16 @@ function renderAdd() {
     const f = presetQuery.trim().toLowerCase();
     const hit = (pr) => !f || pr.name.toLowerCase().includes(f) || pr.id.includes(f) || hostOf(pr.chat || pr.responses || pr.anthropic).includes(f) || (pr.note || "").toLowerCase().includes(f);
     let any = false;
+    const subs = SUBS.filter((x) => !f || x.name.toLowerCase().includes(f) || x.agent.includes(f) || "subscription".includes(f));
+    if (subs.length) {
+      any = true;
+      tiles.append(el("div", "kind", t("Subscriptions · sign in, no key")));
+      const grid = el("div", "grid");
+      for (const x of subs) grid.append(subTile(x));
+      tiles.append(grid);
+      const w = subs.find((x) => signing?.agent === x.agent);
+      if (w) tiles.append(renderSigning(w));
+    }
     for (const [kind, title] of [["vendor", "Vendors"], ["relay", "Relays · many vendors behind one key"], ["local", "On this machine"]]) {
       const ps = providers.presets.filter((p) => p.kind === kind && hit(p));
       if (!ps.length && !(kind === "local" && !f)) continue;
@@ -1109,6 +1180,20 @@ function renderAdd() {
   return editing && typeof editing === "object" ? renderEditor(null, editing.preset) : null;
 }
 
+// subTile adds a subscription: one more account when the agent has some.
+function subTile(x) {
+  const have = providers.providers.find((p) => p.account?.agent === x.agent);
+  const n = have ? (have.account.logins?.length || 1) : 0;
+  const b = el("button", "tile" + (signing?.agent === x.agent ? " on" : ""));
+  b.append(icon(x.icon));
+  const tt = el("span", "tt");
+  tt.append(el("span", "n", t("{name} subscription", { name: x.name })),
+    el("span", "s", !n ? x.plans : x.single ? t("signed in · switch account") : t(n === 1 ? "1 account · add another" : "{n} accounts · add another", { n })));
+  b.append(tt);
+  b.onclick = () => startSignIn(x.agent);
+  return b;
+}
+
 function tile(pr) {
   const b = el("button", "tile" + (pr.added ? " added" : "") + (editing?.preset === pr.id ? " on" : ""));
   b.append(icon(pr.icon || "generic"));
@@ -1122,7 +1207,7 @@ function tile(pr) {
     ck.append(svg(CHECK, 10, 2));
     b.append(ck);
     b.title = t("{name} is already added — open it", { name: pr.name });
-    b.onclick = () => { editing = pr.id; adding = false; draft = null; renderProviders(); };
+    b.onclick = () => { editing = pr.id; draft = null; renderProviders(); };
   } else {
     b.onclick = () => { editing = { preset: pr.id }; draft = null; renderProviders(); };
   }
@@ -1146,7 +1231,7 @@ function input(value, placeholder, type = "text") {
   i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") cancelEdit(); };
   return i;
 }
-function cancelEdit() { editing = null; draft = null; importing = null; renderProviders(); }
+function cancelEdit() { editing = null; draft = null; importing = null; importingApps = null; renderProviders(); }
 
 // Custom request headers: the draft keeps them as an ordered [name, value,
 // json?] list so a half-typed row (and its open JSON editor) survives a
@@ -1408,10 +1493,14 @@ function renderEditor(p, presetID) {
   if (p?.account) {
     // the sign-in belongs to the agent; magpie only borrows it
     const a = p.account;
-    const acct = el("div", "acct");
-    acct.append(icon(a.agentIcon), el("span", "n", a.user), el("span", "plan", accountPlan(a)));
-    ed.append(...field(t("Account"), acct, t("{agent}'s sign-in, read from its own files. Sign out there and this provider goes away.", { agent: a.agentName })));
-    if (a.logins) ed.append(...field(t("Other accounts"), renderLogins(a), t("To add one, sign in to it in {agent} ({how}); magpie remembers every account it sees there. Sessions already running keep their account until restarted.", { agent: a.agentName, how: a.agent === "codex" ? "codex login" : "claude → /login" })));
+    if (subOf(a.agent)) {
+      ed.append(...field(t("Accounts"), renderAccounts(a), p.routing ? t("Tick every account to use; Routing says how requests spread over them.") : subOf(a.agent).single ? t("{agent} keeps one account; the gateway runs it for every request. Signing in to another replaces it.", { agent: a.agentName }) : subOf(a.agent).own ? t("The gateway uses the first. Tick more and it moves on to the next when the one before it is out of quota. {agent} itself stays signed in as it is.", { agent: a.agentName }) : t("{agent} signs in to the first. Tick more and the gateway moves on to the next when the one before it is out of quota. Sessions already running keep theirs until restarted.", { agent: a.agentName })));
+      if ((a.logins || []).filter((l) => l.active || l.on).length > 1) ed.append(...renderRouting(p));
+    } else {
+      const acct = el("div", "acct");
+      acct.append(icon(a.agentIcon), el("span", "n", a.user), el("span", "plan", accountPlan(a)));
+      ed.append(...field(t("Account"), acct, t("{agent}'s sign-in, read from its own files. Sign out there and this provider goes away.", { agent: a.agentName })));
+    }
     ed.append(...field(t("Models"), renderModels(p), ""));
     ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
     ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
@@ -1453,7 +1542,9 @@ function renderEditor(p, presetID) {
   if (keysUrl) { const b = el("button", "link", t("Get a key ↗")); b.onclick = () => api("open", { url: keysUrl }); side.append(b); }
   const keyWrap = el("div", "pair");
   keyWrap.append(key, side);
-  ed.append(...field(t("API key"), keyWrap, isNew ? t("Kept in ~/.config/magpie/providers.json, readable by you alone. Nothing is read from your shell.") : ""));
+  if (p?.keyList?.length) ed.append(...field(t("Accounts"), renderKeyAccounts(p), p.routing ? t("Tick every key to use; Routing says how requests spread over them.") : t("Tick every key to use. Requests go to the first; when it runs out of quota or hits a rate limit, the next ticked key takes over.")));
+  if (p?.keyList?.filter((k) => k.on).length > 1) ed.append(...renderRouting(p));
+  else ed.append(...field(t("API key"), keyWrap, isNew ? t("Kept in ~/.config/magpie/providers.json, readable by you alone. Nothing is read from your shell.") : ""));
 
   // A user-defined provider can have its own picture; presets keep theirs.
   if (custom) ed.append(...field(t("Icon"), iconPicker(ed), ""));
@@ -1517,9 +1608,9 @@ function renderEditor(p, presetID) {
     if (draft.api === "anthropic") add("OpenAI URL", "chat", "https://…/v1", "if the vendor also serves chat completions");
     else add("Anthropic URL", "anthropic", "https://…", "if the vendor also serves Anthropic messages");
     add("Responses URL", "responses", "https://…/v1", "if the vendor serves the OpenAI Responses API (Codex uses it natively)");
-    const cat = input(draft.catalog, t("models.dev id, e.g. openai"));
+    const cat = input(draft.catalog, t("models.dev ids, e.g. openai, deepseek"));
     cat.oninput = () => { draft.catalog = cat.value; };
-    inner.append(...field(t("Catalog"), cat, t("Display names and reasoning levels for the models")));
+    inner.append(...field(t("Catalog"), cat, t("Display names and reasoning levels for the models; for a gateway that serves several vendors, list them all, first match wins")));
     more.append(inner);
     ed.append(more);
   }
@@ -1551,9 +1642,220 @@ function renderEditor(p, presetID) {
   return ed;
 }
 
+// fetchImportIcon asks the server to download the vendor's own logo, named
+// by the link. It swaps the header mark when it lands; a failure is silent
+// (the generic outline stays), since the icon is decoration, not the deal.
+function fetchImportIcon(p, head, ed) {
+  const host = hostOf(p.iconUrl);
+  const note = el("div", "hint", t("Fetching {host}’s icon…", { host: host || t("the vendor") }));
+  ed.append(note);
+  api("import/icon", { url: p.iconUrl }).then((r) => {
+    p.icon = r.icon;
+    delete p.iconUrl;
+    const old = head.firstChild;
+    const now = icon(p.icon);
+    old ? old.replaceWith(now) : head.prepend(now);
+    note.remove();
+  }).catch(() => note.remove());
+}
+
 // renderImport: what a magpie://import link would add, for the user to
 // check. Nothing is saved until they press Add; the key stays hidden unless
 // they ask to see it.
+// Providers other apps (CC Switch, Alma) have set up, for the user to pick
+// from. magpie only reads those apps; the keys stay on the server side and
+// the dialog sees them masked.
+async function openImportApps() {
+  importingApps = { loading: true, sources: [], picks: {} };
+  renderProviders();
+  try {
+    const sources = await api("importapps");
+    const picks = {};
+    for (const s of sources) for (const it of s.items) {
+      if (it.skip || it.status === "same") continue;
+      picks[s.id + "\n" + it.ref] = { on: !it.off && (it.status !== "taken" || !!it.keyOf), mode: it.keyOf ? "key" : "add" };
+    }
+    if (!importingApps) return;
+    importingApps = { sources, picks };
+  } catch (e) {
+    if (!importingApps) return;
+    importingApps = { error: e.message, sources: [], picks: {} };
+  }
+  renderProviders();
+}
+
+function renderImportApps(ia) {
+  const ed = el("div", "editor new importapps");
+  ed.onclick = (e) => e.stopPropagation();
+  const h = el("div", "ehead");
+  h.append(el("b", "", t("Import from other apps")));
+  ed.append(h);
+  const bar = el("div", "bar");
+  const count = el("span", "note grow");
+  const cancel = el("button", "text", t("Cancel"));
+  cancel.onclick = cancelEdit;
+  const go = el("button", "text primary", t("Import"));
+  const recount = () => {
+    const n = Object.values(ia.picks).filter((x) => x.on).length;
+    count.textContent = n ? t("{n} selected", { n }) : "";
+    go.disabled = !n;
+  };
+  bar.append(count, cancel, go);
+  if (ia.loading) {
+    ed.append(el("div", "appnote", t("Reading Alma and CC Switch…")), bar);
+    go.disabled = true;
+    return ed;
+  }
+  if (ia.error) {
+    ed.append(el("div", "warnbox", ia.error), bar);
+    go.disabled = true;
+    return ed;
+  }
+  ed.append(el("div", "appnote", t("magpie reads these apps' settings and changes nothing in them. Pick the providers to bring over.")));
+  // one tab per app magpie can import from, so which ones it can is plain
+  // at a glance; each shows how many providers it has to bring over
+  const tabs = el("div", "apptabs");
+  tabs.setAttribute("role", "tablist");
+  const list = el("div", "applist");
+  const secs = {};
+  const pickable = (s) => s.items.some((it) => ia.picks[s.id + "\n" + it.ref]);
+  if (!ia.sources.some((s) => s.id === ia.tab)) {
+    ia.tab = (ia.sources.find(pickable) || ia.sources.find((s) => s.found) || ia.sources[0])?.id;
+  }
+  const showTab = (id) => {
+    ia.tab = id;
+    for (const [sid, [tab, sec]] of Object.entries(secs)) {
+      tab.classList.toggle("on", sid === id);
+      tab.setAttribute("aria-selected", String(sid === id));
+      sec.hidden = sid !== id;
+    }
+    list.scrollTop = 0;
+  };
+  for (const s of ia.sources) {
+    const sec = el("div", "appsrc");
+    const tab = el("button", "apptab" + (s.found && !s.error ? "" : " missing"));
+    tab.setAttribute("role", "tab");
+    const tlogo = el("img", "applogo");
+    tlogo.src = `icons/app-${s.id}.png`;
+    tlogo.alt = "";
+    tlogo.draggable = false;
+    const n = s.items.filter((it) => ia.picks[s.id + "\n" + it.ref]).length;
+    tab.append(tlogo, el("span", "", s.name), el("span", "count", s.found && !s.error ? String(n) : "–"));
+    tab.title = s.found ? (s.error || t(n === 1 ? "1 provider to bring over" : "{n} providers to bring over", { n })) : t("Not found on this computer");
+    tab.onclick = () => showTab(s.id);
+    tabs.append(tab);
+    secs[s.id] = [tab, sec];
+    const sh = el("div", "apphead");
+    const logo = el("img", "applogo");
+    logo.src = `icons/app-${s.id}.png`;
+    logo.alt = "";
+    logo.draggable = false;
+    sh.append(logo, el("b", "", s.name), el("code", "", s.path.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~")));
+    sec.append(sh);
+    if (!s.found) sec.append(el("div", "appempty", t("Not found on this computer")));
+    else if (s.error) sec.append(el("div", "appempty", s.error));
+    else if (!s.items.length) sec.append(el("div", "appempty", t("No providers in it")));
+    // everything this app has that can come over, on or off at once
+    const mine = s.items.map((it) => ia.picks[s.id + "\n" + it.ref]).filter(Boolean);
+    const boxes = [];
+    const all = el("input");
+    all.type = "checkbox";
+    const allState = () => {
+      const n = mine.filter((x) => x.on).length;
+      all.checked = n > 0 && n === mine.length;
+      all.indeterminate = n > 0 && n < mine.length;
+    };
+    const tick = () => { allState(); recount(); };
+    for (const it of s.items) sec.append(importAppRow(ia, s, it, tick, boxes));
+    if (mine.length) {
+      const lab = el("label", "appall");
+      all.onchange = () => {
+        for (const x of mine) x.on = all.checked;
+        for (const b of boxes) b.checked = all.checked;
+        tick();
+      };
+      lab.append(all, el("span", "", t("Select all")));
+      sh.append(lab);
+      allState();
+    }
+    list.append(sec);
+  }
+  ed.append(tabs, list);
+  showTab(ia.tab);
+  go.onclick = async () => {
+    const picks = [];
+    for (const [k, v] of Object.entries(ia.picks)) {
+      if (!v.on) continue;
+      const [source, ref] = k.split("\n");
+      picks.push({ source, ref, mode: v.mode });
+    }
+    go.classList.add("busy");
+    try {
+      const r = await api("importapps", { picks });
+      providers = r.state;
+      importingApps = null;
+      adding = false;
+      editing = null;
+      draft = null;
+      renderProviders();
+      state = await api("state");
+      renderAgents();
+      status(t("Imported {n}: {names}", { n: r.added.length, names: r.added.join(", ") }), "ok");
+    } catch (e) {
+      go.classList.remove("busy");
+      if (!editorError(e.message, "err")) status(e.message, "err");
+    }
+  };
+  ed.append(bar);
+  recount();
+  return ed;
+}
+
+function importAppRow(ia, s, it, recount, boxes) {
+  const p = it.provider;
+  const pick = ia.picks[s.id + "\n" + it.ref];
+  const row = el("label", "approw" + (pick ? "" : " dim"));
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = !!pick?.on;
+  box.disabled = !pick;
+  box.onchange = () => { pick.on = box.checked; recount(); };
+  if (pick) boxes.push(box);
+  const who = el("div", "appwho");
+  const name = el("div", "name");
+  name.append(el("span", "", p.name || it.ref));
+  if (it.from) name.append(el("span", "from", it.from));
+  who.append(name);
+  const bits = [];
+  const host = hostOf(p.anthropic || p.chat || p.responses || "");
+  if (it.skip) bits.push(t(it.skip));
+  else {
+    if (host) bits.push(host);
+    if (p.key) bits.push(p.key);
+    if (p.models?.length) bits.push(t(p.models.length === 1 ? "1 model" : "{n} models", { n: p.models.length }));
+  }
+  who.append(el("div", "sub", bits.join(" · ")));
+  if (pick && it.off) who.append(el("div", "sub", t(it.off)));
+  if (pick && (it.keyOf || it.status === "taken")) {
+    const opts = [];
+    if (it.keyOf) opts.push(["key", t("Add as another key")]);
+    opts.push(["add", t(it.status === "taken" ? "Keep both" : "Add as a new provider")]);
+    if (it.status === "taken") opts.push(["replace", t("Replace it")]);
+    who.append(el("div", "sub", t("magpie has {name} already", { name: it.existing })));
+    const sg = segs(opts, pick.mode, (m) => { pick.mode = m; if (!pick.on) { pick.on = box.checked = true; recount(); } });
+    sg.onclick = (e) => e.preventDefault(); // a click on a choice is not a click on the checkbox
+    who.append(sg);
+  }
+  let tag = null;
+  if (it.status === "same") tag = el("span", "apptag", t("Already added"));
+  else if (it.skip) tag = el("span", "apptag", t("Can't import"));
+  else if (it.status === "taken") tag = el("span", "apptag", t("Name in use"));
+  else if (it.keyOf) tag = el("span", "apptag", t("Same vendor"));
+  row.append(box, icon(p.icon || "generic"), who);
+  if (tag) row.append(tag);
+  return row;
+}
+
 function renderImport(im) {
   const ed = el("div", "editor new import");
   ed.onclick = (e) => e.stopPropagation();
@@ -1598,6 +1900,12 @@ function renderImport(im) {
     ed.append(...field(t("Models"), chips, ""));
   }
   if (im.replaces) ed.append(el("div", "warnbox soft", t("Replaces your {name}, key and all.", { name: im.replaces })));
+
+  // The link may name the vendor's own logo — an explicit icon= wins over
+  // whatever the catalog or preset gave. magpie fetches it here (the dialog
+  // being open is the confirmation), once, quietly, and only ever into its
+  // icons folder; the fallback mark stays when it fails.
+  if (p.iconUrl) fetchImportIcon(p, h, ed);
 
   const addBtn = el("button", "text primary", t(im.replaces ? "Replace" : "Add"));
   const add = () => {
@@ -1712,6 +2020,23 @@ function renderModels(p) {
   return box;
 }
 
+// renderRouting: how the gateway spreads requests over the keys or
+// accounts a provider has on. It takes effect at once, like ticking one.
+const ROUTINGS = [
+  ["", "Smart", "The first takes requests while it has quota to spare; when it runs low, the one with the most left takes over. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again."],
+  ["order", "In order", "Requests go to the first; the next takes over when the one before runs out of quota, hits a rate limit or fails."],
+  ["rotate", "In turn", "Each request goes to the next one, spreading the load evenly; one that fails is passed over for a minute."],
+  ["usage", "Least used first", "Each request goes to the one used least: a subscription by the share of its allowance used, a key by the tokens it served in the last hours."],
+];
+function renderRouting(p) {
+  const cur = ROUTINGS.find(([id]) => id === (p.routing || "")) || ROUTINGS[0];
+  const pick = segs(ROUTINGS.map(([id, name]) => [id, t(name)]), cur[0], (routing) => {
+    const r = ROUTINGS.find(([id]) => id === routing);
+    accountAction("provider/route", { id: p.id, routing }, t("{name}: {routing}", { name: p.name, routing: t(r[1]) }));
+  });
+  return field(t("Routing"), pick, t(cur[2]));
+}
+
 // renderFallback: where requests go when this provider can't take them —
 // out of quota, rate limited, overloaded or down — tried top to bottom.
 function renderFallback(p) {
@@ -1773,25 +2098,428 @@ function fallbackHint(p) {
   return t("When {name} is out of quota, rate limited or down, a request goes to these instead, top first. It only happens before any of the reply is sent, and {name} then sits out a minute.", { name: p.name });
 }
 
-// renderLogins: the agent's other accounts magpie remembers, each one a
-// click away from being the one the agent is signed in to.
-function renderLogins(a) {
-  const list = el("div", "logins");
-  const others = a.logins.filter((l) => !l.active);
-  if (!others.length) list.append(el("div", "none", t("None yet")));
-  for (const l of others) {
-    const row = el("div", "acct");
-    row.append(el("span", "n", l.user), el("span", "plan", accountPlan({ agent: a.agent, plan: l.plan })), el("span", "grow"));
-    const forget = el("button", "text", t("Forget"));
-    forget.title = t("magpie forgets this account's sign-in; the account itself is untouched");
-    forget.onclick = () => providerAction("forget", { agent: a.agent, user: l.user }, t("{user} forgotten", { user: l.user }), "login/");
-    const use = el("button", "text", t("Switch"));
-    use.title = t("Sign {agent} in to this account", { agent: a.agentName });
-    use.onclick = () => { use.classList.add("busy"); providerAction("switch", { agent: a.agent, user: l.user }, t("{agent} is now signed in as {user}", { agent: a.agentName, user: l.user }), "login/"); };
-    row.append(forget, use);
+// ---------- subscriptions ----------
+//
+// A Claude or ChatGPT subscription is added here, not in a terminal: magpie
+// opens the vendor's own sign-in in the browser, takes the account when it
+// comes back, and lists it with the others — any of them one click from
+// being the one in use.
+
+const SUBS = [
+  { agent: "claude", name: "Claude", icon: "claude-color", plans: "Pro · Max · Team" },
+  { agent: "codex", name: "ChatGPT", icon: "openai", plans: "Plus · Pro · Business" },
+  // cursor-agent keeps one account; signing in again replaces it
+  { agent: "cursor", name: "Cursor", icon: "cursor", plans: "Pro · Ultra · Teams", single: true },
+  // so does the Grok CLI
+  { agent: "grok", name: "Grok", icon: "xai", plans: "SuperGrok · X Premium+", own: true },
+  // signed in with GitHub's device code; the editors' own sign-in stays theirs
+  { agent: "copilot", name: "Copilot", icon: "githubcopilot", plans: "Pro · Pro+ · Business", own: true },
+];
+const subOf = (agent) => SUBS.find((x) => x.agent === agent);
+let signing = null; // the sign-in under way: { id, agent, url, state, error }
+let justAdded = ""; // the account that just came in, to greet it
+
+async function startSignIn(agent) {
+  if (signing?.state === "waiting") api("signin/" + signing.id + "/cancel", {}).catch(() => {});
+  signing = { agent, state: "starting" };
+  renderProviders();
+  try {
+    signing = await api("signin", { agent });
+    renderProviders();
+    followSignIn(signing.id);
+  } catch (e) {
+    signing = { agent, state: "failed", error: e.message };
+    renderProviders();
+  }
+}
+
+async function followSignIn(id) {
+  while (signing?.id === id && signing.state === "waiting") {
+    await new Promise((r) => setTimeout(r, 800));
+    let st;
+    try { st = await api("signin/" + id); } catch { continue; }
+    if (signing?.id !== id || st.state === "waiting") continue;
+    if (st.state === "done") {
+      signing = null;
+      justAdded = st.user;
+      providers = await api("providers");
+      const p = providers.providers.find((x) => x.account?.agent === st.agent);
+      if (p) { editing = p.id; draft = null; adding = false; presetQuery = ""; }
+      renderProviders();
+      status(st.using ? t("Signed in as {user}", { user: st.user }) : t("{user} added — switch to it any time", { user: st.user }), "ok");
+      state = await api("state");
+      renderAgents();
+      setTimeout(() => { justAdded = ""; }, 2000);
+      return;
+    }
+    signing = st.state === "canceled" ? null : st;
+    renderProviders();
+  }
+}
+
+function cancelSignIn() {
+  if (signing?.id) api("signin/" + signing.id + "/cancel", {}).catch(() => {});
+  signing = null;
+  renderProviders();
+}
+
+// renderSigning: where a sign-in stands, in place of the button that
+// started it — waiting on the browser, or what went wrong.
+function renderSigning(sub) {
+  const box = el("div", "signing" + (signing.state === "failed" ? " failed" : ""));
+  const tt = el("span", "tt");
+  if (signing.state === "failed") {
+    box.append(el("span", "mark", "!"));
+    tt.append(el("span", "n", t("Sign-in didn't finish")), el("span", "s", signing.error || ""));
+    box.append(tt);
+    const again = el("button", "text primary", t("Try again"));
+    again.onclick = () => startSignIn(sub.agent);
+    const close = el("button", "text", t("Cancel"));
+    close.onclick = cancelSignIn;
+    box.append(close, again);
+    return box;
+  }
+  box.append(el("span", "spinner"));
+  tt.append(el("span", "n", t("Finish signing in to {name} in your browser", { name: sub.name })),
+    el("span", "s", signing.code ? t("magpie opened GitHub's device page. Enter this code there; the account shows up here as soon as you're done.") : t("magpie opened the sign-in page. The account shows up here as soon as you're done.")));
+  if (signing.code) {
+    const code = el("span", "devcode");
+    code.append(el("code", "", signing.code), copyBtn(signing.code, t("Code")));
+    tt.append(code);
+  }
+  box.append(tt);
+  if (signing.url) {
+    const acts = el("span", "acts");
+    const open = el("button", "link", t("Open again"));
+    open.onclick = () => api("open", { url: signing.url }).catch(() => {});
+    const cp = el("button", "link", t("Copy link"));
+    cp.onclick = () => copy(signing.url, t("Sign-in link"), cp);
+    acts.append(open, cp);
+    tt.append(acts);
+  }
+  const x = el("button", "text", t("Cancel"));
+  x.onclick = cancelSignIn;
+  box.append(x);
+  return box;
+}
+
+// renderAccounts: every account of an agent magpie has, the one the agent
+// is signed in to first, and a way to add another. Like keys, any number
+// can be ticked: the gateway moves to the next ticked account when the
+// first is out of quota. Each shows how much of its allowance is used, so
+// which one to go to next is plain to see.
+function renderAccounts(a) {
+  const sub = subOf(a.agent);
+  const list = el("div", "accts");
+  let ls = a.logins?.length ? [...a.logins] : [{ user: a.user, plan: a.plan, active: true, on: true }];
+  ls.sort((x, y) => (y.active ? 1 : 0) - (x.active ? 1 : 0));
+  const several = ls.filter((l) => l.active || l.on).length > 1;
+  const quota = loginUsageOf(a.agent);
+  for (const l of ls) {
+    const on = l.active || l.on;
+    const row = el("div", "acc" + (on ? " in-use" : " off") + (l.user === justAdded ? " new" : ""));
+    const dot = el("button", "dot tick");
+    if (on) dot.append(svg(CHECK, 10, 2.2));
+    if (l.active) {
+      dot.title = sub?.own ? t("The gateway uses this account first") : t("{agent} is signed in to this account", { agent: a.agentName });
+      dot.classList.add("fixed");
+    } else {
+      dot.title = on ? t("Stop using this account") : t("Use this account too");
+      dot.onclick = () => accountAction("login/" + (on ? "off" : "on"), { agent: a.agent, user: l.user });
+    }
+    row.append(dot, el("span", "n", l.user), el("span", "plan", accountPlan({ agent: a.agent, plan: l.plan })), el("span", "grow"));
+    if (l.active) {
+      row.append(el("span", "using", several ? t("First") : t("In use")));
+    } else {
+      const forget = el("button", "text quiet", t("Remove"));
+      forget.title = t("magpie forgets this account's sign-in; the account itself is untouched");
+      forget.onclick = () => accountAction("login/forget", { agent: a.agent, user: l.user }, t("{user} removed", { user: l.user }));
+      const use = el("button", "text", on ? t("Make first") : t("Use"));
+      use.title = sub?.own ? t("The gateway uses this account first") : t("Sign {agent} in to this account", { agent: a.agentName });
+      use.onclick = () => { use.classList.add("busy"); accountAction("login/switch", { agent: a.agent, user: l.user }, sub?.own ? t("The gateway now uses {user} first", { user: l.user }) : t("{agent} is now signed in as {user}", { agent: a.agentName, user: l.user })); };
+      row.append(forget, use);
+    }
+    row.append(accountQuota(quota, l.user));
     list.append(row);
   }
+  if (signing?.agent === a.agent) list.append(renderSigning(sub));
+  else {
+    const add = el("button", "acc add");
+    const ic = el("span", "dot");
+    ic.append(svg(PLUS, 10, 1.8));
+    add.append(ic, el("span", "n", t(sub.single ? "Sign in to another {name} account" : "Add another {name} account", { name: sub.name })));
+    add.onclick = () => startSignIn(a.agent);
+    list.append(add);
+  }
   return list;
+}
+
+// Each account's allowance comes from the vendor and takes a moment, so it
+// loads on its own and fills the rows in when it's there.
+const loginUsage = {}; // agent → { at, data: { user: quota }, loading }
+function loginUsageOf(agent) {
+  const u = (loginUsage[agent] ||= {});
+  if (!u.loading && !(Date.now() - (u.at || 0) < 60000)) {
+    u.loading = api("login/usage?agent=" + agent)
+      .then((d) => { u.data = d || {}; }, () => { u.data = u.data || {}; })
+      .finally(() => {
+        u.at = Date.now(); u.loading = null;
+        if (providers?.providers.find((p) => p.id === editing)?.account?.agent === agent && !document.querySelector(".editor .rename-in, .editor input:focus")) renderProviders();
+      });
+  }
+  return u.data;
+}
+
+// accountQuota: an account's allowance as a line of small meters under its
+// name, the reset time on the ones nearly used up.
+function accountQuota(data, user) {
+  const line = el("div", "aq");
+  if (!data) {
+    line.append(el("span", "skeleton sk-aq"), el("span", "skeleton sk-aq"));
+    return line;
+  }
+  const q = data[user];
+  if (!q || q.error || !q.windows?.length) {
+    line.append(el("span", "aq-none", q?.error ? t("Usage unavailable") : t("No usage reported")));
+    if (q?.error) line.title = q.error;
+    return line;
+  }
+  // the two rolling windows fit a line; the per-model ones go in its tooltip
+  line.title = q.windows.slice(2).map((w) => t(w.name) + " " + (w.display || Math.round(w.used) + "%")).join(" · ");
+  for (const w of q.windows.slice(0, 2)) {
+    const used = Math.max(0, Math.min(100, w.used));
+    const m = el("span", "aq-w" + (used >= 90 ? " full" : ""));
+    const track = el("span", "aq-track");
+    const fill = el("i");
+    fill.style.width = used + "%";
+    track.append(fill);
+    m.append(el("span", "aq-n", t(w.name)), track, el("b", "", w.display || Math.round(w.used) + "%"));
+    if (w.resetsAt) {
+      const at = new Date(w.resetsAt);
+      m.title = t("Resets {when}", { when: at.toLocaleString() });
+      if (used >= 80) m.append(el("span", "aq-r", t("resets {in}", { in: untilText(at) })));
+    }
+    line.append(m);
+  }
+  return line;
+}
+
+function untilText(at) {
+  const mins = Math.max(1, Math.round((at - Date.now()) / 60000));
+  if (mins < 60) return t("in {n}m", { n: mins });
+  const h = Math.round(mins / 60);
+  if (h < 48) return t("in {n}h", { n: h });
+  return t("in {n}d", { n: Math.round(h / 24) });
+}
+
+// accountAction changes which account a provider uses, or which it has,
+// and leaves its editor open on the result.
+async function accountAction(path, body, okMsg) {
+  try {
+    providers = await api(path, body);
+    renderProviders();
+    state = await api("state");
+    renderAgents();
+    if (okMsg) status(okMsg, "ok");
+    return true;
+  } catch (e) {
+    if (!editorError(e.message, "err")) status(e.message, "err");
+    document.querySelector(".editor .busy")?.classList.remove("busy");
+    return false;
+  }
+}
+
+// renderKeyAccounts: a key provider's accounts, one per key, the same list
+// a subscription has. addingKey holds the half-typed new one.
+let addingKey = null;
+function renderKeyAccounts(p) {
+  const list = el("div", "accts");
+  const several = p.keyList.filter((k) => k.on).length > 1;
+  for (const k of p.keyList) {
+    const row = el("div", "acc" + (k.on ? " in-use" : " off") + (k.id === justAdded ? " new" : ""));
+    // the dot is the switch: every key ticked is in use
+    const dot = el("button", "dot tick");
+    if (k.on) dot.append(svg(CHECK, 10, 2.2));
+    dot.title = k.on ? t("Stop using this key") : t("Use this key too");
+    dot.onclick = () => accountAction("keys/" + (k.on ? "off" : "on"), { id: p.id, ref: k.id });
+    const name = el("button", "n rename" + (k.name ? "" : " mono"), k.name || k.masked);
+    name.title = t("Rename");
+    name.onclick = () => {
+      const i = input(k.name, t("Name, e.g. Personal or Team"));
+      i.className = "rename-in";
+      const done = (save) => {
+        if (save && i.value.trim() !== (k.name || "")) accountAction("keys/rename", { id: p.id, ref: k.id, name: i.value });
+        else renderProviders();
+      };
+      i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") done(true); else if (e.key === "Escape") done(false); };
+      i.onblur = () => done(true);
+      name.replaceWith(i);
+      i.focus();
+    };
+    row.append(dot, name);
+    if (k.name) row.append(el("span", "plan mono", k.masked));
+    const proto = protoPicker(p, k.protocol, (v) => accountAction("keys/protocol", { id: p.id, ref: k.id, protocol: v }));
+    if (proto) row.append(proto);
+    row.append(el("span", "grow"));
+    if (!k.active || several) {
+      const rm = el("button", "text quiet", t("Remove"));
+      rm.onclick = () => accountAction("keys/remove", { id: p.id, ref: k.id }, t("Key removed"));
+      row.append(rm);
+    }
+    if (k.active) row.append(el("span", "using", several ? t("First") : t("In use")));
+    else if (k.on) {
+      const first = el("button", "text", t("Make first"));
+      first.onclick = () => { first.classList.add("busy"); accountAction("keys/use", { id: p.id, ref: k.id }, t("{name} tries {key} first", { name: p.name, key: k.name || k.masked })); };
+      row.append(first);
+    }
+    list.append(row);
+  }
+  if (addingKey?.id === p.id) {
+    const box = el("div", "acc adding");
+    const name = input(addingKey.name, t("Name, e.g. Team"));
+    name.oninput = () => { addingKey.name = name.value; };
+    const key = input(addingKey.key, t("paste an API key"), "password");
+    key.oninput = () => { addingKey.key = key.value; };
+    const add = el("button", "text primary", t("Add"));
+    const go = async () => {
+      add.classList.add("busy");
+      const id = await keyFingerprint(key.value.trim());
+      if (await accountAction("keys/add", { id: p.id, name: name.value, key: key.value, protocol: addingKey.protocol || "" }, t("Key added — it takes over when the ones before it run out"))) {
+        addingKey = null; justAdded = id; renderProviders(); setTimeout(() => { justAdded = ""; }, 2000);
+      }
+    };
+    add.onclick = go;
+    for (const i of [name, key]) i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") go(); else if (e.key === "Escape") { addingKey = null; renderProviders(); } };
+    const x = el("button", "text", t("Cancel"));
+    x.onclick = () => { addingKey = null; renderProviders(); };
+    const fields = el("div", "kf");
+    fields.append(name, key);
+    const proto = protoPicker(p, addingKey.protocol || "", (v) => { addingKey.protocol = v; });
+    const bar = el("div", "kb");
+    if (p.keysUrl) { const g = el("button", "link", t("Get a key ↗")); g.onclick = () => api("open", { url: p.keysUrl }); bar.append(g); }
+    if (proto) bar.append(proto);
+    bar.append(el("span", "grow"), x, add);
+    box.append(fields, bar);
+    list.append(box);
+    queueMicrotask(() => (addingKey.name ? key : name).focus());
+  } else {
+    const add = el("button", "acc add");
+    const ic = el("span", "dot");
+    ic.append(svg(PLUS, 10, 1.8));
+    add.append(ic, el("span", "n", t("Add another key")));
+    add.onclick = () => { addingKey = { id: p.id, name: "", key: "" }; renderProviders(); };
+    list.append(add);
+  }
+  return list;
+}
+
+// protoPicker: which protocol a key works with. Some relays hand out one
+// key for Anthropic and another for OpenAI; a key set to one is used on
+// that endpoint only, and the gateway sends each request to the key that
+// suits it. Only offered when the provider has more than one endpoint.
+const PROTO_OPTS = [
+  { v: "", pill: "Any protocol", name: "Any protocol", note: "Used on every endpoint" },
+  { v: "anthropic", pill: "Anthropic", name: "Anthropic", note: "Messages API · Claude Code, Claude" },
+  { v: "chat", pill: "Chat", name: "Chat Completions", note: "OpenAI API · GPT models, most agents" },
+  { v: "responses", pill: "Responses", name: "Responses", note: "OpenAI Responses API · Codex" },
+];
+
+// protoPicker is the key row's protocol badge; clicking it drops a small menu
+// that says what each choice is for.
+function protoPicker(p, value, onChange) {
+  value = value || "";
+  const have = ["anthropic", "chat", "responses"].filter((x) => p[x]);
+  if (have.length < 2 && !value) return null;
+  const opts = PROTO_OPTS.filter((o) => !o.v || have.includes(o.v) || o.v === value);
+  const pill = el("button", "proto" + (value ? " set" : ""));
+  pill.type = "button";
+  pill.title = t("Some relays give out a key per protocol. Set it here and the gateway sends each request to the key that fits: Claude models to the Anthropic key, GPT models to the OpenAI one.");
+  const paint = () => pill.replaceChildren(el("span", "", t(PROTO_OPTS.find((o) => o.v === value).pill)), svg(CHEV, 11, 1.6));
+  paint();
+  pill.onclick = (e) => {
+    e.stopPropagation();
+    if (pill.classList.contains("open")) return closeProtoMenu();
+    openProtoMenu(pill, opts, value, (v) => {
+      if (v === value) return;
+      value = v;
+      pill.classList.toggle("set", !!v);
+      paint();
+      onChange(v);
+    });
+  };
+  return pill;
+}
+
+let protoMenu = null;
+function closeProtoMenu() {
+  if (!protoMenu) return;
+  protoMenu.anchor.classList.remove("open");
+  protoMenu.box.remove();
+  document.removeEventListener("mousedown", protoMenu.outside, true);
+  document.removeEventListener("keydown", protoMenu.keys, true);
+  document.removeEventListener("scroll", closeProtoMenu, true);
+  removeEventListener("resize", closeProtoMenu);
+  protoMenu = null;
+}
+function openProtoMenu(anchor, opts, value, choose) {
+  closeProtoMenu();
+  const box = el("div", "pop proto-menu");
+  box.setAttribute("role", "menu");
+  box.append(el("div", "pm-head", t("Protocol this key speaks")));
+  const items = opts.map((o) => {
+    const b = el("button", "pm-item" + (o.v === value ? " on" : ""));
+    b.type = "button";
+    b.setAttribute("role", "menuitemradio");
+    b.setAttribute("aria-checked", o.v === value);
+    const tick = el("span", "pm-tick");
+    if (o.v === value) tick.append(svg(CHECK, 12, 1.9));
+    const words = el("span", "pm-words");
+    words.append(el("span", "pm-name", t(o.name)), el("span", "pm-note", t(o.note)));
+    b.append(tick, words);
+    b.onclick = (e) => { e.stopPropagation(); closeProtoMenu(); choose(o.v); };
+    b.onmouseenter = () => b.focus({ preventScroll: true });
+    box.append(b);
+    return b;
+  });
+  document.body.append(box);
+  // under the pill, or above it when the window runs out
+  const r = anchor.getBoundingClientRect(), w = box.offsetWidth, h = box.offsetHeight, pad = 8;
+  let y = r.bottom + 5;
+  if (y + h > innerHeight - pad && r.top - 5 - h >= pad) { y = r.top - 5 - h; box.classList.add("up"); }
+  box.style.left = Math.max(pad, Math.min(r.left, innerWidth - w - pad)) + "px";
+  box.style.top = Math.max(pad, y) + "px";
+  anchor.classList.add("open");
+  const outside = (e) => { if (!box.contains(e.target) && !anchor.contains(e.target)) closeProtoMenu(); };
+  const keys = (e) => {
+    const i = items.indexOf(document.activeElement);
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus(); }
+    else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault(); e.stopPropagation();
+      const n = items.length, from = i < 0 ? (e.key === "ArrowDown" ? n - 1 : 0) : i;
+      items[(from + (e.key === "ArrowDown" ? 1 : n - 1)) % n].focus();
+    }
+  };
+  document.addEventListener("mousedown", outside, true);
+  document.addEventListener("keydown", keys, true);
+  document.addEventListener("scroll", closeProtoMenu, true); // it is pinned to the window; the dialog moving under it would strand it
+  addEventListener("resize", closeProtoMenu);
+  protoMenu = { box, anchor, outside, keys };
+  (items.find((b) => b.classList.contains("on")) || items[0]).focus({ preventScroll: true });
+}
+
+// keyPill is a key provider's row badge: the key in use, or how many are.
+function keyPill(p) {
+  const on = (p.keyList || []).filter((k) => k.on);
+  if (on.length > 1) return t("{n} keys", { n: on.length });
+  return on[0]?.name || p.key.masked;
+}
+
+// keyFingerprint is the id the backend gives a key, to greet a new one.
+async function keyFingerprint(key) {
+  try {
+    const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
+    return [...h.slice(0, 5)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch { return ""; }
 }
 
 async function providerAction(action, body, okMsg, base = "provider/") {
@@ -2188,7 +2916,9 @@ async function renderUpdate(r, u) {
       break;
     case "downloading":
       sub.textContent = t("Downloading {v}…", { v: u.latest });
-      setTimeout(() => renderUpdate(r), 2000);
+      if (u.total) sub.textContent += " " + Math.floor((u.done / u.total) * 100) + "% · " + t("{done} of {total} MB", { done: (u.done / 1e6).toFixed(1), total: (u.total / 1e6).toFixed(1) });
+      else if (u.done) sub.textContent += " " + t("{done} MB", { done: (u.done / 1e6).toFixed(1) });
+      setTimeout(() => renderUpdate(r), 700);
       break;
     case "checking":
       sub.textContent = t("Checking for updates…");
@@ -2199,7 +2929,8 @@ async function renderUpdate(r, u) {
       btn(t("Check"), check);
       break;
     case "error":
-      sub.textContent = t("Couldn't check for updates");
+      // the reason in sight: "timed out" says try a proxy, a 404 says wait
+      sub.textContent = t(u.latest ? "Couldn't download {v}" : "Couldn't check for updates", { v: u.latest }) + (u.error ? " · " + u.error.replace(/^Get "[^"]*": /, "") : "");
       sub.title = u.error || "";
       btn(t("Check"), check);
       break;
@@ -2239,6 +2970,7 @@ $("#prefs").onclick = () => { if (mode === "window") show("settings"); else api(
 
 $("#sync").onclick = async () => {
   const b = $("#sync");
+  if (b.classList.contains("spin")) return;
   b.classList.add("spin");
   try {
     state = await api("sync", {});
@@ -2248,7 +2980,10 @@ $("#sync").onclick = async () => {
   } catch (e) {
     status(t("Sync failed: {e}", { e: e.message }), "err");
   } finally {
-    b.classList.remove("spin");
+    // stop at the end of a turn, not wherever the reply caught it (#16)
+    const svg = b.querySelector("svg");
+    if (svg.getAnimations().length) svg.addEventListener("animationiteration", () => b.classList.remove("spin"), { once: true });
+    else b.classList.remove("spin");
   }
 };
 $("#open").onclick = () => api("window/main", {});
@@ -2261,6 +2996,7 @@ else { $("#nav").remove(); }
 // the panel comes back into view.
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 window.addEventListener("focus", load);
+setInterval(renderUpdateBadge, 15 * 60 * 1000); // a window left open still hears of a new version
 // Opened on a magpie://import link: fetch what it describes (once — the
 // id is spent) and ask before adding it.
 if (mode === "window" && params.get("import")) {
