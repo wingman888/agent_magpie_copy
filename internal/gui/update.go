@@ -2,6 +2,7 @@ package gui
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -17,14 +18,18 @@ import (
 // hours; when a newer release is out and the app may replace itself — the
 // bundle on a Mac, the binary elsewhere — the new one is downloaded
 // straight away, so all that is left is a restart. Quitting installs it too, and the next launch is
-// the new version.
+// the new version. Where the app's folder isn't the user's to change, the
+// restart asks for the administrator's password; only an app that can't be
+// replaced at all (run from its disk image, say) is sent to the release page.
 type updater struct {
 	mu      sync.Mutex
 	state   string // checking | latest | downloading | ready | available | source | error
 	latest  *update.Release
 	err     string
-	bundle  string // the .app to replace, "" when not in one or not writable
+	bundle  string // the .app to replace, "" when not in one or stuck
+	stuck   string // why the .app can't be replaced where it is (update.Stuck)
 	exe     string // off the Mac: the binary to replace, "" when not writable
+	retry   bool   // error: the download failed, and may be tried again
 	staged  string
 	done    int64 // downloading: bytes so far, of total (0 when unknown)
 	total   int64
@@ -37,6 +42,8 @@ type updateJSON struct {
 	Latest  string `json:"latest,omitempty"`
 	Notes   string `json:"notes,omitempty"`
 	URL     string `json:"url,omitempty"`
+	Stuck   string `json:"stuck,omitempty"` // available: why it can't update itself
+	Retry   bool   `json:"retry,omitempty"` // error: a click downloads it again
 	Error   string `json:"error,omitempty"`
 	Done    int64  `json:"done,omitempty"` // downloading: bytes so far
 	Total   int64  `json:"total,omitempty"`
@@ -47,10 +54,12 @@ var updates = &updater{}
 const updateEvery = 6 * time.Hour
 
 func (u *updater) start() {
-	if b := update.Bundle(); b != "" && update.Writable(filepath.Dir(b)) {
-		u.bundle = b
+	if b := update.Bundle(); b != "" {
+		if u.stuck = update.Stuck(b); u.stuck == "" {
+			u.bundle = b
+		}
 	} else if runtime.GOOS != "darwin" {
-		if exe, err := update.Executable(); err == nil && update.Writable(filepath.Dir(exe)) {
+		if exe, err := update.Executable(); err == nil && (update.Writable(filepath.Dir(exe)) || update.CanElevate()) {
 			u.exe = exe
 			os.Remove(exe + ".old") // what the last update on Windows moved aside
 		}
@@ -66,14 +75,24 @@ func (u *updater) start() {
 
 // check asks the feed and, when it can, stages the new version.
 func (u *updater) check() {
-	u.mu.Lock()
-	if u.state == "checking" || u.state == "downloading" || u.state == "ready" {
-		u.mu.Unlock()
-		return
+	if u.begin() {
+		u.run()
 	}
-	u.state, u.err = "checking", ""
-	u.mu.Unlock()
+}
 
+// begin marks a check as under way, unless one is or there's nothing left
+// to do.
+func (u *updater) begin() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.state == "checking" || u.state == "downloading" || u.state == "ready" {
+		return false
+	}
+	u.state, u.err, u.retry = "checking", "", false
+	return true
+}
+
+func (u *updater) run() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	rel, err := update.Latest(ctx)
@@ -111,7 +130,7 @@ func (u *updater) check() {
 	u.mu.Lock()
 	if err != nil {
 		log.Println("update:", err)
-		u.state, u.err = "error", err.Error()
+		u.state, u.err, u.retry = "error", err.Error(), true
 		return
 	}
 	u.state, u.staged = "ready", staged
@@ -120,8 +139,11 @@ func (u *updater) check() {
 	}
 }
 
-// install swaps the staged version in; it reports whether there was one.
-func (u *updater) install() bool {
+// install swaps the staged version in; it reports whether it did. Asked
+// (the restart), it may put up the password prompt; on quitting it doesn't,
+// and a folder that needs one waits for the next restart. A failure keeps
+// the staged version, so the restart can be tried again.
+func (u *updater) install(ask bool) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.staged == "" {
@@ -130,12 +152,21 @@ func (u *updater) install() bool {
 	var err error
 	if u.bundle != "" {
 		err = update.Install(u.staged, u.bundle)
+		if ask && update.NeedsAdmin(err) {
+			err = update.InstallAsAdmin(u.staged, u.bundle)
+		}
 	} else {
-		err = update.InstallBinary(u.staged)
+		err = update.InstallBinary(u.staged, u.exe)
+		if ask && update.NeedsAdmin(err) && update.CanElevate() {
+			err = update.InstallBinaryAsAdmin(u.staged, u.exe)
+		}
 	}
+	u.err = ""
 	if err != nil {
-		log.Println("update:", err)
-		u.state, u.err = "error", err.Error()
+		if !errors.Is(err, update.ErrCanceled) {
+			log.Println("update:", err)
+			u.err = err.Error()
+		}
 		return false
 	}
 	u.staged = ""
@@ -145,7 +176,10 @@ func (u *updater) install() bool {
 func (u *updater) json() updateJSON {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	j := updateJSON{State: u.state, Current: Version, Error: u.err}
+	j := updateJSON{State: u.state, Current: Version, Error: u.err, Retry: u.retry}
+	if u.state == "available" {
+		j.Stuck = u.stuck
+	}
 	if u.state == "downloading" {
 		j.Done, j.Total = u.done, u.total
 	}
@@ -163,16 +197,22 @@ func updateRoutes(mux *http.ServeMux, w Windows) {
 		updates.check()
 		writeJSON(rw, updates.json())
 	})
-	// install restarts into the staged version; without one it opens the
-	// release page instead.
+	// install restarts into the staged version; after a failed download it
+	// downloads it again, and the page restarts once it's in. Only an app
+	// that can't replace itself is sent to the release page.
 	mux.HandleFunc("POST /api/update/install", func(rw http.ResponseWriter, r *http.Request) {
-		j := updates.json()
-		if j.State == "ready" && restartToUpdate() {
-			rw.WriteHeader(http.StatusNoContent)
-			go w.Quit()
-			return
-		}
-		if j.URL != "" {
+		switch j := updates.json(); {
+		case j.State == "ready":
+			if restartToUpdate() {
+				rw.WriteHeader(http.StatusNoContent)
+				go w.Quit()
+				return
+			}
+		case j.State == "error" && j.Retry:
+			if updates.begin() {
+				go updates.run()
+			}
+		case j.State == "available" && j.URL != "":
 			w.OpenURL(j.URL)
 		}
 		writeJSON(rw, updates.json())
@@ -183,7 +223,7 @@ func updateRoutes(mux *http.ServeMux, w Windows) {
 // once this process is gone; the caller then quits.
 func restartToUpdate() bool {
 	bundle, exe := updates.bundle, updates.exe
-	if !updates.install() {
+	if !updates.install(true) {
 		return false
 	}
 	var err error

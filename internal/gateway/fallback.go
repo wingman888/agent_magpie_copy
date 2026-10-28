@@ -55,15 +55,38 @@ func (c candidate) label() string {
 // OpenAI one for a GPT model, else the key that speaks what the agent
 // spoke, so nothing is translated that needn't be.
 func perKey(p provider.Provider, model string, from provider.Protocol) []candidate {
+	out, aside, _ := perKeyOf(p, model, from)
+	return append(out, aside...)
+}
+
+// perKeyOf is perKey, split: the keys routing goes over, those made for
+// another protocol, and the accounts or keys it left out as not listing
+// the model. Keys made for different protocols are not one pool: routing
+// weighs, rotates and keeps conversations over those made for the
+// protocol that suits the request best, and the others are tried only
+// after them, in the order they suit it.
+func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, aside, left []candidate) {
 	if p.Account != nil {
-		out := []candidate{{p, model, p.ID}}
+		all := []candidate{{p, model, p.ID}}
 		for _, q := range p.AlsoOn() {
-			out = append(out, candidate{q, model, p.ID + "@" + q.Account.User})
+			all = append(all, candidate{q, model, p.ID + "@" + q.Account.User})
 		}
-		return out
+		// an account whose plan lacks the model (a Free one behind a Plus)
+		// would only answer 400; it is tried only when none lists it
+		for _, c := range all {
+			if c.p.Account.Lists(model) {
+				out = append(out, c)
+			} else {
+				left = append(left, c)
+			}
+		}
+		if len(out) == 0 {
+			return all, nil, nil
+		}
+		return out, nil, left
 	}
 	keys := p.KeysOn()
-	var out []candidate
+	var unlisted []candidate
 	for _, k := range keys {
 		q := p.WithKey(k)
 		if len(q.Speaks()) == 0 {
@@ -73,13 +96,29 @@ func perKey(p provider.Provider, model string, from provider.Protocol) []candida
 		if len(keys) > 1 {
 			rest += "#" + provider.KeyID(k.Key)
 		}
+		if !p.Serves(k, model) {
+			// the vendor lists the model to another key only
+			unlisted = append(unlisted, candidate{q, model, rest})
+			continue
+		}
 		out = append(out, candidate{q, model, rest})
 	}
 	if len(out) == 0 {
-		return []candidate{{p, model, p.ID}}
+		out, unlisted = unlisted, nil // no key lists it: try them all the same
+	}
+	if len(out) == 0 {
+		return []candidate{{p, model, p.ID}}, nil, nil
 	}
 	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
-	return out
+	pool := out[:0:0]
+	for _, c := range out {
+		if c.p.KeyProtocol == out[0].p.KeyProtocol {
+			pool = append(pool, c)
+		} else {
+			aside = append(aside, c)
+		}
+	}
+	return pool, aside, unlisted
 }
 
 // keyFit ranks how well a key suits a request, best first: 0 fits, 1 needs
@@ -126,7 +165,32 @@ func modelFamily(model string) provider.Protocol {
 // or accounts as its routing orders them, those resting after a recent
 // failure moved behind the rest.
 func (s *Server) candidates(p provider.Provider, model string, from provider.Protocol) []candidate {
-	out := route(p, perKey(p, model, from), model, from)
+	out, _ := s.plan(p, model, from)
+	return out
+}
+
+// plan is candidates, and for the routing trace what each stood where it
+// did by, and those left out.
+func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
+	var pl planned
+	add := func(q provider.Provider, m string, fallback bool) []candidate {
+		cs, aside, left := perKeyOf(q, m, from)
+		cs, wg := weigh(q, cs, m, from)
+		for i, c := range cs {
+			w := weighed(c, q, wg, fallback, from)
+			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
+			pl.order = append(pl.order, w)
+		}
+		pl.order = append(pl.order, asideOf(aside, q, fallback, from)...)
+		cs = append(cs, aside...)
+		for _, c := range left {
+			w := weighed(c, q, weighing{}, fallback, from)
+			w.Unlisted = true
+			pl.left = append(pl.left, w)
+		}
+		return cs
+	}
+	out := add(p, model, false)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -134,42 +198,123 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, route(fp, perKey(fp, fm, from), fm, from)...)
+		out = append(out, add(fp, fm, true)...)
 	}
+	return restLast(out, pl)
+}
+
+// planGroup is plan for a routing group: every member's keys or accounts
+// weighed together as the group's routing says — in order, member by
+// member, each as its own provider's routing orders it; else all as one,
+// so a subscription whose allowance renews soonest goes first whichever
+// provider it is of. A member's fallbacks are not the group's.
+func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider.Protocol) ([]candidate, planned) {
+	var pl planned
+	var out []candidate
+	of := map[string]provider.Provider{} // candidate → its member's provider
+	var all, asides []candidate
+	var wAsides []Weighed
+	for _, m := range ms {
+		cs, aside, left := perKeyOf(m.Provider, m.Model, from)
+		asides, wAsides = append(asides, aside...), append(wAsides, asideOf(aside, m.Provider, false, from)...)
+		for _, c := range left {
+			w := weighed(c, m.Provider, weighing{}, false, from)
+			w.Unlisted = true
+			pl.left = append(pl.left, w)
+		}
+		if g.Routing == provider.Ordered {
+			cs, wg := weigh(m.Provider, cs, m.Model, from)
+			for i, c := range cs {
+				w := weighed(c, m.Provider, wg, false, from)
+				w.Turn = i == 0 && m.Provider.Routing == provider.Rotate && len(cs) > 1
+				pl.order = append(pl.order, w)
+			}
+			out = append(out, cs...)
+			continue
+		}
+		for _, c := range cs {
+			of[c.rest+"/"+c.model] = m.Provider
+		}
+		all = append(all, cs...)
+	}
+	if g.Routing != provider.Ordered {
+		cs, wg := weigh(provider.Provider{ID: provider.GroupPrefix + g.ID, Routing: g.Routing}, all, "", from)
+		for i, c := range cs {
+			w := weighed(c, of[c.rest+"/"+c.model], wg, false, from)
+			w.Routing = g.Routing
+			w.Turn = i == 0 && g.Routing == provider.Rotate && len(cs) > 1
+			pl.order = append(pl.order, w)
+		}
+		out = cs
+	}
+	out, pl.order = append(out, asides...), append(pl.order, wAsides...)
+	if len(out) == 0 {
+		return nil, pl
+	}
+	return restLast(out, pl)
+}
+
+// asideOf is how the trace tells the keys made for another protocol than
+// those routed over: after them, in the order they suit the request.
+func asideOf(cs []candidate, q provider.Provider, fallback bool, from provider.Protocol) []Weighed {
+	var out []Weighed
+	for _, c := range cs {
+		w := weighed(c, q, weighing{}, fallback, from)
+		w.Aside = true
+		out = append(out, w)
+	}
+	return out
+}
+
+// restLast moves those resting after a recent failure behind the rest.
+func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	if len(out) == 1 {
-		return out
+		if r, ok := restOf(out[0].rest); ok {
+			pl.order[0].Rest = &r // tried all the same: there is no other
+		}
+		return out, pl
 	}
 	var ready, resting []candidate
-	for _, c := range out {
-		if s.resting(c.rest) {
-			resting = append(resting, c)
+	var wReady, wResting []Weighed
+	for i, c := range out {
+		if r, ok := restOf(c.rest); ok {
+			pl.order[i].Rest = &r
+			resting, wResting = append(resting, c), append(wResting, pl.order[i])
 		} else {
-			ready = append(ready, c)
+			ready, wReady = append(ready, c), append(wReady, pl.order[i])
 		}
 	}
-	return append(ready, resting...)
+	pl.order = append(wReady, wResting...)
+	return append(ready, resting...), pl
 }
 
 var restingUntil = struct {
 	sync.Mutex
-	m map[string]time.Time
-}{m: map[string]time.Time{}}
+	m    map[string]time.Time
+	note map[string]Rest // why each rests
+}{m: map[string]time.Time{}, note: map[string]Rest{}}
 
 func (s *Server) resting(id string) bool {
-	restingUntil.Lock()
-	defer restingUntil.Unlock()
-	return time.Now().Before(restingUntil.m[id])
+	_, ok := restOf(id)
+	return ok
 }
 
-func (s *Server) rest(id string) {
+// restOf is why a candidate is resting, while it is.
+func restOf(id string) (Rest, bool) {
 	restingUntil.Lock()
-	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
-	restingUntil.Unlock()
+	defer restingUntil.Unlock()
+	until := restingUntil.m[id]
+	if !time.Now().Before(until) {
+		return Rest{}, false
+	}
+	r := restingUntil.note[id]
+	r.Until = until
+	return r, true
 }
 
 // quotaWords are how vendors say "out of quota" or "slow down" when their
 // status code doesn't: some answer 400 or 403 with it.
-var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
+var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
 
 // retryable says whether another provider may do better with a request
 // that failed this way.

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -67,6 +68,12 @@ type Provider struct {
 	// failing is passed over for as long as that lasts.
 	Routing string `json:"routing,omitempty"`
 
+	// Affinity is how long a conversation stays with the key or account
+	// that answered it, so the vendor's prompt cache it filled is read
+	// again rather than lost (see Affinities): "" auto, "session",
+	// "turn", "off".
+	Affinity string `json:"affinity,omitempty"`
+
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
 	// key+URL provider — forwarded calls, connectivity tests, and model-list
@@ -74,6 +81,13 @@ type Provider struct {
 	// when a gateway insists on a private scheme. Signed-in agent accounts
 	// ignore them: their auth is the agent's own.
 	Headers map[string]string `json:"headers,omitempty"`
+
+	// BalanceURL, when set, is where the vendor tells what is left on a
+	// key, asked with the key the way a chat request carries it; BalancePath
+	// picks the amount out of the JSON reply (see balance.go). The vendors
+	// magpie knows need neither.
+	BalanceURL  string `json:"balanceURL,omitempty"`
+	BalancePath string `json:"balancePath,omitempty"`
 
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
@@ -99,6 +113,7 @@ type Provider struct {
 
 type file struct {
 	Providers []Provider `json:"providers"`
+	Groups    []Group    `json:"groups,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -153,7 +168,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback, a.Routing = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing
+		a.Models, a.Fallback, a.Routing, a.Affinity = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing, picks[a.ID].Affinity
 		out = append(out, a)
 	}
 	return out
@@ -212,14 +227,21 @@ func Save(p Provider) error {
 	if p.ID == "magpie" {
 		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
+	if p.ID == strings.TrimSuffix(GroupPrefix, "/") {
+		return errors.New(`"group" starts the ids of routing groups; pick another id`)
+	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity}
 	} else {
+		if slices.Contains(accountIDs, p.ID) && !stored(p.ID) {
+			// taken, it would hide that subscription once signed in
+			return fmt.Errorf("%q is the id of the %s subscription; pick another name", p.ID, p.ID)
+		}
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
@@ -236,6 +258,31 @@ func Save(p Provider) error {
 	}
 	f.Providers = append(f.Providers, p)
 	return store(f)
+}
+
+// accountIDs are the ids of the subscriptions magpie can list (account.go).
+var accountIDs = []string{"claude", "codex", "copilot", "cursor", "grok"}
+
+func stored(id string) bool {
+	for _, p := range load().Providers {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// ShowAccount brings back the signed-in account of an agent the user had
+// removed from magpie.
+func ShowAccount(id string) error {
+	f := load()
+	for i := range f.Providers {
+		if f.Providers[i].ID == id && f.Providers[i].Hidden {
+			f.Providers[i].Hidden = false
+			return store(f)
+		}
+	}
+	return nil
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -292,6 +339,9 @@ func normalize(p Provider) Provider {
 	p.Fallback = cleanList(p.Fallback)
 	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
 		p.Routing = ""
+	}
+	if !slices.Contains(Affinities, p.Affinity) {
+		p.Affinity = ""
 	}
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)

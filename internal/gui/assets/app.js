@@ -16,6 +16,7 @@ let state = { agents: [], profiles: [], catalog: "", settings: {} };
 let prefs = null; // the settings page: theme, lang, version, dir, gateway
 let providers = null; // { providers, presets, gateway }
 let view = "agents";
+let showAllAgents = false; // the agents no one has set anything on, folded away
 let period = "30d"; // usage window
 let usage = null;   // last usage summary
 let pick = null; // { agent, field, options, items, cursor, anchor }
@@ -32,6 +33,11 @@ const expandedCalls = new Set(); // recent-call ids whose wire bodies are open
 let savedModelFavorites = [];
 try { savedModelFavorites = JSON.parse(localStorage.getItem("magpie.modelFavorites") || "[]"); } catch {}
 const modelFavorites = new Set(Array.isArray(savedModelFavorites) ? savedModelFavorites : []);
+// A model through magpie is starred as its catalog id, which is the same in
+// every agent; the agent's own models by their value. Stars kept by value
+// before still count.
+const favoriteKey = (o) => o.ref || o.value;
+const isFavorite = (o) => modelFavorites.has(favoriteKey(o)) || modelFavorites.has(o.value);
 
 async function api(path, body) {
   const res = await fetch("/api/" + path, {
@@ -118,7 +124,29 @@ function optionFor(field, value) {
   return field.options.find((o) => o.value === value);
 }
 
+// Rows in the shape of the list while magpie first reads the agents; a
+// reload keeps the rows it has until the new ones are in.
+function renderAgentsLoading() {
+  const page = $("#view-agents");
+  page.classList.add("loading");
+  page.setAttribute("aria-busy", "true");
+  const list = $("#agents");
+  list.replaceChildren();
+  for (let i = 0; i < 5; i++) {
+    const row = el("div", "row agent ag-sk-row");
+    const who = el("div", "who");
+    who.append(el("span", "skeleton ag-sk-name"));
+    const fields = el("div", "fields");
+    fields.append(el("span", "skeleton ag-sk-field"), el("span", "skeleton ag-sk-field"));
+    row.append(el("span", "skeleton ag-sk-icon"), who, fields);
+    list.append(row);
+  }
+}
+
 function renderAgents() {
+  const page = $("#view-agents");
+  page.classList.remove("loading");
+  page.removeAttribute("aria-busy");
   const list = $("#agents");
   list.replaceChildren();
   if (!state.agents.length) {
@@ -126,7 +154,11 @@ function renderAgents() {
     e.append(el("b", "", t("No agents found")), el("span", "", t("Install Claude Code, Codex, Gemini CLI, OpenCode… and magpie will list them here.")));
     list.append(e);
   }
-  for (const a of state.agents) {
+  // An agent no one has set anything on is noise in a picker: fold it away,
+  // unless that is all of them (a fresh magpie has nothing to show otherwise).
+  const used = state.agents.filter((a) => a.fields.some((f) => f.value));
+  const folded = used.length ? state.agents.filter((a) => !used.includes(a)) : [];
+  const agentRow = (a) => {
     const row = el("div", "row agent");
     row.dataset.id = a.id;
     row.title = a.path;
@@ -144,9 +176,14 @@ function renderAgents() {
       const b = el("button", "field " + (sorted.length === 1 ? "solo" : wide(f) ? "main" : "side"));
       const opt = optionFor(f, f.value);
       b.title = t("{label}: {value}", { label: t(f.label), value: f.value || t("agent default") }) + (opt?.note ? ` · ${opt.note}` : "");
-      if (opt?.icon) b.append(icon(opt.icon));
+      const effort = f.key === "effort" || f.label === "effort" || f.label === "thinking";
+      if (opt?.icon || opt?.icons?.length) b.append(optionIcon(opt));
+      // a field with no logo of its own still leads with an icon: how much
+      // effort, or the agent's own for its default, as the picker shows it
+      else if (effort) b.append(effortIcon(f));
+      else if (!f.value && !f.menu && a.icon) b.append(icon(a.icon));
       else if (!wide(f) || !f.value) b.append(el("span", "k", t(f.label)));
-      const shown = f.menu ? f.summary : (f.key === "effort" || f.label === "effort" || f.label === "thinking") ? effortName(opt || { value: f.value }) : (opt?.label || f.value || t("default"));
+      const shown = f.menu ? f.summary : effort ? effortName(opt || { value: f.value }) : (opt?.label || f.value || t("default"));
       if (f.menu) b.title = f.options.map((o) => `${o.label}: ${o.note}`).join("\n");
       b.append(el("span", "v" + (f.value || f.custom ? "" : " empty"), shown));
       const c = el("span", "chev");
@@ -157,7 +194,58 @@ function renderAgents() {
       fields.append(b);
     }
     row.append(icon(a.icon), who, fields);
-    list.append(row);
+    return row;
+  };
+  if (!folded.length) {
+    for (const a of state.agents) list.append(agentRow(a));
+  } else {
+    // the ones in use stay put; the rest unroll beneath them like a scroll
+    for (const a of used) list.append(agentRow(a));
+    const fold = el("div", "agent-fold" + (showAllAgents ? " open" : ""));
+    const inner = el("div", "agent-fold-inner");
+    inner.inert = !showAllAgents;
+    fold.style.setProperty("--n", folded.length);
+    folded.forEach((a, i) => {
+      const row = agentRow(a);
+      row.style.setProperty("--i", i);
+      inner.append(row);
+    });
+    fold.append(inner);
+    const more = el("button", "agent-more");
+    const label = el("span", "", "");
+    const chev = el("span", "chev");
+    chev.append(svg(CHEV, 10, 1.8));
+    more.append(label, chev);
+    const labelFor = () => {
+      label.textContent = showAllAgents ? t("Show less") : t("Show {n} more", { n: folded.length });
+      more.setAttribute("aria-expanded", String(showAllAgents));
+    };
+    labelFor();
+    // settled: the soft edge goes, and a folded scroll gives the panel its room
+    // back. A hidden window never ends its transition, so a timer backs it up.
+    let settle;
+    const settled = () => {
+      clearTimeout(settle);
+      fold.classList.remove("moving");
+      fit();
+    };
+    fold.addEventListener("transitionend", (e) => { if (e.target === fold) settled(); });
+    more.onclick = () => {
+      showAllAgents = !showAllAgents;
+      // the panel's edge moves with the scroll, on the same beat and curve
+      const room = inner.scrollHeight;
+      fit(showAllAgents ? room : -room, showAllAgents ? UNROLL : ROLLUP);
+      clearTimeout(settle);
+      settle = setTimeout(settled, 900);
+      fold.classList.add("moving");
+      fold.classList.toggle("open", showAllAgents);
+      inner.inert = !showAllAgents;
+      labelFor();
+      if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        label.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.22, 1, .36, 1)" });
+      }
+    };
+    list.append(fold, more);
   }
 
   const chips = $("#profiles");
@@ -200,16 +288,64 @@ function tierMenu(a) {
 }
 
 // The tray panel has no scrollbars to speak of, so it grows to fit instead.
-function fit() {
+// The agents' scroll unrolls and rolls up on these, in app.css as in the
+// panel's own height.
+const UNROLL = { ms: 620, ease: ".22,1,.36,1" };
+const ROLLUP = { ms: 420, ease: ".4,0,.2,1" };
+
+// tintPanel hands the colour the panel's page shows to the system, to paint
+// under the page, which then leaves its own background clear: the page is
+// drawn a frame or two after the panel grows, and what shows at the new edge
+// meanwhile is that colour, not a dark band. ms is how long a change of theme
+// fades.
+async function tintPanel(ms = 0) {
   if (mode !== "panel") return;
-  const h = $(".top").offsetHeight + $("#agents").offsetHeight + $(".profiles").offsetHeight + $(".foot").offsetHeight + 4;
-  if (h !== fit.last) { fit.last = h; api("window/fit?h=" + h, {}); }
+  const probe = tintPanel.probe || (tintPanel.probe = document.body.appendChild(el("div", "tint-probe")));
+  const c = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  c.fillStyle = "#010203";
+  const none = c.fillStyle;
+  c.fillStyle = getComputedStyle(probe).backgroundColor;
+  if (c.fillStyle === none) return; // a colour the canvas can't read
+  // what the page shows: its thin paint over the webview's white
+  const paint = c.fillStyle;
+  c.fillStyle = "#fff";
+  c.fillRect(0, 0, 1, 1);
+  c.fillStyle = paint;
+  c.fillRect(0, 0, 1, 1);
+  const rgba = [...c.getImageData(0, 0, 1, 1).data].join(",");
+  if (rgba === tintPanel.last) return;
+  tintPanel.last = rgba;
+  try {
+    const r = await api("window/tint?c=" + rgba + "&ms=" + ms, {});
+    document.body.classList.toggle("tinted", !!r?.ok);
+  } catch {
+    tintPanel.last = null;
+    document.body.classList.remove("tinted");
+  }
+}
+if (mode === "panel") {
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => tintPanel(450));
+}
+
+// extra is room about to be taken (or given back), e.g. by agents unrolling;
+// glide moves the panel's edge there over time instead of at once.
+function fit(extra = 0, glide) {
+  if (mode !== "panel") return;
+  const h = $(".top").offsetHeight + $("#agents").offsetHeight + $(".profiles").offsetHeight + $(".foot").offsetHeight + 4 + extra;
+  if (h === fit.last) return;
+  fit.last = h;
+  const still = !glide || matchMedia("(prefers-reduced-motion: reduce)").matches;
+  api("window/fit?h=" + h + (still ? "" : "&ms=" + glide.ms + "&ease=" + glide.ease), {});
 }
 
 async function load() {
+  if (!load.done) renderAgentsLoading();
+  if (view === "providers" && !providers) renderProvidersLoading();
   try {
     state = await api("state");
+    load.done = true;
     applyPrefs(state.settings);
+    tintPanel();
     renderAgents();
     // an open provider editor is someone typing: coming back to the window
     // must not rebuild it under them
@@ -226,20 +362,59 @@ async function load() {
 // downloaded (a click restarts into it) or, where magpie can't replace
 // itself, out (a click opens the release page).
 async function renderUpdateBadge() {
-  const b = $("#update");
+  const b = $("#update"), label = b.querySelector("span");
   const u = await api("update").catch(() => null);
-  const on = !!u && (u.state === "ready" || u.state === "available");
+  // pulling: a click is downloading it again, and restarts once it's in
+  const pulling = !!u && !!b.dataset.pulling && ["checking", "downloading", "ready"].includes(u.state);
+  if (b.dataset.pulling && !pulling) {
+    delete b.dataset.pulling;
+    b.classList.remove("busy");
+  }
+  const on = pulling || (!!u && (u.state === "ready" || u.state === "available" || (u.state === "error" && u.retry)));
   if (b.hidden !== !on) b.hidden = !on;
-  if (!on || b.classList.contains("busy")) return;
-  b.querySelector("span").textContent = t("Update");
-  b.title = u.state === "ready" ? t("Restart to update to {v}", { v: u.latest }) : t("{v} is out", { v: u.latest });
-  b.onclick = () => {
-    if (u.state === "ready") {
-      b.classList.add("busy");
-      b.querySelector("span").textContent = t("Restarting…");
+  if (!on) return;
+  const restart = async () => {
+    b.classList.add("busy");
+    label.textContent = t("Restarting…");
+    // an answer means it didn't: the password prompt dismissed, or the swap failed
+    if (await api("update/install", {}).catch(() => ({}))) {
+      b.classList.remove("busy");
+      renderUpdateBadge();
     }
-    api("update/install", {}).catch(() => b.classList.remove("busy"));
   };
+  if (pulling) {
+    if (u.state === "ready") {
+      delete b.dataset.pulling;
+      return restart();
+    }
+    label.textContent = u.total ? t("Downloading… {p}%", { p: Math.floor((u.done / u.total) * 100) }) : t("Downloading…");
+    setTimeout(renderUpdateBadge, 700);
+    return;
+  }
+  if (b.classList.contains("busy")) return;
+  label.textContent = t("Update");
+  b.title = u.state === "ready" ? t("Restart to update to {v}", { v: u.latest })
+    : u.state === "error" ? t("Couldn't download {v}", { v: u.latest }) + " · " + t("Click to try again")
+    : u.stuck ? updateStuck(u) + " " + t("Click to open the download page.")
+    : t("{v} is out", { v: u.latest });
+  if (u.error) b.title += "\n" + u.error;
+  b.onclick = () => {
+    if (u.state === "ready") return restart();
+    if (u.state === "error") {
+      b.dataset.pulling = "1";
+      b.classList.add("busy");
+      label.textContent = t("Downloading…");
+      return api("update/install", {}).then(renderUpdateBadge, renderUpdateBadge);
+    }
+    api("update/install", {}).catch(() => {});
+  };
+}
+
+// updateStuck says why this magpie can't replace itself where it is.
+function updateStuck(u) {
+  return u.stuck === "translocated"
+    ? t("macOS is running magpie from a temporary copy, so it can't update itself; move magpie to Applications and open it from there.")
+    : t("magpie is running from its disk image, so it can't update itself; drag it to Applications and open it from there.");
 }
 
 // ---------- picker ----------
@@ -277,6 +452,8 @@ function openPicker(agent, field, anchor, ev, only) {
   closePicker();
   const cur = field.value;
   let options = field.options.filter((o) => !only || only(o));
+  // routing groups come first, before the agent's own models and each provider's
+  options = [...options.filter((o) => o.group === ROUTING_GROUPS), ...options.filter((o) => o.group !== ROUTING_GROUPS)];
   const effortPicker = !only && (field.key === "effort" || field.label === "effort" || field.label === "thinking");
   // Current model first, then the rest in catalog order. Effort levels keep
   // their natural low → high order because their position is meaningful.
@@ -287,7 +464,7 @@ function openPicker(agent, field, anchor, ev, only) {
   if (TIERS.includes(field.label)) {
     const main = agent.fields.find((f) => f.key === "model");
     options.unshift({ value: "", label: t("Same as model"), note: optionFor(main, main.value)?.label || main.value, icon: optionFor(main, main.value)?.icon, reset: true });
-  } else if (!only && !field.menu) options.unshift({ value: "", label: t("Default"), note: t("what {agent} ships with", { agent: agent.name }), icon: agent.icon, reset: true });
+  } else if (!only && !field.menu && !field.onPick) options.unshift({ value: "", label: t("Default"), note: t("what {agent} ships with", { agent: agent.name }), icon: agent.icon, reset: true });
   const modelPicker = ["model", "small", "large", ...TIERS].includes(field.label) && !only;
   pick = { agent, field, options, anchor, cursor: 0, free: !only && !field.menu, modelPicker, effortPicker, groupFilter: "all" };
   anchor.classList.add("open");
@@ -316,6 +493,21 @@ function effortName(option) {
   return t(option.label || option.value);
 }
 
+// An effort level as four bars filled up to it: none for the default or
+// off, all four for the highest the agent offers.
+function effortIcon(f) {
+  const levels = (f.options || []).filter((o) => o.value && o.value !== "off");
+  const at = levels.findIndex((o) => o.value === f.value);
+  const lit = at < 0 ? 0 : Math.max(1, Math.round(((at + 1) / levels.length) * 4));
+  const e = el("span", "ic effort-ic");
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("viewBox", "0 0 16 16");
+  s.innerHTML = [4, 7, 10, 13].map((h, i) =>
+    `<rect x="${1.25 + i * 3.6}" y="${14.5 - h}" width="2.6" height="${h}" rx="1" fill="currentColor" opacity="${i < lit ? 1 : 0.28}"/>`).join("");
+  e.append(s);
+  return e;
+}
+
 function renderEffortPicker() {
   const range = $("#effortRange");
   const options = pick.options;
@@ -323,8 +515,16 @@ function renderEffortPicker() {
   range.max = String(Math.max(0, options.length - 1));
   range.value = String(selected);
   $("#effortTitle").textContent = t(pick.field.label);
+  // a dot at every level, so the stops show before the thumb gets there
+  const ticks = $("#effortTicks");
+  ticks.replaceChildren(...options.map((_, i) => {
+    const dot = el("i");
+    dot.style.setProperty("--at", options.length > 1 ? i / (options.length - 1) : 0);
+    return dot;
+  }));
   const update = () => {
     const i = Number(range.value);
+    [...ticks.children].forEach((dot, j) => { dot.classList.toggle("on", j < i); dot.classList.toggle("cur", j === i); });
     $("#effortValue").textContent = effortName(options[i]);
     const fill = `${options.length > 1 ? 100 * i / (options.length - 1) : 0}%`;
     range.style.setProperty("--fill", fill);
@@ -361,7 +561,7 @@ function filter() {
   if (!pick) return;
   const q = $("#q").value.trim().toLowerCase();
   let source = pick.options;
-  if (pick.modelPicker && pick.groupFilter === "favorites") source = source.filter((o) => modelFavorites.has(o.value));
+  if (pick.modelPicker && pick.groupFilter === "favorites") source = source.filter((o) => isFavorite(o));
   else if (pick.modelPicker && pick.groupFilter !== "all") source = source.filter((o) => o.group === pick.groupFilter || o.reset);
   const scored = source.map((o) => ({ o, i: pick.options.indexOf(o), s: score(q, o) })).filter((x) => x.s > 0);
   // with a query, best matches first; without, catalog order keeps the groups together
@@ -445,7 +645,8 @@ function renderPickerRail() {
     if (groups.length) rail.append(el("span", "rail-sep"));
     for (const group of groups) {
       const sample = pick.options.find((o) => o.group === group);
-      add(group, group, icon(sample?.icon || "generic"));
+      if (group === ROUTING_GROUPS) add(group, t(group), svg(FAN, 16, 1.5));
+      else add(group, group, icon(sample?.groupIcon || sample?.icon || "generic"));
     }
   }
   queueMicrotask(updatePickerRailSelection);
@@ -459,11 +660,11 @@ function renderList() {
   const q = $("#q").value.trim();
   let group = null;
   pick.items.forEach((o, idx) => {
-    if (!q && o.group && o.group !== group) list.append(el("li", "group", o.group));
+    if (!q && o.group && o.group !== group) list.append(el("li", "group", o.group === ROUTING_GROUPS ? t(o.group) : o.group));
     if (!q) group = o.group ?? group;
     const li = el("li", (idx === pick.cursor ? "sel" : "") + (o.value === pick.field.value ? " cur" : "") + (o.custom ? " custom" : "") + (o.reset ? " reset" : ""));
     li.dataset.i = idx;
-    if (hasIcons) li.append(icon(o.icon));
+    if (hasIcons) li.append(optionIcon(o));
     const words = el("span", "option-words");
     words.append(el("span", "v", o.label || o.value));
     let note = o.note && o.note !== (o.label || o.value) ? o.note : "";
@@ -471,12 +672,13 @@ function renderList() {
     if (note) words.append(el("span", "n", note));
     li.append(words);
     if (pick.modelPicker && o.value && !o.custom) {
-      const star = el("button", "favorite" + (modelFavorites.has(o.value) ? " on" : ""));
-      star.title = modelFavorites.has(o.value) ? t("Remove from favorites") : t("Add to favorites");
+      const star = el("button", "favorite" + (isFavorite(o) ? " on" : ""));
+      star.title = isFavorite(o) ? t("Remove from favorites") : t("Add to favorites");
       star.append(svg("m8 2 1.8 3.7 4.1.6-3 2.9.7 4.1L8 11.4l-3.6 1.9.7-4.1-3-2.9 4.1-.6z", 14, 1.4));
       star.onclick = (ev) => {
         ev.stopPropagation();
-        if (modelFavorites.has(o.value)) modelFavorites.delete(o.value); else modelFavorites.add(o.value);
+        const key = favoriteKey(o);
+        if (isFavorite(o)) { modelFavorites.delete(key); modelFavorites.delete(o.value); } else modelFavorites.add(key);
         localStorage.setItem("magpie.modelFavorites", JSON.stringify([...modelFavorites]));
         filter();
       };
@@ -503,6 +705,7 @@ async function commit(value) {
   const { agent, field, anchor } = pick;
   const opt = pick.options.find((o) => o.value === value);
   closePicker();
+  if (field.onPick) return field.onPick(value, opt); // a picker opened for something other than an agent's setting
   if (field.menu) {
     // a tier chosen from the tiers menu: now its model
     const tier = agent.fields.find((f) => f.key === value);
@@ -589,10 +792,32 @@ $("#save").onclick = () => {
 
 async function loadProviders() {
   if (view === "gateway") renderGatewayLoading();
+  else if (!providers) renderProvidersLoading();
   providers = await api("providers");
+  // a reload's provider may be gone since
+  if (typeof editing === "string" && !providers.providers.some((p) => p.id === editing)) editing = null;
   if (!providers.providers.length && editing === null) adding = true;
   if (view === "gateway") renderGatewayView();
   else renderProviders();
+}
+
+// Rows in the shape of the list while it is first asked for; a reload keeps
+// the list it has until the new one is in.
+function renderProvidersLoading() {
+  const page = $("#view-providers");
+  page.classList.add("loading");
+  page.setAttribute("aria-busy", "true");
+  const list = $("#providers");
+  list.hidden = false;
+  list.replaceChildren();
+  for (let i = 0; i < 5; i++) {
+    const row = el("div", "row provider pv-sk-row");
+    const who = el("div", "who pv-sk-who");
+    who.append(el("span", "skeleton pv-sk-name"), el("span", "skeleton pv-sk-sub"));
+    row.append(el("span", "skeleton pv-sk-icon"), who, el("span", "skeleton pv-sk-key"));
+    list.append(row);
+  }
+  $("#excluded").replaceChildren();
 }
 
 // One row per provider: logo, name, the agents pointed at it, key status.
@@ -602,7 +827,10 @@ function renderProviders() {
   // scroll to the top; put it back so closing the editor leaves the reader
   // where they were.
   const view = $("#view-providers"), top = view.scrollTop;
+  view.classList.remove("loading");
+  view.removeAttribute("aria-busy");
   closeProtoMenu();
+  syncURL();
   const list = $("#providers");
   list.replaceChildren();
   list.hidden = !providers.providers.length;
@@ -794,11 +1022,8 @@ const FLAVORS = {
   openai: {
     name: "OpenAI", base: (u) => u + "/v1", baseEnv: "OPENAI_BASE_URL", keyEnv: "OPENAI_API_KEY",
     note: "Chat Completions, the API most tools speak. Anything with an OpenAI base-URL setting works.",
-    curl: (b, m) => `curl ${b}/chat/completions \\
-  -H "Authorization: Bearer magpie" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${m}",
-       "messages": [{"role": "user", "content": "hi"}]}'`,
+    curl: (b, m) => ({ url: `${b}/chat/completions`, headers: ["Authorization: Bearer magpie"],
+      body: `{"model": "${m}",\n "messages": [{"role": "user", "content": "hi"}]}` }),
     python: (b, m) => `from openai import OpenAI
 
 client = OpenAI(base_url="${b}", api_key="magpie")
@@ -819,10 +1044,8 @@ console.log(r.choices[0].message.content);`,
   responses: {
     name: "Responses", base: (u) => u + "/v1", baseEnv: "OPENAI_BASE_URL", keyEnv: "OPENAI_API_KEY",
     note: "OpenAI's newer API: reasoning, built-in tool items, encrypted reasoning. Codex speaks this.",
-    curl: (b, m) => `curl ${b}/responses \\
-  -H "Authorization: Bearer magpie" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${m}", "input": "hi"}'`,
+    curl: (b, m) => ({ url: `${b}/responses`, headers: ["Authorization: Bearer magpie"],
+      body: `{"model": "${m}", "input": "hi"}` }),
     python: (b, m) => `from openai import OpenAI
 
 client = OpenAI(base_url="${b}", api_key="magpie")
@@ -837,12 +1060,8 @@ console.log(r.output_text);`,
   anthropic: {
     name: "Anthropic", base: (u) => u, baseEnv: "ANTHROPIC_BASE_URL", keyEnv: "ANTHROPIC_API_KEY",
     note: "Messages API. Claude Code reads ANTHROPIC_AUTH_TOKEN instead of the key; the Agents tab sets that for you.",
-    curl: (b, m) => `curl ${b}/v1/messages \\
-  -H "x-api-key: magpie" \\
-  -H "anthropic-version: 2023-06-01" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${m}", "max_tokens": 1024,
-       "messages": [{"role": "user", "content": "hi"}]}'`,
+    curl: (b, m) => ({ url: `${b}/v1/messages`, headers: ["x-api-key: magpie", "anthropic-version: 2023-06-01"],
+      body: `{"model": "${m}", "max_tokens": 1024,\n "messages": [{"role": "user", "content": "hi"}]}` }),
     python: (b, m) => `import anthropic
 
 client = anthropic.Anthropic(
@@ -867,10 +1086,8 @@ console.log(m.content[0].text);`,
   gemini: {
     name: "Gemini", base: (u) => u, baseEnv: "GOOGLE_GEMINI_BASE_URL", keyEnv: "GEMINI_API_KEY",
     note: "Google's generateContent API, v1beta. Gemini CLI and the google-genai SDKs speak this.",
-    curl: (b, m) => `curl ${b}/v1beta/models/${m}:generateContent \\
-  -H "x-goog-api-key: magpie" \\
-  -H "Content-Type: application/json" \\
-  -d '{"contents": [{"parts": [{"text": "hi"}]}]}'`,
+    curl: (b, m) => ({ url: `${b}/v1beta/models/${m}:generateContent`, headers: ["x-goog-api-key: magpie"],
+      body: `{"contents": [{"parts": [{"text": "hi"}]}]}` }),
     python: (b, m) => `from google import genai
 
 client = genai.Client(api_key="magpie", http_options={"base_url": "${b}"})
@@ -886,11 +1103,27 @@ const r = await ai.models.generateContent({ model: "${m}", contents: "hi" });
 console.log(r.text);`,
   },
 };
-const LANGS = [["shell", "Shell"], ["curl", "curl"], ["python", "Python"], ["node", "Node"]];
+// Windows gets PowerShell: $env: in place of export, and the curl.exe that
+// ships with it (plain curl there is Invoke-WebRequest). The body goes in
+// on stdin, since Windows PowerShell drops the quotes inside an argument.
+const WIN = /^Win/.test(navigator.platform);
+const LANGS = [["shell", WIN ? "PowerShell" : "Shell"], ["curl", "curl"], ["python", "Python"], ["node", "Node"]];
+
+function curlSnippet({ url, headers, body }) {
+  headers = [...headers, "Content-Type: application/json"];
+  if (WIN) return `@'\n${body}\n'@ | curl.exe ${url} \`\n${headers.map((h) => `  -H "${h}" \``).join("\n")}\n  --data-binary "@-"`;
+  return `curl ${url} \\\n${headers.map((h) => `  -H "${h}" \\`).join("\n")}\n  -d '${body.replaceAll("\n", "\n      ")}'`;
+}
+
+function envSnippet(vars) {
+  return vars.map(([k, v]) => (WIN ? `$env:${k}="${v}"` : `export ${k}=${v}`)).join("\n");
+}
 
 // every exposed model, as the ids agents use
 function gatewayModels() {
-  const out = [];
+  // the routing groups first, as the agents' pickers list them
+  const out = (providers.gateway.groups || []).map((g) => ({ id: g.id, name: g.name, icons: g.icons, group: true,
+    provider: { name: [t("routing group"), g.providers.join(", ")].filter(Boolean).join(" · ") } }));
   for (const p of providers.providers) for (const m of p.models) if (m.on) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p });
   return out;
 }
@@ -934,14 +1167,17 @@ function renderConnect() {
 
   const ex = el("div", "stack");
   ex.append(segs(LANGS, lang, (id) => { lang = id; localStorage.setItem("magpie.lang", id); renderConnect(); }));
-  const code = lang === "shell"
-    ? `export ${f.baseEnv}=${base}\nexport ${f.keyEnv}=magpie`
+  const code = lang === "shell" ? envSnippet([[f.baseEnv, base], [f.keyEnv, "magpie"]])
+    : lang === "curl" ? curlSnippet(f.curl(base, model))
     : f[lang](base, model);
   const pre = el("pre", "snip");
   const c = el("code");
   c.append(highlight(code, lang));
-  pre.append(c, copyBtn(code, t("Snippet")));
-  ex.append(pre);
+  pre.append(c);
+  // the button sits outside the scrolling box, so a long line doesn't carry it off
+  const wrap = el("div", "snip-wrap");
+  wrap.append(pre, copyBtn(code, t("Snippet")));
+  ex.append(wrap);
   box.append(...field(t("Example"), ex, lang === "shell" ? t("Put these in the shell (or the tool's settings) and the tool talks to magpie instead of the vendor.") : ""));
 }
 
@@ -951,12 +1187,12 @@ const KEYWORDS = {
   python: /^(from|import|def|return|await|async|for|in|if|else|None|True|False)$/,
   node: /^(import|from|const|let|await|async|new|return|function|export|default)$/,
   shell: /^(export|curl)$/,
-  curl: /^(curl)$/,
+  curl: /^(curl|curl\.exe)$/,
 };
 function highlight(code, lang) {
   const re = lang === "node"
     ? /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\/\/.*)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)(?=\s*\()|([A-Za-z_$][\w$]*)|(\s+|.)/g
-    : /("(?:[^"\\]|\\.)*"|'[^']*'|(?<==)\S+)|(#.*)|(\b\d+(?:\.\d+)?\b(?=[,\s\]}]))|(-{1,2}[A-Za-z][\w-]*)|([A-Z][A-Z0-9_]+)(?==)|([A-Za-z_][\w.]*)(?=\s*\()|([A-Za-z_][\w.]*)|(\\\n)|(\s+|.)/g;
+    : /("(?:[^"\\]|\\.)*"|'[^']*'|(?<==)\S+)|(#.*)|(\b\d+(?:\.\d+)?\b(?=[,\s\]}]))|(-{1,2}[A-Za-z][\w-]*)|([A-Z][A-Z0-9_]+)(?==)|([A-Za-z_][\w.]*)(?=\s*\()|([A-Za-z_][\w.]*)|(\\\n|`\n)|(\s+|.)/g;
   const out = document.createDocumentFragment();
   const kw = KEYWORDS[lang] || KEYWORDS.shell;
   let m;
@@ -1001,7 +1237,9 @@ function renderGatewayModels() {
   $("#copyModels").hidden = !models.length;
   $("#copyModels").onclick = () => copy(models.map((m) => m.id).join("\n"), t("Model ids"));
   if (!all.length) {
-    list.append(el("div", "empty-state", "")).append(el("b", "", t("No models exposed yet")), t("Add a provider, or sign in to Codex or Copilot; their models show up here for every agent."));
+    const empty = el("div", "empty-state", "");
+    empty.append(el("b", "", t("No models exposed yet")), t("Add a provider, or sign in to Codex or Copilot; their models show up here for every agent."));
+    list.append(empty);
     return;
   }
   if (!models.length) {
@@ -1012,7 +1250,7 @@ function renderGatewayModels() {
     const row = el("div", "row model" + (m.id === exampleModel ? " selected" : ""));
     const who = el("div", "who");
     who.append(el("div", "name", m.id), el("div", "sub", m.name && m.name !== m.id.split("/")[1] ? `${m.name} · ${m.provider.name}` : m.provider.name));
-    row.append(icon(m.provider.icon || "generic"), who, copyBtn(m.id, t("Model id")));
+    row.append(m.group ? stackIcon(m.icons) : icon(m.provider.icon || "generic"), who, copyBtn(m.id, t("Model id")));
     row.title = t("Use this model in the snippets");
     row.onclick = () => { exampleModel = m.id; localStorage.setItem("magpie.model", m.id); renderConnect(); renderGatewayModels(); };
     list.append(row);
@@ -1325,6 +1563,31 @@ function parses(s) { try { JSON.parse(s); return true; } catch { return false; }
 
 // iconPicker: a custom provider's icon — one of the built-in ones, or a
 // picture of the user's own, which magpie keeps in ~/.config/magpie/icons.
+// A routing group's icon: its providers' icons stacked, the first on top,
+// so which providers a group routes over shows at a glance.
+function stackIcon(icons) {
+  if (!icons || icons.length < 2) return icon(icons?.[0] || "generic");
+  const e = el("span", "ic-stack");
+  for (const n of icons.slice(0, 3)) {
+    const d = el("span", "disc");
+    d.append(icon(n || "generic"));
+    e.append(d);
+  }
+  if (icons.length > 3) e.append(el("span", "disc more", "+" + (icons.length - 3)));
+  return e;
+}
+
+function optionIcon(o) {
+  return o.icons?.length ? stackIcon(o.icons) : icon(o.icon);
+}
+
+// The picker's own section for routing groups (agent.RoutingGroups), and
+// its mark on the rail: one model fanning out to several providers.
+const ROUTING_GROUPS = "Routing groups";
+const dot = (x, y) => `M${x - 1.4} ${y}a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0`;
+const FAN = [dot(2.9, 8), dot(13.1, 3.4), dot(13.1, 8), dot(13.1, 12.6),
+  "M4.3 8h7.4", "M4.3 8c2.6 0 3.2-4.6 5.8-4.6h1.6", "M4.3 8c2.6 0 3.2 4.6 5.8 4.6h1.6"].join(" ");
+
 function iconPicker(ed) {
   const box = el("div", "icon-pick");
   const draw = () => {
@@ -1434,7 +1697,7 @@ function renderEditor(p, presetID) {
   const pr = presetID ? providers.presets.find((x) => x.id === presetID) : p?.preset ? providers.presets.find((x) => x.id === p.preset) : null;
   const isNew = !p, custom = !pr;
   draft = draft || (p
-    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "", fallback: [...(p.fallback || [])] }
+    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "", fallback: [...(p.fallback || [])], balanceURL: p.balanceURL || "", balancePath: p.balancePath || "" }
     : pr
       ? { id: pr.id, name: pr.name, preset: pr.id, key: "", chosen: [], extra: [], headers: [] }
       : { id: "", name: "", preset: "", chat: "", responses: "", anthropic: "", catalog: "", key: "", api: "openai", chosen: [], extra: [], headers: [], icon: "" });
@@ -1611,6 +1874,12 @@ function renderEditor(p, presetID) {
     const cat = input(draft.catalog, t("models.dev ids, e.g. openai, deepseek"));
     cat.oninput = () => { draft.catalog = cat.value; };
     inner.append(...field(t("Catalog"), cat, t("Display names and reasoning levels for the models; for a gateway that serves several vendors, list them all, first match wins")));
+    const bal = input(draft.balanceURL, "https://…/api/usage/token", "url");
+    bal.oninput = () => { draft.balanceURL = bal.value; };
+    inner.append(...field(t("Balance URL"), bal, t("Where the vendor tells what is left on the key, asked with it like a chat request; shown on the Usage page")));
+    const balPath = input(draft.balancePath, "data.balance");
+    balPath.oninput = () => { draft.balancePath = balPath.value; };
+    inner.append(...field(t("Balance field"), balPath, t("Where the amount is in the reply, e.g. data.balance; \"$\" in front adds the sign, \"/ 500000\" after it divides")));
     more.append(inner);
     ed.append(more);
   }
@@ -1627,7 +1896,7 @@ function renderEditor(p, presetID) {
   const saveBtn = el("button", "text primary", t(isNew ? "Add" : "Save"));
   const save = () => {
     const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra };
-    if (custom) { body.headers = headersOf(draft.headers); body.icon = draft.icon || "generic"; }
+    if (custom) { body.headers = headersOf(draft.headers); body.icon = draft.icon || "generic"; body.balanceURL = (draft.balanceURL || "").trim(); body.balancePath = (draft.balancePath || "").trim(); }
     if (p) body.fallback = draft.fallback;
     if (isNew && custom && !body.name) { name.focus(); return editorError(t("Give it a name"), "warn"); }
     if (isNew && custom && !body.chat && !body.anthropic) { url.focus(); return editorError(t("A base URL is needed"), "warn"); }
@@ -1684,6 +1953,10 @@ async function openImportApps() {
   renderProviders();
 }
 
+// appIcon is an import source's logo; Claude Code has its mark among the
+// vendor icons rather than an app tile of its own.
+const appIcon = (id) => id === "claude-code" ? "icons/claudecode-color.svg" : `icons/app-${id}.png`;
+
 function renderImportApps(ia) {
   const ed = el("div", "editor new importapps");
   ed.onclick = (e) => e.stopPropagation();
@@ -1736,7 +2009,7 @@ function renderImportApps(ia) {
     const tab = el("button", "apptab" + (s.found && !s.error ? "" : " missing"));
     tab.setAttribute("role", "tab");
     const tlogo = el("img", "applogo");
-    tlogo.src = `icons/app-${s.id}.png`;
+    tlogo.src = appIcon(s.id);
     tlogo.alt = "";
     tlogo.draggable = false;
     const n = s.items.filter((it) => ia.picks[s.id + "\n" + it.ref]).length;
@@ -1747,7 +2020,7 @@ function renderImportApps(ia) {
     secs[s.id] = [tab, sec];
     const sh = el("div", "apphead");
     const logo = el("img", "applogo");
-    logo.src = `icons/app-${s.id}.png`;
+    logo.src = appIcon(s.id);
     logo.alt = "";
     logo.draggable = false;
     sh.append(logo, el("b", "", s.name), el("code", "", s.path.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~")));
@@ -2025,7 +2298,7 @@ function renderModels(p) {
 const ROUTINGS = [
   ["", "Smart", "The first takes requests while it has quota to spare; when it runs low, the one with the most left takes over. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again."],
   ["order", "In order", "Requests go to the first; the next takes over when the one before runs out of quota, hits a rate limit or fails."],
-  ["rotate", "In turn", "Each request goes to the next one, spreading the load evenly; one that fails is passed over for a minute."],
+  ["rotate", "In turn", "Each turn of a conversation goes to the next one, spreading the load evenly; the requests within a turn stay where it began, so the prompt cache holds, and one that fails is passed over while it rests."],
   ["usage", "Least used first", "Each request goes to the one used least: a subscription by the share of its allowance used, a key by the tokens it served in the last hours."],
 ];
 function renderRouting(p) {
@@ -2646,33 +2919,60 @@ function renderQuotas() {
     return;
   }
   subscriptions.hidden = !quotas.length;
+  // an agent with several accounts is one card, a section per account
+  const groups = [];
   for (const sub of quotas) {
-    const card = el("div", "subscription-card");
+    const g = sub.user && groups.find((x) => x[0].user && x[0].provider === sub.provider);
+    if (g) g.push(sub); else groups.push([sub]);
+  }
+  for (const subs of groups) {
+    const first = subs[0];
+    const card = el("div", "subscription-card" + (first.user ? " several" : ""));
     const head = el("div", "subscription-head");
-    head.append(icon(sub.icon), el("b", "", sub.name));
-    if (sub.plan) head.append(el("span", "plan", sub.plan));
+    head.append(icon(first.icon), el("b", "", first.name));
+    if (!first.user && first.plan) head.append(el("span", "plan", first.plan));
     card.append(head);
-    if (sub.error) {
-      card.append(el("div", "subscription-error", t("Usage unavailable")));
-      card.title = sub.error;
-    } else {
-      const windows = el("div", "quota-windows");
-      for (const w of sub.windows) {
-        const quota = el("div", "quota");
-        const labels = el("div", "quota-labels");
-        labels.append(el("span", "", t(w.name)), el("b", "", w.display || `${Math.round(w.used)}%`));
-        const track = el("div", "quota-track");
-        const fill = el("i");
-        fill.style.width = `${Math.max(0, Math.min(100, w.used))}%`;
-        track.append(fill);
-        quota.append(labels, track);
-        if (w.resetsAt) quota.title = t("Resets {when}", { when: new Date(w.resetsAt).toLocaleString() });
-        windows.append(quota);
+    for (const sub of subs) {
+      if (sub.user) {
+        const who = el("div", "subscription-account");
+        const u = el("span", "user", sub.user);
+        u.title = sub.user;
+        who.append(u);
+        if (sub.plan) who.append(el("span", "plan", sub.plan));
+        card.append(who);
       }
-      card.append(windows);
+      card.append(quotaWindows(sub));
     }
     subscriptions.append(card);
   }
+}
+
+// quotaWindows: one account's allowance as meters, or why there are none.
+function quotaWindows(sub) {
+  if (sub.balance) {
+    const b = el("div", "quota-balance");
+    b.append(el("span", "", t("Balance")), el("b", "", sub.balance));
+    return b;
+  }
+  if (sub.error) {
+    const e = el("div", "subscription-error", t("Usage unavailable"));
+    e.title = sub.error;
+    return e;
+  }
+  const windows = el("div", "quota-windows");
+  for (const w of sub.windows) {
+    const quota = el("div", "quota");
+    const labels = el("div", "quota-labels");
+    labels.append(el("span", "", t(w.name)), el("b", "", w.display || `${Math.round(w.used)}%`));
+    const track = el("div", "quota-track");
+    const fill = el("i");
+    fill.style.width = `${Math.max(0, Math.min(100, w.used))}%`;
+    track.append(fill);
+    quota.append(labels, track);
+    if (w.resetsAt) quota.title = t("Resets {when}", { when: new Date(w.resetsAt).toLocaleString() });
+    windows.append(quota);
+  }
+  return windows;
 }
 
 function renderUsage() {
@@ -2809,6 +3109,7 @@ function applyPrefs(s) {
         applyPrefs.t = setTimeout(() => root.classList.remove("theming"), 450);
       }
       if (want) root.dataset.theme = want; else delete root.dataset.theme;
+      if (applyPrefs.ready) tintPanel(450);
     }
   }
   applyPrefs.ready = true;
@@ -2822,6 +3123,8 @@ async function loadSettings() {
   prefs = await api("settings");
   renderSettings();
 }
+
+const DISCORD_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg>';
 
 function renderSettings() {
   const s = prefs;
@@ -2839,16 +3142,23 @@ function renderSettings() {
     who.append(el("div", "name", name));
     if (sub) who.append(el("div", "sub", sub));
     const val = el("div", "val");
-    val.append(el("code", "", value), ...tools);
+    if (value) val.append(el("code", "", value));
+    val.append(...tools);
     r.append(who, val);
     about.append(r);
     return r;
   };
   renderUpdate(row(t("Version"), "", s.version));
   const open = el("button", "text", t("Open"));
-  open.onclick = () => api("open", { url: "file://" + s.path });
+  open.onclick = () => api("settings/reveal", {}).catch(() => {});
   row(t("Config folder"), t("providers, profiles and these settings"), s.dir, copyBtn(s.dir, t("Path")), open);
   row(t("Gateway URL"), t("the address every agent is pointed at"), s.gateway, copyBtn(s.gateway, t("Gateway URL")));
+  const join = el("button", "discord");
+  join.innerHTML = DISCORD_SVG;
+  join.append(el("span", "", t("Join Discord")));
+  join.title = "discord.gg/vGSnD3ZKQF";
+  join.onclick = () => api("open", { url: "https://discord.gg/vGSnD3ZKQF" }).catch(() => {});
+  row(t("Community"), t("questions, ideas and feedback, on Discord"), "", join);
 }
 
 // renderProxy: magpie's own requests to vendors follow the system proxy on
@@ -2907,11 +3217,13 @@ async function renderUpdate(r, u) {
   };
   switch (u.state) {
     case "ready":
-      sub.textContent = t("{v} is downloaded", { v: u.latest });
-      btn(t("Restart to update"), () => api("update/install", {}));
+      sub.textContent = t("{v} is downloaded", { v: u.latest }) + (u.error ? " · " + u.error : "");
+      // back with an answer only when it didn't restart
+      btn(t("Restart to update"), async () => renderUpdate(r, await api("update/install", {}).catch(() => null) || undefined));
       break;
     case "available":
       sub.textContent = t("{v} is out", { v: u.latest });
+      if (u.stuck) sub.textContent += " · " + updateStuck(u);
       btn(t("Download"), () => api("update/install", {}));
       break;
     case "downloading":
@@ -2954,16 +3266,71 @@ async function savePrefs(body) {
 
 // ---------- header / footer ----------
 
+// ---------- where the reader is ----------
+// Each view stays scrolled where the reader put it. Only the reader moves it
+// — the wheel or trackpad, a touch, the keys that scroll, Tab, a drag — or
+// code that says so first with scrollOnPurpose(). Anything else that moves
+// it is put back before it's painted: a part of the page redrawn, and
+// measured while it was briefly shorter, pulls the page up to what was left
+// of it (WebKit has no scroll anchoring), and WebKit scrolls a field it
+// focuses to the middle of the view. Never set a view's scrollTop, or
+// scrollIntoView inside one, without scrollOnPurpose().
+let purposeUntil = 0;
+function scrollOnPurpose(ms = 1000) { purposeUntil = Math.max(purposeUntil, performance.now() + ms); }
+const SCROLL_KEYS = new Set(["PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown", " "]);
+addEventListener("wheel", () => scrollOnPurpose(250), { capture: true, passive: true });
+addEventListener("touchmove", () => scrollOnPurpose(250), { capture: true, passive: true });
+addEventListener("pointermove", (e) => { if (e.buttons) scrollOnPurpose(250); }, { capture: true, passive: true });
+addEventListener("keydown", (e) => {
+  const typing = e.target.closest?.("input, textarea, select, [contenteditable]");
+  if (e.key === "Tab" || (!typing && SCROLL_KEYS.has(e.key))) scrollOnPurpose(400);
+}, true);
+const readerAt = new WeakMap();
+function backToReader(v) {
+  if (v.hidden) return;
+  const want = Math.min(readerAt.get(v) || 0, Math.max(0, v.scrollHeight - v.clientHeight));
+  if (Math.abs(v.scrollTop - want) < 1) return;
+  v.scrollTop = want;
+  // a field focused out of sight still comes into view, no further than needed
+  const f = document.activeElement;
+  if (f && f !== document.body && v.contains(f)) {
+    const r = f.getBoundingClientRect(), b = v.getBoundingClientRect();
+    if (r.bottom > b.bottom || r.top < b.top) { scrollOnPurpose(); f.scrollIntoView({ block: "nearest" }); }
+  }
+}
+for (const v of document.querySelectorAll(".view")) {
+  v.addEventListener("scroll", () => {
+    if (v.hidden) return;
+    if (performance.now() < purposeUntil) readerAt.set(v, v.scrollTop);
+    else backToReader(v);
+  }, { passive: true });
+}
+
 function show(v) {
   view = v;
   if (mode === "window") { for (const b of $("#nav").querySelectorAll("button")) b.classList.toggle("on", b.dataset.view === v); slide($("#nav"), "nav"); }
   $("#prefs").classList.toggle("on", v === "settings");
-  for (const id of ["agents", "providers", "gateway", "usage", "settings"]) $("#view-" + id).hidden = v !== id;
+  for (const id of ["agents", "providers", "gateway", "routing", "usage", "settings"]) $("#view-" + id).hidden = v !== id;
+  // back to where the reader was in it, and again once it has what it loads
+  const back = () => backToReader($("#view-" + v));
+  requestAnimationFrame(back);
   closePicker();
   if (v !== "providers" && editing !== null) cancelEdit();
-  if (v === "providers" || v === "gateway") loadProviders().catch((e) => status(e.message, "err"));
-  if (v === "usage") loadUsage().catch((e) => status(e.message, "err"));
-  if (v === "settings") loadSettings().catch((e) => status(e.message, "err"));
+  if (v === "providers" || v === "gateway" || v === "routing") loadProviders().then(back, (e) => status(e.message, "err"));
+  if (v === "usage") loadUsage().then(back, (e) => status(e.message, "err"));
+  if (v === "settings") loadSettings().then(back, (e) => status(e.message, "err"));
+  syncURL();
+}
+
+// The tab, and the provider open in it, are kept in the address so a
+// reload comes back to them.
+function syncURL() {
+  if (mode !== "window") return;
+  const q = new URLSearchParams(location.search);
+  if (view === "agents") q.delete("view"); else q.set("view", view);
+  if (view === "providers" && typeof editing === "string") q.set("edit", editing); else q.delete("edit");
+  const s = q.size ? "?" + q : location.pathname;
+  if (s !== location.search) history.replaceState(null, "", s);
 }
 if (mode === "window") for (const b of $("#nav").querySelectorAll("button")) b.onclick = () => { show(b.dataset.view); b.blur(); };
 $("#prefs").onclick = () => { if (mode === "window") show("settings"); else api("window/main?view=settings", {}); $("#prefs").blur(); };
@@ -2994,7 +3361,40 @@ else { $("#nav").remove(); }
 
 // Config files may change underneath us (another magpie, an editor); reload when
 // the panel comes back into view.
-document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+// The magpie in the corner flaps and wags its tail as the window opens and
+// when the pointer comes over it.
+function wag() {
+  const logo = document.querySelector(".brand .logo");
+  if (!logo || logo.classList.contains("wag") || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  logo.classList.add("wag");
+  logo.querySelector(".tail").addEventListener("animationend", () => logo.classList.remove("wag"), { once: true });
+}
+document.querySelector(".brand")?.addEventListener("mouseenter", wag);
+setTimeout(wag, 250);
+
+// A narrow window has no room for the whole header: the name goes, leaving
+// the magpie, and Update becomes its arrow; narrower still, the tabs stop
+// centring and take the room between.
+function fitTop() {
+  const top = $(".top"), nav = $("#nav"), brand = $(".brand"), actions = $(".actions");
+  const fits = () => {
+    const a = actions.getBoundingClientRect();
+    const left = brand.offsetParent ? brand.getBoundingClientRect().right
+      : top.getBoundingClientRect().left + parseFloat(getComputedStyle(top).paddingLeft);
+    if (!nav?.offsetParent) return left + 8 <= a.left;
+    const n = nav.getBoundingClientRect();
+    return left + 8 <= n.left && n.right + 8 <= a.left;
+  };
+  top.classList.remove("tight", "cramped");
+  if (fits()) return;
+  top.classList.add("tight");
+  if (!fits()) top.classList.add("cramped");
+}
+const topFit = new ResizeObserver(fitTop);
+for (const e of [".top", ".brand", ".actions"]) topFit.observe($(e));
+document.fonts?.ready.then(fitTop);
+
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { load(); wag(); } });
 window.addEventListener("focus", load);
 setInterval(renderUpdateBadge, 15 * 60 * 1000); // a window left open still hears of a new version
 // Opened on a magpie://import link: fetch what it describes (once — the
@@ -3008,6 +3408,7 @@ if (mode === "window" && params.get("import")) {
     if (providers && view === "providers") renderProviders();
   }).catch(() => {});
 }
-if (mode === "window" && ["providers", "gateway", "usage", "settings"].includes(params.get("view"))) show(params.get("view"));
+if (mode === "window" && params.get("view") === "providers" && params.get("edit")) editing = params.get("edit");
+if (mode === "window" && ["providers", "gateway", "routing", "usage", "settings"].includes(params.get("view"))) show(params.get("view"));
 else if (mode === "window") slide($("#nav"), "nav");
 load();
