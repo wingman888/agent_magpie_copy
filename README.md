@@ -71,6 +71,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
+| DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
 
 Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
@@ -203,6 +204,7 @@ you press *Add*. `magpie import <link>` does the same in a terminal.
 | `models`    | model ids to expose, comma separated                               |
 | `catalog`   | models.dev provider id, for model names and reasoning levels       |
 | `website`, `keys` | the vendor's site and its API-key page (https)               |
+| `icon`      | an https picture of the vendor's own (PNG, JPEG, GIF, WebP, ICO, SVG, at most 1 MB). magpie downloads it once, after you confirm the import, into its icons folder; without one it falls back to the catalog's logo or a plain mark |
 
 Base URLs must be https (plain http only to this machine or the local
 network). Web pages and GitHub don't link custom schemes reliably, so link
@@ -322,6 +324,30 @@ Keys in the terminal version:
 
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
+
+## Moving to another machine
+
+```
+magpie backup [--no-keys] [file]     # default: ./magpie.magpie-backup
+magpie restore [--no-agents] <file>
+```
+
+`backup` saves your providers (with their API keys, unless `--no-keys`), their
+pictures, settings, every profile and the model each agent uses now, in one
+file. It asks for a passphrase twice; the file is encrypted with it
+(AES-256-GCM, key from PBKDF2-SHA256), so nothing can be read without it and
+the passphrase cannot be recovered. When stdin is not a terminal the passphrase
+is its first line.
+
+`restore` asks for the passphrase and puts everything back: providers are
+matched by id and replaced (a backup made without keys keeps the keys already
+here), then settings, profiles and the agents' models, for the agents installed
+on this machine only; what can't be set is listed and left as it was.
+`--no-agents` leaves the agents alone. Providers still missing a key are listed;
+add it with `magpie provider key <id>`.
+
+**Subscriptions are not in the backup.** Claude Code, Codex and the like are the
+agents' own sign-ins: sign in to each on the new machine.
 
 ## Files
 
