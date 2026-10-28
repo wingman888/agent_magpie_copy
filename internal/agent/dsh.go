@@ -1,14 +1,17 @@
 package agent
 
-// DeepSeek Harness (dsh) boots from its shipped rows and then applies one
-// personal patch list, ~/.dsh/config.yaml: a YAML list of {id, config}
-// entries, each replacing the whole config of the row with that id. magpie
-// points dsh at the gateway with such entries: llm-deepseek (endpoint, key,
-// the catalog as its model list), agent-loop (the TUI's main agent) and
-// api-gateway (the model `dsh -p` and `dsh web` start sessions on; the TUI
-// has no such row and only notes that). All are marked as magpie's, the
-// user's own entries stay as they are, and one magpie replaces is stashed
-// and put back when it steps out.
+// DeepSeek Harness (dsh) boots from its shipped rows and then applies a
+// personal patch list: a YAML list of {id, config} entries, each replacing
+// the whole config of the row with that id. Since 0.1.5 every profile has
+// its own, ~/.dsh/profiles/<name>/cordis.patch.yml (web and desktop read it
+// live); before that there was one, ~/.dsh/config.yaml. magpie points dsh at
+// the gateway with such entries: llm-deepseek (endpoint, the catalog as its
+// model list; the key is a credential named in apiKeyEnv, which magpie puts
+// in ~/.dsh/.env) and agent-default-model (the model new sessions start on).
+// Before 0.1.5 that model was agent-loop's main agent (the TUI) and
+// api-gateway's route (`dsh -p`, `dsh web`), and the key sat in the entry.
+// All are marked as magpie's, the user's own entries stay as they are, and
+// one magpie replaces is stashed and put back when it steps out.
 
 import (
 	"encoding/json"
@@ -16,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
@@ -24,8 +28,12 @@ import (
 
 const dshMark = "# magpie"
 
+// dshKeyRef is the credential dsh signs gateway requests with.
+const dshKeyRef = "MAGPIE_API_KEY"
+
 // dshModels are the models dsh reaches on its own, as it ships them.
 var dshModels = []Option{
+	{Value: "deepseek-flash", Label: "DeepSeek-V41-Flash", Icon: "deepseek-color", Group: "DeepSeek"},
 	{Value: "deepseek-v4-pro", Label: "DeepSeek-V4-Pro", Icon: "deepseek-color", Group: "DeepSeek"},
 	{Value: "deepseek-v4-flash", Label: "DeepSeek-V4-Flash", Icon: "deepseek-color", Group: "DeepSeek"},
 }
@@ -36,13 +44,20 @@ func dsh(home string) *Agent {
 		dir = filepath.Join(home, ".dsh")
 	}
 	path := filepath.Join(dir, "config.yaml")
+	if files := dshProfiles(dir); len(files) > 0 {
+		path = files[0]
+	}
 	return &Agent{
 		ID: "dsh", Name: "DeepSeek Harness", Icon: "deepseek-color", Aliases: []string{"deepseek-harness"},
 		Bin: "dsh", Dir: dir, Path: path,
 		Notice: func() string {
 			var notes []string
 			if Running(`(^|/)dsh( |$)`) {
-				notes = append(notes, "dsh reads its config at start-up — restart open dsh sessions to use this.")
+				if len(dshProfiles(dir)) > 0 {
+					notes = append(notes, "New dsh sessions start on this; one already open keeps its model until you pick another in it. A dsh started with -p or in a terminal reads it at start-up.")
+				} else {
+					notes = append(notes, "dsh reads its config at start-up — restart open dsh sessions to use this.")
+				}
 			}
 			if dshSettingsEndpoint(filepath.Join(dir, "settings.yaml")) {
 				notes = append(notes, "~/.dsh/settings.yaml sets its own DeepSeek endpoint or key, which dsh puts over magpie's; clear it in dsh's Models page to go through magpie.")
@@ -51,13 +66,22 @@ func dsh(home string) *Agent {
 		},
 		Fields: []Field{{
 			Key: "model", Label: "model",
-			Get: func() string { return dshGet(path) },
-			Set: func(v string) error { return dshSet(path, v) },
+			Get: func() string { return dshGet(dir) },
+			Set: func(v string) error { return dshSet(dir, v) },
 			Options: func(map[string]string) []Option {
 				return append(append([]Option{}, dshModels...), viaMagpie(magpieID+"/")...)
 			},
 		}},
 	}
+}
+
+// dshProfiles are the profiles' patch lists (dsh 0.1.5 on), web's first.
+func dshProfiles(dir string) []string {
+	files, _ := filepath.Glob(filepath.Join(dir, "profiles", "*", "cordis.patch.yml"))
+	sort.SliceStable(files, func(i, j int) bool {
+		return filepath.Base(filepath.Dir(files[i])) == "web" && filepath.Base(filepath.Dir(files[j])) != "web"
+	})
+	return files
 }
 
 // dshItem is one entry of the patch list, as its lines.
@@ -127,20 +151,30 @@ func dshFind(items []dshItem, id string) int {
 
 var dshModelLine = regexp.MustCompile(`^\s+model:\s*(.+?)\s*$`)
 
-func dshGet(path string) string {
+// dshGet reads the model new sessions start on: the one last picked in dsh,
+// saved in its settings, else the patch list's.
+func dshGet(dir string) string {
+	files := dshProfiles(dir)
+	path, row := filepath.Join(dir, "config.yaml"), "agent-loop"
+	if len(files) > 0 {
+		path, row = files[0], "agent-default-model"
+	}
 	_, items, err := dshRead(path)
 	if err != nil {
 		return ""
 	}
-	i := dshFind(items, "agent-loop")
-	if i < 0 {
-		return ""
-	}
 	model := ""
-	for _, l := range items[i].lines {
-		if m := dshModelLine.FindStringSubmatch(l); m != nil {
-			model = yamlScalar(m[1])
-			break
+	if len(files) > 0 {
+		if m := edit.GetYAMLMap(filepath.Join(dir, "settings.yaml"), "agent-default-model"); m["model"] != "" {
+			model = m["model"]
+		}
+	}
+	if i := dshFind(items, row); i >= 0 && model == "" {
+		for _, l := range items[i].lines {
+			if m := dshModelLine.FindStringSubmatch(l); m != nil {
+				model = yamlScalar(m[1])
+				break
+			}
 		}
 	}
 	if model == "" {
@@ -168,17 +202,57 @@ func yamlScalar(v string) string {
 
 func dshStashKey(path, id string) string { return "dsh:" + path + ":" + id }
 
-// dshSet writes v as the main agent's model: a catalog model through the
-// gateway, one of dsh's own models directly, or "" for dsh's own default.
-func dshSet(path, v string) error {
+// dshSet writes v as the model new sessions start on: a catalog model
+// through the gateway, one of dsh's own models directly, or "" for dsh's own
+// default. Every profile gets it; config.yaml only where there are none.
+func dshSet(dir, v string) error {
+	ref, viaGateway := strings.CutPrefix(v, magpieID+"/")
+	if viaGateway && !isMagpie(ref) {
+		return fmt.Errorf("unknown model %q", v)
+	}
+	legacy := filepath.Join(dir, "config.yaml")
+	files := dshProfiles(dir)
+	if len(files) == 0 {
+		return dshSetFile(legacy, v, false)
+	}
+	for _, f := range files {
+		if err := dshSetFile(f, v, true); err != nil {
+			return err
+		}
+	}
+	// what an older dsh was given is no use now
+	if _, err := os.Stat(legacy); err == nil {
+		if err := dshSetFile(legacy, "", false); err != nil {
+			return err
+		}
+	}
+	env := filepath.Join(dir, ".env")
+	if viaGateway {
+		if err := edit.SetEnvFile(env, edit.KV{Path: dshKeyRef, Value: gateway.Token}); err != nil {
+			return err
+		}
+	} else if _, ok := edit.GetEnvFile(env, dshKeyRef); ok {
+		if err := edit.DelEnvFile(env, dshKeyRef); err != nil {
+			return err
+		}
+	}
+	// a model picked in dsh is saved in its settings and goes over the
+	// patch list; picking one here takes over from it
+	settings := filepath.Join(dir, "settings.yaml")
+	if v != "" && edit.GetYAMLMap(settings, "agent-default-model") != nil {
+		return edit.DelYAML(settings, "agent-default-model")
+	}
+	return nil
+}
+
+// dshSetFile writes v into one patch list; modern is the layout of dsh
+// 0.1.5 on.
+func dshSetFile(path, v string, modern bool) error {
 	head, items, err := dshRead(path)
 	if err != nil {
 		return err
 	}
 	ref, viaGateway := strings.CutPrefix(v, magpieID+"/")
-	if viaGateway && !isMagpie(ref) {
-		return fmt.Errorf("unknown model %q", v)
-	}
 	put := func(id string, lines []string) {
 		i := dshFind(items, id)
 		if i >= 0 && !items[i].magpie {
@@ -205,11 +279,18 @@ func dshSet(path, v string) error {
 
 	switch {
 	case v == "":
+		drop("agent-default-model")
 		drop("api-gateway")
 		drop("agent-loop")
 		drop("llm-deepseek")
+	case modern && viaGateway:
+		put("llm-deepseek", dshProviderLines(true))
+		put("agent-default-model", dshDefaultLines(ref))
+	case modern:
+		drop("llm-deepseek")
+		put("agent-default-model", dshDefaultLines(v))
 	case viaGateway:
-		put("llm-deepseek", dshProviderLines())
+		put("llm-deepseek", dshProviderLines(false))
 		put("agent-loop", dshLoopLines(ref))
 		put("api-gateway", dshRouteLines(ref))
 	default:
@@ -223,11 +304,11 @@ func dshSet(path, v string) error {
 	for _, it := range items {
 		out = append(out, it.lines...)
 	}
-	if len(items) == 0 && len(head) == 0 {
+	if len(items) == 0 {
 		if _, err := os.Stat(path); err != nil {
 			return nil // nothing was there, nothing to write
 		}
-		out = append(out, "[]")
+		out = append(out, "[]") // dsh wants a list, even an empty one
 	}
 	return edit.WriteAtomic(path, []byte(strings.Join(out, "\n")+"\n"))
 }
@@ -238,12 +319,17 @@ func yamlQuote(s string) string {
 }
 
 // dshProviderLines is the llm-deepseek entry pointing dsh at the gateway,
-// with the catalog as the models its /model offers.
-func dshProviderLines() []string {
+// with the catalog as the models its /model offers. Since 0.1.5 the key is a
+// credential the entry names rather than holds.
+func dshProviderLines(modern bool) []string {
+	key := "    apiKey: " + yamlQuote(gateway.Token)
+	if modern {
+		key = "    apiKeyEnv: " + dshKeyRef
+	}
 	lines := []string{
 		"- id: llm-deepseek " + dshMark,
 		"  config:",
-		"    apiKey: " + yamlQuote(gateway.Token),
+		key,
 		"    baseURL: " + yamlQuote(gatewayV1()),
 		"    thinking: enabled",
 		"    reasoningEffort: high",
@@ -257,6 +343,17 @@ func dshProviderLines() []string {
 		lines = append(lines, "      - id: "+yamlQuote(m.ID), "        name: "+yamlQuote(m.Name))
 	}
 	return lines
+}
+
+// dshDefaultLines is the agent-default-model entry: the model new sessions
+// start on, in every entry point.
+func dshDefaultLines(model string) []string {
+	return []string{
+		"- id: agent-default-model " + dshMark,
+		"  config:",
+		"    provider: deepseek-official",
+		"    model: " + yamlQuote(model),
+	}
 }
 
 // dshLoopLines is the agent-loop entry dsh ships, with model in place.

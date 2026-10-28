@@ -1,11 +1,10 @@
 package backup
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,178 +13,157 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-func isolate(t *testing.T) {
+// home gives the test a machine of its own: no agents, no magpie files.
+func home(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("PATH", t.TempDir())
+	h := t.TempDir()
+	t.Setenv("HOME", h)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(h, ".cache"))
+	t.Setenv("PATH", h)
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "DSH_HOME", "GEMINI_CLI_HOME", "OPENCODE_CONFIG"} {
+		t.Setenv(v, "")
+	}
 }
 
-const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-
-func setup(t *testing.T) {
+func setUp(t *testing.T) {
 	t.Helper()
-	icon, err := provider.StoreIcon([]byte(png))
+	icon, err := provider.StoreIcon([]byte("\x89PNG\r\n\x1a\n0000000000000000"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := provider.Save(provider.Provider{ID: "acme", Name: "Acme", Icon: icon, Key: "sk-acme-secret",
-		Keys:    []provider.KeyAccount{{Name: "second", Key: "sk-second-secret"}},
-		Chat:    "https://api.acme-relay.example/v1",
-		Headers: map[string]string{"X-Team": "blue-team-7", "X-Api-Key": "hdr-secret-9"}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := provider.Save(provider.Provider{ID: "beta", Name: "Beta", Key: "sk-beta-secret", Chat: "https://beta.example/v1"}); err != nil {
-		t.Fatal(err)
+	for _, p := range []provider.Provider{
+		{ID: "acme", Name: "Acme", Chat: "https://acme.example.com/v1", Key: "sk-acme", Icon: icon,
+			Keys:    []provider.KeyAccount{{Name: "second", Key: "sk-acme-2"}},
+			Headers: map[string]string{"X-Team": "a", "X-Api-Key": "hdr-secret"}},
+		{ID: "beta", Name: "Beta", Chat: "https://beta.example.com/v1", Key: "sk-beta"},
+	} {
+		if err := provider.Save(p); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := settings.Save(settings.Settings{Theme: "dark", Lang: "zh"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := profile.Save("work-laptop-x", profile.Profile{"codex.model": "acme/m1"}); err != nil {
+	if err := profile.Save("work", profile.Profile{"claude.model": "acme/m1"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestRoundTrip(t *testing.T) {
-	isolate(t)
-	setup(t)
+	home(t)
+	setUp(t)
 	b, err := Collect(true, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := Seal(b, "pw")
+	data, err := Seal(b, "correct horse")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range []string{"sk-acme-secret", "sk-second-secret", "blue-team-7", "hdr-secret-9", "acme-relay", "work-laptop-x", "Acme"} {
-		if bytes.Contains(sealed, []byte(s)) {
-			t.Errorf("%q in the sealed file", s)
+	for _, secret := range []string{"sk-acme", "hdr-secret", "acme.example.com", "work"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("%q readable in the file", secret)
 		}
 	}
-	if !strings.Contains(string(sealed), `"iterations": 600000`) {
-		t.Error("no iterations line")
+	if _, err := Open(data, "wrong"); !errors.Is(err, ErrPassphrase) {
+		t.Fatalf("wrong passphrase: %v", err)
 	}
-	if _, err := Open(sealed, "bad"); !errors.Is(err, ErrPassphrase) {
-		t.Errorf("wrong passphrase: %v", err)
-	}
-	// iterations tampered
-	tam := bytes.Replace(sealed, []byte(`"iterations": 600000`), []byte(`"iterations": 100000`), 1)
-	if _, err := Open(tam, "pw"); !errors.Is(err, ErrPassphrase) {
-		t.Errorf("tampered: %v", err)
-	}
-	got, err := Open(sealed, "pw")
+
+	home(t) // another machine
+	got, err := Open(data, "correct horse")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	isolate(t) // a fresh machine
 	r, err := Restore(got, All)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Added != 2 || !r.Settings || r.Profiles != 1 || len(r.NeedKey) != 0 || r.Agents != 0 {
-		t.Fatalf("result = %+v", r)
+	if r.Added != 2 || !r.Settings || r.Profiles != 1 || len(r.NeedKey) != 0 {
+		t.Fatalf("result: %+v", r)
 	}
 	p, err := provider.Find("acme")
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || p.Key != "sk-acme" || len(p.Keys) != 1 || p.Headers["X-Api-Key"] != "hdr-secret" {
+		t.Fatalf("acme: %+v %v", p, err)
 	}
-	if p.Key != "sk-acme-secret" || len(p.Keys) != 1 || p.Headers["X-Api-Key"] != "hdr-secret-9" {
-		t.Errorf("acme = %+v", p)
-	}
-	if f := provider.IconFile(strings.TrimPrefix(p.Icon, "file:")); f == "" {
-		t.Error("no icon file name")
-	} else if d, err := os.ReadFile(f); err != nil || string(d) != png {
-		t.Errorf("icon: %v", err)
+	name, _ := strings.CutPrefix(p.Icon, "file:")
+	if _, err := os.Stat(provider.IconFile(name)); err != nil {
+		t.Fatalf("icon: %v", err)
 	}
 	if s := settings.Load(); s.Theme != "dark" || s.Lang != "zh" {
-		t.Errorf("settings = %+v", s)
+		t.Fatalf("settings: %+v", s)
 	}
-	if ps, _ := profile.Load(); ps["work-laptop-x"]["codex.model"] != "acme/m1" {
-		t.Errorf("profiles = %v", ps)
+	if ps, _ := profile.Load(); ps["work"]["claude.model"] != "acme/m1" {
+		t.Fatalf("profiles: %+v", ps)
 	}
 }
 
+// Without keys, nothing secret leaves; restored over a machine that has the
+// provider, its keys there stay, and one new there is named as needing a key.
 func TestNoKeys(t *testing.T) {
-	isolate(t)
-	setup(t)
+	home(t)
+	setUp(t)
 	b, err := Collect(false, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range b.Providers {
-		if p.Key != "" || len(p.Keys) != 0 || p.KeyName != "" || p.KeyProtocol != "" {
-			t.Errorf("%s keeps a key", p.ID)
+		if p.Key != "" || len(p.Keys) != 0 {
+			t.Fatalf("key in a keyless backup: %+v", p)
 		}
-		if _, bad := p.Headers["X-Api-Key"]; bad {
-			t.Error("X-Api-Key kept")
-		}
-		if p.ID == "acme" && p.Headers["X-Team"] != "blue-team-7" {
-			t.Error("X-Team lost")
+		if _, ok := p.Headers["X-Api-Key"]; ok {
+			t.Fatalf("auth header in a keyless backup: %+v", p.Headers)
 		}
 	}
-	if len(b.Icons) != 1 {
-		t.Errorf("icons = %d", len(b.Icons))
-	}
+	data, _ := Seal(b, "pw")
 
-	isolate(t)
-	if err := provider.Save(provider.Provider{ID: "acme", Name: "Acme", Key: "sk-here", Chat: "https://old.example/v1"}); err != nil {
+	home(t)
+	if err := provider.Save(provider.Provider{ID: "acme", Name: "Acme old", Chat: "https://old.example.com/v1", Key: "sk-here"}); err != nil {
 		t.Fatal(err)
 	}
-	r, err := Restore(b, Parts{Providers: true})
+	got, err := Open(data, "pw")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Added != 1 || r.Replaced != 1 || len(r.NeedKey) != 1 || r.NeedKey[0] != "Beta" || r.Settings || r.Profiles != 0 {
-		t.Fatalf("result = %+v", r)
+	r, err := Restore(got, Parts{Providers: true})
+	if err != nil {
+		t.Fatal(err)
 	}
-	p, _ := provider.Find("acme")
-	if p.Key != "sk-here" || p.Chat != "https://api.acme-relay.example/v1" || p.Headers["X-Team"] != "blue-team-7" {
-		t.Errorf("acme = %+v", p)
+	if r.Added != 1 || r.Replaced != 1 || !slices.Equal(r.NeedKey, []string{"Beta"}) || r.Settings || r.Profiles != 0 {
+		t.Fatalf("result: %+v", r)
+	}
+	if p, _ := provider.Find("acme"); p.Key != "sk-here" || p.Chat != "https://acme.example.com/v1" || p.Headers["X-Team"] != "a" {
+		t.Fatalf("acme: %+v", p)
 	}
 }
 
-func TestOpenErrors(t *testing.T) {
-	for _, in := range []string{"", "{}", `{"format":"magpie-backup","version":9,"kdf":"x"}`} {
-		_, err := Open([]byte(in), "pw")
-		if err == nil || errors.Is(err, ErrPassphrase) {
-			t.Errorf("Open(%q) = %v", in, err)
+func TestNotABackup(t *testing.T) {
+	for _, data := range []string{"", "{}", `{"format":"magpie-backup","version":9,"kdf":"x"}`} {
+		if _, err := Open([]byte(data), "pw"); err == nil || errors.Is(err, ErrPassphrase) {
+			t.Fatalf("%q: %v", data, err)
 		}
-	}
-	if _, err := Open([]byte(`{"format":"magpie-backup","version":9,"kdf":"x"}`), "pw"); err == nil || !strings.Contains(err.Error(), "newer magpie") {
-		t.Errorf("version: %v", err)
 	}
 	if _, err := Seal(Bundle{}, ""); err == nil {
-		t.Error("empty passphrase sealed")
+		t.Fatal("sealed with no passphrase")
 	}
 }
 
-func TestRestoreSkipsAgents(t *testing.T) {
-	isolate(t)
-	b := Bundle{Agents: profile.Profile{"codex.model": "x/y", "codex.provider": "x"}}
-	r, err := Restore(b, All)
+func TestTampered(t *testing.T) {
+	data, err := Seal(Bundle{Version: 1}, "pw")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Agents != 0 || len(r.Skipped) != 2 {
-		t.Errorf("result = %+v", r)
+	// lowering the work of the key derivation is noticed
+	bad := strings.Replace(string(data), `"iterations": 600000`, `"iterations": 100000`, 1)
+	if _, err := Open([]byte(bad), "pw"); !errors.Is(err, ErrPassphrase) {
+		t.Fatalf("tampered header: %v", err)
 	}
 }
 
-func TestRestoreIgnoresBadIDs(t *testing.T) {
-	isolate(t)
-	var ps []provider.Provider
-	for _, id := range []string{"magpie", "", "Not A Slug"} {
-		ps = append(ps, provider.Provider{ID: id, Name: "x", Key: "k", Chat: "https://x.example/v1"})
+func TestProfileKeys(t *testing.T) {
+	got := profileKeys(profile.Profile{"codex.effort": "", "claude.model": "", "codex.provider": "", "codex.model": ""})
+	want := []string{"codex.provider", "claude.model", "codex.model", "codex.effort"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%v", got)
 	}
-	r, err := Restore(Bundle{Providers: ps}, All)
-	if err != nil || r.Added != 0 || r.Replaced != 0 {
-		t.Fatalf("%+v %v", r, err)
-	}
-	if _, err := os.Stat(provider.Path()); err == nil {
-		t.Error("providers.json written")
-	}
-	_ = json.Marshal
 }

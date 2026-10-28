@@ -29,13 +29,23 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 		return grokLoginUsage(ctx)
 	}
 	out := map[string]SubscriptionQuota{}
-	if agent != "claude" && agent != "codex" {
+	var logins []Login
+	switch agent {
+	case "claude", "codex":
+		logins = Logins(agent)
+	case "copilot":
+		logins = copilotLoginList()
+	case "cursor": // one account, the one cursor-agent is signed in to
+		if user, plan, ok := cursorIdentity(); ok {
+			logins = []Login{{Agent: agent, User: user, Plan: plan, Active: true, On: true}}
+		}
+	default:
 		return out
 	}
 	c := &loginUsageCache
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for _, l := range Logins(agent) {
+	for _, l := range logins {
 		key := agent + "/" + strings.ToLower(l.User)
 		c.Lock()
 		e, ok := c.m[key]
@@ -67,6 +77,17 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 }
 
 func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
+	if l.Agent == "cursor" {
+		return cursorSubscriptionUsage(ctx, l.Plan)
+	}
+	if l.Agent == "copilot" {
+		for _, c := range copilotLogins(copilotConfigDir()) {
+			if strings.EqualFold(c.User, l.User) {
+				return copilotSubscriptionUsage(ctx, c.app.Token)
+			}
+		}
+		return SubscriptionQuota{Provider: l.Agent, Plan: l.Plan, Windows: []QuotaWindow{}, Error: "not signed in"}
+	}
 	q := SubscriptionQuota{Provider: l.Agent, Plan: l.Plan, Windows: []QuotaWindow{}}
 	var tok, accountID string
 	var err error

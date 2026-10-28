@@ -85,6 +85,7 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
+	trace        trace // what routing did with each request, for the Gateway view
 }
 
 // New makes a gateway.
@@ -161,6 +162,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("POST /_magpie/claude-mcp/{token}", s.subscription.mcpCall)
+	mux.HandleFunc(CodexPath+"/", s.codexBackend)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
 	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -363,15 +365,21 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands := s.candidates(p, model, from)
+	cands, pl := s.plan(p, model, from)
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
 		hw := newHoldWriter(w, !last)
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		began := time.Now()
+		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
 		if !last && hw.failed() {
-			s.restAfter(c.rest, hw.status, hw.header, hw.held.Bytes())
+			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
+			try.Fail, try.Rest = rest.Why, &rest
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
@@ -379,7 +387,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+		} else {
+			try.Fail = failure(call.Status, []byte(call.Error))
 		}
+		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 		break
 	}
 	if len(skipped) > 0 {
@@ -387,6 +398,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
+	s.trace.update(tr, func(t *Route) {
+		t.Done, t.Status, t.Error, t.Millis = true, call.Status, call.Error, call.Millis
+		t.Tokens = call.Usage.Input + call.Usage.Output + call.Usage.CacheRead + call.Usage.CacheWrite
+	})
 	s.record(call)
 	if call.To != "" {
 		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
@@ -479,6 +494,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		keepRetry(w.Header(), res.Header)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
 	rd, sse := eventStream(res)
@@ -621,6 +637,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		keepRetry(w.Header(), res.Header)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(actual)
