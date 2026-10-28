@@ -1,24 +1,36 @@
 //go:build ignore
 
-// Icon generator. Everything dial shows is drawn from one glyph, "gateway":
-// three inputs come in from the left, two of them curving, and meet at a
-// hollow node in the middle; one line leaves to the right. Many models,
-// one endpoint. The same paths live in internal/gui/assets/index.html, on a
-// 44-unit grid.
+// Icon generator. Everything magpie shows is drawn from one bird: a round
+// little magpie in profile, tail cocked, black and white, on a 44-unit grid.
+// magpie.svg is the full drawing, its belly, shoulder and the slits in its
+// tail cut out of the black; the app tile uses it from 64px up.
+// magpie-small.svg drops the eye, which would only be a speck; the tray and
+// the smaller tiles use it, and so does the header in
+// internal/gui/assets/index.html.
 //
 //	go run build/icon/gen.go tray internal/gui/tray.png     # 44px black template icon (macOS menu bar)
-//	go run build/icon/gen.go app 64 internal/gui/icon.png   # coloured app icon at a given size
-//	make icons                                              # regenerates all of them plus dial.icns
+//	go run build/icon/gen.go app 64 internal/gui/icon.png   # app icon at a given size
+//	make icons                                              # regenerates all of them plus magpie.icns
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"math"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
+)
+
+var (
+	//go:embed magpie.svg
+	fullSVG string
+	//go:embed magpie-small.svg
+	smallSVG string
 )
 
 func main() {
@@ -45,130 +57,151 @@ func main() {
 	}
 }
 
-// tray draws the glyph as a macOS template image (black + alpha).
+// tray draws the silhouette as a macOS template image (black + alpha).
 func tray() image.Image {
 	const S = 44
+	cov := coverage(parse(smallSVG), S, 8, 1, 0, 0)
 	img := image.NewNRGBA(image.Rect(0, 0, S, S))
-	for y := 0; y < S; y++ {
-		for x := 0; x < S; x++ {
-			a := 0.0
-			// supersample 4x4
-			for sy := 0; sy < 4; sy++ {
-				for sx := 0; sx < 4; sx++ {
-					fx := float64(x) + (float64(sx)+0.5)/4
-					fy := float64(y) + (float64(sy)+0.5)/4
-					if mark(fx, fy) {
-						a++
-					}
-				}
-			}
-			img.SetNRGBA(x, y, color.NRGBA{0, 0, 0, uint8(a / 16 * 255)})
-		}
+	for i, a := range cov {
+		img.SetNRGBA(i%S, i/S, color.NRGBA{0, 0, 0, uint8(a*255 + 0.5)})
 	}
 	return img
 }
 
-// app draws a rounded indigo square with the glyph in white.
+// app draws a rounded square, white shading to the palest grey, with the
+// bird on it in ink.
 func app(n int) image.Image {
 	S := float64(n)
-	img := image.NewNRGBA(image.Rect(0, 0, n, n))
 	// macOS icon grid: the squircle occupies ~80% of the canvas
 	inset := S * 0.1
 	side := S - 2*inset
 	radius := side * 0.225
-	// the mark fills 75% of the tile, as in the reference SVG (scale 14 on 824)
-	k := side * 0.747 / 44
-	ox, oy := inset+(side-44*k)/2, inset+(side-44*k)/2
-	bg1 := [3]float64{0x5b, 0x55, 0xf0} // top: lighter indigo
-	bg2 := [3]float64{0x3f, 0x37, 0xc9} // bottom: deeper
+	k := side * 0.8 / 44
+	o := inset + side/2 - 22*k
 	ss := 4
 	if n <= 64 {
 		ss = 8
 	}
+	// under 64px the eye is a grey speck; leave it out
+	shape := fullSVG
+	if n < 64 {
+		shape = smallSVG
+	}
+	bird := coverage(parse(shape), n, ss, k, o, o)
+	bg1, bg2 := 0xff, 0xec // top, bottom
+	const ink = 0x16
+	img := image.NewNRGBA(image.Rect(0, 0, n, n))
 	for y := 0; y < n; y++ {
 		for x := 0; x < n; x++ {
-			var aBg, aFg float64
+			var tile float64
 			for sy := 0; sy < ss; sy++ {
 				for sx := 0; sx < ss; sx++ {
 					fx := float64(x) + (float64(sx)+0.5)/float64(ss)
 					fy := float64(y) + (float64(sy)+0.5)/float64(ss)
 					if roundRect(fx, fy, inset, inset, side, side, radius) {
-						aBg++
-						if mark((fx-ox)/k, (fy-oy)/k) {
-							aFg++
-						}
+						tile++
 					}
 				}
 			}
-			tot := float64(ss * ss)
-			t := float64(y) / S
-			r := bg1[0]*(1-t) + bg2[0]*t
-			g := bg1[1]*(1-t) + bg2[1]*t
-			b := bg1[2]*(1-t) + bg2[2]*t
-			fg := aFg / tot
-			if aBg > 0 {
-				fg /= aBg / tot
+			if tile == 0 {
+				continue
 			}
-			img.SetNRGBA(x, y, color.NRGBA{
-				uint8(r*(1-fg) + 255*fg), uint8(g*(1-fg) + 255*fg), uint8(b*(1-fg) + 255*fg),
-				uint8(aBg / tot * 255),
-			})
+			t := float64(y) / S
+			bg := float64(bg1)*(1-t) + float64(bg2)*t
+			a := bird[y*n+x]
+			g := uint8(bg*(1-a) + ink*a + 0.5)
+			img.SetNRGBA(x, y, color.NRGBA{g, g, g, uint8(tile / float64(ss*ss) * 255)})
 		}
 	}
 	return img
 }
 
-// mark is the glyph on its 44-unit grid: a 4.5-wide ring of radius 6.5 about
-// (22,22); three inputs from x=5, the middle one straight and the outer two
-// curving in from y=11 and y=33; one straight output to x=39. Round caps.
-func mark(u, v float64) bool {
-	const w = 4.5
-	if d := math.Hypot(u-22, v-22); math.Abs(d-6.5) <= w/2 {
-		return true
-	}
-	if segDist(u, v, 5, 22, 15.5, 22) <= w/2 || segDist(u, v, 28.5, 22, 39, 22) <= w/2 {
-		return true
-	}
-	for _, c := range [][8]float64{
-		{5, 11, 12, 11, 11, 22, 16, 22},
-		{5, 33, 12, 33, 11, 22, 16, 22},
-	} {
-		if bezDist(u, v, c) <= w/2 {
-			return true
+// coverage rasterises a shape, scaled by k and moved to (ox, oy), onto an n×n
+// grid of pixels with ss×ss samples each, and gives each pixel's coverage in
+// 0..1. It fills even-odd, a scanline at a time.
+func coverage(rings [][][2]float64, n, ss int, k, ox, oy float64) []float64 {
+	cov := make([]float64, n*n)
+	per := 1 / float64(ss*ss)
+	var xs []float64
+	for y := 0; y < n*ss; y++ {
+		v := ((float64(y)+0.5)/float64(ss) - oy) / k
+		xs = xs[:0]
+		for _, r := range rings {
+			for i, j := 0, len(r)-1; i < len(r); j, i = i, i+1 {
+				a, b := r[j], r[i]
+				if (a[1] > v) != (b[1] > v) {
+					u := a[0] + (v-a[1])*(b[0]-a[0])/(b[1]-a[1])
+					xs = append(xs, (u*k+ox)*float64(ss))
+				}
+			}
+		}
+		sort.Float64s(xs)
+		row := cov[(y/ss)*n:][:n]
+		for i := 0; i+1 < len(xs); i += 2 {
+			// sample centres x+0.5 that fall between the two crossings
+			lo := int(math.Max(0, math.Ceil(xs[i]-0.5)))
+			hi := int(math.Min(float64(n*ss), math.Ceil(xs[i+1]-0.5)))
+			for x := lo; x < hi; x++ {
+				row[x/ss] += per
+			}
 		}
 	}
-	return false
+	return cov
 }
 
-// bezDist is the distance from (px,py) to a cubic bezier, flattened into
-// short segments; plenty for a stroke this wide.
-func bezDist(px, py float64, c [8]float64) float64 {
-	const n = 32
-	best := math.Inf(1)
-	x0, y0 := c[0], c[1]
-	for i := 1; i <= n; i++ {
-		t := float64(i) / n
-		m := 1 - t
-		x := m*m*m*c[0] + 3*m*m*t*c[2] + 3*m*t*t*c[4] + t*t*t*c[6]
-		y := m*m*m*c[1] + 3*m*m*t*c[3] + 3*m*t*t*c[5] + t*t*t*c[7]
-		best = math.Min(best, segDist(px, py, x0, y0, x, y))
-		x0, y0 = x, y
+// parse reads the path out of one of the SVGs: absolute M, L, C and Z
+// commands, each curve cut into short segments, one polygon per subpath.
+func parse(svg string) [][][2]float64 {
+	d := svg[strings.Index(svg, ` d="`)+4:]
+	d = d[:strings.IndexByte(d, '"')]
+	f := strings.Fields(strings.NewReplacer("M", " M ", "L", " L ", "C", " C ", "Z", " Z ").Replace(d))
+	num := func(i int) float64 { x, _ := strconv.ParseFloat(f[i], 64); return x }
+	var rings [][][2]float64
+	var pts [][2]float64
+	cmd := ""
+	for i := 0; i < len(f); {
+		if c := f[i]; c == "M" || c == "L" || c == "C" || c == "Z" {
+			cmd = c
+			i++
+		}
+		switch cmd {
+		case "M", "L":
+			if cmd == "M" && len(pts) > 0 {
+				rings, pts = append(rings, pts), nil
+			}
+			pts = append(pts, [2]float64{num(i), num(i + 1)})
+			i += 2
+			cmd = "L" // further pairs after M are lines
+		case "C":
+			p := pts[len(pts)-1]
+			c := [8]float64{p[0], p[1], num(i), num(i + 1), num(i + 2), num(i + 3), num(i + 4), num(i + 5)}
+			for s := 1; s <= 8; s++ {
+				t := float64(s) / 8
+				m := 1 - t
+				pts = append(pts, [2]float64{
+					m*m*m*c[0] + 3*m*m*t*c[2] + 3*m*t*t*c[4] + t*t*t*c[6],
+					m*m*m*c[1] + 3*m*m*t*c[3] + 3*m*t*t*c[5] + t*t*t*c[7],
+				})
+			}
+			i += 6
+		case "Z":
+			if len(pts) > 0 {
+				rings, pts = append(rings, pts), nil
+			}
+		}
 	}
-	return best
+	if len(pts) > 0 {
+		rings = append(rings, pts)
+	}
+	return rings
 }
 
+// roundRect is a rounded square: true inside it.
 func roundRect(px, py, x, y, w, h, r float64) bool {
 	if px < x || py < y || px > x+w || py > y+h {
 		return false
 	}
-	qx := math.Max(math.Abs(px-(x+w/2))-(w/2-r), 0)
-	qy := math.Max(math.Abs(py-(y+h/2))-(h/2-r), 0)
-	return math.Hypot(qx, qy) <= r
-}
-
-func segDist(px, py, ax, ay, bx, by float64) float64 {
-	vx, vy := bx-ax, by-ay
-	wx, wy := px-ax, py-ay
-	t := math.Max(0, math.Min(1, (wx*vx+wy*vy)/(vx*vx+vy*vy)))
-	return math.Hypot(px-(ax+t*vx), py-(ay+t*vy))
+	cx := math.Max(x+r, math.Min(px, x+w-r))
+	cy := math.Max(y+r, math.Min(py, y+h-r))
+	return math.Hypot(px-cx, py-cy) <= r
 }
