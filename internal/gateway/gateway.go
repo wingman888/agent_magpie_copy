@@ -564,7 +564,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if n > 0 {
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return res.StatusCode, ""
+				return res.StatusCode, "", false
 			}
 			if f != nil {
 				f.Flush()
