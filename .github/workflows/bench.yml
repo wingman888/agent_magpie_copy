@@ -12,9 +12,11 @@ jobs:
         run: |
           set +e
           pkgs=$(cat .bench/packages)
-          go vet $pkgs > vet.log 2>&1
+          # 默认带 nogui：桌面界面要 cgo 与 GTK 等系统库，Actions 上编译不了，与 magpie 的 CLI 构建一致
+          tags="nogui"; [ -f .bench/tags ] && tags=$(cat .bench/tags)
+          go vet -tags "$tags" $pkgs > vet.log 2>&1
           run=""; [ -f .bench/run ] && run="-run=$(cat .bench/run)"
-          go test -count=1 -json $run $pkgs > test.json 2> build.log
+          go test -tags "$tags" -count=1 -json $run $pkgs > test.json 2> build.log
           code=$?
           pass=$(grep -c '"Action":"pass","Package":"[^"]*","Test"' test.json)
           fail=$(grep -c '"Action":"fail","Package":"[^"]*","Test"' test.json)
@@ -22,5 +24,7 @@ jobs:
           echo "::notice title=summary::pass=$pass fail=$fail pkgfail=$buildfail exit=$code"
           grep -o '"Action":"fail","Package":"[^"]*","Test":"[^"]*"' test.json | head -n 25 | sed 's/^/::error title=failed-test::/'
           grep -h -E '_test.go:[0-9]+:|\.go:[0-9]+:[0-9]+:' build.log vet.log | head -n 25 | sed 's/^/::error title=compile::/'
+          # 不带文件行号的构建错误（cgo、embed、模块解析等）也要能看到
+          grep -h -E '"Action":"build-fail"|"Output":"# |cannot find|no matching files|build constraints|pkg-config|package .* is not in' test.json build.log | head -n 10 | cut -c1-300 | sed 's/^/::error title=compile::/'
           grep -o '"Output":"[^"]*_test.go:[0-9]*: [^"]*"' test.json | head -n 25 | sed 's/^/::error title=assert::/'
           exit $code
