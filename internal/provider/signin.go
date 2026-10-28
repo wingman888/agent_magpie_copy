@@ -463,6 +463,9 @@ func addLogin(l savedLogin) (using bool, err error) {
 		live.Seen = l.Seen
 		ls = upsertLogin(ls, live)
 	}
+	// a second account is in use beside the first straight away, as a
+	// second key is: it takes over when the first runs out
+	l.On = !using
 	if err := writeLogins(upsertLogin(ls, l)); err != nil {
 		return false, err
 	}
