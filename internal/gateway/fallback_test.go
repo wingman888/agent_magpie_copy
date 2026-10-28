@@ -2,8 +2,6 @@ package gateway
 
 import (
 	"bytes"
-	"io"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -104,57 +102,5 @@ func TestLastFallbackErrorReachesTheAgent(t *testing.T) {
 	code, body := post(t, "/v1/chat/completions", chatReq)
 	if code != 503 || !strings.Contains(body, "spare down") {
 		t.Fatalf("%d %s", code, body)
-	}
-}
-
-// byKey answers per API key: a key named in limited is out of quota.
-type byKey struct {
-	limited map[string]bool
-	seen    []string
-}
-
-func (b *byKey) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	b.seen = append(b.seen, key)
-	w.Header().Set("Content-Type", "application/json")
-	if b.limited[key] {
-		w.WriteHeader(429)
-		io.WriteString(w, `{"error":{"message":"rate limited"}}`)
-		return
-	}
-	io.WriteString(w, `{"id":"from-`+key+`","choices":[]}`)
-}
-
-func TestSeveralKeysOnTakeOverFromEachOther(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	restingUntil.Lock()
-	restingUntil.m = map[string]time.Time{}
-	restingUntil.Unlock()
-	up := &byKey{limited: map[string]bool{"k-personal": true}}
-	srv := httptest.NewServer(up)
-	defer srv.Close()
-	p := provider.Provider{ID: "plan", Name: "Plan", Chat: srv.URL + "/v1", Models: []string{"m1"},
-		Key: "k-personal", KeyName: "Personal",
-		Keys: []provider.KeyAccount{{Name: "Idle", Key: "k-idle", Off: true}, {Name: "Team", Key: "k-team"}}}
-	if err := provider.Save(p); err != nil {
-		t.Fatal(err)
-	}
-	s := New()
-	send := func() string {
-		rec := httptest.NewRecorder()
-		s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatReq)))
-		return rec.Body.String()
-	}
-	if body := send(); !strings.Contains(body, "from-k-team") {
-		t.Fatalf("body %s", body)
-	}
-	if c := s.Recent()[0]; c.Provider != "plan" || !strings.Contains(c.Fallback, "plan (Personal): ") {
-		t.Fatalf("recorded %+v", c)
-	}
-	// the limited key rests; the one that's off is never tried
-	up.seen = nil
-	if body := send(); !strings.Contains(body, "from-k-team") || strings.Join(up.seen, ",") != "k-team" {
-		t.Fatalf("body %s, tried %v", body, up.seen)
 	}
 }

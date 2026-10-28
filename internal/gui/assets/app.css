@@ -533,22 +533,6 @@ body.window .foot { padding-left: 18px; }
 .acc.add:hover { background: var(--card-2); color: var(--fg); }
 .acc.add:hover .dot { box-shadow: inset 0 0 0 1.5px var(--fg); color: var(--fg); }
 
-.acc .rename { font: inherit; font-weight: 500; color: inherit; background: none; border: 0; padding: 0; cursor: text; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acc .rename:hover { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
-.acc .dot.tick { padding: 0; border: 0; background: none; cursor: default; transition: background .15s, box-shadow .15s; }
-.acc .dot.tick:hover { box-shadow: inset 0 0 0 1.5px var(--fg); }
-.acc.in-use .dot.tick { background: var(--fg); }
-.acc.off .n, .acc.off .plan { opacity: .55; }
-.acc .rename.mono { font-family: var(--code); font-size: 11.5px; font-weight: 450; }
-.acc .rename-in { height: 24px; padding: 0 7px; font-size: 12.5px; max-width: 220px; }
-.acc .plan.mono { font-family: var(--code); font-size: 10.5px; }
-.acc.adding { display: grid; gap: 8px; padding: 10px 10px 8px 11px; background: var(--card-2); }
-.acc.adding .kf { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 6px; }
-.acc.adding .kb { display: flex; align-items: center; gap: 4px; }
-.acc.adding .kb .grow { flex: 1; }
-.acc + .acc.adding { border-top: 1px solid var(--line-2); }
-@media (max-width: 520px) { .acc.adding .kf { grid-template-columns: 1fr; } }
-
 /* a sign-in under way, waiting on the browser */
 .signing { display: flex; align-items: flex-start; gap: 11px; padding: 11px 10px 11px 12px; font-size: 12.5px; background: var(--card-2); animation: fade-in .2s; }
 .sheet .signing { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; }

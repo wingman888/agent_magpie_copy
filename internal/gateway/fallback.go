@@ -6,10 +6,6 @@ package gateway
 // been sent, so an agent sees one clean answer from whoever gave it, never a
 // half from each. A provider that just failed that way waits at the back of
 // the line for a minute, rather than costing every request a doomed try.
-//
-// A provider with several keys on is several candidates, one per key, in
-// order: when one account runs out, the next account of the same provider
-// takes the request before any fallback model does.
 
 import (
 	"bytes"
@@ -26,40 +22,12 @@ const fallbackCooldown = time.Minute
 type candidate struct {
 	p     provider.Provider
 	model string
-	rest  string // what rests after a failure: the provider, or one of its keys
-}
-
-// label names a candidate in a call's record: the provider, and the key
-// when it has several on.
-func (c candidate) label() string {
-	if c.rest == c.p.ID {
-		return c.p.ID
-	}
-	if c.p.KeyName != "" {
-		return c.p.ID + " (" + c.p.KeyName + ")"
-	}
-	return c.p.ID + " (" + provider.Mask(c.p.Key) + ")"
-}
-
-// perKey is a provider once per key it has on, in order.
-func perKey(p provider.Provider, model string) []candidate {
-	keys := p.KeysOn()
-	if len(keys) < 2 {
-		return []candidate{{p, model, p.ID}}
-	}
-	out := make([]candidate, 0, len(keys))
-	for _, k := range keys {
-		q := p
-		q.Key, q.KeyName = k.Key, k.Name
-		out = append(out, candidate{q, model, p.ID + "#" + provider.KeyID(k.Key)})
-	}
-	return out
 }
 
 // candidates is the primary and then its fallbacks, those resting after a
 // recent failure moved behind the rest.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := perKey(p, model)
+	out := []candidate{{p, model}}
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -67,14 +35,14 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, perKey(fp, fm)...)
+		out = append(out, candidate{fp, fm})
 	}
 	if len(out) == 1 {
 		return out
 	}
 	var ready, resting []candidate
 	for _, c := range out {
-		if s.resting(c.rest) {
+		if s.resting(c.p.ID) {
 			resting = append(resting, c)
 		} else {
 			ready = append(ready, c)
