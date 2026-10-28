@@ -3,6 +3,7 @@ package settings
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,29 @@ func TestMigrate(t *testing.T) {
 	Migrate()
 	if b, _ := os.ReadFile(filepath.Join(cfg, "magpie", "providers.json")); string(b) != "new" {
 		t.Fatal("existing folder overwritten")
+	}
+}
+
+func TestProxySave(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, p := range []string{"http://h:1", "https://h:1", "socks5://h:1", "socks5h://h:1", "127.0.0.1:7890", "direct", ""} {
+		if err := Save(Settings{Proxy: p}); err != nil {
+			t.Fatal(p, err)
+		}
+	}
+	if err := Save(Settings{Proxy: "  direct  "}); err != nil || Load().Proxy != "direct" {
+		t.Fatal(err, Load().Proxy)
+	}
+	if err := Save(Settings{Proxy: " 127.0.0.1:7890 "}); err != nil || Load().Proxy != "127.0.0.1:7890" {
+		t.Fatal(err, Load().Proxy)
+	}
+	for _, p := range []string{"ftp://x", "http://", "://bad"} {
+		err := Save(Settings{Theme: "dark", Proxy: p})
+		if err == nil || !strings.HasPrefix(err.Error(), "proxy must look like") {
+			t.Fatal(p, err)
+		}
+		if got := Load(); got.Proxy != "127.0.0.1:7890" || got.Theme != "system" {
+			t.Fatalf("%s: %+v", p, got)
+		}
 	}
 }

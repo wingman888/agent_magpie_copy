@@ -2,5 +2,5 @@
 
 package netproxy
 
-// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
-func system() Proxy { return Proxy{} }
+// no system proxy here; the environment is the way
+func platformRead() Proxy { return Proxy{} }

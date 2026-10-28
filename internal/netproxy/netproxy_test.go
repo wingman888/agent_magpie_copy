@@ -3,96 +3,186 @@ package netproxy
 import (
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/settings"
 )
 
-func TestParseScutil(t *testing.T) {
-	out := `<dictionary> {
-  ExceptionsList : <array> {
-    0 : 127.0.0.1
-    1 : *.local
-  }
-  HTTPEnable : 1
-  HTTPPort : 7890
-  HTTPProxy : 127.0.0.1
-  HTTPSEnable : 1
-  HTTPSPort : 7891
-  HTTPSProxy : 127.0.0.1
-  SOCKSEnable : 1
-  SOCKSPort : 7892
-  SOCKSProxy : 127.0.0.1
-}`
-	p := parseScutil(out)
-	if p.URL != "http://127.0.0.1:7891" || len(p.Bypass) != 2 || p.Bypass[1] != "*.local" {
-		t.Fatalf("%+v", p)
-	}
-	if p := parseScutil("<dictionary> {\n  SOCKSEnable : 1\n  SOCKSPort : 1080\n  SOCKSProxy : 10.0.0.2\n}"); p.URL != "socks5://10.0.0.2:1080" {
-		t.Fatalf("socks: %+v", p)
-	}
-	if p := parseScutil("<dictionary> {\n  HTTPEnable : 0\n  HTTPProxy : x\n}"); p.URL != "" {
-		t.Fatalf("off: %+v", p)
-	}
-}
-
-func TestParseWindows(t *testing.T) {
-	for server, want := range map[string]string{
-		"127.0.0.1:7890":                     "http://127.0.0.1:7890",
-		"http=127.0.0.1:1;https=127.0.0.1:2": "http://127.0.0.1:2",
-		"socks=127.0.0.1:1080":               "socks5://127.0.0.1:1080",
-		"":                                   "",
-	} {
-		if got := parseWindows(server, "").URL; got != want {
-			t.Errorf("%q: %q, want %q", server, got, want)
-		}
-	}
-	p := parseWindows("127.0.0.1:7890", "*.corp;<local>")
-	if !bypassed("git.corp", p.Bypass) || !bypassed("intranet", p.Bypass) || bypassed("chatgpt.com", p.Bypass) {
-		t.Fatalf("bypass: %+v", p.Bypass)
-	}
-}
-
-func TestFor(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy"} {
+func setup(t *testing.T, sys Proxy) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, k := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"} {
 		t.Setenv(k, "")
 	}
-	sysCache.at, sysCache.p = farFuture, Proxy{URL: "http://127.0.0.1:7890", Bypass: []string{"*.corp"}}
-	t.Cleanup(func() { sysCache.at = zero })
+	old := readSys
+	readSys = func() Proxy { return sys }
+	mu.Lock()
+	readAt = time.Time{}
+	mu.Unlock()
+	t.Cleanup(func() {
+		readSys = old
+		mu.Lock()
+		readAt = time.Time{}
+		mu.Unlock()
+	})
+}
 
-	u, _ := url.Parse("https://chatgpt.com/backend-api/codex/responses")
-	if p, _ := For(u); p == nil || p.String() != "http://127.0.0.1:7890" {
-		t.Fatalf("system: %v", p)
+func forStr(t *testing.T, raw string) string {
+	t.Helper()
+	u, _ := url.Parse(raw)
+	p, err := For(u)
+	if err != nil {
+		t.Fatal(err)
 	}
-	corp, _ := url.Parse("https://git.corp/x")
-	if p, _ := For(corp); p != nil {
-		t.Fatalf("bypass: %v", p)
+	if p == nil {
+		return ""
 	}
-	local := &http.Request{URL: &url.URL{Scheme: "http", Host: "127.0.0.1:3425"}}
-	if p, _ := Func(local); p != nil {
-		t.Fatalf("loopback: %v", p)
-	}
+	return p.String()
+}
 
-	// magpie's own setting wins; "direct" turns it off
-	settings.Save(settings.Settings{Proxy: "socks5://127.0.0.1:1080"})
-	if p, _ := For(u); p == nil || p.String() != "socks5://127.0.0.1:1080" {
-		t.Fatalf("setting: %v", p)
+func TestPriority(t *testing.T) {
+	setup(t, Proxy{})
+	if got := forStr(t, "https://chatgpt.com/x"); got != "" {
+		t.Fatal(got)
+	}
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+	t.Setenv("NO_PROXY", "skip.example")
+	if got := forStr(t, "https://chatgpt.com/x"); got != "http://127.0.0.1:9999" {
+		t.Fatal(got)
+	}
+	if got := forStr(t, "https://a.skip.example/"); got != "" {
+		t.Fatal(got)
+	}
+	if err := settings.Save(settings.Settings{Proxy: " socks5://127.0.0.1:1080 "}); err != nil {
+		t.Fatal(err)
+	}
+	if got := forStr(t, "https://chatgpt.com/x"); got != "socks5://127.0.0.1:1080" {
+		t.Fatal(got)
+	}
+	if p, s := Describe(); p != "socks5://127.0.0.1:1080" || s != "settings" {
+		t.Fatal(p, s)
 	}
 	settings.Save(settings.Settings{Proxy: "direct"})
-	if p, _ := For(u); p != nil {
-		t.Fatalf("direct: %v", p)
+	if got := forStr(t, "https://chatgpt.com/x"); got != "" {
+		t.Fatal(got)
 	}
-	if err := settings.Save(settings.Settings{Proxy: "ftp://x"}); err == nil {
-		t.Fatal("ftp proxy accepted")
+	if p, s := Describe(); p != "" || s != "off" {
+		t.Fatal(p, s)
 	}
-	if settings.Save(settings.Settings{Proxy: "127.0.0.1:7890"}) != nil || filepath.Dir(settings.Path()) != filepath.Join(dir, "magpie") {
-		t.Fatal("host:port proxy refused")
+	settings.Save(settings.Settings{Proxy: "127.0.0.1:7890"})
+	if got := forStr(t, "https://chatgpt.com/x"); got != "http://127.0.0.1:7890" {
+		t.Fatal(got)
 	}
 }
 
-var farFuture = time.Now().Add(time.Hour)
-var zero time.Time
+func TestEnvAndSystemDescribe(t *testing.T) {
+	setup(t, Proxy{})
+	if p, s := Describe(); p != "" || s != "none" {
+		t.Fatal(p, s)
+	}
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+	if p, s := Describe(); p != "http://127.0.0.1:9999" || s != "environment" {
+		t.Fatal(p, s)
+	}
+}
+
+func TestSystem(t *testing.T) {
+	setup(t, Proxy{URL: "http://10.0.0.1:3128", Bypass: []string{"*.corp", "<local>"}})
+	if got := forStr(t, "https://chatgpt.com/"); got != "http://10.0.0.1:3128" {
+		t.Fatal(got)
+	}
+	if got := forStr(t, "https://git.corp/"); got != "" {
+		t.Fatal(got)
+	}
+	if got := forStr(t, "http://intranet/"); got != "" {
+		t.Fatal(got)
+	}
+	if p, s := Describe(); p != "http://10.0.0.1:3128" || s != "system" {
+		t.Fatal(p, s)
+	}
+}
+
+func TestFuncLoopback(t *testing.T) {
+	setup(t, Proxy{})
+	settings.Save(settings.Settings{Proxy: "127.0.0.1:7890"})
+	for _, u := range []string{"http://127.0.0.1:3425", "http://localhost:1/", "http://[::1]:5/", "http://foo.localhost/"} {
+		req, _ := http.NewRequest("GET", u, nil)
+		if p, err := Func(req); p != nil || err != nil {
+			t.Fatal(u, p, err)
+		}
+	}
+	req, _ := http.NewRequest("GET", "https://chatgpt.com/", nil)
+	if p, _ := Func(req); p == nil || p.String() != "http://127.0.0.1:7890" {
+		t.Fatal(p)
+	}
+}
+
+func TestInstall(t *testing.T) {
+	old := http.DefaultTransport.(*http.Transport).Proxy
+	defer func() { http.DefaultTransport.(*http.Transport).Proxy = old }()
+	Install()
+	req, _ := http.NewRequest("GET", "http://localhost/", nil)
+	if p, err := http.DefaultTransport.(*http.Transport).Proxy(req); p != nil || err != nil {
+		t.Fatal(p, err)
+	}
+}
+
+func TestParse(t *testing.T) {
+	for in, want := range map[string]string{"1.2.3.4:8080": "http://1.2.3.4:8080", " socks5://h:1 ": "socks5://h:1"} {
+		if u, err := Parse(in); err != nil || u.String() != want {
+			t.Fatal(in, u, err)
+		}
+	}
+}
+
+func TestScutil(t *testing.T) {
+	out := `<dictionary> {
+  ExceptionsList : <array> {
+    0 : *.local
+    1 : 169.254/16
+  }
+  HTTPEnable : 1
+  HTTPPort : 8080
+  HTTPProxy : h.example
+  HTTPSEnable : 1
+  HTTPSPort : 8443
+  HTTPSProxy : s.example
+  SOCKSEnable : 1
+  SOCKSPort : 1080
+  SOCKSProxy : k.example
+}`
+	p := parseScutil(out)
+	if p.URL != "http://s.example:8443" || len(p.Bypass) != 2 || p.Bypass[0] != "*.local" {
+		t.Fatalf("%+v", p)
+	}
+	p = parseScutil("<dictionary> {\n  HTTPEnable : 0\n  HTTPPort : 1\n  HTTPProxy : h\n  SOCKSEnable : 1\n  SOCKSPort : 1080\n  SOCKSProxy : k\n}")
+	if p.URL != "socks5://k:1080" {
+		t.Fatalf("%+v", p)
+	}
+	if p = parseScutil("HTTPEnable : 0\nHTTPProxy : h\nHTTPPort : 1"); p.URL != "" {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestWindows(t *testing.T) {
+	if p := parseWindows("h:80", "", true); p.URL != "http://h:80" {
+		t.Fatal(p)
+	}
+	if p := parseWindows("h:80", "", false); p.URL != "" {
+		t.Fatal(p)
+	}
+	p := parseWindows("http=a:1;https=b:2;socks=c:3", "*.corp;<local>;", true)
+	if p.URL != "http://b:2" || len(p.Bypass) != 2 {
+		t.Fatal(p)
+	}
+	if p = parseWindows("socks=c:3", "", true); p.URL != "socks5://c:3" {
+		t.Fatal(p)
+	}
+	b := []string{"*.corp", "<local>"}
+	if !bypassed("git.corp", b) || !bypassed("intranet", b) || bypassed("chatgpt.com", b) {
+		t.Fatal("bypass")
+	}
+	if !bypassed("CORP", []string{".corp"}) || !bypassed("EXAMPLE.com", []string{"example.com"}) || bypassed("x", []string{"", " "}) {
+		t.Fatal("bypass2")
+	}
+}
