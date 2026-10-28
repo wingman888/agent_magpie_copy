@@ -544,6 +544,14 @@ body.window .foot { padding-left: 18px; }
 .editor { padding: 16px 18px 14px; display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px 14px; align-items: start; }
 .editor .ehead { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding-bottom: 8px; margin-bottom: 2px; border-bottom: 1px solid var(--line-2); }
 .editor .ehead .ic { width: 20px; height: 20px; }
+.editor .icon-pick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.editor .icon-pick .icon-now { width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 8px; display: grid; place-items: center; }
+.editor .icon-pick .icon-now .ic { width: 20px; height: 20px; }
+.editor .icon-pick .icon-grid { flex-basis: 100%; display: grid; grid-template-columns: repeat(auto-fill, 34px); gap: 4px; padding: 6px; border: 1px solid var(--line); border-radius: 10px; }
+.editor .icon-pick .icon-grid button { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; }
+.editor .icon-pick .icon-grid button:hover { background: var(--card-2); }
+.editor .icon-pick .icon-grid button.on { box-shadow: inset 0 0 0 1.5px var(--fg); }
+.editor .icon-pick .icon-grid .ic { width: 18px; height: 18px; }
 .editor .ehead b { font-weight: 600; }
 .editor .ehead .note { font-size: 12px; color: var(--muted); }
 .editor label { font-size: 12px; color: var(--muted); text-align: right; padding-top: 5px; }
@@ -554,13 +562,27 @@ body.window .foot { padding-left: 18px; }
   font-size: 12.5px; outline: none; width: 100%; min-width: 0;
   transition: border-color .12s, box-shadow .12s;
 }
-.editor input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.editor input:focus, .editor input:focus-visible, .editor .headers textarea.json:focus, .editor .headers textarea.json:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); outline: none; }
 .editor input::placeholder { color: var(--faint); }
 .editor .pair { display: flex; gap: 8px; align-items: center; }
 .editor .pair input:first-child { flex: 1; }
-.editor .side { display: flex; gap: 4px; align-items: center; flex: none; }
+.editor .side { display: flex; gap: 4px; align-items: center; flex: none; min-width: 52px; justify-content: flex-end; }
 .editor .side .text { padding: 3px 6px; }
+.editor .headers .pair .side .text { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border-radius: 6px; }
 .editor .stack { display: flex; flex-direction: column; gap: 6px; }
+.editor .headers { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.editor .headers .pair { width: 100%; }
+.editor .headers .pair input { flex: 1; min-width: 0; }
+.editor .headers .pair input:first-child { flex: 4; }
+.editor .headers .pair input:nth-child(2) { flex: 6; }
+.editor .headers .pair .side { flex: none; }
+.editor .headers .pair .side .text.on { color: var(--accent); }
+.editor .headers .pair.col { flex-direction: column; align-items: stretch; }
+.editor .headers .pair.col .hhead { display: flex; gap: 8px; align-items: center; width: 100%; }
+.editor .headers .pair.col .hhead input { flex: 1; min-width: 0; }
+.editor .headers .pair.col .side { flex: none; }
+.editor .headers textarea.json { width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); outline: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; resize: vertical; tab-size: 2; white-space: pre; overflow: auto; transition: border-color .12s, box-shadow .12s; }
+.editor .headers textarea.json.bad { border-color: var(--danger, #d66); }
 .segs { position: relative; display: inline-flex; padding: 2px; border-radius: 7px; background: var(--pill); align-self: flex-start; }
 .opt { position: relative; z-index: 1; height: 22px; padding: 0 10px; border-radius: 5px; font-size: 12px; color: var(--muted); transition: color .18s var(--ease), transform .14s var(--ease); }
 .opt.on { color: var(--fg); }
@@ -587,6 +609,8 @@ body.window .foot { padding-left: 18px; }
 .editor.import .mchips .mchip { cursor: default; }
 .editor .bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 4px; padding-top: 10px; border-top: 1px solid var(--line-2); margin-top: 2px; }
 .editor .bar .danger { margin-left: -7px; }
+.editor .editor-error { grid-column: 1 / -1; font-size: 12px; line-height: 1.45; color: var(--red); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.editor .editor-error.warn { color: var(--amber); }
 .busy { opacity: .55; pointer-events: none; }
 
 /* agent chips: who is on this provider, click one to pick it a model */
