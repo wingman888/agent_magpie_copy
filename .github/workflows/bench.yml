@@ -22,6 +22,9 @@ jobs:
           fail=$(grep -c '"Action":"fail","Package":"[^"]*","Test"' test.json)
           buildfail=$(grep -c '"Action":"fail","Package":"[^"]*","Elapsed"' test.json)
           echo "::notice title=summary::pass=$pass fail=$fail pkgfail=$buildfail exit=$code"
+          # 通过的顶层测试名单：编译失败的包里的测试既不算 pass 也不算 fail，只有名单能区分“没通过”
+          passed=$(grep -o '"Action":"pass","Package":"[^"]*","Test":"[^"/]*"' test.json | sed 's/.*"Test":"//; s/"$//' | sort -u | tr '\n' ' ')
+          echo "::notice title=passed::${passed:- }"
           grep -o '"Action":"fail","Package":"[^"]*","Test":"[^"]*"' test.json | head -n 25 | sed 's/^/::error title=failed-test::/'
           grep -h -E '_test.go:[0-9]+:|\.go:[0-9]+:[0-9]+:' build.log vet.log | head -n 25 | sed 's/^/::error title=compile::/'
           # 不带文件行号的构建错误（cgo、embed、模块解析等）也要能看到
