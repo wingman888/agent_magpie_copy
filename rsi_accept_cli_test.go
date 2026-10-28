@@ -43,31 +43,31 @@ func TestAcceptProviderFallbackCLI(t *testing.T) {
 	}
 
 	if out, err := run("provider", "fallback", "main"); err != nil || !strings.Contains(out, "Mainp") || !strings.Contains(out, "has no fallback") {
-		t.Fatalf("%q %v", out, err)
+		t.Fatalf("FAIL %s %v", tl(out), err)
 	}
 	if out, err := run("provider", "fallback", "main", "a/b", "c/d"); err != nil || !strings.Contains(out, "falls back to") {
-		t.Fatalf("%q %v", out, err)
+		t.Fatalf("FAIL %s %v", tl(out), err)
 	}
 	out, err := run("provider", "fallback", "main")
 	if err != nil || !strings.Contains(out, "Mainp") || !strings.Contains(out, "falls back to") || !strings.Contains(out, "a/b → c/d") {
-		t.Fatalf("%q %v", out, err)
+		t.Fatalf("FAIL %s %v", tl(out), err)
 	}
 	// the provider list shows the chain
 	if out, err := run("providers"); err != nil || !strings.Contains(out, "a/b → c/d") {
-		t.Fatalf("list: %q %v", out, err)
+		t.Fatalf("FAIL list %s %v", tl(out), err)
 	}
 	// unknown model: error, nothing saved
 	out, err = run("provider", "fallback", "main", "a/b", "ghost/zzz")
 	if err == nil || !strings.Contains(out, `magpie knows no model "ghost/zzz" (magpie models lists them)`) {
-		t.Fatalf("%q %v", out, err)
+		t.Fatalf("FAIL %s %v", tl(out), err)
 	}
 	if out, _ := run("provider", "fallback", "main"); !strings.Contains(out, "a/b → c/d") {
-		t.Fatalf("list changed: %q", out)
+		t.Fatalf("FAIL changed %s", tl(out))
 	}
 	// missing id
 	out, err = run("provider", "fallback")
 	if err == nil || !strings.Contains(out, "magpie provider fallback <id> [provider/model… | none]") {
-		t.Fatalf("%q %v", out, err)
+		t.Fatalf("FAIL %s %v", tl(out), err)
 	}
 	// unknown provider
 	if _, err := run("provider", "fallback", "nope-such"); err == nil {
@@ -78,9 +78,11 @@ func TestAcceptProviderFallbackCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out, _ := run("provider", "fallback", "main"); !strings.Contains(out, "has no fallback") {
-		t.Fatalf("%q", out)
+		t.Fatalf("FAIL %s", tl(out))
 	}
 	if p, _ := provider.Find("main"); len(p.Fallback) != 0 {
 		t.Fatalf("%v", p.Fallback)
 	}
 }
+
+func tl(s string) string { return strings.ReplaceAll(strings.ReplaceAll(s, "\n", " | "), `"`, "~") }
