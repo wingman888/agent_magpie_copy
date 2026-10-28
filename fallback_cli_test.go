@@ -9,8 +9,8 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// run captures what a command prints.
-func run(t *testing.T, args ...string) (string, error) {
+// runProvider captures what a command prints.
+func runProvider(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	old := os.Stdout
 	r, w, _ := os.Pipe()
@@ -30,26 +30,26 @@ func TestProviderFallbackCommand(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if out, err := run(t, "fallback", "main"); err != nil || !strings.Contains(out, "has no fallback") {
+	if out, err := runProvider(t, "fallback", "main"); err != nil || !strings.Contains(out, "has no fallback") {
 		t.Fatalf("%q %v", out, err)
 	}
-	if out, err := run(t, "fallback", "main", "a/b", "c/d"); err != nil || !strings.Contains(out, "falls back to a/b → c/d") {
+	if out, err := runProvider(t, "fallback", "main", "a/b", "c/d"); err != nil || !strings.Contains(out, "falls back to a/b → c/d") {
 		t.Fatalf("%q %v", out, err)
 	}
-	_, err := run(t, "fallback", "main", "a/b", "nowhere/x")
+	_, err := runProvider(t, "fallback", "main", "a/b", "nowhere/x")
 	if err == nil || err.Error() != `magpie knows no model "nowhere/x" (magpie models lists them)` {
 		t.Fatalf("%v", err)
 	}
-	if out, _ := run(t, "fallback", "main"); !strings.Contains(out, "a/b → c/d") {
+	if out, _ := runProvider(t, "fallback", "main"); !strings.Contains(out, "a/b → c/d") {
 		t.Fatalf("list changed: %q", out)
 	}
-	if _, err := run(t, "fallback"); err == nil || err.Error() != "magpie provider fallback <id> [provider/model… | none]" {
+	if _, err := runProvider(t, "fallback"); err == nil || err.Error() != "magpie provider fallback <id> [provider/model… | none]" {
 		t.Fatalf("%v", err)
 	}
-	if out, err := run(t, "fallback", "main", "none"); err != nil || !strings.Contains(out, "has no fallback") {
+	if out, err := runProvider(t, "fallback", "main", "none"); err != nil || !strings.Contains(out, "has no fallback") {
 		t.Fatalf("%q %v", out, err)
 	}
-	if _, err := run(t, "fallback", "ghost"); err == nil {
+	if _, err := runProvider(t, "fallback", "ghost"); err == nil {
 		t.Fatal("want error for unknown provider")
 	}
 }
