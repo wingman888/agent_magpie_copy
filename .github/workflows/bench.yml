@@ -1,0 +1,26 @@
+name: rsi-bench-go
+on: { push: { branches: ["bench/**"] } }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache: true }
+      - name: go test
+        run: |
+          set +e
+          pkgs=$(cat .bench/packages)
+          go vet $pkgs > vet.log 2>&1
+          run=""; [ -f .bench/run ] && run="-run=$(cat .bench/run)"
+          go test -count=1 -json $run $pkgs > test.json 2> build.log
+          code=$?
+          pass=$(grep -c '"Action":"pass","Package":"[^"]*","Test"' test.json)
+          fail=$(grep -c '"Action":"fail","Package":"[^"]*","Test"' test.json)
+          buildfail=$(grep -c '"Action":"fail","Package":"[^"]*","Elapsed"' test.json)
+          echo "::notice title=summary::pass=$pass fail=$fail pkgfail=$buildfail exit=$code"
+          grep -o '"Action":"fail","Package":"[^"]*","Test":"[^"]*"' test.json | head -n 25 | sed 's/^/::error title=failed-test::/'
+          grep -h -E '_test.go:[0-9]+:|\.go:[0-9]+:[0-9]+:' build.log vet.log | head -n 25 | sed 's/^/::error title=compile::/'
+          grep -o '"Output":"[^"]*_test.go:[0-9]*: [^"]*"' test.json | head -n 25 | sed 's/^/::error title=assert::/'
+          exit $code
