@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 var ansi = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func TestAcceptProviderFallbackCLI(t *testing.T) {
+	var last string
+	defer func() { t.Logf("END failed=%v last=%s", t.Failed(), last) }()
 	h := t.TempDir()
 	env := append(os.Environ(), "HOME="+h, "XDG_CONFIG_HOME="+filepath.Join(h, ".config"),
 		"XDG_CACHE_HOME="+filepath.Join(h, ".cache"), "NO_COLOR=1")
@@ -38,6 +41,7 @@ func TestAcceptProviderFallbackCLI(t *testing.T) {
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		o := ansi.ReplaceAllString(string(out), "")
+		last = fmt.Sprint(args, tl(o))
 		return o, err
 	}
 
