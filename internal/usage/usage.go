@@ -1,5 +1,5 @@
 // Package usage keeps the token count of every call the gateway serves, so
-// magpie can show what each agent and model consumed and roughly what it cost.
+// dial can show what each agent and model consumed and roughly what it cost.
 // Records go to one JSON-lines file next to providers.json; nothing leaves
 // the machine.
 package usage
@@ -15,14 +15,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/dial/internal/catalog"
+	"github.com/yetone/dial/internal/provider"
 )
 
 // Record is one call.
 type Record struct {
 	Time       time.Time `json:"t"`
-	Agent      string    `json:"agent"` // magpie agent id, or the client's product name
+	Agent      string    `json:"agent"` // dial agent id, or the client's product name
 	Provider   string    `json:"provider"`
 	Model      string    `json:"model"` // the provider's model id
 	Input      int       `json:"in"`
@@ -34,7 +34,7 @@ type Record struct {
 	Status     int       `json:"status"`
 }
 
-// Path is the log file: ~/.config/magpie/usage.jsonl (XDG-aware).
+// Path is the log file: ~/.config/dial/usage.jsonl (XDG-aware).
 func Path() string { return filepath.Join(filepath.Dir(provider.Path()), "usage.jsonl") }
 
 var mu sync.Mutex
@@ -92,7 +92,7 @@ func Load(since time.Time) []Record {
 }
 
 // AgentOf names the agent behind a client User-Agent. Known agents map to
-// their magpie id; anything else keeps its product name.
+// their dial id; anything else keeps its product name.
 func AgentOf(ua string) string {
 	ua = strings.TrimSpace(ua)
 	name, _, _ := strings.Cut(ua, "/")
@@ -257,12 +257,9 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 		}
 		var pr *catalog.Price
 		for _, p := range provider.All() {
-			if p.ID == r.Provider {
-				for _, c := range p.Catalogs() {
-					if v, ok := catalog.PriceOf(c, r.Model); ok {
-						pr = &v
-						break
-					}
+			if p.ID == r.Provider && p.Catalog != "" {
+				if v, ok := catalog.PriceOf(p.Catalog, r.Model); ok {
+					pr = &v
 				}
 				break
 			}

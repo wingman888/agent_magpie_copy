@@ -1,6 +1,5 @@
-/magpie
-/magpie.exe
-/magpie.app/
+/dial
+/dial.exe
+/dial.app/
 /dist/
-/magpie-dev
-/rsrc_windows_*.syso
+/dial-dev
