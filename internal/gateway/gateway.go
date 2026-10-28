@@ -67,7 +67,7 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
-	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, as "<id>: <why>" joined by "; "
+	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
@@ -85,9 +85,6 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	// cooling remembers when each provider last failed in a way that sent a
-	// request to its fallbacks; until then it queues behind the others.
-	cooling map[string]time.Time
 }
 
 // New makes a gateway.
@@ -101,7 +98,6 @@ func New() *Server {
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
-		cooling:      make(map[string]time.Time),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -217,7 +213,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	p, model, ok := provider.Resolve(modelOf(body))
 	// Claude Subscription generations run through the Claude Code binary. Its
 	// OAuth token must not take a direct HTTP side path just for token counting.
-	if ok && p.Account != nil && p.Account.Agent == "claude" {
+	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok") {
 		req, err := parseAnthropic(body)
 		if err != nil {
 			writeError(w, provider.Anthropic, 400, err.Error())
@@ -225,6 +221,18 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
+	}
+	if ok {
+		// a relay's OpenAI-only key can't count Anthropic tokens
+		q := p
+		q.Anthropic = ""
+		for _, c := range perKey(p, model, provider.Anthropic) {
+			if c.p.Anthropic != "" {
+				q = c.p
+				break
+			}
+		}
+		p = q
 	}
 	if ok && p.Anthropic != "" {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
@@ -353,147 +361,80 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	seq := s.sequence(p, model)
-	var failed []string
-	var answered candidate
-	for i, c := range seq {
-		var skip func(int, []byte) bool
-		if i < len(seq)-1 {
-			// only an upstream error that says "out of quota / busy / down" is
-			// given up on, and only while the client is still there to hear
-			// the next answer; nothing has been written to it at that point
-			skip = func(status int, body []byte) bool {
-				return r.Context().Err() == nil && fallbackWorthy(status, body)
-			}
-		}
-		answered = c
-		call.Provider, call.Usage = c.p.ID, Usage{}
-		var skipped bool
-		call.To, call.Status, call.Error, skipped = s.attempt(w, r, from, c.p, c.model, body, &call.Usage, skip)
-		if skipped {
-			failed = append(failed, c.p.ID+": "+call.Error)
-			s.cool(c.p.ID)
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
+	cands := s.candidates(p, model, from)
+	var skipped []string
+	for i, c := range cands {
+		last := i == len(cands)-1 || r.Context().Err() != nil
+		hw := newHoldWriter(w, !last)
+		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+		if !last && hw.failed() {
+			s.restAfter(c.rest, hw.status, hw.header, hw.held.Bytes())
+			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
+		}
+		hw.release()
+		model = c.model
+		if call.Status < 400 {
+			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
 		}
 		break
 	}
-	call.Fallback = strings.Join(failed, "; ")
+	if len(skipped) > 0 {
+		call.Fallback = strings.Join(skipped, "; ")
+	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	if call.To == "" {
-		return // no endpoint to reach; nothing to count
+	if call.To != "" {
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 	}
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: answered.p.ID, Model: answered.model,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
-// candidate is one provider and vendor model a request may be answered by.
-type candidate struct {
-	p     provider.Provider
-	model string
-}
-
-// cooldown is how long a provider that ran out of quota or went down queues
-// behind its fallbacks.
-const cooldown = time.Minute
-
-// sequence lists who to try for a request: the model asked for, then the
-// provider's fallbacks in order. Entries that do not resolve or repeat an
-// earlier provider+model are dropped; providers cooling down move to the back.
-func (s *Server) sequence(p provider.Provider, model string) []candidate {
-	seq := []candidate{{p, model}}
-	for _, f := range p.Fallback {
-		fp, fm, ok := provider.Resolve(f)
-		if !ok {
-			continue
-		}
-		dup := false
-		for _, c := range seq {
-			if c.p.ID == fp.ID && c.model == fm {
-				dup = true
-			}
-		}
-		if !dup {
-			seq = append(seq, candidate{fp, fm})
-		}
-	}
-	if len(seq) < 2 {
-		return seq
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var warm, cold []candidate
-	for _, c := range seq {
-		if time.Now().Before(s.cooling[c.p.ID]) {
-			cold = append(cold, c)
-		} else {
-			warm = append(warm, c)
-		}
-	}
-	return append(warm, cold...)
-}
-
-func (s *Server) cool(id string) {
-	s.mu.Lock()
-	s.cooling[id] = time.Now().Add(cooldown)
-	s.mu.Unlock()
-}
-
-// limitWords mark a 400/401/403 body as a quota or rate limit rather than a
-// plain mistake in the request.
-var limitWords = []string{
-	"quota", "insufficient", "balance", "credit", "billing", "exceeded",
-	"rate limit", "rate-limit", "ratelimit", "usage limit", "limit reached", "too many requests", "overloaded",
-	"余额", "额度", "欠费", "限流", "频率", "套餐", "用量", "上限",
-}
-
-// fallbackWorthy reports whether an upstream error means another provider
-// should be asked instead: out of quota, throttled, overloaded or down.
-func fallbackWorthy(status int, body []byte) bool {
-	switch {
-	case status == 402 || status == 408 || status == 429 || status >= 500:
-		return true
-	case status == 400 || status == 401 || status == 403:
-		low := strings.ToLower(string(body))
-		for _, w := range limitWords {
-			if strings.Contains(low, w) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// attempt sends the request to one candidate. When skip is set and approves an
-// upstream error, nothing is written to the client and skipped is true; the
-// returned status and message describe the failure.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, u *Usage, skip func(int, []byte) bool) (to provider.Protocol, status int, msg string, skipped bool) {
+// attempt sends a request to one provider. call.To stays empty when the
+// provider has no endpoint to send it to.
+func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
-		status, msg = s.serveClaudeSubscription(w, r, from, model, body, u)
-		return provider.Anthropic, status, msg, false
+		call.To = provider.Anthropic
+		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
+	}
+	// Cursor's API belongs to its own clients: its CLI does the talking
+	if p.Account != nil && p.Account.Agent == "cursor" {
+		call.To = from
+		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+			return s.subscription.startCursor(ctx, req, model)
+		}
+		return s.serveSubscription(w, r, from, "Cursor", model, body, &call.Usage, start)
+	}
+	// and so does Grok's
+	if p.Account != nil && p.Account.Agent == "grok" {
+		call.To = from
+		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+			return s.subscription.startGrok(ctx, req, model, p.Account.Home)
+		}
+		return s.serveSubscription(w, r, from, "Grok", model, body, &call.Usage, start)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
 	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
 	if relay {
-		status, msg, skipped = s.passthrough(w, r, p, from, model, body, u, skip)
-		return from, status, msg, skipped
+		call.To = from
+		return s.passthrough(w, r, p, from, model, body, &call.Usage)
 	}
-	speaks := p.Speaks()
-	if len(speaks) == 0 {
-		msg = p.Name + " has no endpoint configured"
-		if skip != nil {
-			return "", 502, msg, true
-		}
-		return "", writeError(w, from, 502, msg), msg, false
+	to := p.Speaks()
+	if len(to) == 0 {
+		msg := p.Name + " has no endpoint configured"
+		return writeError(w, from, 502, msg), msg
 	}
-	status, msg, skipped = s.translate(w, r, p, from, speaks[0], model, body, u, skip)
-	return speaks[0], status, msg, skipped
+	call.To = to[0]
+	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 }
 
 // forward sends a request to the provider.
@@ -525,23 +466,20 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, skip func(int, []byte) bool) (int, string, bool) {
+func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
 	}
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
 	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), false
+		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		if skip != nil && skip(res.StatusCode, b) {
-			return res.StatusCode, msg, true
-		}
-		return writeError(w, proto, res.StatusCode, msg), msg, false
+		return writeError(w, proto, res.StatusCode, msg), msg
 	}
 	rd, sse := eventStream(res)
 	h := w.Header()
@@ -564,7 +502,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if n > 0 {
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return res.StatusCode, "", false
+				return res.StatusCode, ""
 			}
 			if f != nil {
 				f.Flush()
@@ -574,7 +512,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			break
 		}
 	}
-	return res.StatusCode, "", false
+	return res.StatusCode, ""
 }
 
 // eventStream reports whether a reply is server-sent events. The header
@@ -668,25 +606,22 @@ func notChatModel(status int, body []byte) bool {
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, skip func(int, []byte) bool) (int, string, bool) {
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
 	request, err := parse(from, body)
 	if err != nil {
-		return writeError(w, from, 400, err.Error()), err.Error(), false
+		return writeError(w, from, 400, err.Error()), err.Error()
 	}
 	stream := request.Stream
 	request.Stream = true
 	res, actual, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
 	if err != nil {
-		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error(), false
+		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		if skip != nil && skip(res.StatusCode, b) {
-			return res.StatusCode, msg, true
-		}
-		return writeError(w, from, res.StatusCode, msg), msg, false
+		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(actual)
 	rd, sse := eventStream(res)
@@ -695,7 +630,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		// event stream would be wrong, so give up cleanly
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
-		return writeError(w, from, 502, msg), msg, false
+		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), request.Model)
@@ -712,14 +647,14 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 			})
 		})
 		enc.finish()
-		return 200, failed, false
+		return 200, failed
 	}
 	var col collector
 	readSSE(rd, func(_, data string) error {
 		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {
-		return writeError(w, from, 502, p.Name+": "+col.err), col.err, false
+		return writeError(w, from, 502, p.Name+": "+col.err), col.err
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)
@@ -727,7 +662,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(out)
-	return 200, col.err, false
+	return 200, col.err
 }
 
 // ---- protocol tables --------------------------------------------------------
