@@ -193,9 +193,18 @@ func Save(p Provider) error {
 		p.Name = p.ID
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
-		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		// an account keeps only the user's model picks and fallback list;
+		// the rest is the agent's own sign-in. Saving it again brings a
+		// removed one back. Saving only a fallback list leaves the picks be.
+		models := p.Models
+		if len(models) == 0 && len(p.Fallback) > 0 {
+			for _, old := range load().Providers {
+				if old.ID == a.ID {
+					models = cleanList(old.Models)
+				}
+			}
+		}
+		p = Provider{ID: a.ID, Models: models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
