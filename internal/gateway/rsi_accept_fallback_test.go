@@ -129,7 +129,7 @@ func TestAcceptPlainErrorsAreNotFallenBack(t *testing.T) {
 		spare := jsonUp(0, `{"id":"from-spare","choices":[]}`)
 		chain(t, id, main, spare, id+"sp/m2")
 		rec := send(gateway.New(), id+"/m1")
-		if rec.Code != tc.code || !rec.Body.String() == tc.body {
+		if rec.Code != tc.code || rec.Body.String() != tc.body {
 			t.Fatalf("%d: got %d %s", tc.code, rec.Code, rec.Body.String())
 		}
 		if spare.calls() != 0 {
