@@ -100,7 +100,7 @@ var presets = []PresetDef{
 		Website: "https://aihubmix.com", KeysURL: "https://aihubmix.com/token"},
 	{ID: "302ai", Name: "302.AI", Icon: "ai302-color", Kind: KindRelay,
 		Chat: "https://api.302.ai/v1", Anthropic: "https://api.302.ai",
-		Website: "https://302.ai", KeysURL: "https://dash.302.ai/apis/list"},
+		Website: "https://302.ai", KeysURL: "https://302.ai/api-keys/list"},
 
 	{ID: "ollama", Name: "Ollama", Icon: "ollama", Kind: KindLocal, NoKey: true,
 		Chat: "http://localhost:11434/v1", Anthropic: "http://localhost:11434",
@@ -147,4 +147,15 @@ func FromPreset(id string) (Provider, error) {
 		Chat: pr.Chat, Responses: pr.Responses, Anthropic: pr.Anthropic,
 		Catalog: pr.Catalog, Website: pr.Website, KeysURL: pr.KeysURL,
 	}, nil
+}
+
+// IconForCatalog names the logo of the vendor behind a models.dev
+// provider id, or "" when no preset covers it.
+func IconForCatalog(catalogID string) string {
+	for _, p := range presets {
+		if p.Catalog == catalogID {
+			return p.Icon
+		}
+	}
+	return ""
 }

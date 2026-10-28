@@ -28,6 +28,7 @@ const usage = `dial — one dial for every coding agent's model
   dial <agent>                  show one agent
   dial <agent> <model>          set an agent's model   e.g. dial claude deepseek/deepseek-chat
   dial <agent> <field> <value>  set another field   e.g. dial codex effort high
+  dial <agent> [field] default  back to the agent's own default, dial's wiring removed
 
   dial save <name>              snapshot every agent's settings as a profile
   dial use <name>               apply a profile
@@ -42,6 +43,7 @@ const usage = `dial — one dial for every coding agent's model
   dial models                   every model agents can pick, as provider/model
 
   dial serve                    run the gateway alone (the app runs it too)
+  dial usage [today|7d|30d|all] tokens and cost per agent and model (30d)
   dial sync                     refresh the model catalog and vendor model lists
   dial agents                   list every supported agent
 
@@ -108,6 +110,8 @@ func run(args []string) error {
 		return models()
 	case "serve":
 		return serve()
+	case "usage":
+		return usageCmd(args)
 	}
 
 	a, err := agent.Find(args[0])
@@ -118,6 +122,9 @@ func run(args []string) error {
 	case 1:
 		return list([]*agent.Agent{a}, true)
 	case 2:
+		if args[1] == "default" {
+			return set(a, a.Fields[0].Key, "")
+		}
 		// `dial codex xhigh`: a bare value that belongs to a non-model field
 		// (effort levels, for instance) is routed there; anything else is a model.
 		if f := fieldForValue(a, args[1]); f != nil {
@@ -125,6 +132,9 @@ func run(args []string) error {
 		}
 		return set(a, a.Fields[0].Key, args[1])
 	case 3:
+		if args[2] == "default" {
+			args[2] = ""
+		}
 		return set(a, args[1], args[2])
 	}
 	return fmt.Errorf("too many arguments\n\n%s", usage)
@@ -141,6 +151,9 @@ func set(a *agent.Agent, key, value string) error {
 	}
 	if err := f.Set(value); err != nil {
 		return err
+	}
+	if value == "" {
+		value = muted.Render("default")
 	}
 	fmt.Println(green.Render("✓"), bold.Render(a.Name), muted.Render(f.Label), value)
 	if a.Notice != nil {

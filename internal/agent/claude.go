@@ -15,11 +15,11 @@ import (
 // all it takes to run it on any provider.
 
 var claudeAliases = []Option{
-	{Value: "opus", Note: "alias · latest Opus"},
-	{Value: "sonnet", Note: "alias · latest Sonnet"},
-	{Value: "haiku", Note: "alias · latest Haiku"},
-	{Value: "opusplan", Note: "alias · Opus for planning, Sonnet for work"},
-	{Value: "sonnet[1m]", Note: "alias · Sonnet with 1M context"},
+	{Value: "opus", Note: "alias · latest Opus", Icon: "claude-color"},
+	{Value: "sonnet", Note: "alias · latest Sonnet", Icon: "claude-color"},
+	{Value: "haiku", Note: "alias · latest Haiku", Icon: "claude-color"},
+	{Value: "opusplan", Note: "alias · Opus for planning, Sonnet for work", Icon: "claude-color"},
+	{Value: "sonnet[1m]", Note: "alias · Sonnet with 1M context", Icon: "claude-color"},
 }
 
 // env vars dial sets while routing through the gateway.
@@ -45,6 +45,15 @@ func claude(home string) *Agent {
 		return model()
 	}
 	set := func(v string) error {
+		if v == "" {
+			// Claude Code as installed: Anthropic's own endpoint and model
+			keys := []string{"model"}
+			for _, k := range claudeEnv {
+				keys = append(keys, "env."+k)
+			}
+			forget("claude.model", "claude.base_url", "claude.auth_token")
+			return edit.DelJSON(path, keys...)
+		}
 		if isDial(v) {
 			if !routed() {
 				stash(map[string]string{
@@ -100,13 +109,14 @@ func claude(home string) *Agent {
 				var own []Option
 				for _, m := range catalog.Provider("anthropic") {
 					if strings.HasPrefix(m.ID, "claude") {
-						own = append(own, Option{Value: m.ID, Note: m.Name})
+						own = append(own, Option{Value: m.ID, Note: m.Name, Icon: "claude-color"})
 					}
 				}
-				out := group("Claude Code", append(append([]Option{}, claudeAliases...), own...))
+				name := "Claude Code"
 				if u := env("ANTHROPIC_BASE_URL"); u != "" && !routed() {
-					out[0].Note += " · " + hostOf(u)
+					name += " · " + hostOf(u)
 				}
+				out := group(name, append(append([]Option{}, claudeAliases...), own...))
 				return append(out, viaDial("")...)
 			},
 		}},

@@ -208,6 +208,16 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 				p.Fetch(ctx)
 				cancel()
 			}
+		case "key":
+			// the saved key, for the editor's Show button; it never
+			// leaves this machine (the panel is served on loopback)
+			p, err := provider.Find(in.ID)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			writeJSON(rw, map[string]string{"key": p.Key})
+			return
 		case "delete":
 			if err := provider.Delete(in.ID); err != nil {
 				fail(rw, err)

@@ -8,7 +8,6 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
-	"io/fs"
 	"net/http"
 	"os"
 	"strconv"
@@ -66,9 +65,9 @@ type stateJSON struct {
 // Handler serves the embedded UI and the JSON API.
 // gw is the gateway this process serves, or nil when another dial has it.
 func Handler(w Windows, gw *gateway.Server) http.Handler {
-	static, _ := fs.Sub(assets, "assets")
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(static)))
+	mux.Handle("/", devPage(http.FileServer(http.FS(staticFS()))))
+	devRoutes(mux)
 	mux.HandleFunc("GET /api/state", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, state())
 	})
@@ -145,6 +144,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		writeJSON(rw, state())
 	})
 	providerRoutes(mux, w, gw)
+	usageRoutes(mux)
 	mux.HandleFunc("POST /api/window/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		switch r.PathValue("action") {
 		case "hide":
@@ -160,6 +160,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
+	devListen(mux)
 	return mux
 }
 

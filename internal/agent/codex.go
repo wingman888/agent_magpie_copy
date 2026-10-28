@@ -45,6 +45,18 @@ func codex(home string) *Agent {
 		return nil
 	}
 	set := func(v string) error {
+		if v == "" {
+			// Codex as installed: OpenAI, its own catalog, its default model
+			if err := edit.DelTOMLTop(path, "model", "model_provider", "model_catalog_json"); err != nil {
+				return err
+			}
+			if err := edit.DelTOMLTable(path, "model_providers."+dialID); err != nil {
+				return err
+			}
+			os.Remove(catalogPath)
+			forget("codex.model", "codex.effort", "codex.provider")
+			return nil
+		}
 		if isDial(v) {
 			if !routed() {
 				stash(map[string]string{"codex.model": get("model"), "codex.effort": get("model_reasoning_effort"),
@@ -125,6 +137,9 @@ func codex(home string) *Agent {
 				Key: "effort", Label: "effort",
 				Get: func() string { return get("model_reasoning_effort") },
 				Set: func(v string) error {
+					if v == "" {
+						return edit.DelTOMLTop(path, "model_reasoning_effort")
+					}
 					return edit.SetTOMLTop(path, edit.KV{Path: "model_reasoning_effort", Value: v})
 				},
 				Options: func(cur map[string]string) []Option {

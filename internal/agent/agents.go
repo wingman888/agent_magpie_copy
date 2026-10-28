@@ -42,7 +42,22 @@ func jsonGet(path, key string) func() string {
 }
 
 func jsonSet(path, key string) func(string) error {
-	return func(v string) error { return edit.SetJSON(path, edit.KV{Path: key, Value: v}) }
+	return func(v string) error {
+		if v == "" {
+			return edit.DelJSON(path, key)
+		}
+		return edit.SetJSON(path, edit.KV{Path: key, Value: v})
+	}
+}
+
+// usesDial reports whether any of the values is a dial/… reference.
+func usesDial(vals ...string) bool {
+	for _, v := range vals {
+		if strings.HasPrefix(v, dialID+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // pair joins a provider field and a model field into one "provider/model"
@@ -78,7 +93,7 @@ func hostOf(u string) string { return provider.HostOf(u) }
 func options(models []catalog.Model, prefix string) []Option {
 	out := make([]Option, 0, len(models))
 	for _, m := range models {
-		out = append(out, Option{Value: prefix + m.ID, Note: m.Name})
+		out = append(out, Option{Value: prefix + m.ID, Note: m.Name, Icon: modelIcon(m.Provider, m.ID)})
 	}
 	return out
 }
@@ -147,7 +162,8 @@ func dialProviderJSON(shape string) any {
 	case "pi":
 		var ms []map[string]any
 		for _, m := range models {
-			ms = append(ms, map[string]any{"id": m.ID, "name": m.Name})
+			// reasoning lets Pi offer its thinking levels for the model
+			ms = append(ms, map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0})
 		}
 		if ms == nil {
 			ms = []map[string]any{}
@@ -169,8 +185,18 @@ func opencode(home, cfg string) *Agent {
 			return append(ownOptions(auth, cur[key]), viaDial(dialID+"/")...)
 		}
 	}
+	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
 	set := func(key string) func(string) error {
 		return func(v string) error {
+			if v == "" {
+				if err := edit.DelJSON(path, key); err != nil {
+					return err
+				}
+				if usesDial(get("model"), get("small_model")) {
+					return nil
+				}
+				return edit.DelJSON(path, "provider."+dialID)
+			}
 			if ref, ok := strings.CutPrefix(v, dialID+"/"); ok && isDial(ref) {
 				if err := edit.SetJSON(path, edit.KV{Path: "provider." + dialID, Value: dialProviderJSON("opencode")}); err != nil {
 					return err
@@ -197,23 +223,56 @@ func pi(home string) *Agent {
 	get := func(k string) (string, bool) { return edit.GetJSON(path, k) }
 	set := func(kvs ...edit.KV) error { return edit.SetJSON(path, kvs...) }
 	pair := pairSet(set, "defaultProvider", "defaultModel")
+	writeDial := func() error {
+		return edit.SetJSON(modelsPath, edit.KV{Path: "providers." + dialID, Value: dialProviderJSON("pi")})
+	}
 	return &Agent{
 		ID: "pi", Name: "Pi", Icon: "pi", Bin: "pi", Dir: dir, Path: path,
-		Fields: []Field{{
-			Key: "model", Label: "model",
-			Get: pairGet(get, "defaultProvider", "defaultModel"),
-			Set: func(v string) error {
-				if ref, ok := strings.CutPrefix(v, dialID+"/"); ok && isDial(ref) {
-					if err := edit.SetJSON(modelsPath, edit.KV{Path: "providers." + dialID, Value: dialProviderJSON("pi")}); err != nil {
-						return err
+		Fields: []Field{
+			{
+				Key: "model", Label: "model",
+				Get: pairGet(get, "defaultProvider", "defaultModel"),
+				Set: func(v string) error {
+					if v == "" {
+						if err := edit.DelJSON(path, "defaultProvider", "defaultModel"); err != nil {
+							return err
+						}
+						return edit.DelJSON(modelsPath, "providers."+dialID)
 					}
-				}
-				return pair(v)
+					if ref, ok := strings.CutPrefix(v, dialID+"/"); ok && isDial(ref) {
+						if err := writeDial(); err != nil {
+							return err
+						}
+					}
+					return pair(v)
+				},
+				Options: func(cur map[string]string) []Option {
+					return append(ownOptions(auth, cur["model"]), viaDial(dialID+"/")...)
+				},
 			},
-			Options: func(cur map[string]string) []Option {
-				return append(ownOptions(auth, cur["model"]), viaDial(dialID+"/")...)
+			{
+				// Pi's startup thinking level, the same list its /thinking offers;
+				// Pi clamps it to what the model supports.
+				Key: "effort", Label: "thinking",
+				Get: func() string { v, _ := get("defaultThinkingLevel"); return v },
+				Set: func(v string) error {
+					if v == "" {
+						return edit.DelJSON(path, "defaultThinkingLevel")
+					}
+					if p, _ := get("defaultProvider"); p == dialID {
+						// older dial entries lacked "reasoning", which Pi needs
+						// before it will think at all
+						if err := writeDial(); err != nil {
+							return err
+						}
+					}
+					return set(edit.KV{Path: "defaultThinkingLevel", Value: v})
+				},
+				Options: func(map[string]string) []Option {
+					return static("off", "minimal", "low", "medium", "high", "xhigh", "max")
+				},
 			},
-		}},
+		},
 	}
 }
 
@@ -231,7 +290,12 @@ func goose(home, cfg string) *Agent {
 		Fields: []Field{{
 			Key: "model", Label: "model",
 			Get: pairGet(get, "GOOSE_PROVIDER", "GOOSE_MODEL"),
-			Set: pairSet(set, "GOOSE_PROVIDER", "GOOSE_MODEL"),
+			Set: func(v string) error {
+				if v == "" {
+					return edit.DelYAMLTop(path, "GOOSE_PROVIDER", "GOOSE_MODEL")
+				}
+				return pairSet(set, "GOOSE_PROVIDER", "GOOSE_MODEL")(v)
+			},
 			Options: func(cur map[string]string) []Option {
 				return ownOptions("", cur["model"], "anthropic", "openai", "google", "openrouter")
 			},
@@ -248,6 +312,9 @@ func cursor(home string) *Agent {
 			Key: "model", Label: "model",
 			Get: jsonGet(path, "model.modelId"),
 			Set: func(v string) error {
+				if v == "" {
+					return edit.DelJSON(path, "model", "hasChangedDefaultModel")
+				}
 				return edit.SetJSON(path,
 					edit.KV{Path: "model.modelId", Value: v},
 					edit.KV{Path: "model.displayModelId", Value: v},
@@ -256,7 +323,7 @@ func cursor(home string) *Agent {
 				)
 			},
 			Options: func(map[string]string) []Option {
-				return []Option{{Value: "auto", Note: "let Cursor pick"}}
+				return []Option{{Value: "auto", Note: "let Cursor pick", Icon: "cursor"}}
 			},
 		}},
 	}
@@ -270,9 +337,17 @@ func copilot(home string) *Agent {
 		Bin: "copilot", Dir: dir, Path: path,
 		Fields: []Field{{
 			Key: "model", Label: "model",
-			Get:     jsonGet(path, "model"),
-			Set:     jsonSet(path, "model"),
-			Options: func(map[string]string) []Option { return options(catalog.Builtin("copilot"), "") },
+			Get: jsonGet(path, "model"),
+			Set: jsonSet(path, "model"),
+			Options: func(map[string]string) []Option {
+				out := options(catalog.Builtin("copilot"), "")
+				for i := range out {
+					if out[i].Value == "auto" {
+						out[i].Icon = "githubcopilot"
+					}
+				}
+				return out
+			},
 		}},
 	}
 }
@@ -307,6 +382,17 @@ func crush(home, cfg string) *Agent {
 	setter := func(pKey, mKey string) func(string) error {
 		pair := pairSet(set, pKey, mKey)
 		return func(v string) error {
+			if v == "" {
+				if err := edit.DelJSON(path, strings.TrimSuffix(pKey, ".provider")); err != nil {
+					return err
+				}
+				large := pairGet(get, "models.large.provider", "models.large.model")()
+				small := pairGet(get, "models.small.provider", "models.small.model")()
+				if usesDial(large, small) {
+					return nil
+				}
+				return edit.DelJSON(path, "providers."+dialID)
+			}
 			if ref, ok := strings.CutPrefix(v, dialID+"/"); ok && isDial(ref) {
 				if err := set(edit.KV{Path: "providers." + dialID, Value: dialProviderJSON("crush")}); err != nil {
 					return err

@@ -114,7 +114,7 @@ func Run(version string, showMain bool) error {
 		Hidden:    true,
 		Mac: application.MacWindow{
 			TitleBar:                application.MacTitleBarHiddenInset,
-			InvisibleTitleBarHeight: 44,
+			InvisibleTitleBarHeight: 50,
 		},
 	})
 	// Closing the window keeps the tray alive; quitting is a menu action.

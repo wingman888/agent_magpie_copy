@@ -10,7 +10,7 @@ ifeq ($(shell uname -s),Darwin)
   export CGO_LDFLAGS = -mmacosx-version-min=11.0
 endif
 
-.PHONY: build cli install test app icons release release-cli clean
+.PHONY: build cli install test app icons release release-cli clean dev dev-once
 
 build:
 	go build -tags $(TAGS) -trimpath -ldflags="$(LDFLAGS)" -o dial .
@@ -58,3 +58,22 @@ release-cli:
 
 clean:
 	rm -rf dial dial.exe dial.app dist
+
+# Development: the UI is served from internal/gui/assets and the window
+# reloads itself when a file there is saved; with fswatch installed, Go
+# changes rebuild and relaunch the app. Uses its own gateway port so a
+# running dial keeps serving the agents.
+DEV_ADDR ?= 127.0.0.1:3426
+DEV_UI ?= 127.0.0.1:3427
+dev:
+	@if command -v fswatch >/dev/null; then \
+	  while true; do \
+	    $(MAKE) --no-print-directory dev-once & pid=$$!; \
+	    fswatch -1 -r -e '.*' -i '\.go$$' -i '\.md$$' . >/dev/null; \
+	    echo "  go changed · rebuilding"; kill $$pid 2>/dev/null; pkill -x dial-dev 2>/dev/null; wait $$pid 2>/dev/null; \
+	  done; \
+	else $(MAKE) --no-print-directory dev-once; fi
+
+dev-once:
+	@go build -tags dev -o dial-dev . && echo "  dial-dev · UI from internal/gui/assets, reload on save · gateway $(DEV_ADDR)"
+	@DIAL_ADDR=$(DEV_ADDR) DIAL_DEV_UI=$(DEV_UI) ./dial-dev app

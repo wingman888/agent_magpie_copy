@@ -35,6 +35,16 @@ func stash(kv map[string]string) {
 	os.WriteFile(stashPath(), b, 0o600)
 }
 
+// forget drops stashed values without restoring them.
+func forget(keys ...string) {
+	m := stashLoad()
+	for _, k := range keys {
+		delete(m, k)
+	}
+	b, _ := json.MarshalIndent(m, "", "  ")
+	os.WriteFile(stashPath(), b, 0o600)
+}
+
 func unstash(key string) string {
 	m := stashLoad()
 	v := m[key]

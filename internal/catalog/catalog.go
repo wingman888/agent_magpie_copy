@@ -24,6 +24,22 @@ type Model struct {
 	Provider string // models.dev provider id
 	Released string // YYYY-MM-DD, used for ordering
 	Efforts  []string
+	Price    *Price // USD per million tokens, when models.dev lists it
+}
+
+// Price is what a model costs, in USD per million tokens.
+type Price struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cache_read"`
+	CacheWrite float64 `json:"cache_write"`
+}
+
+// Cost of a call at this price. Reasoning tokens are billed as output by
+// every vendor, and are already inside the output count.
+func (p Price) Cost(input, output, cacheRead, cacheWrite int) float64 {
+	return (float64(input)*p.Input + float64(output)*p.Output +
+		float64(cacheRead)*p.CacheRead + float64(cacheWrite)*p.CacheWrite) / 1e6
 }
 
 type mdProvider struct {
@@ -44,6 +60,7 @@ type mdModel struct {
 	Modalities struct {
 		Output []string `json:"output"`
 	} `json:"modalities"`
+	Cost *Price `json:"cost"`
 }
 
 const modelsDevURL = "https://models.dev/api.json"
@@ -162,6 +179,16 @@ func ProviderAvailable(provider string) bool {
 	return false
 }
 
+// PriceOf is the list price of a models.dev provider's model, if known.
+func PriceOf(providerID, modelID string) (Price, bool) {
+	if p, ok := load()[providerID]; ok {
+		if m, ok := p.Models[modelID]; ok && m.Cost != nil {
+			return *m.Cost, true
+		}
+	}
+	return Price{}, false
+}
+
 // Provider returns the text models of one models.dev provider, newest first.
 // Built-in models are merged in so the list is usable without any cache.
 func Provider(id string) []Model {
@@ -172,7 +199,7 @@ func Provider(id string) []Model {
 			if !textModel(m) {
 				continue
 			}
-			mm := Model{ID: m.ID, Name: m.Name, Provider: id, Released: m.ReleaseDate}
+			mm := Model{ID: m.ID, Name: m.Name, Provider: id, Released: m.ReleaseDate, Price: m.Cost}
 			for _, r := range m.Reasoning {
 				if r.Type == "effort" {
 					mm.Efforts = r.Values

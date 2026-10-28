@@ -1,7 +1,10 @@
 //go:build ignore
 
-// Icon generator. Everything dial shows is drawn from one glyph: a ring with a
-// gap at the bottom and a pointer, like a knob.
+// Icon generator. Everything dial shows is drawn from one glyph, "gateway":
+// three inputs come in from the left, two of them curving, and meet at a
+// hollow node in the middle; one line leaves to the right. Many models,
+// one endpoint. The same paths live in internal/gui/assets/index.html, on a
+// 44-unit grid.
 //
 //	go run build/icon/gen.go tray internal/gui/tray.png     # 44px black template icon (macOS menu bar)
 //	go run build/icon/gen.go app 64 internal/gui/icon.png   # coloured app icon at a given size
@@ -46,9 +49,6 @@ func main() {
 func tray() image.Image {
 	const S = 44
 	img := image.NewNRGBA(image.Rect(0, 0, S, S))
-	cx, cy := float64(S)/2, float64(S)/2
-	rOuter, rInner := 17.5, 14.0
-	px, py := cx+8.0*math.Cos(-math.Pi/4), cy+8.0*math.Sin(-math.Pi/4) // pointer tip, upper right
 	for y := 0; y < S; y++ {
 		for x := 0; x < S; x++ {
 			a := 0.0
@@ -57,16 +57,7 @@ func tray() image.Image {
 				for sx := 0; sx < 4; sx++ {
 					fx := float64(x) + (float64(sx)+0.5)/4
 					fy := float64(y) + (float64(sy)+0.5)/4
-					dx, dy := fx-cx, fy-cy
-					d := math.Hypot(dx, dy)
-					ang := math.Atan2(dy, dx) // -pi..pi, y down
-					// ring with a gap at the bottom (like a knob's travel)
-					inRing := d <= rOuter && d >= rInner && !(ang > math.Pi/2-0.55 && ang < math.Pi/2+0.55)
-					// pointer: thick segment from centre to tip
-					inPtr := segDist(fx, fy, cx, cy, px, py) <= 2.2
-					// hub
-					inHub := d <= 3.4
-					if inRing || inPtr || inHub {
+					if mark(fx, fy) {
 						a++
 					}
 				}
@@ -85,11 +76,9 @@ func app(n int) image.Image {
 	inset := S * 0.1
 	side := S - 2*inset
 	radius := side * 0.225
-	cx, cy := S/2, S/2
-	rOuter, rInner := side*0.30, side*0.235
-	ptrLen, ptrW := side*0.135, side*0.04
-	px, py := cx+ptrLen*math.Cos(-math.Pi/4), cy+ptrLen*math.Sin(-math.Pi/4)
-	hub := side * 0.062
+	// the mark fills 75% of the tile, as in the reference SVG (scale 14 on 824)
+	k := side * 0.747 / 44
+	ox, oy := inset+(side-44*k)/2, inset+(side-44*k)/2
 	bg1 := [3]float64{0x5b, 0x55, 0xf0} // top: lighter indigo
 	bg2 := [3]float64{0x3f, 0x37, 0xc9} // bottom: deeper
 	ss := 4
@@ -105,12 +94,7 @@ func app(n int) image.Image {
 					fy := float64(y) + (float64(sy)+0.5)/float64(ss)
 					if roundRect(fx, fy, inset, inset, side, side, radius) {
 						aBg++
-						dx, dy := fx-cx, fy-cy
-						d := math.Hypot(dx, dy)
-						ang := math.Atan2(dy, dx)
-						inRing := d <= rOuter && d >= rInner && !(ang > math.Pi/2-0.55 && ang < math.Pi/2+0.55)
-						inPtr := segDist(fx, fy, cx, cy, px, py) <= ptrW
-						if inRing || inPtr || d <= hub {
+						if mark((fx-ox)/k, (fy-oy)/k) {
 							aFg++
 						}
 					}
@@ -132,6 +116,45 @@ func app(n int) image.Image {
 		}
 	}
 	return img
+}
+
+// mark is the glyph on its 44-unit grid: a 4.5-wide ring of radius 6.5 about
+// (22,22); three inputs from x=5, the middle one straight and the outer two
+// curving in from y=11 and y=33; one straight output to x=39. Round caps.
+func mark(u, v float64) bool {
+	const w = 4.5
+	if d := math.Hypot(u-22, v-22); math.Abs(d-6.5) <= w/2 {
+		return true
+	}
+	if segDist(u, v, 5, 22, 15.5, 22) <= w/2 || segDist(u, v, 28.5, 22, 39, 22) <= w/2 {
+		return true
+	}
+	for _, c := range [][8]float64{
+		{5, 11, 12, 11, 11, 22, 16, 22},
+		{5, 33, 12, 33, 11, 22, 16, 22},
+	} {
+		if bezDist(u, v, c) <= w/2 {
+			return true
+		}
+	}
+	return false
+}
+
+// bezDist is the distance from (px,py) to a cubic bezier, flattened into
+// short segments; plenty for a stroke this wide.
+func bezDist(px, py float64, c [8]float64) float64 {
+	const n = 32
+	best := math.Inf(1)
+	x0, y0 := c[0], c[1]
+	for i := 1; i <= n; i++ {
+		t := float64(i) / n
+		m := 1 - t
+		x := m*m*m*c[0] + 3*m*m*t*c[2] + 3*m*t*t*c[4] + t*t*t*c[6]
+		y := m*m*m*c[1] + 3*m*m*t*c[3] + 3*m*t*t*c[5] + t*t*t*c[7]
+		best = math.Min(best, segDist(px, py, x0, y0, x, y))
+		x0, y0 = x, y
+	}
+	return best
 }
 
 func roundRect(px, py, x, y, w, h, r float64) bool {
