@@ -14,8 +14,8 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudebridge"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
-	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
@@ -44,8 +44,11 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
-  magpie import [-y] <link>       add a provider from a magpie://import link, after you confirm
+  magpie provider fallback <id> [provider/model… | none]   models to try when a provider is out of quota or down
+  magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
+  magpie accounts [agent]         the Claude Code and Codex subscriptions magpie remembers
+  magpie accounts switch <agent> <email>   sign the agent in to another of them
 
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
@@ -65,6 +68,7 @@ var (
 
 func main() {
 	gateway.Version = version
+	netproxy.Install()
 	update.GUI = hasGUI
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
@@ -77,23 +81,25 @@ func run(args []string) error {
 	agent.RenameLegacy()
 	if len(args) == 0 {
 		if hasGUI {
-			return runGUI(true)
+			return runGUI(true, "")
 		}
 		return tui.Run()
 	}
-	if len(args[0]) >= 7 && strings.EqualFold(args[0][:7], provider.Scheme+":") {
-		// a link handed over by the system; a GUI would confirm it in a window
-		return importCmd(args)
+	// a magpie:// link the system handed over (Windows, Linux): the app
+	// opens it for the user to confirm
+	if strings.HasPrefix(strings.ToLower(args[0]), "magpie:") {
+		if !hasGUI {
+			return importCmd(args)
+		}
+		return runGUI(false, args[0])
 	}
 	switch args[0] {
-	case "import":
-		return importCmd(args[1:])
 	case "tui":
 		return tui.Run()
 	case "app", "gui":
-		return runGUI(true)
+		return runGUI(true, "")
 	case "tray":
-		return runGUI(false)
+		return runGUI(false, "")
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return nil
@@ -115,6 +121,8 @@ func run(args []string) error {
 		return nil
 	case "save", "use", "rm", "profiles":
 		return profiles(args)
+	case "import":
+		return importCmd(args[1:])
 	case "providers":
 		return providers()
 	case "presets":
@@ -125,6 +133,8 @@ func run(args []string) error {
 		return models()
 	case "serve":
 		return serve()
+	case "accounts", "account":
+		return accountsCmd(args)
 	case "usage":
 		return usageCmd(args)
 	case "update":
@@ -185,6 +195,13 @@ func set(a *agent.Agent, key, value string) error {
 
 func fieldForValue(a *agent.Agent, v string) *agent.Field {
 	vals := a.Values()
+	// a model stays with the model, even where other fields offer it too
+	// (Claude Code's opus/sonnet/haiku/fable)
+	for _, o := range a.Fields[0].Options(vals) {
+		if o.Value == v {
+			return nil
+		}
+	}
 	for i := 1; i < len(a.Fields); i++ {
 		for _, o := range a.Fields[i].Options(vals) {
 			if o.Value == v {
@@ -213,6 +230,9 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
+				if v == "" && f.Quiet {
+					continue
+				}
 				if v == "" {
 					v = faint.Render("—")
 				}
