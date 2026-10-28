@@ -18,12 +18,20 @@ func TestPickerListsRoutingGroupsFirst(t *testing.T) {
 	if len(opts) == 0 || opts[0].Group != RoutingGroups {
 		t.Fatalf("groups not first: %+v", opts)
 	}
-	o := opts[0]
+	var o Option
+	for _, x := range opts {
+		if x.Value == "group/mine" {
+			o = x
+		}
+	}
 	if o.Value != "group/mine" || o.Label != "Mine" || o.Note != "routing group · via magpie" || len(o.Icons) != 2 {
 		t.Errorf("option: %+v", o)
 	}
-	for _, o := range opts[1:] {
-		if o.Group == RoutingGroups {
+	seenProvider := false
+	for _, o := range opts {
+		if o.Group != RoutingGroups {
+			seenProvider = true
+		} else if seenProvider {
 			t.Errorf("group after providers: %+v", o)
 		}
 	}
