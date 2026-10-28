@@ -1,9 +1,9 @@
-// Package provider holds the model vendors dial can reach: where each one
+// Package provider holds the model vendors magpie can reach: where each one
 // lives, which protocols it speaks, the API key the user typed in, and which
 // of its models should show up in the agents' pickers.
 //
 // Nothing here reads environment variables. A provider is exactly what the
-// user entered, kept in ~/.config/dial/providers.json (mode 0600).
+// user entered, kept in ~/.config/magpie/providers.json (mode 0600).
 package provider
 
 import (
@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-// Protocol is a wire API dial can speak to an upstream.
+// Protocol is a wire API magpie can speak to an upstream.
 type Protocol string
 
 const (
@@ -26,7 +26,7 @@ const (
 	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
-// Protocols in the order dial prefers them when it has to translate.
+// Protocols in the order magpie prefers them when it has to translate.
 var Protocols = []Protocol{Chat, Responses, Anthropic}
 
 // Provider is one configured vendor.
@@ -37,7 +37,7 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// Base URLs, one per protocol the vendor serves natively. dial appends
+	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
 	Chat      string `json:"chat,omitempty"`
@@ -52,6 +52,10 @@ type Provider struct {
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
+	// Hidden is set on an account the user removed from magpie; the
+	// agent stays signed in, magpie just leaves it alone.
+	Hidden bool `json:"hidden,omitempty"`
+
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
@@ -64,10 +68,10 @@ type file struct {
 // Path is the file the user's providers live in.
 func Path() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "dial", "providers.json")
+		return filepath.Join(x, "magpie", "providers.json")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "dial", "providers.json")
+	return filepath.Join(home, ".config", "magpie", "providers.json")
 }
 
 func load() file {
@@ -98,22 +102,35 @@ func store(f file) error {
 // model picks for one of those accounts.
 func All() []Provider {
 	stored := load().Providers
-	picks := map[string][]string{}
+	picks := map[string]Provider{}
 	var out []Provider
 	for _, p := range stored {
 		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			picks[p.ID] = p.Models
+			picks[p.ID] = p
 			continue
 		}
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken {
+		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models = picks[a.ID]
+		a.Models = picks[a.ID].Models
 		out = append(out, a)
+	}
+	return out
+}
+
+// Hidden lists the signed-in accounts the user removed from magpie.
+func Hidden() []Provider {
+	var out []Provider
+	for _, a := range Accounts() {
+		for _, p := range load().Providers {
+			if p.ID == a.ID && p.Hidden {
+				out = append(out, a)
+			}
+		}
 	}
 	return out
 }
@@ -135,7 +152,7 @@ func Find(id string) (*Provider, error) {
 			return &p, nil
 		}
 	}
-	return nil, fmt.Errorf("no provider %q — dial providers lists them", id)
+	return nil, fmt.Errorf("no provider %q — magpie providers lists them", id)
 }
 
 var idRe = regexp.MustCompile(`[^a-z0-9]+`)
@@ -154,15 +171,15 @@ func Save(p Provider) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
-	if p.ID == "dial" {
-		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
+	if p.ID == "magpie" {
+		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in
+		// agent's own sign-in. Saving it again brings a removed one back.
 		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
@@ -183,18 +200,18 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider. For an account it forgets the model picks;
-// signing out is the agent's job.
+// Delete removes a provider. An account is only hidden from magpie (its
+// model picks kept); signing out is the agent's job.
 func Delete(id string) error {
 	if _, ok := find(Accounts(), id); ok {
 		f := load()
-		keep := f.Providers[:0]
-		for _, p := range f.Providers {
-			if p.ID != id {
-				keep = append(keep, p)
+		for i := range f.Providers {
+			if f.Providers[i].ID == id {
+				f.Providers[i].Hidden = true
+				return store(f)
 			}
 		}
-		f.Providers = keep
+		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
 		return store(f)
 	}
 	f := load()
@@ -302,6 +319,14 @@ func (p Provider) Host() string {
 		}
 	}
 	return ""
+}
+
+// IsOpenCode reports whether the provider is OpenCode's gateway (Zen or Go),
+// which routes and caches by conversation and turns away requests that do
+// not name one in x-opencode-session.
+func (p Provider) IsOpenCode() bool {
+	h := p.Host()
+	return h == "opencode.ai" || strings.HasSuffix(h, ".opencode.ai")
 }
 
 // HostOf pulls the host out of a URL, for display.
