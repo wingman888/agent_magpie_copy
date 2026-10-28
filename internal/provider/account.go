@@ -2,11 +2,14 @@ package provider
 
 // Accounts: agents the user has signed in to, offered as providers.
 //
-// Claude Code, Codex CLI (ChatGPT), and Copilot logins are subscriptions with
-// models behind them. magpie reads the credentials the agent itself keeps on
-// disk or in the macOS Keychain, so every other agent can use those models
-// through the gateway. Nothing is stored twice: sign out of the agent and the
-// provider is gone.
+// A Codex CLI login (ChatGPT) or a Copilot login is a subscription with
+// models behind it. dial reads the credentials the agent itself keeps on
+// disk, so every other agent can use those models through the gateway.
+// Nothing is stored twice: sign out of the agent and the provider is gone.
+//
+// Claude Code is deliberately absent: Anthropic's terms keep a Claude
+// subscription's OAuth token for Claude Code alone. Excluded says so when
+// that sign-in exists, so its absence here is not a mystery.
 
 import (
 	"bytes"
@@ -14,7 +17,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,7 +30,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/dial/internal/catalog"
 )
 
 // Account is the signed-in agent behind a provider.
@@ -37,7 +39,7 @@ type Account struct {
 	User  string `json:"user"`           // who is signed in: an email, a GitHub login
 	Plan  string `json:"plan,omitempty"` // the subscription, when the agent says
 
-	// Stream is set when the backend only streams; magpie then translates
+	// Stream is set when the backend only streams; dial then translates
 	// a non-streaming request instead of relaying it.
 	Stream bool `json:"-"`
 
@@ -67,424 +69,49 @@ func (p Provider) Prepare(body []byte) []byte {
 	return body
 }
 
-// Exclusion is a sign-in magpie found but will not offer as a provider.
+// Exclusion is a sign-in dial found but will not offer as a provider.
 type Exclusion struct {
 	Agent string `json:"agent"`
 	Why   string `json:"why"`
 }
 
-// Excluded lists sign-ins magpie detects but cannot expose. It is currently
-// empty, but remains part of the API so the CLI and GUI can explain future
-// account types that are detectable but not usable.
-func Excluded() []Exclusion { return nil }
-
-const (
-	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	// These values mirror the genuine Claude Code release used by Alma. The
-	// installed CLI version wins when it is newer, keeping UA and cc_version in
-	// lockstep as Claude's model gates require.
-	claudeVersionFloor           = "2.1.280"
-	claudeSDKVersion             = "0.112.1"
-	claudeRuntimeVersion         = "v22.13.0"
-	claudeFingerprintSalt        = "59cf53e54c78"
-	claudeCCHSeed         uint64 = 0x6e52736ac806831e
-)
-
-var claudeHaikuBetas = "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219"
-var claudeDefaultBetas = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24"
-
-// claudeBase is Anthropic's API root. A var so tests can point it elsewhere.
-var claudeBase = "https://api.anthropic.com"
-
-// claudeTokenURL is where a Claude subscription's OAuth token is refreshed;
-// a var so tests can point it elsewhere.
-var claudeTokenURL = "https://platform.claude.com/v1/oauth/token"
-
-// claudeKeychain reads credentials from the macOS Keychain; a var so tests
-// never touch the machine's own login.
-var claudeKeychain = runtime.GOOS == "darwin"
-
 var (
-	claudeMu sync.Mutex // serializes refresh; a rotated token is written back once
-
-	claudeStatusMu   sync.Mutex
-	claudeStatusAt   time.Time
-	claudeStatusUser string
-	claudeStatusPlan string
-
-	claudeCacheMu  sync.Mutex
-	claudeCacheAt  time.Time
-	claudeCacheC   claudeCredentials
-	claudeCacheLoc claudeCredentialLocation
-	claudeCacheOK  bool
+	excludedMu   sync.Mutex
+	excludedAt   time.Time
+	excludedList []Exclusion
 )
 
-// claudeCacheTTL keeps All() from spawning `security` on every gateway
-// request while still noticing a fresh login quickly.
-const claudeCacheTTL = 10 * time.Second
-
-type claudeAuth struct {
-	AccessToken      string   `json:"accessToken"`
-	RefreshToken     string   `json:"refreshToken"`
-	ExpiresAt        int64    `json:"expiresAt"` // milliseconds since the Unix epoch
-	RefreshExpiresAt int64    `json:"refreshTokenExpiresAt"`
-	Scopes           []string `json:"scopes"`
-	SubscriptionType string   `json:"subscriptionType"`
-	RateLimitTier    string   `json:"rateLimitTier"`
+// Excluded lists the sign-ins dial leaves alone, and why. Claude Code's
+// credentials live in the macOS Keychain or ~/.claude/.credentials.json;
+// only their presence is checked, never their contents.
+func Excluded() []Exclusion {
+	excludedMu.Lock()
+	defer excludedMu.Unlock()
+	if time.Since(excludedAt) < time.Minute {
+		return excludedList
+	}
+	excludedAt, excludedList = time.Now(), nil
+	if claudeSignedIn() {
+		excludedList = append(excludedList, Exclusion{Agent: "claude",
+			Why: "Anthropic's terms keep a Claude subscription for Claude Code itself, so dial does not share it with other agents. Use an Anthropic API key as a provider instead."})
+	}
+	return excludedList
 }
 
-// claudeCredentials keeps the whole credential blob in raw, so refreshing a
-// token writes back everything else — MCP OAuth state included — untouched.
-type claudeCredentials struct {
-	raw   map[string]any
-	OAuth claudeAuth
-}
-
-func parseClaudeCredentials(b []byte) (claudeCredentials, bool) {
-	var raw map[string]any
-	if json.Unmarshal(b, &raw) != nil {
-		return claudeCredentials{}, false
-	}
-	c := claudeCredentials{raw: raw}
-	if o, ok := raw["claudeAiOauth"].(map[string]any); ok {
-		ob, _ := json.Marshal(o)
-		json.Unmarshal(ob, &c.OAuth)
-	}
-	return c, c.OAuth.AccessToken != ""
-}
-
-func (c claudeCredentials) marshal() ([]byte, error) {
-	raw := c.raw
-	if raw == nil {
-		raw = map[string]any{}
-	}
-	oauth, _ := raw["claudeAiOauth"].(map[string]any)
-	if oauth == nil {
-		oauth = map[string]any{}
-	}
-	oauth["accessToken"] = c.OAuth.AccessToken
-	oauth["refreshToken"] = c.OAuth.RefreshToken
-	oauth["expiresAt"] = c.OAuth.ExpiresAt
-	if c.OAuth.RefreshExpiresAt != 0 {
-		oauth["refreshTokenExpiresAt"] = c.OAuth.RefreshExpiresAt
-	}
-	if len(c.OAuth.Scopes) > 0 {
-		oauth["scopes"] = c.OAuth.Scopes
-	}
-	if c.OAuth.SubscriptionType != "" {
-		oauth["subscriptionType"] = c.OAuth.SubscriptionType
-	}
-	if c.OAuth.RateLimitTier != "" {
-		oauth["rateLimitTier"] = c.OAuth.RateLimitTier
-	}
-	raw["claudeAiOauth"] = oauth
-	return json.MarshalIndent(raw, "", "  ")
-}
-
-// claudeExpiry reads expiresAt whether a version stored seconds or ms.
-func claudeExpiry(v int64) time.Time {
-	if v < 1e12 {
-		return time.Unix(v, 0)
-	}
-	return time.UnixMilli(v)
-}
-
-type claudeCredentialLocation struct {
-	path     string
-	account  string
-	keychain bool
-}
-
-func readClaudeCredential() (claudeCredentials, claudeCredentialLocation, bool) {
+func claudeSignedIn() bool {
 	dir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if dir == "" {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".claude")
 	}
-	path := filepath.Join(dir, ".credentials.json")
-	if b, err := os.ReadFile(path); err == nil {
-		if c, ok := parseClaudeCredentials(b); ok {
-			return c, claudeCredentialLocation{path: path}, true
-		}
+	if _, err := os.Stat(filepath.Join(dir, ".credentials.json")); err == nil {
+		return true
 	}
-	if !claudeKeychain {
-		return claudeCredentials{}, claudeCredentialLocation{}, false
+	if runtime.GOOS == "darwin" {
+		// listing the item needs no Keychain prompt; reading it would
+		return exec.Command("security", "find-generic-password", "-s", "Claude Code-credentials").Run() == nil
 	}
-	out, err := exec.Command("security", "find-generic-password", "-s", "Claude Code-credentials", "-w").Output()
-	if err != nil {
-		return claudeCredentials{}, claudeCredentialLocation{}, false
-	}
-	c, ok := parseClaudeCredentials(bytes.TrimSpace(out))
-	return c, claudeCredentialLocation{keychain: true, account: os.Getenv("USER")}, ok
-}
-
-func claudeCredential() (claudeCredentials, claudeCredentialLocation, bool) {
-	claudeCacheMu.Lock()
-	defer claudeCacheMu.Unlock()
-	if time.Since(claudeCacheAt) < claudeCacheTTL {
-		return claudeCacheC, claudeCacheLoc, claudeCacheOK
-	}
-	c, loc, ok := readClaudeCredential()
-	claudeCacheC, claudeCacheLoc, claudeCacheOK, claudeCacheAt = c, loc, ok, time.Now()
-	return c, loc, ok
-}
-
-func cacheClaudeCredential(c claudeCredentials, loc claudeCredentialLocation) {
-	claudeCacheMu.Lock()
-	claudeCacheC, claudeCacheLoc, claudeCacheOK, claudeCacheAt = c, loc, true, time.Now()
-	claudeCacheMu.Unlock()
-}
-
-// forgetClaudeCredential drops the cache; tests use it between homes.
-func forgetClaudeCredential() {
-	claudeCacheMu.Lock()
-	claudeCacheAt = time.Time{}
-	claudeCacheMu.Unlock()
-}
-
-func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) error {
-	b, err := c.marshal()
-	if err != nil {
-		return err
-	}
-	if !loc.keychain {
-		if err := os.WriteFile(loc.path, append(b, '\n'), 0o600); err != nil {
-			return err
-		}
-	} else {
-		args := []string{"add-generic-password", "-U", "-s", "Claude Code-credentials"}
-		if loc.account != "" {
-			args = append(args, "-a", loc.account)
-		}
-		args = append(args, "-w", string(b))
-		if out, err := exec.Command("security", args...).CombinedOutput(); err != nil {
-			return fmt.Errorf("save Claude Code credentials: %v: %s", err, strings.TrimSpace(string(out)))
-		}
-	}
-	cacheClaudeCredential(c, loc)
-	return nil
-}
-
-func claudeExecutable() string {
-	if p, err := exec.LookPath("claude"); err == nil {
-		return p
-	}
-	home, _ := os.UserHomeDir()
-	for _, p := range []string{filepath.Join(home, ".local", "bin", "claude"), "/usr/local/bin/claude", "/opt/homebrew/bin/claude"} {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
-
-// claudeIdentity asks Claude Code itself which account is active. Its credential
-// blob intentionally contains tokens and plan metadata but no display identity;
-// `claude auth status --json` is the authoritative, non-secret view shown by the
-// CLI. Cache it briefly because the providers screen refreshes often.
-func claudeIdentity() (string, string) {
-	claudeStatusMu.Lock()
-	defer claudeStatusMu.Unlock()
-	if time.Since(claudeStatusAt) < 30*time.Second {
-		return claudeStatusUser, claudeStatusPlan
-	}
-	claudeStatusAt = time.Now()
-	path := claudeExecutable()
-	if path == "" {
-		return claudeStatusUser, claudeStatusPlan
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
-	if err != nil {
-		return claudeStatusUser, claudeStatusPlan
-	}
-	var status struct {
-		LoggedIn         bool   `json:"loggedIn"`
-		Email            string `json:"email"`
-		SubscriptionType string `json:"subscriptionType"`
-	}
-	if json.Unmarshal(out, &status) == nil && status.LoggedIn {
-		claudeStatusUser = strings.TrimSpace(status.Email)
-		claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
-	}
-	return claudeStatusUser, claudeStatusPlan
-}
-
-func claudeAccount() (Provider, bool) {
-	c, _, ok := claudeCredential()
-	if !ok {
-		return Provider{}, false
-	}
-	user, statusPlan := claudeIdentity()
-	plan := c.OAuth.SubscriptionType
-	if statusPlan != "" {
-		plan = statusPlan
-	}
-	if user == "" {
-		user = "Claude account"
-		if plan != "" {
-			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
-		}
-	}
-	acct := &Account{Agent: "claude", User: user, Plan: plan}
-	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
-		tok, err := claudeToken(ctx)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("User-Agent", claudeUserAgent())
-		req.Header.Set("X-Claude-Code-Session-Id", claudeSessionID())
-		req.Header.Set("anthropic-beta", claudeBetaHeader(claudeModelOf(body)))
-		req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-		req.Header.Set("x-app", "cli")
-		req.Header.Set("x-client-request-id", randomUUID())
-		for k, v := range claudeStainlessHeaders() {
-			req.Header.Set(k, v)
-		}
-		return nil
-	}
-	acct.body = claudeBody
-	acct.models = func() []catalog.Model { return catalog.Provider("anthropic") }
-	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := claudeModels(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return ms, catalog.SaveLive("claude", claudeBase, ms)
-	}
-	return Provider{ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Anthropic: claudeBase,
-		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}, true
-}
-
-// claudeModels asks Anthropic's Models API, authenticated with the account's
-// own OAuth token, so the picker follows the vendor instead of a snapshot.
-// Nothing here is compiled in: a new model shows up the moment Anthropic
-// lists it (which is what the refresh button runs).
-func claudeModels(ctx context.Context) ([]catalog.Model, error) {
-	tok, err := claudeToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var out []catalog.Model
-	after := ""
-	for {
-		u := claudeBase + "/v1/models?limit=1000"
-		if after != "" {
-			u += "&after_id=" + url.QueryEscape(after)
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("anthropic-version", "2023-06-01")
-		req.Header.Set("anthropic-beta", claudeBetaHeader(""))
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", claudeUserAgent())
-		res, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, errors.New("Claude model list: " + err.Error())
-		}
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
-		res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("Claude model list: %s", res.Status)
-		}
-		var page struct {
-			Data []struct {
-				ID          string `json:"id"`
-				DisplayName string `json:"display_name"`
-			} `json:"data"`
-			HasMore bool   `json:"has_more"`
-			LastID  string `json:"last_id"`
-		}
-		if json.Unmarshal(b, &page) != nil {
-			return nil, errors.New("Claude model list: unexpected payload")
-		}
-		for _, m := range page.Data {
-			if m.ID == "" {
-				continue
-			}
-			name := m.DisplayName
-			if name == "" {
-				name = m.ID
-			}
-			out = append(out, catalog.Model{ID: m.ID, Name: name, Provider: "anthropic"})
-		}
-		if !page.HasMore || page.LastID == "" || page.LastID == after {
-			break
-		}
-		after = page.LastID
-	}
-	if len(out) == 0 {
-		return nil, errors.New("Claude listed no models")
-	}
-	return out, nil
-}
-
-// claudeFresh reports whether a token is usable for the next few minutes.
-func claudeFresh(c claudeCredentials) bool {
-	return c.OAuth.AccessToken != "" &&
-		(c.OAuth.ExpiresAt == 0 || time.Until(claudeExpiry(c.OAuth.ExpiresAt)) > 5*time.Minute)
-}
-
-// claudeToken returns a usable access token, refreshing it through Anthropic
-// when it is about to expire. A refresh rotates the refresh token, so the new
-// pair goes back where Claude Code will look for it.
-func claudeToken(ctx context.Context) (string, error) {
-	claudeMu.Lock()
-	defer claudeMu.Unlock()
-	c, loc, ok := claudeCredential()
-	if !ok {
-		return "", errors.New("Claude Code is signed out; run claude auth login")
-	}
-	if !claudeFresh(c) {
-		// Claude Code itself may have rotated the token since the cache was
-		// filled; a stale refresh token would be rejected, so look again.
-		if latest, latestLoc, ok := readClaudeCredential(); ok {
-			c, loc = latest, latestLoc
-		}
-	}
-	if claudeFresh(c) {
-		return c.OAuth.AccessToken, nil
-	}
-	if c.OAuth.RefreshToken == "" {
-		return "", errors.New("Claude Code OAuth token expired; run claude auth login")
-	}
-	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": c.OAuth.RefreshToken,
-		"client_id": claudeClientID})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeTokenURL, bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", errors.New("Claude Code token refresh: " + err.Error())
-	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	var fresh struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-	}
-	if res.StatusCode != http.StatusOK || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return "", errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
-	}
-	c.OAuth.AccessToken = fresh.AccessToken
-	if fresh.RefreshToken != "" {
-		c.OAuth.RefreshToken = fresh.RefreshToken
-	}
-	if fresh.ExpiresIn > 0 {
-		c.OAuth.ExpiresAt = time.Now().Add(time.Duration(fresh.ExpiresIn) * time.Second).UnixMilli()
-	}
-	if err := saveClaudeCredential(loc, c); err != nil {
-		return "", err
-	}
-	return fresh.AccessToken, nil
+	return false
 }
 
 // Accounts lists the signed-in agents as providers.
@@ -495,9 +122,6 @@ func Accounts() []Provider {
 		cfg = filepath.Join(home, ".config")
 	}
 	var out []Provider
-	if p, ok := claudeAccount(); ok {
-		out = append(out, p)
-	}
 	if p, ok := codexAccount(home); ok {
 		out = append(out, p)
 	}
@@ -591,7 +215,7 @@ func codexAccount(home string) (Provider, bool) {
 			req.Header.Set("chatgpt-account-id", accountID)
 		}
 		req.Header.Set("OpenAI-Beta", "responses=experimental")
-		req.Header.Set("originator", "magpie")
+		req.Header.Set("originator", "dial")
 		return nil
 	}
 	acct.body = codexBody
@@ -774,6 +398,18 @@ func copilotAccount(cfg string) (Provider, bool) {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
+	}
+	acct.models = func() []catalog.Model {
+		if live, _, ok := catalog.Live("copilot"); ok {
+			return live
+		}
+		var out []catalog.Model
+		for _, m := range catalog.Builtin("copilot") {
+			if m.ID != "auto" {
+				out = append(out, m)
+			}
+		}
+		return out
 	}
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
 		ms, err := copilotModels(ctx, app.Token)
