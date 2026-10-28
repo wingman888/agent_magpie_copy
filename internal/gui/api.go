@@ -14,12 +14,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yetone/dial/internal/agent"
-	"github.com/yetone/dial/internal/catalog"
-	"github.com/yetone/dial/internal/gateway"
-	"github.com/yetone/dial/internal/profile"
-	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/profile"
+	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
+
+// Version is the build's version string, shown in Settings.
+var Version = "dev"
 
 //go:embed assets
 var assets embed.FS
@@ -27,7 +32,8 @@ var assets embed.FS
 // Windows is what the API needs from the host application.
 type Windows interface {
 	HidePanel()
-	ShowMain()
+	// ShowMain brings the window up, on the named tab when view is set.
+	ShowMain(view string)
 	Quit()
 	// OpenURL hands a link to the system browser.
 	OpenURL(url string)
@@ -56,14 +62,34 @@ type profileJSON struct {
 }
 
 type stateJSON struct {
-	Agents   []agentJSON   `json:"agents"`
-	Profiles []profileJSON `json:"profiles"`
-	Catalog  string        `json:"catalog"`
-	Notice   string        `json:"notice,omitempty"` // advice after a change, e.g. "restart Codex"
+	Agents   []agentJSON       `json:"agents"`
+	Profiles []profileJSON     `json:"profiles"`
+	Catalog  string            `json:"catalog"`
+	Notice   string            `json:"notice,omitempty"` // advice after a change, e.g. "restart Codex"
+	Settings settings.Settings `json:"settings"`
+}
+
+// settingsJSON is the Settings page: the two choices plus the facts it shows.
+type settingsJSON struct {
+	settings.Settings
+	Version string `json:"version"`
+	Dir     string `json:"dir"`     // where magpie keeps its files, as shown
+	Path    string `json:"path"`    // the same, absolute, for opening it
+	Gateway string `json:"gateway"` // the local endpoint
+	// the proxy vendor requests go through now, and where it came from:
+	// settings, environment, system, off or none
+	ProxyNow    string `json:"proxyNow"`
+	ProxySource string `json:"proxySource"`
+}
+
+func settingsState() settingsJSON {
+	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Path: settings.Dir(), Gateway: gateway.URL()}
+	s.ProxyNow, s.ProxySource = netproxy.Describe()
+	return s
 }
 
 // Handler serves the embedded UI and the JSON API.
-// gw is the gateway this process serves, or nil when another dial has it.
+// gw is the gateway this process serves, or nil when another magpie has it.
 func Handler(w Windows, gw *gateway.Server) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", devPage(http.FileServer(http.FS(staticFS()))))
@@ -144,13 +170,30 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		writeJSON(rw, state())
 	})
 	providerRoutes(mux, w, gw)
+	importRoutes(mux)
 	usageRoutes(mux)
+	updateRoutes(mux, w)
+	mux.HandleFunc("GET /api/settings", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, settingsState())
+	})
+	mux.HandleFunc("POST /api/settings", func(rw http.ResponseWriter, r *http.Request) {
+		var in settings.Settings
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if err := settings.Save(in); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
 	mux.HandleFunc("POST /api/window/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		switch r.PathValue("action") {
 		case "hide":
 			w.HidePanel()
 		case "main":
-			w.ShowMain()
+			w.ShowMain(r.URL.Query().Get("view"))
 		case "quit":
 			w.Quit()
 		case "fit":
@@ -165,7 +208,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 }
 
 func state() stateJSON {
-	s := stateJSON{Agents: []agentJSON{}, Profiles: []profileJSON{}, Catalog: catalog.Source()}
+	s := stateJSON{Agents: []agentJSON{}, Profiles: []profileJSON{}, Catalog: catalog.Source(), Settings: settings.Load()}
 	for _, a := range agent.Detected() {
 		vals := a.Values()
 		aj := agentJSON{ID: a.ID, Name: a.Name, Icon: a.Icon, Path: tilde(a.Path)}
