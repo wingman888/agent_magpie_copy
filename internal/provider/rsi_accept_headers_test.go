@@ -132,7 +132,7 @@ func TestAcceptCatalogFetchHeaders(t *testing.T) {
 		t.Fatalf("fetch: %v %v", ms, err)
 	}
 	h := seen[0]
-	if v := h["x-org"]; len(v) != 1 || v[0] != "acme" {
+	if h.Get("x-org") != "acme" {
 		t.Errorf("x-org missing: %v", h)
 	}
 	if h.Get("Authorization") != "Custom abc" {

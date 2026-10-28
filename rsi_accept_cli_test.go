@@ -73,7 +73,7 @@ func TestAcceptCLIHeaders(t *testing.T) {
 	mu.Lock()
 	ok := false
 	for _, h := range seen {
-		if len(h["x-id"]) == 1 && h["x-id"][0] == "1" {
+		if h.Get("x-id") == "1" {
 			ok = true
 		}
 	}
