@@ -11,10 +11,10 @@ func TestSeveralKeys(t *testing.T) {
 	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1", Key: "sk-personal-1111"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddKey("relay", "Team", "sk-team-2222"); err != nil {
+	if err := AddKey("relay", "Team", "sk-team-2222", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddKey("relay", "", "sk-team-2222"); err == nil {
+	if err := AddKey("relay", "", "sk-team-2222", ""); err == nil {
 		t.Fatal("the same key was added twice")
 	}
 	p, _ := Find("relay")
