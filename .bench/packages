@@ -1,1 +1,1 @@
-./. ./internal/provider
+./. ./internal/gateway ./internal/provider
