@@ -30,6 +30,7 @@ type candidate struct {
 	p     provider.Provider
 	model string
 	rest  string // what rests after a failure: the provider, or one of its keys
+	fit   int    // how well its key suits the request, 0 best
 }
 
 // label names a candidate in a call's record: the provider, and the key
@@ -104,41 +105,32 @@ func keyFit(q provider.Provider, k provider.KeyAccount, family int, from provide
 // left out.
 func perKey(p provider.Provider, model string, from provider.Protocol) []candidate {
 	if p.Account != nil {
-		out := []candidate{{p, model, p.ID}}
+		out := []candidate{{p: p, model: model, rest: p.ID}}
 		for _, q := range p.AlsoOn() {
-			out = append(out, candidate{q, model, p.ID + "@" + q.Account.User})
+			out = append(out, candidate{p: q, model: model, rest: p.ID + "@" + q.Account.User})
 		}
 		return out
 	}
 	keys := p.KeysOn()
 	family := modelFamily(model)
 	var out []candidate
-	var fit []int
 	for _, k := range keys {
 		q := p.WithKey(k)
 		if k.Protocol != "" && q.Base(k.Protocol) == "" {
 			continue
 		}
-		c := candidate{q, model, p.ID}
+		c := candidate{p: q, model: model, rest: p.ID}
 		if len(keys) > 1 {
 			c.rest = p.ID + "#" + provider.KeyID(k.Key)
 		}
+		c.fit = keyFit(q, k, family, from)
 		out = append(out, c)
-		fit = append(fit, keyFit(q, k, family, from))
 	}
 	if len(out) == 0 {
-		return []candidate{{p, model, p.ID}}
+		return []candidate{{p: p, model: model, rest: p.ID}}
 	}
-	idx := make([]int, len(out))
-	for i := range idx {
-		idx[i] = i
-	}
-	sort.SliceStable(idx, func(a, b int) bool { return fit[idx[a]] < fit[idx[b]] })
-	sorted := make([]candidate, len(out))
-	for i, j := range idx {
-		sorted[i] = out[j]
-	}
-	return sorted
+	sort.SliceStable(out, func(a, b int) bool { return out[a].fit < out[b].fit })
+	return out
 }
 
 // candidates is the primary and then its fallbacks, those resting after a
