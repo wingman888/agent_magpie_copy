@@ -100,23 +100,23 @@ func lastRoute(t *testing.T, s *gateway.Server) gateway.Route {
 
 func TestAcceptGroupRouting(t *testing.T) {
 	isolate(t)
-	a, b := &keyed{}, &keyed{fail: map[string]int{"kb": 429}}
-	serveOn(t, "a", "ka", []string{"m", "only-a"}, a)
-	serveOn(t, "b", "kb", []string{"vendor/m"}, b)
-	if err := provider.SaveGroup(provider.Group{Name: "Mine", Members: []string{"b/vendor/m", "a/only-a"}, Routing: provider.Ordered}); err != nil {
+	a, b := &keyed{}, &keyed{fail: map[string]int{"kxb": 429}}
+	serveOn(t, "xa", "kxa", []string{"m", "only-a"}, a)
+	serveOn(t, "xb", "kxb", []string{"vendor/m"}, b)
+	if err := provider.SaveGroup(provider.Group{Name: "Mine", Members: []string{"xb/vendor/m", "xa/only-a"}, Routing: provider.Ordered}); err != nil {
 		t.Fatal(err)
 	}
 	s := gateway.New()
 	code, body := postAs(t, s, "", `{"model":"group/mine","messages":[{"role":"user","content":"hi"}]}`)
-	if code != 200 || !strings.Contains(body, "from ka") || strings.Join(b.log(), ",") != "kb" {
+	if code != 200 || !strings.Contains(body, "from kxa") || strings.Join(b.log(), ",") != "kxb" {
 		t.Fatalf("group: %d %s, b tried %v", code, body, b.log())
 	}
 	r := lastRoute(t, s)
 	if r.Group == nil || r.Group.ID != "mine" || r.Group.Name != "Mine" || len(r.Group.Members) != 2 || len(r.Order) != 2 ||
-		r.Order[0].Provider != "b" || r.Order[1].Model != "only-a" {
+		r.Order[0].Provider != "xb" || r.Order[1].Model != "only-a" {
 		t.Fatalf("trace: %+v %+v", r.Group, r.Order)
 	}
-	if r.Group.Members[0] != "b/vendor/m" || r.Group.Members[1] != "a/only-a" {
+	if r.Group.Members[0] != "xb/vendor/m" || r.Group.Members[1] != "xa/only-a" {
 		t.Fatalf("members: %v", r.Group.Members)
 	}
 
@@ -137,7 +137,7 @@ func TestAcceptGroupRouting(t *testing.T) {
 	if code, _ := postAs(t, s, "", `{"model":"group/auto-m","messages":[{"role":"user","content":"hi"}]}`); code != 404 {
 		t.Fatalf("hidden group: %d", code)
 	}
-	postAs(t, s, "", `{"model":"a/m","messages":[{"role":"user","content":"hi"}]}`)
+	postAs(t, s, "", `{"model":"xa/m","messages":[{"role":"user","content":"hi"}]}`)
 	if r := lastRoute(t, s); r.Group != nil {
 		t.Fatalf("group on a plain request: %+v", r.Group)
 	}
@@ -277,14 +277,14 @@ func TestAcceptKeyPoolsByProtocol(t *testing.T) {
 	v := &keyed{}
 	up := httptest.NewServer(v)
 	t.Cleanup(up.Close)
-	p := provider.Provider{ID: "mix", Name: "MIX", Key: "k1", KeyProtocol: provider.Chat, Models: []string{"m"}, Chat: up.URL + "/v1",
+	p := provider.Provider{ID: "mixpool", Name: "MIX", Key: "k1", KeyProtocol: provider.Chat, Models: []string{"m"}, Chat: up.URL + "/v1",
 		Keys: []provider.KeyAccount{{Key: "k2"}, {Key: "k3", Protocol: provider.Chat}}, Routing: provider.Rotate}
 	if err := provider.Save(p); err != nil {
 		t.Fatal(err)
 	}
 	s := gateway.New()
 	for range 4 {
-		postAs(t, s, "", `{"model":"mix/m","messages":[{"role":"user","content":"hi"}]}`)
+		postAs(t, s, "", `{"model":"mixpool/m","messages":[{"role":"user","content":"hi"}]}`)
 	}
 	if got := strings.Join(v.log(), ","); got != "k1,k3,k1,k3" {
 		t.Fatalf("in turn went %s", got)
@@ -294,7 +294,7 @@ func TestAcceptKeyPoolsByProtocol(t *testing.T) {
 		t.Fatalf("trace: %+v", r.Order)
 	}
 	v.setFail(map[string]int{"k1": 429, "k3": 429})
-	code, body := postAs(t, s, "", `{"model":"mix/m","messages":[{"role":"user","content":"hi"}]}`)
+	code, body := postAs(t, s, "", `{"model":"mixpool/m","messages":[{"role":"user","content":"hi"}]}`)
 	if code != 200 || !strings.Contains(body, "from k2") {
 		t.Fatalf("aside key: %d %s, tried %v", code, body, v.log())
 	}
