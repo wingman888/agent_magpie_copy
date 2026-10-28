@@ -35,41 +35,97 @@ type SubscriptionQuota struct {
 
 var subscriptionUsageCache struct {
 	sync.Mutex
-	at   time.Time
-	data []SubscriptionQuota
+	at      time.Time
+	data    []SubscriptionQuota
+	pending chan struct{} // closed when the refresh in flight is done
 }
+
+// subscriptionTimeout bounds one refresh; the vendors' endpoints can be
+// unreachable without a proxy, and then each fetch would hang to it.
+var subscriptionTimeout = 10 * time.Second
 
 // SubscriptionUsage returns rolling quotas for signed-in first-party agents.
 // Results are cached because these private account endpoints are aggressively
-// rate limited when several CLI sessions are active.
+// rate limited when several CLI sessions are active. Once there is something
+// cached it comes back at once, and a stale copy is refreshed in the
+// background; only the very first call waits, for as long as ctx allows.
 func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
-	subscriptionUsageCache.Lock()
-	defer subscriptionUsageCache.Unlock()
-	if time.Since(subscriptionUsageCache.at) < time.Minute && subscriptionUsageCache.data != nil {
-		return append([]SubscriptionQuota(nil), subscriptionUsageCache.data...)
+	c := &subscriptionUsageCache
+	c.Lock()
+	have, fresh := c.data != nil, time.Since(c.at) < time.Minute
+	if !fresh && c.pending == nil {
+		done := make(chan struct{})
+		c.pending = done
+		go func() {
+			out := fetchSubscriptionUsage()
+			c.Lock()
+			c.at, c.data, c.pending = time.Now(), out, nil
+			c.Unlock()
+			close(done)
+		}()
 	}
-	var out []SubscriptionQuota
+	pending := c.pending
+	c.Unlock()
+	if !have && pending != nil {
+		select {
+		case <-pending:
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	c.Lock()
+	defer c.Unlock()
+	return visibleQuotas(c.data)
+}
+
+// visibleQuotas drops accounts removed from magpie since the last refresh.
+func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
 	hidden := map[string]bool{}
 	for _, p := range load().Providers {
 		hidden[p.ID] = p.Hidden
 	}
+	out := []SubscriptionQuota{}
+	for _, q := range all {
+		if !hidden[q.Provider] {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// fetchSubscriptionUsage asks every signed-in vendor at once.
+func fetchSubscriptionUsage() []SubscriptionQuota {
+	ctx, cancel := context.WithTimeout(context.Background(), subscriptionTimeout)
+	defer cancel()
+	hidden := map[string]bool{}
+	for _, p := range load().Providers {
+		hidden[p.ID] = p.Hidden
+	}
+	var fetches []func() SubscriptionQuota
 	if _, ok := claudeAccount(); ok && !hidden["claude"] {
-		out = append(out, claudeSubscriptionUsage(ctx))
+		fetches = append(fetches, func() SubscriptionQuota { return claudeSubscriptionUsage(ctx) })
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if p, ok := codexAccount(home); ok && !hidden[p.ID] {
-			out = append(out, codexSubscriptionUsage(ctx, filepath.Join(home, ".codex", "auth.json")))
+		if _, ok := codexAccount(home); ok && !hidden["codex"] {
+			auth := filepath.Join(home, ".codex", "auth.json")
+			fetches = append(fetches, func() SubscriptionQuota { return codexSubscriptionUsage(ctx, auth) })
 		}
 		cfg := os.Getenv("XDG_CONFIG_HOME")
 		if cfg == "" {
 			cfg = filepath.Join(home, ".config")
 		}
 		if app, ok := copilotLogin(cfg); ok && !hidden["copilot"] {
-			out = append(out, copilotSubscriptionUsage(ctx, app.Token))
+			fetches = append(fetches, func() SubscriptionQuota { return copilotSubscriptionUsage(ctx, app.Token) })
 		}
 	}
-	subscriptionUsageCache.at, subscriptionUsageCache.data = time.Now(), out
-	return append([]SubscriptionQuota(nil), out...)
+	out := make([]SubscriptionQuota, len(fetches))
+	var wg sync.WaitGroup
+	for i, f := range fetches {
+		wg.Add(1)
+		go func() { defer wg.Done(); out[i] = f() }()
+	}
+	wg.Wait()
+	return out
 }
 
 func accountJSON(ctx context.Context, url, token string, headers map[string]string, dst any) error {

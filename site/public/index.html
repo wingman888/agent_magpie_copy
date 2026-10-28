@@ -120,7 +120,7 @@ nav .links a:hover { color: var(--ink); }
 .btn.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
 .btn svg { width: 16px; height: 16px; }
 
-.hero { padding: 88px 0 40px; display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center; }
+.hero { padding: 80px 0 32px; display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center; }
 .hero h1 { font-size: clamp(40px, 6vw, 64px); line-height: 1.04; letter-spacing: -.035em; font-weight: 700; margin: 0 0 22px; }
 .hero h1 span { color: var(--ink3); }
 .hero p.lede { font-size: 19px; color: var(--ink2); margin: 0 0 32px; max-width: 30em; }
@@ -129,6 +129,18 @@ nav .links a:hover { color: var(--ink); }
 .meta a { color: var(--ink2); }
 .shot { position: relative; }
 .shot picture img { width: 100%; height: auto; height: auto; max-width: 440px; display: block; margin: 0 auto; border-radius: 14px; box-shadow: var(--shadow); border: 1px solid var(--line); }
+
+.sponsor { padding: 24px 0 8px; text-align: center; }
+.sponsor p { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink3); margin: 0 0 14px; }
+.sponsor .card { display: inline-flex; align-items: center; gap: 20px; max-width: 100%; padding: 12px 20px 12px 22px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; text-decoration: none; text-align: left; transition: border-color .2s, box-shadow .2s, transform .2s; }
+.sponsor .card:hover { border-color: color-mix(in srgb, var(--ink) 18%, var(--line)); box-shadow: var(--shadow); transform: translateY(-1px); }
+.sponsor .card img { flex: none; width: 124px; height: auto; opacity: .92; }
+.sponsor .card hr { flex: none; width: 1px; height: 28px; margin: 0; border: 0; background: var(--line); }
+.sponsor .card span { font-size: 14px; line-height: 1.5; color: var(--ink2); }
+.sponsor .card i { flex: none; font-style: normal; color: var(--ink3); transition: color .2s, transform .2s; }
+.sponsor .card:hover i { color: var(--ink); transform: translateX(2px); }
+.sponsor .more { display: inline-block; margin-top: 10px; font-size: 12.5px; color: var(--ink3); text-decoration: none; }
+.sponsor .more:hover { color: var(--ink2); }
 
 .agents { padding: 40px 0 16px; text-align: center; }
 .agents p { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink3); margin: 0 0 22px; }
@@ -230,6 +242,8 @@ footer a:hover { color: var(--ink); }
 @media (max-width: 560px) {
   .wrap { padding: 0 16px; }
   .grid { grid-template-columns: 1fr; }
+  .sponsor .card { flex-direction: column; gap: 10px; padding: 16px 20px; text-align: center; }
+  .sponsor .card hr, .sponsor .card i { display: none; }
   nav .links { gap: 16px; }
   nav .wrap { gap: 14px; }
   nav .links a.hide-sm { display: none; }
@@ -281,6 +295,17 @@ footer a:hover { color: var(--ink); }
         <img loading="lazy" class="pick for-dark" src="/img/picker-dark.png" width="440" height="555" alt="Codex's model picker in magpie, listing DeepSeek, Kimi and GLM models">
     </div>
   </header>
+
+  <aside class="sponsor" aria-label="Sponsor">
+    <p>Sponsored by</p>
+    <a class="card" href="https://yylx.io" target="_blank" rel="noopener sponsored">
+      <img class="bird" src="/img/sponsor-yylx.png" width="640" height="184" alt="鱼鱼连线 YYLX.IO AI Router">
+      <hr>
+      <span>One API gateway for Claude and GPT, tuned for Claude Code.</span>
+      <i aria-hidden="true">→</i>
+    </a>
+    <br><a class="more" href="mailto:yetoneful@gmail.com?subject=Sponsoring%20magpie">Become a sponsor</a>
+  </aside>
 
   <div class="agents">
     <p>Every agent</p>
