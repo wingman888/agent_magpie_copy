@@ -347,7 +347,12 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStart, MsgID: ch.ID, Model: ch.Model})
 	}
 	for _, c := range ch.Choices {
-		if t := c.Delta.ReasoningContent + c.Delta.Reasoning; t != "" {
+		// Some relays send the same thought under both names; one is enough.
+		t := c.Delta.ReasoningContent
+		if t == "" {
+			t = c.Delta.Reasoning
+		}
+		if t != "" {
 			emit(Event{Kind: KThink, Text: t})
 		}
 		if c.Delta.Content != nil && *c.Delta.Content != "" {
