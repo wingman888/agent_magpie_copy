@@ -40,9 +40,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
-  magpie backup [--no-keys] [file]    providers, keys, settings, profiles and agent models in one file, sealed with a passphrase
-  magpie restore [--no-agents] <file> put a backup in on this machine
-
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
@@ -149,10 +146,6 @@ func run(args []string) error {
 		return usageCmd(args)
 	case "update":
 		return updateCmd(args)
-	case "backup":
-		return backupCmd(args[1:])
-	case "restore":
-		return restoreCmd(args[1:])
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 		return claudebridge.RunMCP(args[1:])
 	}
