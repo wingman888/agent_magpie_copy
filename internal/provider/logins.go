@@ -45,11 +45,6 @@ type savedLogin struct {
 	// Profile is Claude Code's oauthAccount from .claude.json, which says
 	// whose credentials those are.
 	Profile json.RawMessage `json:"profile,omitempty"`
-	// Home is where a Grok account magpie signed in keeps its sign-in; the
-	// Grok CLI's own account has none (see grok_accounts.go). First puts a
-	// Grok or Copilot account ahead of the agent's own (side_logins.go).
-	Home  string `json:"home,omitempty"`
-	First bool   `json:"first,omitempty"`
 }
 
 var (
@@ -112,56 +107,13 @@ func writePrivate(path string, b []byte) error {
 
 func upsertLogin(ls []savedLogin, l savedLogin) []savedLogin {
 	for i := range ls {
-		if sameLogin(ls[i], l) {
+		if ls[i].Agent == l.Agent && strings.EqualFold(ls[i].User, l.User) {
 			l.On = l.On || ls[i].On
 			ls[i] = l
 			return ls
 		}
 	}
 	return append(ls, l)
-}
-
-// sameLogin says whether two saved logins are one account. A Claude
-// account is its email within an organization: one email can be a personal
-// Pro or Max and a seat on a Team, two subscriptions side by side.
-func sameLogin(a, b savedLogin) bool {
-	if a.Agent != b.Agent {
-		return false
-	}
-	if a.Agent == "claude" {
-		ea, oa := claudeWho(a.Profile)
-		eb, ob := claudeWho(b.Profile)
-		if ea != "" && eb != "" && oa != "" && ob != "" {
-			return strings.EqualFold(ea, eb) && oa == ob
-		}
-	}
-	return strings.EqualFold(a.User, b.User)
-}
-
-// claudeWho reads the email and organization of Claude Code's oauthAccount.
-func claudeWho(profile json.RawMessage) (email, org string) {
-	var acct struct {
-		Email string `json:"emailAddress"`
-		Org   string `json:"organizationUuid"`
-	}
-	if json.Unmarshal(profile, &acct) != nil {
-		return "", ""
-	}
-	return acct.Email, acct.Org
-}
-
-// claudeUser names a Claude account: its email, and for a seat on a Team
-// or Enterprise the organization too, so it reads apart from a personal
-// subscription of the same email.
-func claudeUser(email, plan string, acct map[string]any) string {
-	if email == "" || (plan != "team" && plan != "enterprise") {
-		return email
-	}
-	org, _ := acct["organizationName"].(string)
-	if org = strings.TrimSpace(org); org == "" || strings.Contains(org, email) {
-		org = strings.ToUpper(plan[:1]) + plan[1:]
-	}
-	return email + " · " + org
 }
 
 func codexAuthPath() string {
@@ -224,21 +176,18 @@ func liveLogin(agent string) (savedLogin, bool) {
 		if err != nil {
 			return savedLogin{}, false
 		}
-		// credentials a logout left behind are not a sign-in: Claude Code
-		// says so, and the account is not a provider either (claudeAccount)
-		user, _, signedOut := claudeIdentity()
-		if signedOut {
-			return savedLogin{}, false
-		}
 		l := savedLogin{Agent: agent, Plan: c.OAuth.SubscriptionType, Auth: b}
 		if m, err := readClaudeProfile(); err == nil {
 			if acct, ok := m["oauthAccount"].(map[string]any); ok {
-				email, _ := acct["emailAddress"].(string)
-				l.User = claudeUser(email, l.Plan, acct)
+				l.User, _ = acct["emailAddress"].(string)
 				l.Profile, _ = json.Marshal(acct)
 			}
 		}
 		if l.User == "" {
+			user, _, signedOut := claudeIdentity()
+			if signedOut {
+				return savedLogin{}, false
+			}
 			l.User = user
 		}
 		if l.User == "" {
@@ -278,15 +227,6 @@ func rememberLogins(force bool) {
 // Logins lists the remembered accounts of an agent ("" for every one),
 // the active one flagged.
 func Logins(agent string) []Login {
-	var side []Login
-	switch agent {
-	case "grok":
-		return grokLoginList()
-	case "copilot":
-		return copilotLoginList()
-	case "":
-		side = append(grokLoginList(), copilotLoginList()...)
-	}
 	rememberLogins(false)
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
@@ -298,26 +238,20 @@ func Logins(agent string) []Login {
 	}
 	var out []Login
 	for _, l := range readLogins() {
-		if (agent != "" && l.Agent != agent) || l.Agent == "grok" || l.Agent == "copilot" {
+		if agent != "" && l.Agent != agent {
 			continue
 		}
 		using := strings.EqualFold(active[l.Agent], l.User)
 		out = append(out, Login{Agent: l.Agent, User: l.User, Plan: l.Plan, Seen: l.Seen,
 			Active: using, On: using || l.On})
 	}
-	return append(out, side...)
+	return out
 }
 
 // SwitchLogin signs an agent in to a remembered account. Sessions of the
 // agent that are already running keep the account they started with until
 // they restart.
 func SwitchLogin(agent, user string) error {
-	switch agent {
-	case "grok":
-		return switchGrokLogin(user)
-	case "copilot":
-		return switchCopilotLogin(user)
-	}
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
 	ls := readLogins()
@@ -413,12 +347,6 @@ func putClaudeLogin(l savedLogin) error {
 // ForgetLogin drops a remembered account. The one an agent is signed in to
 // now can't be forgotten; it would only be remembered again.
 func ForgetLogin(agent, user string) error {
-	switch agent {
-	case "grok":
-		return forgetGrokLogin(user)
-	case "copilot":
-		return forgetCopilotLogin(user)
-	}
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
 	if live, ok := liveLogin(agent); ok && strings.EqualFold(live.User, user) {
@@ -444,7 +372,6 @@ func ForgetLogin(agent, user string) error {
 func forgetAccountCaches() {
 	forgetClaudeCredential()
 	forgetClaudeStatus()
-	forgetCursorStatus()
 	subscriptionUsageCache.Lock()
 	subscriptionUsageCache.at = time.Time{}
 	subscriptionUsageCache.data = nil

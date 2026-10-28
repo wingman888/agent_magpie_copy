@@ -20,8 +20,9 @@ type KeyAccount struct {
 	Name string `json:"name,omitempty"`
 	Key  string `json:"key"`
 	Off  bool   `json:"off,omitempty"`
-	// Protocol, when set, is the only one the key works with: some relays
-	// give out one key for Anthropic and another for OpenAI. Empty is any.
+
+	// Protocol limits the key to one protocol's endpoint; empty is any.
+	// Some relays sell one key for Anthropic and another for OpenAI.
 	Protocol Protocol `json:"protocol,omitempty"`
 }
 
@@ -33,7 +34,7 @@ type KeyInfo struct {
 	Active bool   `json:"active"` // the first, where requests go
 	On     bool   `json:"on"`     // in use: the first, or next in line
 
-	Protocol Protocol `json:"protocol,omitempty"` // the only one it works with
+	Protocol Protocol `json:"protocol,omitempty"` // the only protocol it's used for; empty is any
 }
 
 func keyID(key string) string {
@@ -62,7 +63,7 @@ func (p Provider) KeysOn() []KeyAccount {
 	if p.Key == "" {
 		return nil
 	}
-	out := []KeyAccount{p.first()}
+	out := []KeyAccount{{Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol}}
 	for _, k := range p.Keys {
 		if !k.Off && k.Key != "" {
 			out = append(out, k)
@@ -75,7 +76,7 @@ func (p Provider) KeysOn() []KeyAccount {
 // the ones before it. It becomes the first when the provider has none.
 func AddKey(id, name, key string, proto Protocol) error {
 	name, key = strings.TrimSpace(name), strings.TrimSpace(key)
-	if err := keyProtocolOK(proto); err != nil {
+	if err := checkKeyProtocol(proto); err != nil {
 		return err
 	}
 	if key == "" {
@@ -101,60 +102,30 @@ func AddKey(id, name, key string, proto Protocol) error {
 	return Save(*p)
 }
 
-// first is the first key as a KeyAccount, and setFirst makes k the first.
-func (p *Provider) first() KeyAccount {
-	return KeyAccount{Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol}
-}
-
-func (p *Provider) setFirst(k KeyAccount) {
-	p.Key, p.KeyName, p.KeyProtocol = k.Key, k.Name, k.Protocol
-}
-
-func keyProtocolOK(proto Protocol) error {
+// checkKeyProtocol accepts what a key can be limited to: nothing, or one
+// of the protocols a vendor serves.
+func checkKeyProtocol(proto Protocol) error {
 	switch proto {
 	case "", Chat, Responses, Anthropic:
 		return nil
 	}
-	return fmt.Errorf("unknown protocol %q", proto)
+	return fmt.Errorf("unknown protocol %q", string(proto))
 }
 
-// SetKeyProtocol says which one protocol a key works with; empty is any.
-func SetKeyProtocol(id, keyRef string, proto Protocol) error {
-	if err := keyProtocolOK(proto); err != nil {
-		return err
-	}
-	p, err := Find(id)
-	if err != nil {
-		return err
-	}
-	i, ok := findKey(p, keyRef)
-	if !ok {
-		return fmt.Errorf("%s has no such key", p.Name)
-	}
-	if i < 0 {
-		p.KeyProtocol = proto
-	} else {
-		p.Keys[i].Protocol = proto
-	}
-	return Save(*p)
-}
-
-// WithKey is p using key k: its endpoints narrowed to k's protocol when k
-// has one. It has none left when p doesn't serve that protocol.
+// WithKey is p using k: its key, name and protocol. A key limited to one
+// protocol keeps only that protocol's endpoint, so it's never sent to
+// another.
 func (p Provider) WithKey(k KeyAccount) Provider {
 	p.Key, p.KeyName, p.KeyProtocol = k.Key, k.Name, k.Protocol
 	if k.Protocol != "" {
-		for _, pr := range Protocols {
-			if pr != k.Protocol {
-				switch pr {
-				case Chat:
-					p.Chat = ""
-				case Responses:
-					p.Responses = ""
-				case Anthropic:
-					p.Anthropic = ""
-				}
-			}
+		if k.Protocol != Chat {
+			p.Chat = ""
+		}
+		if k.Protocol != Responses {
+			p.Responses = ""
+		}
+		if k.Protocol != Anthropic {
+			p.Anthropic = ""
 		}
 	}
 	return p
@@ -189,9 +160,8 @@ func UseKey(id, keyRef string) error {
 		return nil
 	}
 	k := p.Keys[i]
-	rest := append([]KeyAccount{p.first()}, append(p.Keys[:i:i], p.Keys[i+1:]...)...)
-	p.setFirst(k)
-	p.Keys = rest
+	rest := append([]KeyAccount{{Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol}}, append(p.Keys[:i:i], p.Keys[i+1:]...)...)
+	p.Key, p.KeyName, p.KeyProtocol, p.Keys = k.Key, k.Name, k.Protocol, rest
 	return Save(*p)
 }
 
@@ -200,8 +170,8 @@ func UseKey(id, keyRef string) error {
 func promote(p *Provider) (old KeyAccount, ok bool) {
 	for i, k := range p.Keys {
 		if !k.Off {
-			old = p.first()
-			p.setFirst(k)
+			old = KeyAccount{Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol}
+			p.Key, p.KeyName, p.KeyProtocol = k.Key, k.Name, k.Protocol
 			p.Keys = append(p.Keys[:i:i], p.Keys[i+1:]...)
 			return old, true
 		}
@@ -268,6 +238,28 @@ func RenameKey(id, keyRef, name string) error {
 		p.KeyName = name
 	} else {
 		p.Keys[i].Name = name
+	}
+	return Save(*p)
+}
+
+// SetKeyProtocol limits one of a provider's keys to a protocol; empty
+// lets it be used for any.
+func SetKeyProtocol(id, keyRef string, proto Protocol) error {
+	if err := checkKeyProtocol(proto); err != nil {
+		return err
+	}
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	i, ok := findKey(p, keyRef)
+	if !ok {
+		return fmt.Errorf("%s has no such key", p.Name)
+	}
+	if i < 0 {
+		p.KeyProtocol = proto
+	} else {
+		p.Keys[i].Protocol = proto
 	}
 	return Save(*p)
 }

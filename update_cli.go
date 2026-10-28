@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/yetone/magpie/internal/update"
@@ -33,19 +34,15 @@ func updateCmd(args []string) error {
 		return fmt.Errorf("this magpie was built from source; update it the way you built it, or get the release from %s", update.Site)
 	}
 	if app := update.Bundle(); app != "" {
-		if update.Stuck(app) != "" {
-			return fmt.Errorf("%s can't be replaced where it is; move magpie to Applications, or download the new version from %s", tilde(app), update.Site)
+		if !update.Writable(filepath.Dir(app)) {
+			return fmt.Errorf("cannot write to %s; download the new version from %s", filepath.Dir(app), update.Site)
 		}
 		fmt.Println(muted.Render("  downloading " + update.AppAsset() + " …"))
 		staged, err := update.Stage(ctx, rel, app)
 		if err != nil {
 			return err
 		}
-		err = update.Install(staged, app)
-		if update.NeedsAdmin(err) {
-			err = update.InstallAsAdmin(staged, app)
-		}
-		if err != nil {
+		if err := update.Install(staged, app); err != nil {
 			return err
 		}
 		fmt.Println(green.Render("✓"), "updated", tilde(app), "to", rel.Version, muted.Render("· quit and reopen magpie to use it"))
