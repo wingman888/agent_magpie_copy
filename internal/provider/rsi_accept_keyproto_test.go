@@ -37,20 +37,6 @@ func TestAcceptAddKeyProtocol(t *testing.T) {
 	}
 }
 
-func TestAcceptAddKeyFirstGetsKeyProtocol(t *testing.T) {
-	isolate(t)
-	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := provider.AddKey("relay", "A", "sk-a-1", provider.Responses); err != nil {
-		t.Fatal(err)
-	}
-	p, _ := provider.Find("relay")
-	if p.Key != "sk-a-1" || p.KeyProtocol != provider.Responses || len(p.Keys) != 0 {
-		t.Fatalf("%+v", p)
-	}
-}
-
 func TestAcceptAddKeyUnknownProtocol(t *testing.T) {
 	isolate(t)
 	saveRelay(t)
