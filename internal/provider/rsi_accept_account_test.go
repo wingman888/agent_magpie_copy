@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"fmt"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -51,9 +52,18 @@ func codexLogin(t *testing.T, home string, mode, access string) {
 	})
 }
 
+// each login gets its own OAuth token so a cached session from an earlier
+// test (whose servers are gone) is never reused
+var (
+	tokSeq int
+	curTok string
+)
+
 func copilotLogin(home string, t *testing.T) {
+	tokSeq++
+	curTok = fmt.Sprintf("gho_%d", tokSeq)
 	wfile(t, filepath.Join(home, ".config", "github-copilot", "apps.json"), map[string]any{
-		"github.com:Iv1.x": map[string]any{"user": "octocat", "oauth_token": "gho_x"},
+		"github.com:Iv1.x": map[string]any{"user": "octocat", "oauth_token": curTok},
 	})
 }
 
@@ -257,7 +267,7 @@ func copilotServers(t *testing.T) (*httptest.Server, *int) {
 	t.Cleanup(api.Close)
 	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
-		if r.Header.Get("Authorization") != "token gho_x" {
+		if r.Header.Get("Authorization") != "token "+curTok {
 			w.WriteHeader(401)
 			return
 		}
