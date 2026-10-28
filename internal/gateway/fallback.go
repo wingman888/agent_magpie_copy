@@ -6,19 +6,11 @@ package gateway
 // been sent, so an agent sees one clean answer from whoever gave it, never a
 // half from each. A provider that just failed that way waits at the back of
 // the line for a minute, rather than costing every request a doomed try.
-//
-// A provider with several keys on is several candidates, one per key, in
-// order, and so is a subscription with several accounts on: when one
-// account runs out, the next account of the same provider takes the
-// request before any fallback model does. A key can be made for one
-// protocol only, as some relays hand them out; see perKey.
 
 import (
 	"bytes"
 	"net/http"
 	"regexp"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,103 +22,12 @@ const fallbackCooldown = time.Minute
 type candidate struct {
 	p     provider.Provider
 	model string
-	rest  string // what rests after a failure: the provider, or one of its keys
 }
 
-// label names a candidate in a call's record: the provider, and the key
-// when it has several on.
-func (c candidate) label() string {
-	if c.rest == c.p.ID {
-		return c.p.ID
-	}
-	if c.p.Account != nil {
-		return c.p.ID + " (" + c.p.Account.User + ")"
-	}
-	if c.p.KeyName != "" {
-		return c.p.ID + " (" + c.p.KeyName + ")"
-	}
-	return c.p.ID + " (" + provider.Mask(c.p.Key) + ")"
-}
-
-// perKey is a provider once per key it has on, in order — or, for a
-// signed-in agent, once per account it has on, its own first. A key made
-// for one protocol only serves on that one's endpoint, and the keys that
-// suit the request go first: the Anthropic key for a Claude model, the
-// OpenAI one for a GPT model, else the key that speaks what the agent
-// spoke, so nothing is translated that needn't be.
-func perKey(p provider.Provider, model string, from provider.Protocol) []candidate {
-	if p.Account != nil {
-		out := []candidate{{p, model, p.ID}}
-		for _, q := range p.AlsoOn() {
-			out = append(out, candidate{q, model, p.ID + "@" + q.Account.User})
-		}
-		return out
-	}
-	keys := p.KeysOn()
-	var out []candidate
-	for _, k := range keys {
-		q := p.WithKey(k)
-		if len(q.Speaks()) == 0 {
-			continue // made for a protocol this provider has no endpoint for
-		}
-		rest := p.ID
-		if len(keys) > 1 {
-			rest += "#" + provider.KeyID(k.Key)
-		}
-		out = append(out, candidate{q, model, rest})
-	}
-	if len(out) == 0 {
-		return []candidate{{p, model, p.ID}}
-	}
-	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
-	return out
-}
-
-// keyFit ranks how well a key suits a request, best first: 0 fits, 1 needs
-// the request translated, 2 is made for another vendor's models.
-func keyFit(q provider.Provider, model string, from provider.Protocol) int {
-	if q.KeyProtocol == "" {
-		return 0
-	}
-	switch modelFamily(model) {
-	case provider.Anthropic:
-		if q.KeyProtocol == provider.Anthropic {
-			return 0
-		}
-		return 2
-	case provider.Chat:
-		if q.KeyProtocol != provider.Anthropic {
-			return 0
-		}
-		return 2
-	}
-	if q.Base(from) != "" {
-		return 0
-	}
-	return 1
-}
-
-// modelFamily is the protocol a model is at home in, when its name says:
-// Anthropic for Claude, Chat (standing for OpenAI's) for GPT and the o-series.
-func modelFamily(model string) provider.Protocol {
-	m := strings.ToLower(model)
-	if i := strings.LastIndex(m, "/"); i >= 0 {
-		m = m[i+1:]
-	}
-	switch {
-	case strings.HasPrefix(m, "claude"):
-		return provider.Anthropic
-	case strings.HasPrefix(m, "gpt-"), strings.Contains(m, "codex"), len(m) > 1 && m[0] == 'o' && m[1] >= '1' && m[1] <= '9':
-		return provider.Chat
-	}
-	return ""
-}
-
-// candidates is the primary and then its fallbacks, each provider's keys
-// or accounts as its routing orders them, those resting after a recent
-// failure moved behind the rest.
-func (s *Server) candidates(p provider.Provider, model string, from provider.Protocol) []candidate {
-	out := route(p, perKey(p, model, from), model, from)
+// candidates is the primary and then its fallbacks, those resting after a
+// recent failure moved behind the rest.
+func (s *Server) candidates(p provider.Provider, model string) []candidate {
+	out := []candidate{{p, model}}
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -134,14 +35,14 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, route(fp, perKey(fp, fm, from), fm, from)...)
+		out = append(out, candidate{fp, fm})
 	}
 	if len(out) == 1 {
 		return out
 	}
 	var ready, resting []candidate
 	for _, c := range out {
-		if s.resting(c.rest) {
+		if s.resting(c.p.ID) {
 			resting = append(resting, c)
 		} else {
 			ready = append(ready, c)
