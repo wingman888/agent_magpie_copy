@@ -202,8 +202,7 @@ func Stage(ctx context.Context, rel *Release, bundle string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("release %s has no %s", rel.Version, AppAsset())
 	}
-	// Unpacked beside the bundle so Install is a rename on one volume.
-	dir := filepath.Join(filepath.Dir(bundle), ".magpie-update")
+	dir := stageDir(filepath.Dir(bundle))
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -250,8 +249,22 @@ func team(ctx context.Context, app string) string {
 	return ""
 }
 
+// stageDir is where an update is unpacked: beside what it replaces, so
+// installing it is a rename on one volume, or, where magpie may not write,
+// in its cache, to be moved in with the administrator's password.
+func stageDir(dir string) string {
+	if !Writable(dir) {
+		if cache, err := os.UserCacheDir(); err == nil {
+			return filepath.Join(cache, "magpie", "update")
+		}
+	}
+	return filepath.Join(dir, ".magpie-update")
+}
+
 // Install swaps the staged app in for bundle. The running copy keeps going
-// until it quits; the next launch is the new one.
+// until it quits; the next launch is the new one. Where the folder is not
+// magpie's to change the error is a permission one (NeedsAdmin), and
+// InstallAsAdmin can do it instead.
 func Install(staged, bundle string) error {
 	old := filepath.Join(filepath.Dir(staged), "old.app")
 	os.RemoveAll(old)
@@ -266,6 +279,17 @@ func Install(staged, bundle string) error {
 	return nil
 }
 
+// InstallAsAdmin is Install with the administrator's password, asked for
+// by the system.
+func InstallAsAdmin(staged, bundle string) error {
+	old := filepath.Join(filepath.Dir(staged), "old.app")
+	err := asAdmin(swapScript(staged, bundle, old))
+	if err == nil {
+		os.RemoveAll(filepath.Dir(filepath.Dir(staged)))
+	}
+	return err
+}
+
 // Relaunch opens bundle again once this process (pid) has exited.
 func Relaunch(bundle string) error {
 	script := fmt.Sprintf(`while kill -0 %d 2>/dev/null; do sleep 0.2; done; open %q`, os.Getpid(), bundle)
@@ -277,15 +301,23 @@ func Relaunch(bundle string) error {
 // ReplaceBinary puts the release's build for this binary where the
 // running one is.
 func ReplaceBinary(ctx context.Context, rel *Release) error {
+	exe, err := Executable()
+	if err != nil {
+		return err
+	}
 	staged, err := StageBinary(ctx, rel)
 	if err != nil {
 		return err
 	}
-	return InstallBinary(staged)
+	err = InstallBinary(staged, exe)
+	if NeedsAdmin(err) && CanElevate() {
+		err = InstallBinaryAsAdmin(staged, exe)
+	}
+	return err
 }
 
-// StageBinary downloads the release's build for this binary next to it,
-// ready for InstallBinary.
+// StageBinary downloads the release's build for this binary next to it (or
+// to the cache, where magpie may not write there), ready for InstallBinary.
 func StageBinary(ctx context.Context, rel *Release) (string, error) {
 	a, ok := rel.Assets[BinaryAsset()]
 	if !ok {
@@ -296,6 +328,13 @@ func StageBinary(ctx context.Context, rel *Release) (string, error) {
 		return "", err
 	}
 	tmp := exe + ".new"
+	if !Writable(filepath.Dir(exe)) {
+		dir := stageDir(filepath.Dir(exe))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		tmp = filepath.Join(dir, filepath.Base(exe)+".new")
+	}
 	if err := download(ctx, a, tmp); err != nil {
 		return "", err
 	}
@@ -306,10 +345,9 @@ func StageBinary(ctx context.Context, rel *Release) (string, error) {
 	return tmp, nil
 }
 
-// InstallBinary swaps a staged binary in for the running one, which keeps
-// going until it exits.
-func InstallBinary(staged string) error {
-	exe := strings.TrimSuffix(staged, ".new")
+// InstallBinary swaps a staged binary in for exe, the running one, which
+// keeps going until it exits.
+func InstallBinary(staged, exe string) error {
 	if runtime.GOOS == "windows" {
 		// A running .exe cannot be overwritten, but it can be moved aside.
 		os.Remove(exe + ".old")
@@ -319,10 +357,21 @@ func InstallBinary(staged string) error {
 		}
 	}
 	if err := os.Rename(staged, exe); err != nil {
-		os.Remove(staged)
+		if !NeedsAdmin(err) { // kept for InstallBinaryAsAdmin
+			os.Remove(staged)
+		}
 		return err
 	}
 	return nil
+}
+
+// InstallBinaryAsAdmin is InstallBinary with the administrator's password.
+func InstallBinaryAsAdmin(staged, exe string) error {
+	err := asAdmin("mv -f " + shellQuote(staged) + " " + shellQuote(exe))
+	if err != nil && !errors.Is(err, ErrCanceled) {
+		os.Remove(staged)
+	}
+	return err
 }
 
 // RelaunchBinary starts exe again as the tray app. The new process waits
@@ -352,11 +401,37 @@ func AwaitPredecessor() {
 	}
 }
 
-// download fetches a to path and checks its hash.
+type progressKey struct{}
+
+// WithProgress has downloads made under ctx report how far along they are;
+// total is 0 while the size is unknown.
+func WithProgress(ctx context.Context, f func(done, total int64)) context.Context {
+	return context.WithValue(ctx, progressKey{}, f)
+}
+
+// download fetches a to path and checks its hash. A connection that drops
+// part way — GitHub from some networks — gets two more tries.
 func download(ctx context.Context, a Asset, path string) error {
 	if a.SHA256 == "" {
 		return errors.New("the release lists no checksum for " + filepath.Base(path))
 	}
+	var err error
+	for try := 0; try < 3; try++ {
+		if try > 0 {
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(time.Duration(try) * 2 * time.Second):
+			}
+		}
+		if err = fetch(ctx, a, path); err == nil || ctx.Err() != nil {
+			break
+		}
+	}
+	return err
+}
+
+func fetch(ctx context.Context, a Asset, path string) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", a.URL, nil)
 	if err != nil {
 		return err
@@ -374,7 +449,16 @@ func download(ctx context.Context, a Asset, path string) error {
 		return err
 	}
 	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(f, h), res.Body)
+	var body io.Reader = res.Body
+	if report, ok := ctx.Value(progressKey{}).(func(done, total int64)); ok {
+		total := res.ContentLength
+		if total <= 0 {
+			total = a.Size
+		}
+		body = &counter{r: res.Body, total: max(total, 0), report: report}
+		report(0, max(total, 0))
+	}
+	_, err = io.Copy(io.MultiWriter(f, h), body)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -385,4 +469,19 @@ func download(ctx context.Context, a Asset, path string) error {
 		os.Remove(path)
 	}
 	return err
+}
+
+// counter reports bytes as they are read.
+type counter struct {
+	r      io.Reader
+	done   int64
+	total  int64
+	report func(done, total int64)
+}
+
+func (c *counter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.done += int64(n)
+	c.report(c.done, c.total)
+	return n, err
 }
