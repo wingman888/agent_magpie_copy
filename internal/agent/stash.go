@@ -5,10 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/magpie/internal/provider"
 )
 
-// The stash remembers what an agent's config said before dial pointed it
+// The stash remembers what an agent's config said before magpie pointed it
 // at the gateway, so switching back restores it instead of guessing.
 
 func stashPath() string { return filepath.Join(filepath.Dir(provider.Path()), "stash.json") }
@@ -32,6 +32,16 @@ func stash(kv map[string]string) {
 	}
 	b, _ := json.MarshalIndent(m, "", "  ")
 	os.MkdirAll(filepath.Dir(stashPath()), 0o755)
+	os.WriteFile(stashPath(), b, 0o600)
+}
+
+// forget drops stashed values without restoring them.
+func forget(keys ...string) {
+	m := stashLoad()
+	for _, k := range keys {
+		delete(m, k)
+	}
+	b, _ := json.MarshalIndent(m, "", "  ")
 	os.WriteFile(stashPath(), b, 0o600)
 }
 

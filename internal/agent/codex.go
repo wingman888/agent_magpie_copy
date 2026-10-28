@@ -6,14 +6,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/yetone/dial/internal/catalog"
-	"github.com/yetone/dial/internal/edit"
-	"github.com/yetone/dial/internal/gateway"
+	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/gateway"
 )
 
 // Codex talks the OpenAI Responses API to whichever provider config.toml
-// names. Routing it through dial means a [model_providers.dial] table,
-// `model_provider = "dial"`, and a model catalog file so the whole dial
+// names. Routing it through magpie means a [model_providers.magpie] table,
+// `model_provider = "magpie"`, and a model catalog file so the whole magpie
 // catalog shows up inside Codex's own /model picker.
 
 // codexPrompt is Codex's generic system prompt (Apache-2.0, openai/codex,
@@ -26,12 +26,12 @@ var codexPrompt string
 func codex(home string) *Agent {
 	dir := filepath.Join(home, ".codex")
 	path := filepath.Join(dir, "config.toml")
-	catalogPath := filepath.Join(dir, "dial-models.json")
+	catalogPath := filepath.Join(dir, "magpie-models.json")
 	get := func(k string) string { v, _ := edit.GetTOMLTop(path, k); return v }
-	routed := func() bool { return get("model_provider") == dialID }
+	routed := func() bool { return get("model_provider") == magpieID }
 	models := func() []catalog.Model {
 		if routed() {
-			return dialModels()
+			return magpieModels()
 		}
 		return catalog.Codex()
 	}
@@ -45,24 +45,36 @@ func codex(home string) *Agent {
 		return nil
 	}
 	set := func(v string) error {
-		if isDial(v) {
+		if v == "" {
+			// Codex as installed: OpenAI, its own catalog, its default model
+			if err := edit.DelTOMLTop(path, "model", "model_provider", "model_catalog_json"); err != nil {
+				return err
+			}
+			if err := edit.DelTOMLTable(path, "model_providers."+magpieID); err != nil {
+				return err
+			}
+			os.Remove(catalogPath)
+			forget("codex.model", "codex.effort", "codex.provider")
+			return nil
+		}
+		if isMagpie(v) {
 			if !routed() {
 				stash(map[string]string{"codex.model": get("model"), "codex.effort": get("model_reasoning_effort"),
 					"codex.provider": get("model_provider")})
 			}
-			if err := edit.SetTOMLTable(path, "model_providers."+dialID,
-				edit.KV{Path: "name", Value: "dial"},
+			if err := edit.SetTOMLTable(path, "model_providers."+magpieID,
+				edit.KV{Path: "name", Value: "magpie"},
 				edit.KV{Path: "base_url", Value: gatewayV1()},
 				edit.KV{Path: "wire_api", Value: "responses"},
 				edit.KV{Path: "experimental_bearer_token", Value: gateway.Token},
 			); err != nil {
 				return err
 			}
-			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModels())); err != nil {
+			if err := edit.WriteAtomic(catalogPath, codexCatalog(magpieModels())); err != nil {
 				return err
 			}
 			if err := edit.SetTOMLTop(path,
-				edit.KV{Path: "model_provider", Value: dialID},
+				edit.KV{Path: "model_provider", Value: magpieID},
 				edit.KV{Path: "model_catalog_json", Value: catalogPath},
 				edit.KV{Path: "model", Value: v},
 			); err != nil {
@@ -74,7 +86,7 @@ func codex(home string) *Agent {
 			if err := edit.DelTOMLTop(path, "model_provider", "model_catalog_json"); err != nil {
 				return err
 			}
-			if err := edit.DelTOMLTable(path, "model_providers."+dialID); err != nil {
+			if err := edit.DelTOMLTable(path, "model_providers."+magpieID); err != nil {
 				return err
 			}
 			os.Remove(catalogPath)
@@ -115,16 +127,19 @@ func codex(home string) *Agent {
 				Set: set,
 				Options: func(map[string]string) []Option {
 					own := group("OpenAI", options(catalog.Codex(), ""))
-					if p := get("model_provider"); p != "" && p != dialID {
+					if p := get("model_provider"); p != "" && p != magpieID {
 						own = group(p, own)
 					}
-					return append(own, viaDial("")...)
+					return append(own, viaMagpieFor("codex", "")...)
 				},
 			},
 			{
 				Key: "effort", Label: "effort",
 				Get: func() string { return get("model_reasoning_effort") },
 				Set: func(v string) error {
+					if v == "" {
+						return edit.DelTOMLTop(path, "model_reasoning_effort")
+					}
 					return edit.SetTOMLTop(path, edit.KV{Path: "model_reasoning_effort", Value: v})
 				},
 				Options: func(cur map[string]string) []Option {
@@ -192,7 +207,7 @@ func codexCatalog(ms []catalog.Model) []byte {
 	}
 	for i, m := range ms {
 		e := model{
-			Slug: m.ID, DisplayName: m.Name, Description: m.Name + " via dial",
+			Slug: m.ID, DisplayName: m.Name, Description: m.Name + " via magpie",
 			Instructions: codexPrompt, Efforts: []level{},
 			Shell: "unified_exec", Visibility: "list", InAPI: true, Priority: i + 1,
 			ApplyPatch: "freeform", Tools: []string{}, Modalities: []string{"text"},

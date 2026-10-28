@@ -92,6 +92,26 @@ func SetYAMLTop(path string, kvs ...KV) error {
 	return WriteAtomic(path, []byte(joinLines(lines)))
 }
 
+// DelYAMLTop removes top-level scalar keys from a YAML file.
+func DelYAMLTop(path string, keys ...string) error {
+	raw, err := Read(path)
+	if err != nil || raw == nil {
+		return err
+	}
+	drop := map[string]bool{}
+	for _, k := range keys {
+		drop[k] = true
+	}
+	var out []string
+	for _, line := range splitLines(string(raw)) {
+		if m := yamlKV.FindStringSubmatch(line); m != nil && drop[m[1]] {
+			continue
+		}
+		out = append(out, line)
+	}
+	return WriteAtomic(path, []byte(joinLines(out)))
+}
+
 // setLine replaces the line whose key matches, or inserts newLine after the
 // last key line in the header section (before the first line matching stop).
 func setLine(lines []string, key, newLine string, stop *regexp.Regexp, keyOf func(string) (string, bool)) []string {
