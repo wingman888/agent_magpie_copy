@@ -1,4 +1,4 @@
-// Package agent describes every coding agent magpie can drive: where its config
+// Package agent describes every coding agent dial can drive: where its config
 // lives, which fields matter (model, effort, …) and which values to offer.
 package agent
 
@@ -20,9 +20,7 @@ type Option struct {
 	Group string `json:"group,omitempty"` // section header in the picker
 }
 
-// Field is one tunable setting of an agent. Set with an empty value puts
-// the field back to the agent's own default: anything magpie wired in (the
-// gateway as a provider, its model catalog) comes out and the key is removed.
+// Field is one tunable setting of an agent.
 type Field struct {
 	Key     string
 	Label   string
@@ -39,7 +37,7 @@ type Agent struct {
 	Aliases []string
 	Bin     string // executable name, used for detection
 	Dir     string // config directory, used for detection
-	Path    string // config file magpie edits
+	Path    string // config file dial edits
 	Fields  []Field
 	// Notice, if set, is advice worth showing after a change: agents that
 	// read their config once at start-up need a restart to see it.
@@ -82,11 +80,6 @@ func (a *Agent) Detected() bool {
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
-			return &a.Fields[i]
-		}
-	}
-	for i := range a.Fields {
-		if a.Fields[i].Label == key { // `magpie gemini auth …`: the label as shown
 			return &a.Fields[i]
 		}
 	}

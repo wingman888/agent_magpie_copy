@@ -1,6 +1,6 @@
 package provider
 
-// A preset is a vendor magpie already knows: adding one only asks for the key.
+// A preset is a vendor dial already knows: adding one only asks for the key.
 
 // Kind groups presets in the picker.
 type Kind string
@@ -21,36 +21,29 @@ type PresetDef struct {
 	Responses string   `json:"responses,omitempty"`
 	Anthropic string   `json:"anthropic,omitempty"`
 	Catalog   string   `json:"catalog,omitempty"`
+	Defaults  []string `json:"defaults,omitempty"` // models to expose until the user picks
 	Website   string   `json:"website,omitempty"`
 	KeysURL   string   `json:"keysUrl,omitempty"`
 	NoKey     bool     `json:"noKey,omitempty"`     // local servers: a key is optional
 	Sponsored bool     `json:"sponsored,omitempty"` // shown first, with a tag
 	Note      string   `json:"note,omitempty"`      // one line under the name
-	Regions   []Region `json:"regions,omitempty"`   // base-URL choices (a relay's regional endpoints)
-}
-
-// Region is one base-URL option of a preset that offers several. The first
-// is the default; picking another in the editor swaps the endpoints.
-type Region struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Chat      string `json:"chat,omitempty"`
-	Responses string `json:"responses,omitempty"`
-	Anthropic string `json:"anthropic,omitempty"`
 }
 
 // presets are ordered as they appear in the picker.
 var presets = []PresetDef{
 	{ID: "anthropic", Name: "Anthropic", Icon: "claude-color", Kind: KindVendor, Catalog: "anthropic",
 		Anthropic: "https://api.anthropic.com",
+		Defaults:  []string{"claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"},
 		Website:   "https://console.anthropic.com", KeysURL: "https://console.anthropic.com/settings/keys"},
 	{ID: "openai", Name: "OpenAI", Icon: "openai", Kind: KindVendor, Catalog: "openai",
 		Chat: "https://api.openai.com/v1", Responses: "https://api.openai.com/v1",
-		Website: "https://platform.openai.com", KeysURL: "https://platform.openai.com/api-keys"},
+		Defaults: []string{"gpt-5.6-sol", "gpt-5.5", "gpt-5.3-codex"},
+		Website:  "https://platform.openai.com", KeysURL: "https://platform.openai.com/api-keys"},
 	{ID: "google", Name: "Google Gemini", Icon: "gemini-color", Kind: KindVendor, Catalog: "google",
-		Chat:    "https://generativelanguage.googleapis.com/v1beta/openai",
-		Note:    "Gemini Developer API",
-		Website: "https://aistudio.google.com", KeysURL: "https://aistudio.google.com/apikey"},
+		Chat:     "https://generativelanguage.googleapis.com/v1beta/openai",
+		Note:     "Gemini Developer API",
+		Defaults: []string{"gemini-3.1-pro", "gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"},
+		Website:  "https://aistudio.google.com", KeysURL: "https://aistudio.google.com/apikey"},
 	{ID: "deepseek", Name: "DeepSeek", Icon: "deepseek-color", Kind: KindVendor, Catalog: "deepseek",
 		Chat: "https://api.deepseek.com/v1", Responses: "https://api.deepseek.com/v1", Anthropic: "https://api.deepseek.com/anthropic",
 		Website: "https://platform.deepseek.com", KeysURL: "https://platform.deepseek.com/api_keys"},
@@ -104,18 +97,10 @@ var presets = []PresetDef{
 		Website: "https://cloud.siliconflow.cn", KeysURL: "https://cloud.siliconflow.cn/account/ak"},
 	{ID: "aihubmix", Name: "AiHubMix", Icon: "aihubmix-color", Kind: KindRelay,
 		Chat: "https://aihubmix.com/v1", Anthropic: "https://aihubmix.com",
-		Website: "https://aihubmix.com", KeysURL: "https://console.aihubmix.com/token"},
+		Website: "https://aihubmix.com", KeysURL: "https://aihubmix.com/token"},
 	{ID: "302ai", Name: "302.AI", Icon: "ai302-color", Kind: KindRelay,
 		Chat: "https://api.302.ai/v1", Anthropic: "https://api.302.ai",
-		Website: "https://302.ai", KeysURL: "https://302.ai/api-keys/list"},
-	{ID: "yylx", Name: "鱼鱼连线", Icon: "yylx", Kind: KindRelay,
-		Chat: "https://app.yylx.io/v1", Anthropic: "https://app.yylx.io",
-		Website: "https://yylx.io", KeysURL: "https://app.yylx.io/keys",
-		Regions: []Region{
-			{ID: "auto", Name: "Auto", Chat: "https://app.yylx.io/v1", Anthropic: "https://app.yylx.io"},
-			{ID: "global", Name: "Global", Chat: "https://global.yylx.io/v1", Anthropic: "https://global.yylx.io"},
-			{ID: "cn", Name: "China Mainland", Chat: "https://cn.yylx.io/v1", Anthropic: "https://cn.yylx.io"},
-		}},
+		Website: "https://302.ai", KeysURL: "https://dash.302.ai/apis/list"},
 
 	{ID: "ollama", Name: "Ollama", Icon: "ollama", Kind: KindLocal, NoKey: true,
 		Chat: "http://localhost:11434/v1", Anthropic: "http://localhost:11434",
@@ -155,22 +140,11 @@ func Preset(id string) *PresetDef {
 func FromPreset(id string) (Provider, error) {
 	pr := Preset(id)
 	if pr == nil {
-		return Provider{}, errorf("no preset %q — magpie presets lists them", id)
+		return Provider{}, errorf("no preset %q — dial presets lists them", id)
 	}
 	return Provider{
 		ID: pr.ID, Name: pr.Name, Icon: pr.Icon, Preset: pr.ID,
 		Chat: pr.Chat, Responses: pr.Responses, Anthropic: pr.Anthropic,
 		Catalog: pr.Catalog, Website: pr.Website, KeysURL: pr.KeysURL,
 	}, nil
-}
-
-// IconForCatalog names the logo of the vendor behind a models.dev
-// provider id, or "" when no preset covers it.
-func IconForCatalog(catalogID string) string {
-	for _, p := range presets {
-		if p.Catalog == catalogID {
-			return p.Icon
-		}
-	}
-	return ""
 }

@@ -9,13 +9,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/edit"
-	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/dial/internal/catalog"
+	"github.com/yetone/dial/internal/edit"
+	"github.com/yetone/dial/internal/gateway"
+	"github.com/yetone/dial/internal/provider"
 )
 
-// All returns every agent magpie knows about, detected or not.
+// All returns every agent dial knows about, detected or not.
 func All() []*Agent {
 	home, _ := os.UserHomeDir()
 	cfg := os.Getenv("XDG_CONFIG_HOME")
@@ -42,22 +42,7 @@ func jsonGet(path, key string) func() string {
 }
 
 func jsonSet(path, key string) func(string) error {
-	return func(v string) error {
-		if v == "" {
-			return edit.DelJSON(path, key)
-		}
-		return edit.SetJSON(path, edit.KV{Path: key, Value: v})
-	}
-}
-
-// usesMagpie reports whether any of the values is a magpie/… reference.
-func usesMagpie(vals ...string) bool {
-	for _, v := range vals {
-		if strings.HasPrefix(v, magpieID+"/") {
-			return true
-		}
-	}
-	return false
+	return func(v string) error { return edit.SetJSON(path, edit.KV{Path: key, Value: v}) }
 }
 
 // pair joins a provider field and a model field into one "provider/model"
@@ -93,7 +78,7 @@ func hostOf(u string) string { return provider.HostOf(u) }
 func options(models []catalog.Model, prefix string) []Option {
 	out := make([]Option, 0, len(models))
 	for _, m := range models {
-		out = append(out, Option{Value: prefix + m.ID, Note: m.Name, Icon: modelIcon(m.Provider, m.ID)})
+		out = append(out, Option{Value: prefix + m.ID, Note: m.Name})
 	}
 	return out
 }
@@ -113,7 +98,7 @@ func ownOptions(authFile string, cur string, extra ...string) []Option {
 	for _, p := range extra {
 		set[p] = true
 	}
-	if p, _, ok := strings.Cut(cur, "/"); ok && p != magpieID {
+	if p, _, ok := strings.Cut(cur, "/"); ok && p != dialID {
 		set[p] = true
 	}
 	if b, err := os.ReadFile(authFile); err == nil {
@@ -138,16 +123,16 @@ func ownOptions(authFile string, cur string, extra ...string) []Option {
 
 // ---- agents ----------------------------------------------------------------
 
-// magpieProviderJSON is the provider block agents with JSON configs get.
-func magpieProviderJSON(shape string) any {
-	models := magpieModels()
+// dialProviderJSON is the provider block agents with JSON configs get.
+func dialProviderJSON(shape string) any {
+	models := dialModels()
 	switch shape {
 	case "opencode":
 		ms := map[string]any{}
 		for _, m := range models {
 			ms[m.ID] = map[string]any{"name": m.Name}
 		}
-		return map[string]any{"npm": "@ai-sdk/openai-compatible", "name": "magpie",
+		return map[string]any{"npm": "@ai-sdk/openai-compatible", "name": "dial",
 			"options": map[string]any{"baseURL": gatewayV1(), "apiKey": gateway.Token}, "models": ms}
 	case "crush":
 		var ms []map[string]any
@@ -158,17 +143,16 @@ func magpieProviderJSON(shape string) any {
 		if ms == nil {
 			ms = []map[string]any{}
 		}
-		return map[string]any{"type": "openai", "name": "magpie", "base_url": gatewayV1(), "api_key": gateway.Token, "models": ms}
+		return map[string]any{"type": "openai", "name": "dial", "base_url": gatewayV1(), "api_key": gateway.Token, "models": ms}
 	case "pi":
 		var ms []map[string]any
 		for _, m := range models {
-			// reasoning lets Pi offer its thinking levels for the model
-			ms = append(ms, map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0})
+			ms = append(ms, map[string]any{"id": m.ID, "name": m.Name})
 		}
 		if ms == nil {
 			ms = []map[string]any{}
 		}
-		return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
+		return map[string]any{"name": "dial", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
 	}
 	return nil
 }
@@ -182,23 +166,13 @@ func opencode(home, cfg string) *Agent {
 	auth := filepath.Join(home, ".local", "share", "opencode", "auth.json")
 	opts := func(key string) func(map[string]string) []Option {
 		return func(cur map[string]string) []Option {
-			return append(ownOptions(auth, cur[key]), viaMagpie(magpieID+"/")...)
+			return append(ownOptions(auth, cur[key]), viaDial(dialID+"/")...)
 		}
 	}
-	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
 	set := func(key string) func(string) error {
 		return func(v string) error {
-			if v == "" {
-				if err := edit.DelJSON(path, key); err != nil {
-					return err
-				}
-				if usesMagpie(get("model"), get("small_model")) {
-					return nil
-				}
-				return edit.DelJSON(path, "provider."+magpieID)
-			}
-			if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
-				if err := edit.SetJSON(path, edit.KV{Path: "provider." + magpieID, Value: magpieProviderJSON("opencode")}); err != nil {
+			if ref, ok := strings.CutPrefix(v, dialID+"/"); ok && isDial(ref) {
+				if err := edit.SetJSON(path, edit.KV{Path: "provider." + dialID, Value: dialProviderJSON("opencode")}); err != nil {
 					return err
 				}
 			}
@@ -223,56 +197,23 @@ func pi(home string) *Agent {
 	get := func(k string) (string, bool) { return edit.GetJSON(path, k) }
 	set := func(kvs ...edit.KV) error { return edit.SetJSON(path, kvs...) }
 	pair := pairSet(set, "defaultProvider", "defaultModel")
-	writeMagpie := func() error {
-		return edit.SetJSON(modelsPath, edit.KV{Path: "providers." + magpieID, Value: magpieProviderJSON("pi")})
-	}
 	return &Agent{
 		ID: "pi", Name: "Pi", Icon: "pi", Bin: "pi", Dir: dir, Path: path,
-		Fields: []Field{
-			{
-				Key: "model", Label: "model",
-				Get: pairGet(get, "defaultProvider", "defaultModel"),
-				Set: func(v string) error {
-					if v == "" {
-						if err := edit.DelJSON(path, "defaultProvider", "defaultModel"); err != nil {
-							return err
-						}
-						return edit.DelJSON(modelsPath, "providers."+magpieID)
+		Fields: []Field{{
+			Key: "model", Label: "model",
+			Get: pairGet(get, "defaultProvider", "defaultModel"),
+			Set: func(v string) error {
+				if ref, ok := strings.CutPrefix(v, dialID+"/"); ok && isDial(ref) {
+					if err := edit.SetJSON(modelsPath, edit.KV{Path: "providers." + dialID, Value: dialProviderJSON("pi")}); err != nil {
+						return err
 					}
-					if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
-						if err := writeMagpie(); err != nil {
-							return err
-						}
-					}
-					return pair(v)
-				},
-				Options: func(cur map[string]string) []Option {
-					return append(ownOptions(auth, cur["model"]), viaMagpie(magpieID+"/")...)
-				},
+				}
+				return pair(v)
 			},
-			{
-				// Pi's startup thinking level, the same list its /thinking offers;
-				// Pi clamps it to what the model supports.
-				Key: "effort", Label: "thinking",
-				Get: func() string { v, _ := get("defaultThinkingLevel"); return v },
-				Set: func(v string) error {
-					if v == "" {
-						return edit.DelJSON(path, "defaultThinkingLevel")
-					}
-					if p, _ := get("defaultProvider"); p == magpieID {
-						// older magpie entries lacked "reasoning", which Pi needs
-						// before it will think at all
-						if err := writeMagpie(); err != nil {
-							return err
-						}
-					}
-					return set(edit.KV{Path: "defaultThinkingLevel", Value: v})
-				},
-				Options: func(map[string]string) []Option {
-					return static("off", "minimal", "low", "medium", "high", "xhigh", "max")
-				},
+			Options: func(cur map[string]string) []Option {
+				return append(ownOptions(auth, cur["model"]), viaDial(dialID+"/")...)
 			},
-		},
+		}},
 	}
 }
 
@@ -290,12 +231,7 @@ func goose(home, cfg string) *Agent {
 		Fields: []Field{{
 			Key: "model", Label: "model",
 			Get: pairGet(get, "GOOSE_PROVIDER", "GOOSE_MODEL"),
-			Set: func(v string) error {
-				if v == "" {
-					return edit.DelYAMLTop(path, "GOOSE_PROVIDER", "GOOSE_MODEL")
-				}
-				return pairSet(set, "GOOSE_PROVIDER", "GOOSE_MODEL")(v)
-			},
+			Set: pairSet(set, "GOOSE_PROVIDER", "GOOSE_MODEL"),
 			Options: func(cur map[string]string) []Option {
 				return ownOptions("", cur["model"], "anthropic", "openai", "google", "openrouter")
 			},
@@ -312,9 +248,6 @@ func cursor(home string) *Agent {
 			Key: "model", Label: "model",
 			Get: jsonGet(path, "model.modelId"),
 			Set: func(v string) error {
-				if v == "" {
-					return edit.DelJSON(path, "model", "hasChangedDefaultModel")
-				}
 				return edit.SetJSON(path,
 					edit.KV{Path: "model.modelId", Value: v},
 					edit.KV{Path: "model.displayModelId", Value: v},
@@ -323,7 +256,7 @@ func cursor(home string) *Agent {
 				)
 			},
 			Options: func(map[string]string) []Option {
-				return []Option{{Value: "auto", Note: "let Cursor pick", Icon: "cursor"}}
+				return []Option{{Value: "auto", Note: "let Cursor pick"}}
 			},
 		}},
 	}
@@ -337,17 +270,9 @@ func copilot(home string) *Agent {
 		Bin: "copilot", Dir: dir, Path: path,
 		Fields: []Field{{
 			Key: "model", Label: "model",
-			Get: jsonGet(path, "model"),
-			Set: jsonSet(path, "model"),
-			Options: func(map[string]string) []Option {
-				// "auto" is Copilot's own choice, not a model it lists; the rest
-				// come from the list magpie last fetched from Copilot.
-				out := []Option{{Value: "auto", Note: "let Copilot pick", Icon: "githubcopilot"}}
-				if live, _, ok := catalog.Live("copilot"); ok {
-					out = append(out, options(live, "")...)
-				}
-				return out
-			},
+			Get:     jsonGet(path, "model"),
+			Set:     jsonSet(path, "model"),
+			Options: func(map[string]string) []Option { return options(catalog.Builtin("copilot"), "") },
 		}},
 	}
 }
@@ -370,31 +295,20 @@ func crush(home, cfg string) *Agent {
 				}
 				if json.Unmarshal(b, &c) == nil {
 					for p := range c.Providers {
-						if p != magpieID {
+						if p != dialID {
 							extra = append(extra, p)
 						}
 					}
 				}
 			}
-			return append(ownOptions("", cur[key], extra...), viaMagpie(magpieID+"/")...)
+			return append(ownOptions("", cur[key], extra...), viaDial(dialID+"/")...)
 		}
 	}
 	setter := func(pKey, mKey string) func(string) error {
 		pair := pairSet(set, pKey, mKey)
 		return func(v string) error {
-			if v == "" {
-				if err := edit.DelJSON(path, strings.TrimSuffix(pKey, ".provider")); err != nil {
-					return err
-				}
-				large := pairGet(get, "models.large.provider", "models.large.model")()
-				small := pairGet(get, "models.small.provider", "models.small.model")()
-				if usesMagpie(large, small) {
-					return nil
-				}
-				return edit.DelJSON(path, "providers."+magpieID)
-			}
-			if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
-				if err := set(edit.KV{Path: "providers." + magpieID, Value: magpieProviderJSON("crush")}); err != nil {
+			if ref, ok := strings.CutPrefix(v, dialID+"/"); ok && isDial(ref) {
+				if err := set(edit.KV{Path: "providers." + dialID, Value: dialProviderJSON("crush")}); err != nil {
 					return err
 				}
 			}

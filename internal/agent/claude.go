@@ -4,9 +4,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/edit"
-	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/dial/internal/catalog"
+	"github.com/yetone/dial/internal/edit"
+	"github.com/yetone/dial/internal/gateway"
 )
 
 // Claude Code reads its endpoint from the `env` block of settings.json.
@@ -14,12 +14,19 @@ import (
 // ANTHROPIC_MODEL (and the aliases opus/sonnet/haiku resolve through) is
 // all it takes to run it on any provider.
 
-// env vars magpie sets while routing through the gateway.
+var claudeAliases = []Option{
+	{Value: "opus", Note: "alias · latest Opus"},
+	{Value: "sonnet", Note: "alias · latest Sonnet"},
+	{Value: "haiku", Note: "alias · latest Haiku"},
+	{Value: "opusplan", Note: "alias · Opus for planning, Sonnet for work"},
+	{Value: "sonnet[1m]", Note: "alias · Sonnet with 1M context"},
+}
+
+// env vars dial sets while routing through the gateway.
 var claudeEnv = []string{
 	"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
 	"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
-	"CLAUDE_CODE_SUBAGENT_MODEL",
 }
 
 func claude(home string) *Agent {
@@ -38,16 +45,7 @@ func claude(home string) *Agent {
 		return model()
 	}
 	set := func(v string) error {
-		if v == "" {
-			// Claude Code as installed: Anthropic's own endpoint and model
-			keys := []string{"model"}
-			for _, k := range claudeEnv {
-				keys = append(keys, "env."+k)
-			}
-			forget("claude.model", "claude.base_url", "claude.auth_token")
-			return edit.DelJSON(path, keys...)
-		}
-		if isMagpie(v) {
+		if isDial(v) {
 			if !routed() {
 				stash(map[string]string{
 					"claude.model":      model(),
@@ -63,7 +61,6 @@ func claude(home string) *Agent {
 				edit.KV{Path: "env.ANTHROPIC_DEFAULT_SONNET_MODEL", Value: v},
 				edit.KV{Path: "env.ANTHROPIC_DEFAULT_HAIKU_MODEL", Value: v},
 				edit.KV{Path: "env.ANTHROPIC_SMALL_FAST_MODEL", Value: v},
-				edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: v},
 				edit.KV{Path: "model", Value: v},
 			)
 		}
@@ -103,17 +100,14 @@ func claude(home string) *Agent {
 				var own []Option
 				for _, m := range catalog.Provider("anthropic") {
 					if strings.HasPrefix(m.ID, "claude") {
-						own = append(own, Option{Value: m.ID, Note: m.Name, Icon: "claude-color"})
+						own = append(own, Option{Value: m.ID, Note: m.Name})
 					}
 				}
-				name := "Claude Code"
+				out := group("Claude Code", append(append([]Option{}, claudeAliases...), own...))
 				if u := env("ANTHROPIC_BASE_URL"); u != "" && !routed() {
-					name += " · " + hostOf(u)
+					out[0].Note += " · " + hostOf(u)
 				}
-				// Only the catalog's models; Claude Code's own short aliases are
-				// not something any API lists, and a compiled-in copy would just
-				// go stale.
-				return append(group(name, own), viaMagpie("")...)
+				return append(out, viaDial("")...)
 			},
 		}},
 	}
