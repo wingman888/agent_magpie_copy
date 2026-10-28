@@ -107,9 +107,6 @@ func usesByProvider() map[string][]string {
 		}
 		v := a.Fields[0].Get()
 		v = strings.TrimPrefix(v, "magpie/")
-		if strings.HasPrefix(v, provider.GroupPrefix) {
-			continue // a routing group, of no one provider
-		}
 		if pid, _, ok := strings.Cut(v, "/"); ok {
 			out[pid] = append(out[pid], a.Name)
 		}
@@ -158,13 +155,9 @@ func models() error {
 	}
 	last := ""
 	for _, e := range entries {
-		head, name := e.Provider.ID, e.Provider.Name
-		if e.Group != "" {
-			head, name = provider.GroupPrefix, "Routing groups"
-		}
-		if head != last {
-			last = head
-			fmt.Println(faint.Render("  " + name))
+		if e.Provider.ID != last {
+			last = e.Provider.ID
+			fmt.Println(faint.Render("  " + e.Provider.Name))
 		}
 		line := "  " + pad(e.ID, w)
 		if e.Name != "" && e.Name != e.Model {
