@@ -5,10 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/magpie/internal/provider"
 )
 
-// The stash remembers what an agent's config said before dial pointed it
+// The stash remembers what an agent's config said before magpie pointed it
 // at the gateway, so switching back restores it instead of guessing.
 
 func stashPath() string { return filepath.Join(filepath.Dir(provider.Path()), "stash.json") }
