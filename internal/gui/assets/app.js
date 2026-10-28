@@ -1797,11 +1797,10 @@ async function loadSettings() {
 
 function renderSettings() {
   const s = prefs;
-  const keep = { theme: s.theme, lang: s.lang, tray: s.tray, proxy: s.proxy || "" };
+  const keep = { theme: s.theme, lang: s.lang, tray: s.tray };
   $("#themeSegs").replaceChildren(segs(THEMES.map(([id, name]) => [id, t(name)]), s.theme, (theme) => savePrefs({ ...keep, theme })));
   $("#langSegs").replaceChildren(segs(LOCALES.map(([id, name]) => [id, t(name)]), s.lang, (lang) => savePrefs({ ...keep, lang })));
   $("#traySegs").replaceChildren(segs(TRAYS.map(([id, name]) => [id, t(name)]), s.tray || "panel", (tray) => savePrefs({ ...keep, tray })));
-  renderProxy(s, keep);
 
   const about = $("#about");
   about.replaceChildren();
@@ -1821,45 +1820,6 @@ function renderSettings() {
   open.onclick = () => api("open", { url: "file://" + s.path });
   row(t("Config folder"), t("providers, profiles and these settings"), s.dir, copyBtn(s.dir, t("Path")), open);
   row(t("Gateway URL"), t("the address every agent is pointed at"), s.gateway, copyBtn(s.gateway, t("Gateway URL")));
-}
-
-// renderProxy: magpie's own requests to vendors follow the system proxy on
-// their own; this row says which one, and lets it be turned off or set.
-let proxyCustom = false; // Custom picked, nothing typed yet
-function renderProxy(s, keep) {
-  const cur = !s.proxy ? "auto" : s.proxy === "direct" ? "off" : "custom";
-  const mode = proxyCustom ? "custom" : cur;
-  const sub = $("#proxySub");
-  sub.textContent = {
-    settings: t("Requests to vendors go through {proxy}", { proxy: s.proxyNow }),
-    system: t("Following the system proxy, {proxy}", { proxy: s.proxyNow }),
-    environment: t("Following HTTPS_PROXY, {proxy}", { proxy: s.proxyNow }),
-    off: t("Off: requests to vendors go direct"),
-    none: t("No system proxy found; requests to vendors go direct"),
-  }[s.proxySource] || "";
-  const box = $("#proxySegs");
-  box.replaceChildren();
-  const pick = (id) => {
-    proxyCustom = id === "custom";
-    if (id === "auto") savePrefs({ ...keep, proxy: "" });
-    else if (id === "off") savePrefs({ ...keep, proxy: "direct" });
-    else renderProxy(s, keep);
-  };
-  if (mode === "custom") {
-    const i = input(cur === "custom" ? s.proxy : "", "http://127.0.0.1:7890");
-    i.className = "proxy";
-    const save = () => {
-      const v = i.value.trim();
-      if (!v || v === s.proxy) return;
-      proxyCustom = false;
-      savePrefs({ ...keep, proxy: v });
-    };
-    i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") save(); else if (e.key === "Escape") { proxyCustom = false; renderProxy(s, keep); } };
-    i.onblur = save;
-    box.append(i);
-    if (proxyCustom) queueMicrotask(() => i.focus());
-  }
-  box.append(segs([["auto", t("Auto")], ["off", t("Off")], ["custom", t("Custom")]], mode, pick));
 }
 
 // renderUpdate fills in the version row: whether a newer magpie is out.
