@@ -59,17 +59,19 @@ func signIn(t *testing.T) string {
 	return home
 }
 
-// isolate keeps tests off the machine's own Claude Code Keychain login and
-// forgets anything a previous test cached.
+// isolate keeps tests off the machine's own Claude Code and Cursor Keychain
+// logins and forgets anything a previous test cached.
 func isolate(t *testing.T) {
 	t.Helper()
 	oldKeychain, oldURL, oldBase, oldExe := claudeKeychain, claudeTokenURL, claudeBase, claudeExecutable
-	claudeKeychain = false
+	oldCursor := cursorKeychain
+	claudeKeychain, cursorKeychain = false, false
 	claudeExecutable = func() string { return "" }
 	forgetClaudeCredential()
 	forgetClaudeStatus()
 	t.Cleanup(func() {
 		claudeKeychain, claudeTokenURL, claudeBase, claudeExecutable = oldKeychain, oldURL, oldBase, oldExe
+		cursorKeychain = oldCursor
 		forgetClaudeCredential()
 		forgetClaudeStatus()
 	})
