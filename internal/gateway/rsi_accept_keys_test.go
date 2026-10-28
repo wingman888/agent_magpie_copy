@@ -27,7 +27,7 @@ func (b *keyUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if lim {
 		w.WriteHeader(429)
-		io.WriteString(w, `{"error":{"message":"rate limited for `+strings.ToUpper(key[len(key)-3:])+`"}}`)
+		io.WriteString(w, `{"error":{"message":"rate limited for `+strings.ToUpper(key)+`"}}`)
 		return
 	}
 	io.WriteString(w, `{"id":"from-`+key+`","choices":[]}`)
