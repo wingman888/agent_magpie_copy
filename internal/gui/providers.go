@@ -3,16 +3,14 @@ package gui
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/yetone/magpie/internal/agent"
-	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/dial/internal/agent"
+	"github.com/yetone/dial/internal/catalog"
+	"github.com/yetone/dial/internal/gateway"
+	"github.com/yetone/dial/internal/provider"
 )
 
 // The providers page: the vendors the user added, the presets they can add
@@ -26,18 +24,17 @@ type modelJSON struct {
 }
 
 type providerJSON struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Icon      string            `json:"icon"`
-	Preset    string            `json:"preset"`
-	Host      string            `json:"host"`
-	Chat      string            `json:"chat"`
-	Responses string            `json:"responses"`
-	Anthropic string            `json:"anthropic"`
-	Catalog   string            `json:"catalog"`
-	Website   string            `json:"website"`
-	KeysURL   string            `json:"keysUrl"`
-	Headers   map[string]string `json:"headers,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Icon      string `json:"icon"`
+	Preset    string `json:"preset"`
+	Host      string `json:"host"`
+	Chat      string `json:"chat"`
+	Responses string `json:"responses"`
+	Anthropic string `json:"anthropic"`
+	Catalog   string `json:"catalog"`
+	Website   string `json:"website"`
+	KeysURL   string `json:"keysUrl"`
 	Key       struct {
 		Set      bool   `json:"set"`
 		Masked   string `json:"masked"`
@@ -90,7 +87,7 @@ type excludedJSON struct {
 type providersJSON struct {
 	Providers []providerJSON `json:"providers"`
 	Presets   []presetJSON   `json:"presets"`
-	Excluded  []excludedJSON `json:"excluded"` // sign-ins magpie found but will not share
+	Excluded  []excludedJSON `json:"excluded"` // sign-ins dial found but will not share
 	Gateway   gatewayJSON    `json:"gateway"`
 }
 
@@ -99,7 +96,7 @@ func currentProvider(a *agent.Agent) (string, string) {
 	if len(a.Fields) == 0 {
 		return "", ""
 	}
-	v := strings.TrimPrefix(a.Fields[0].Get(), "magpie/")
+	v := strings.TrimPrefix(a.Fields[0].Get(), "dial/")
 	if pid, model, ok := strings.Cut(v, "/"); ok {
 		if _, err := provider.Find(pid); err == nil {
 			return pid, model
@@ -113,8 +110,7 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
-		Headers: p.Headers,
-		Ready:   p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
+		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
@@ -194,9 +190,9 @@ func ago(t time.Time) string {
 	case d < time.Minute:
 		return "just now"
 	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Round(time.Minute).Minutes()))
+		return strings.TrimSuffix(d.Round(time.Minute).String(), "0s") + " ago"
 	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Round(time.Hour).Hours()))
+		return d.Round(time.Hour).String() + " ago"
 	default:
 		return t.Format("Jan 2")
 	}
@@ -205,32 +201,6 @@ func ago(t time.Time) string {
 func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 	mux.HandleFunc("GET /api/providers", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, providersState(gw))
-	})
-	// a picture for a provider, picked in the editor: kept by content before
-	// the provider is saved, which then points at it
-	mux.HandleFunc("POST /api/icons", func(rw http.ResponseWriter, r *http.Request) {
-		b, err := io.ReadAll(io.LimitReader(r.Body, provider.MaxIcon+1))
-		if err != nil {
-			fail(rw, err)
-			return
-		}
-		icon, err := provider.StoreIcon(b)
-		if err != nil {
-			fail(rw, err)
-			return
-		}
-		writeJSON(rw, map[string]string{"icon": icon})
-	})
-	mux.HandleFunc("GET /api/icons/{name}", func(rw http.ResponseWriter, r *http.Request) {
-		f := provider.IconFile(r.PathValue("name"))
-		if f == "" {
-			http.NotFound(rw, r)
-			return
-		}
-		// an SVG is only ever drawn as an image, never run
-		rw.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
-		rw.Header().Set("Cache-Control", "max-age=31536000, immutable")
-		http.ServeFile(rw, r, f)
 	})
 	mux.HandleFunc("POST /api/provider/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var in provider.Provider
@@ -255,9 +225,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			old, _ := provider.Find(in.ID)
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
-			}
-			if in.Icon == "" && old != nil && in.Preset == "" {
-				in.Icon = old.Icon
 			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
