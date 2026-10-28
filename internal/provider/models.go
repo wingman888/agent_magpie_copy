@@ -24,15 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		seen := map[string]bool{}
-		for _, id := range p.Catalogs() {
-			for _, m := range catalog.Provider(id) {
-				if !seen[m.ID] {
-					seen[m.ID] = true
-					known = append(known, m)
-				}
-			}
-		}
+		known = catalog.Provider(p.Catalog)
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -49,13 +41,6 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
-func (p Provider) firstCatalog() string {
-	if cs := p.Catalogs(); len(cs) > 0 {
-		return cs[0]
-	}
-	return ""
-}
-
 // Fetched reports when the vendor's own list was last fetched.
 func (p Provider) Fetched() (time.Time, bool) {
 	_, t, ok := catalog.Live(p.ID)
@@ -69,7 +54,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic, p.Headers)
+		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic)
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -95,7 +80,7 @@ func (p Provider) Exposed() []catalog.Model {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
 			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.firstCatalog()})
+				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
 			}
 		}
 		return out
