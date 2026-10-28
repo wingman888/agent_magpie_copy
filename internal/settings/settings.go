@@ -18,14 +18,12 @@ import (
 type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
-	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
 }
 
 // Themes and Langs are the accepted values, in the order the UI offers them.
 var (
 	Themes = []string{"system", "light", "dark"}
 	Langs  = []string{"system", "en", "zh"}
-	Trays  = []string{"panel", "window"}
 )
 
 // Path is the settings file.
@@ -58,9 +56,6 @@ func Save(s Settings) error {
 	if !slices.Contains(Langs, s.Lang) {
 		return fmt.Errorf("language must be one of %v, not %q", Langs, s.Lang)
 	}
-	if !slices.Contains(Trays, s.Tray) {
-		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
-	}
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
 	}
@@ -77,9 +72,6 @@ func (s Settings) normal() Settings {
 	}
 	if s.Lang == "" {
 		s.Lang = "system"
-	}
-	if s.Tray == "" {
-		s.Tray = "panel"
 	}
 	return s
 }

@@ -188,13 +188,6 @@ func set(a *agent.Agent, key, value string) error {
 
 func fieldForValue(a *agent.Agent, v string) *agent.Field {
 	vals := a.Values()
-	// a model stays with the model, even where other fields offer it too
-	// (Claude Code's opus/sonnet/haiku/fable)
-	for _, o := range a.Fields[0].Options(vals) {
-		if o.Value == v {
-			return nil
-		}
-	}
 	for i := 1; i < len(a.Fields); i++ {
 		for _, o := range a.Fields[i].Options(vals) {
 			if o.Value == v {
@@ -223,9 +216,6 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
-				if v == "" && f.Quiet {
-					continue
-				}
 				if v == "" {
 					v = faint.Render("—")
 				}

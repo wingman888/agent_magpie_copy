@@ -121,23 +121,18 @@ function renderAgents() {
     // so the controls line up down the list
     const fields = el("div", "fields");
     const wide = (f) => f.label === "model" || f.label === "large";
-    const shownFields = a.fields.filter((f) => !TIERS.includes(f.label));
-    const tiers = tierMenu(a);
-    if (tiers) shownFields.push(tiers);
-    const sorted = shownFields.sort((x, y) => wide(y) - wide(x));
+    const sorted = [...a.fields].sort((x, y) => wide(y) - wide(x));
     for (const f of sorted) {
       const b = el("button", "field " + (sorted.length === 1 ? "solo" : wide(f) ? "main" : "side"));
       const opt = optionFor(f, f.value);
       b.title = t("{label}: {value}", { label: t(f.label), value: f.value || t("agent default") }) + (opt?.note ? ` · ${opt.note}` : "");
       if (opt?.icon) b.append(icon(opt.icon));
       else if (!wide(f) || !f.value) b.append(el("span", "k", t(f.label)));
-      const shown = f.menu ? f.summary : (f.key === "effort" || f.label === "effort" || f.label === "thinking") ? effortName(opt || { value: f.value }) : (opt?.label || f.value || t("default"));
-      if (f.menu) b.title = f.options.map((o) => `${o.label}: ${o.note}`).join("\n");
-      b.append(el("span", "v" + (f.value || f.custom ? "" : " empty"), shown));
+      const shown = (f.key === "effort" || f.label === "effort" || f.label === "thinking") ? effortName(opt || { value: f.value }) : (opt?.label || f.value || t("default"));
+      b.append(el("span", "v" + (f.value ? "" : " empty"), shown));
       const c = el("span", "chev");
       c.append(svg(CHEV, 11, 1.7));
       b.append(c);
-      b.dataset.key = f.key;
       b.onclick = (ev) => openPicker(a, f, b, ev);
       fields.append(b);
     }
@@ -160,28 +155,6 @@ function renderAgents() {
     chips.append(c);
   }
   fit();
-}
-
-// Claude Code's opus/sonnet/haiku/fable can each have a model of their own
-// once it runs through magpie. They share one button, which lists the four;
-// picking one opens the model picker for it.
-const TIERS = ["opus", "sonnet", "haiku", "fable"];
-
-function tierMenu(a) {
-  const tiers = a.fields.filter((f) => TIERS.includes(f.label));
-  if (!tiers.length || !tiers.some((f) => f.options.length)) return null;
-  const main = a.fields.find((f) => f.key === "model");
-  const mainName = optionFor(main, main.value)?.label || main.value;
-  const custom = tiers.filter((f) => f.value);
-  const name = (f) => optionFor(f, f.value)?.label || f.value;
-  return {
-    key: "tiers", label: "tiers", value: "", menu: true, custom: custom.length > 0,
-    summary: custom.length ? custom.map((f) => f.label).join(", ") : t("same as model"),
-    options: tiers.map((f) => ({
-      value: f.key, label: f.label, icon: optionFor(f, f.value)?.icon || optionFor(main, main.value)?.icon,
-      note: f.value ? name(f) : t("same as model ({model})", { model: mainName }),
-    })),
-  };
 }
 
 // The tray panel has no scrollbars to speak of, so it grows to fit instead.
@@ -243,15 +216,12 @@ function openPicker(agent, field, anchor, ev, only) {
   // Current model first, then the rest in catalog order. Effort levels keep
   // their natural low → high order because their position is meaningful.
   const i = options.findIndex((o) => o.value === cur);
-  if (!effortPicker && !field.menu && i > 0) { const [c] = options.splice(i, 1); options.unshift({ ...c, group: "" }); }
+  if (!effortPicker && i > 0) { const [c] = options.splice(i, 1); options.unshift({ ...c, group: "" }); }
   else if (i < 0 && cur && !only) options.unshift({ value: cur, note: t("current value") });
   // the agent's own default: magpie's wiring comes out and the key is removed
-  if (TIERS.includes(field.label)) {
-    const main = agent.fields.find((f) => f.key === "model");
-    options.unshift({ value: "", label: t("Same as model"), note: optionFor(main, main.value)?.label || main.value, icon: optionFor(main, main.value)?.icon, reset: true });
-  } else if (!only && !field.menu) options.unshift({ value: "", label: t("Default"), note: t("what {agent} ships with", { agent: agent.name }), icon: agent.icon, reset: true });
-  const modelPicker = ["model", "small", "large", ...TIERS].includes(field.label) && !only;
-  pick = { agent, field, options, anchor, cursor: 0, free: !only && !field.menu, modelPicker, effortPicker, groupFilter: "all" };
+  if (!only) options.unshift({ value: "", label: t("Default"), note: t("what {agent} ships with", { agent: agent.name }), icon: agent.icon, reset: true });
+  const modelPicker = ["model", "small", "large"].includes(field.label) && !only;
+  pick = { agent, field, options, anchor, cursor: 0, free: !only, modelPicker, effortPicker, groupFilter: "all" };
   anchor.classList.add("open");
   const pop = $("#pop");
   pop.classList.toggle("model-picker", modelPicker);
@@ -330,7 +300,7 @@ function filter() {
   if (q) scored.sort((a, b) => b.s - a.s || a.i - b.i);
   pick.items = scored.map((x) => x.o);
   const typed = $("#q").value.trim();
-  if (typed && pick.free && ["model", "small", "large", ...TIERS].includes(pick.field.label) && !pick.items.some((o) => o.value === typed)) {
+  if (typed && pick.free && ["model", "small", "large"].includes(pick.field.label) && !pick.items.some((o) => o.value === typed)) {
     pick.items.push({ value: typed, note: t("use as typed"), custom: true });
   }
   pick.cursor = 0;
@@ -462,20 +432,14 @@ function move(d) {
 
 async function commit(value) {
   if (!pick || value == null) return;
-  const { agent, field, anchor } = pick;
+  const { agent, field } = pick;
   const opt = pick.options.find((o) => o.value === value);
   closePicker();
-  if (field.menu) {
-    // a tier chosen from the tiers menu: now its model
-    const tier = agent.fields.find((f) => f.key === value);
-    if (tier) openPicker(agent, tier, anchor, { stopPropagation() {} });
-    return;
-  }
   if (value === field.value) return;
   try {
     state = await api("set", { agent: agent.id, field: field.key, value });
     renderAgents();
-    const b = document.querySelector(`.agent[data-id="${agent.id}"] .field[data-key="${TIERS.includes(field.label) ? "tiers" : field.key}"]`);
+    const b = document.querySelector(`.agent[data-id="${agent.id}"] .field:nth-child(${agent.fields.indexOf(field) + 1})`);
     b?.classList.add("flash");
     const shown = opt?.label || value;
     if (state.notice) status(`${agent.name} → ${shown}. ${state.notice}`, "warn", 9000);
@@ -605,19 +569,14 @@ function renderProviders() {
 }
 
 // Sign-ins magpie found but leaves alone, so nobody wonders why an agent that
-// is clearly logged in is not in the list: the ones the user removed.
+// is clearly logged in is not in the list. Empty today.
 function renderExcluded() {
   const box = $("#excluded");
   box.replaceChildren();
   for (const x of providers.excluded) {
     const r = el("div", "excluded");
     r.append(icon(x.agentIcon), el("span", "", ""));
-    r.lastChild.append(el("b", "", t("{agent} is signed in, but stays out of this list. ", { agent: x.agentName })), t(x.why));
-    if (x.provider) {
-      const back = el("button", "link", t("Add it back"));
-      back.onclick = () => providerAction("save", { id: x.provider }, t("{name} added back", { name: x.agentName }));
-      r.lastChild.append(" ", back);
-    }
+    r.lastChild.append(el("b", "", t("{agent} is signed in, but stays out of this list. ", { agent: x.agentName })), x.why);
     box.append(r);
   }
 }
@@ -1251,11 +1210,7 @@ function renderEditor(p, presetID) {
     ed.append(...field(t("Models"), renderModels(p), ""));
     ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
     const bar = el("div", "bar");
-    // removing only hides it from magpie; the agent stays signed in
-    const del = el("button", "text danger", t("Remove"));
-    del.title = t("{agent} stays signed in; magpie just stops offering it", { agent: a.agentName });
-    del.onclick = () => providerAction("delete", { id: p.id }, t("{name} removed", { name: p.name }));
-    bar.append(del, el("span", "grow"));
+    bar.append(el("span", "grow"));
     const cancel = el("button", "text", t("Cancel"));
     cancel.onclick = cancelEdit;
     const saveBtn = el("button", "text primary", t("Save"));
@@ -1759,13 +1714,11 @@ function renderUsage() {
 
 // ---------- settings ----------
 //
-// Three choices (palette, language, what the tray icon opens) and the facts
-// people come looking for:
+// Two choices (palette, language) and the facts people come looking for:
 // the version, where magpie keeps its files, the gateway's address.
 
 const THEMES = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
 const LOCALES = [["system", "System"], ["en", "English"], ["zh", "中文"]];
-const TRAYS = [["panel", "Quick panel"], ["window", "Main window"]];
 
 // applyPrefs paints and speaks as the saved settings say. A ?theme= or
 // ?locale= in the URL wins, so a forced look stays forced.
@@ -1797,10 +1750,8 @@ async function loadSettings() {
 
 function renderSettings() {
   const s = prefs;
-  const keep = { theme: s.theme, lang: s.lang, tray: s.tray };
-  $("#themeSegs").replaceChildren(segs(THEMES.map(([id, name]) => [id, t(name)]), s.theme, (theme) => savePrefs({ ...keep, theme })));
-  $("#langSegs").replaceChildren(segs(LOCALES.map(([id, name]) => [id, t(name)]), s.lang, (lang) => savePrefs({ ...keep, lang })));
-  $("#traySegs").replaceChildren(segs(TRAYS.map(([id, name]) => [id, t(name)]), s.tray || "panel", (tray) => savePrefs({ ...keep, tray })));
+  $("#themeSegs").replaceChildren(segs(THEMES.map(([id, name]) => [id, t(name)]), s.theme, (theme) => savePrefs({ theme, lang: s.lang })));
+  $("#langSegs").replaceChildren(segs(LOCALES.map(([id, name]) => [id, t(name)]), s.lang, (lang) => savePrefs({ theme: s.theme, lang })));
 
   const about = $("#about");
   about.replaceChildren();

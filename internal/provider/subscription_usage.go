@@ -49,22 +49,18 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		return append([]SubscriptionQuota(nil), subscriptionUsageCache.data...)
 	}
 	var out []SubscriptionQuota
-	hidden := map[string]bool{}
-	for _, p := range load().Providers {
-		hidden[p.ID] = p.Hidden
-	}
-	if _, ok := claudeAccount(); ok && !hidden["claude"] {
+	if _, _, ok := claudeCredential(); ok {
 		out = append(out, claudeSubscriptionUsage(ctx))
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if p, ok := codexAccount(home); ok && !hidden[p.ID] {
+		if _, ok := codexAccount(home); ok {
 			out = append(out, codexSubscriptionUsage(ctx, filepath.Join(home, ".codex", "auth.json")))
 		}
 		cfg := os.Getenv("XDG_CONFIG_HOME")
 		if cfg == "" {
 			cfg = filepath.Join(home, ".config")
 		}
-		if app, ok := copilotLogin(cfg); ok && !hidden["copilot"] {
+		if app, ok := copilotLogin(cfg); ok {
 			out = append(out, copilotSubscriptionUsage(ctx, app.Token))
 		}
 	}
@@ -105,7 +101,7 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 		q.Error = err.Error()
 		return q
 	}
-	_, plan, _ := claudeIdentity()
+	_, plan := claudeIdentity()
 	q.Plan = plan
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
