@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,30 @@ func TestImportIsReadOnce(t *testing.T) {
 	}
 	if _, in := get(stashImport("magpie://import?name=x")); in.Error == "" {
 		t.Fatal("a bad link reported no error")
+	}
+}
+
+func TestImportIconRoute(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	mux := http.NewServeMux()
+	importRoutes(mux)
+	post := func(url string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		body := strings.NewReader(`{"url":"` + url + `"}`)
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/import/icon", body))
+		return rec
+	}
+	// a loopback URL is refused before any request goes out
+	if rec := post("https://127.0.0.1/logo.png"); rec.Code == 200 {
+		t.Fatalf("loopback icon accepted: %s", rec.Body.String())
+	}
+	if rec := post("http://relay.example/logo.svg"); rec.Code == 200 {
+		t.Fatalf("plain http icon accepted: %s", rec.Body.String())
+	}
+	if rec := post("not a url"); rec.Code == 200 {
+		t.Fatalf("junk accepted: %s", rec.Body.String())
 	}
 }
 
