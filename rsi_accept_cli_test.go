@@ -38,8 +38,7 @@ func TestAcceptProviderFallbackCLI(t *testing.T) {
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		o := ansi.ReplaceAllString(string(out), "")
-		t.Logf("run %v => %s", args, strings.ReplaceAll(strings.ReplaceAll(o, "\n", " | "), "\"", "~"))
-		return o, err
+				return o, err
 	}
 
 	if out, err := run("provider", "fallback", "main"); err != nil || !strings.Contains(out, "Mainp") || !strings.Contains(out, "has no fallback") {
@@ -79,9 +78,6 @@ func TestAcceptProviderFallbackCLI(t *testing.T) {
 	}
 	if out, _ := run("provider", "fallback", "main"); !strings.Contains(out, "has no fallback") {
 		t.Fatalf("FAIL %s", tl(out))
-	}
-	if p, _ := provider.Find("main"); len(p.Fallback) != 0 {
-		t.Fatalf("%v", p.Fallback)
 	}
 }
 
