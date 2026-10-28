@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -107,6 +108,9 @@ func usesByProvider() map[string][]string {
 		}
 		v := a.Fields[0].Get()
 		v = strings.TrimPrefix(v, "magpie/")
+		if strings.HasPrefix(v, provider.GroupPrefix) {
+			continue
+		}
 		if pid, _, ok := strings.Cut(v, "/"); ok {
 			out[pid] = append(out[pid], a.Name)
 		}
@@ -142,6 +146,13 @@ func presets() error {
 	return nil
 }
 
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // models: `magpie models` — the catalog every agent sees
 func models() error {
 	entries := provider.Catalog()
@@ -149,13 +160,22 @@ func models() error {
 		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
 	}
+	// routing groups come first, in a section of their own
+	slices.SortStableFunc(entries, func(a, b provider.Entry) int {
+		return cmp.Compare(b2i(a.Group != ""), b2i(b.Group != "")) * -1
+	})
 	w := 0
 	for _, e := range entries {
 		w = max(w, len(e.ID))
 	}
 	last := ""
 	for _, e := range entries {
-		if e.Provider.ID != last {
+		if e.Group != "" {
+			if last != agent.RoutingGroups {
+				last = agent.RoutingGroups
+				fmt.Println(faint.Render("  " + agent.RoutingGroups))
+			}
+		} else if e.Provider.ID != last {
 			last = e.Provider.ID
 			fmt.Println(faint.Render("  " + e.Provider.Name))
 		}

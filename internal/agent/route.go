@@ -17,10 +17,19 @@ import (
 // magpieID is the provider id agents know the gateway by.
 const magpieID = "magpie"
 
-// viaMagpie lists the catalog for a picker, one group per provider.
+// RoutingGroups names the picker group the routing groups are listed in.
+const RoutingGroups = "Routing groups"
+
+// viaMagpie lists the catalog for a picker, one group per provider, the
+// routing groups first in a group of their own.
 func viaMagpie(prefix string) []Option {
-	var out []Option
+	var groups, out []Option
 	for _, e := range provider.Catalog() {
+		if e.Group != "" {
+			groups = append(groups, Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
+				Icon: e.Provider.Icon, Icons: e.Icons, Group: RoutingGroups, Ref: e.ID})
+			continue
+		}
 		note := e.Provider.Name + " · via magpie"
 		if a := e.Provider.Account; a != nil {
 			note = a.User + " · via magpie"
@@ -28,7 +37,7 @@ func viaMagpie(prefix string) []Option {
 		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
 			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
 	}
-	return out
+	return append(groups, out...)
 }
 
 // viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going
@@ -61,7 +70,11 @@ func firstOf(xs []string) string {
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
+		name := e.Name + " · " + e.Provider.Name
+		if e.Group != "" {
+			name = e.Name + " · routing group"
+		}
+		out = append(out, catalog.Model{ID: e.ID, Name: name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
 	}
 	return out
 }

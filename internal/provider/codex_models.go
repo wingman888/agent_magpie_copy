@@ -9,10 +9,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 )
@@ -52,16 +56,92 @@ func codexModels(ctx context.Context, sign func(context.Context, *http.Request, 
 	return ms, nil
 }
 
-// codexCacheVersion is the client version Codex CLI last asked with.
+var (
+	// codexHome and codexRun are where the client version is looked for;
+	// tests swap them.
+	codexHome = func() string { h, _ := os.UserHomeDir(); return h }
+	codexRun  = func(ctx context.Context) ([]byte, error) {
+		return exec.CommandContext(ctx, "codex", "--version").Output()
+	}
+
+	codexVerMu   sync.Mutex
+	codexVer     string
+	codexVerTime time.Time
+)
+
+const codexVersionTTL = 10 * time.Minute
+
+// codexCacheVersion is the client version the models list is asked with: the
+// newest of the installed Codex CLI, the one in its models cache, and the
+// built-in default.
 func codexCacheVersion() string {
-	home, _ := os.UserHomeDir()
+	codexVerMu.Lock()
+	defer codexVerMu.Unlock()
+	if codexVer != "" && time.Since(codexVerTime) < codexVersionTTL {
+		return codexVer
+	}
+	best := codexClientVersion
+	if v := codexCLIVersion(); v != "" && semverLess(best, v) {
+		best = v
+	}
 	var c struct {
 		ClientVersion string `json:"client_version"`
 	}
-	if b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json")); err == nil && json.Unmarshal(b, &c) == nil && c.ClientVersion != "" {
-		return c.ClientVersion
+	if b, err := os.ReadFile(filepath.Join(codexHome(), ".codex", "models_cache.json")); err == nil && json.Unmarshal(b, &c) == nil {
+		if v := strings.TrimSpace(c.ClientVersion); semverParse(v) != nil && semverLess(best, v) {
+			best = v
+		}
 	}
-	return codexClientVersion
+	codexVer, codexVerTime = best, time.Now()
+	return best
+}
+
+// codexCLIVersion is what `codex --version` says ("codex-cli 0.155.1"), or ""
+// when there is no Codex CLI or it fails.
+func codexCLIVersion() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := codexRun(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, f := range strings.Fields(string(out)) {
+		if semverParse(f) != nil {
+			return f
+		}
+	}
+	return ""
+}
+
+// semverParse reads major.minor.patch, ignoring a leading v and any
+// pre-release or build suffix; nil when it isn't one.
+func semverParse(v string) []int {
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) < 2 || len(parts) > 3 {
+		return nil
+	}
+	n := []int{0, 0, 0}
+	for i, p := range parts {
+		x, err := strconv.Atoi(p)
+		if err != nil || x < 0 {
+			return nil
+		}
+		n[i] = x
+	}
+	return n
+}
+
+// semverLess reports whether a is an older version than b.
+func semverLess(a, b string) bool {
+	x, y := semverParse(a), semverParse(b)
+	if x == nil || y == nil {
+		return false
+	}
+	return slices.Compare(x, y) < 0
 }
 
 // parseCodexModels reads the backend's list, the listed ones in its order.
