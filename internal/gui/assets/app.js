@@ -1,15 +1,12 @@
-// magpie — one state object per view, rendered into a list. No framework.
+// dial — one state object per view, rendered into a list. No framework.
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
 const params = new URLSearchParams(location.search);
 const mode = params.get("mode") || "window";
 document.body.classList.add(mode);
-// Only the Mac window draws its title bar inside the page (the traffic lights).
-if (/^Mac/.test(navigator.platform)) document.body.classList.add("mac");
 if (params.get("theme")) document.documentElement.dataset.theme = params.get("theme");
 
-let state = { agents: [], profiles: [], catalog: "", settings: {} };
-let prefs = null; // the settings page: theme, lang, version, dir, gateway
+let state = { agents: [], profiles: [], catalog: "" };
 let providers = null; // { providers, presets, gateway }
 let view = "agents";
 let period = "30d"; // usage window
@@ -18,15 +15,7 @@ let pick = null; // { agent, field, options, items, cursor, anchor }
 let editing = null; // provider id being edited; { preset } or { custom: true } for a new one
 let draft = null; // the editor's working copy
 let adding = false; // the preset sheet is open
-let importing = null; // a magpie://import link waiting for a yes: { provider, error, replaces }
-// the gateway tab's choices, kept per machine
-let flavor = params.get("flavor") || localStorage.getItem("magpie.flavor") || "openai"; // which API the snippets speak
-let lang = params.get("lang") || localStorage.getItem("magpie.lang") || "shell";        // which snippet
-let exampleModel = localStorage.getItem("magpie.model") || "";  // the model in the snippets
-const expandedCalls = new Set(); // recent-call ids whose wire bodies are open
-let savedModelFavorites = [];
-try { savedModelFavorites = JSON.parse(localStorage.getItem("magpie.modelFavorites") || "[]"); } catch {}
-const modelFavorites = new Set(Array.isArray(savedModelFavorites) ? savedModelFavorites : []);
+let activity = false; // recent gateway calls are shown
 
 async function api(path, body) {
   const res = await fetch("/api/" + path, {
@@ -58,7 +47,6 @@ const CHEV = "m5.5 6.5 2.5 2.5 2.5-2.5";
 const CHEV_R = "m6.5 4.5 3 3.5-3 3.5";
 const CHECK = "m3.5 8.5 3 3 6-7";
 const PLUS = "M8 3.5v9M3.5 8h9";
-const COPY_ICON = "M5.5 5.5V3.5h7v7h-2M3.5 5.5h7v7h-7z";
 
 // A brand icon: colour logos are images, mono logos take the text colour.
 // Nothing is ever invented: a model with no known vendor keeps the slot
@@ -68,16 +56,6 @@ function icon(name) {
   if (name === "generic") {
     e.classList.add("generic");
     e.append(svg("M8 2.2 13.2 5.1v5.8L8 13.8 2.8 10.9V5.1Z M8 8v5.8 M2.8 5.1 8 8l5.2-2.9", 16, 1.4));
-    return e;
-  }
-  if (name?.startsWith("file:")) {
-    // a picture the user gave their own provider
-    const img = el("img");
-    img.src = "/api/icons/" + encodeURIComponent(name.slice(5));
-    img.alt = "";
-    img.draggable = false;
-    img.onerror = () => e.replaceWith(icon("generic"));
-    e.append(img);
     return e;
   }
   if (name) {
@@ -118,7 +96,7 @@ function renderAgents() {
   list.replaceChildren();
   if (!state.agents.length) {
     const e = el("div", "empty-state");
-    e.append(el("b", "", t("No agents found")), el("span", "", t("Install Claude Code, Codex, Gemini CLI, OpenCode… and magpie will list them here.")));
+    e.append(el("b", "", "No coding agents found"), el("span", "", "Install Claude Code, Codex, Gemini CLI, OpenCode… and dial will list them here."));
     list.append(e);
   }
   for (const a of state.agents) {
@@ -127,27 +105,17 @@ function renderAgents() {
     row.title = a.path;
     const who = el("div", "who");
     who.append(el("div", "name", a.name));
-    // the model picker takes the wide column, everything else the narrow one,
-    // so the controls line up down the list
     const fields = el("div", "fields");
-    const wide = (f) => f.label === "model" || f.label === "large";
-    const shownFields = a.fields.filter((f) => !TIERS.includes(f.label));
-    const tiers = tierMenu(a);
-    if (tiers) shownFields.push(tiers);
-    const sorted = shownFields.sort((x, y) => wide(y) - wide(x));
-    for (const f of sorted) {
-      const b = el("button", "field " + (sorted.length === 1 ? "solo" : wide(f) ? "main" : "side"));
+    for (const f of a.fields) {
+      const b = el("button", "field");
       const opt = optionFor(f, f.value);
-      b.title = t("{label}: {value}", { label: t(f.label), value: f.value || t("agent default") }) + (opt?.note ? ` · ${opt.note}` : "");
+      b.title = `${f.label}: ${f.value || "agent default"}` + (opt?.note ? ` · ${opt.note}` : "");
       if (opt?.icon) b.append(icon(opt.icon));
-      else if (!wide(f) || !f.value) b.append(el("span", "k", t(f.label)));
-      const shown = f.menu ? f.summary : (f.key === "effort" || f.label === "effort" || f.label === "thinking") ? effortName(opt || { value: f.value }) : (opt?.label || f.value || t("default"));
-      if (f.menu) b.title = f.options.map((o) => `${o.label}: ${o.note}`).join("\n");
-      b.append(el("span", "v" + (f.value || f.custom ? "" : " empty"), shown));
+      else if (f.label !== "model" || !f.value) b.append(el("span", "k", f.label));
+      b.append(el("span", "v" + (f.value ? "" : " empty"), opt?.label || f.value || "default"));
       const c = el("span", "chev");
       c.append(svg(CHEV, 11, 1.7));
       b.append(c);
-      b.dataset.key = f.key;
       b.onclick = (ev) => openPicker(a, f, b, ev);
       fields.append(b);
     }
@@ -157,41 +125,19 @@ function renderAgents() {
 
   const chips = $("#profiles");
   chips.replaceChildren();
-  if (!state.profiles.length) chips.append(el("span", "hint", t("none yet · save the setup to switch back in one click")));
+  if (!state.profiles.length) chips.append(el("span", "hint", "Save the current setup to switch everything back in one click."));
   for (const p of state.profiles) {
     const c = el("button", "chip");
     c.title = p.summary;
     c.append(el("span", "", p.name));
     const x = el("span", "x", "×");
-    x.title = t("Delete profile");
+    x.title = "Delete profile";
     x.onclick = (ev) => { ev.stopPropagation(); profileAction("delete", p.name); };
     c.append(x);
     c.onclick = () => profileAction("use", p.name);
     chips.append(c);
   }
   fit();
-}
-
-// Claude Code's opus/sonnet/haiku/fable can each have a model of their own
-// once it runs through magpie. They share one button, which lists the four;
-// picking one opens the model picker for it.
-const TIERS = ["opus", "sonnet", "haiku", "fable"];
-
-function tierMenu(a) {
-  const tiers = a.fields.filter((f) => TIERS.includes(f.label));
-  if (!tiers.length || !tiers.some((f) => f.options.length)) return null;
-  const main = a.fields.find((f) => f.key === "model");
-  const mainName = optionFor(main, main.value)?.label || main.value;
-  const custom = tiers.filter((f) => f.value);
-  const name = (f) => optionFor(f, f.value)?.label || f.value;
-  return {
-    key: "tiers", label: "tiers", value: "", menu: true, custom: custom.length > 0,
-    summary: custom.length ? custom.map((f) => f.label).join(", ") : t("same as model"),
-    options: tiers.map((f) => ({
-      value: f.key, label: f.label, icon: optionFor(f, f.value)?.icon || optionFor(main, main.value)?.icon,
-      note: f.value ? name(f) : t("same as model ({model})", { model: mainName }),
-    })),
-  };
 }
 
 // The tray panel has no scrollbars to speak of, so it grows to fit instead.
@@ -204,13 +150,9 @@ function fit() {
 async function load() {
   try {
     state = await api("state");
-    applyPrefs(state.settings);
     renderAgents();
-    // an open provider editor is someone typing: coming back to the window
-    // must not rebuild it under them
-    if ((view === "providers" || view === "gateway") && !(editing || adding)) await loadProviders();
+    if (view === "providers") await loadProviders();
     if (view === "usage") await loadUsage();
-    if (view === "settings") await loadSettings();
   } catch (e) {
     status(e.message, "err");
   }
@@ -251,184 +193,43 @@ function openPicker(agent, field, anchor, ev, only) {
   closePicker();
   const cur = field.value;
   let options = field.options.filter((o) => !only || only(o));
-  const effortPicker = !only && (field.key === "effort" || field.label === "effort" || field.label === "thinking");
-  // Current model first, then the rest in catalog order. Effort levels keep
-  // their natural low → high order because their position is meaningful.
+  // current value first, then the rest in catalog order
   const i = options.findIndex((o) => o.value === cur);
-  if (!effortPicker && !field.menu && i > 0) { const [c] = options.splice(i, 1); options.unshift({ ...c, group: "" }); }
-  else if (i < 0 && cur && !only) options.unshift({ value: cur, note: t("current value") });
-  // the agent's own default: magpie's wiring comes out and the key is removed
-  if (TIERS.includes(field.label)) {
-    const main = agent.fields.find((f) => f.key === "model");
-    options.unshift({ value: "", label: t("Same as model"), note: optionFor(main, main.value)?.label || main.value, icon: optionFor(main, main.value)?.icon, reset: true });
-  } else if (!only && !field.menu) options.unshift({ value: "", label: t("Default"), note: t("what {agent} ships with", { agent: agent.name }), icon: agent.icon, reset: true });
-  const modelPicker = ["model", "small", "large", ...TIERS].includes(field.label) && !only;
-  pick = { agent, field, options, anchor, cursor: 0, free: !only && !field.menu, modelPicker, effortPicker, groupFilter: "all" };
+  if (i > 0) { const [c] = options.splice(i, 1); options.unshift({ ...c, group: "" }); }
+  else if (i < 0 && cur && !only) options.unshift({ value: cur, note: "current value" });
+  // the agent's own default: dial's wiring comes out and the key is removed
+  if (!only) options.unshift({ value: "", label: "Default", note: `what ${agent.name} ships with`, icon: agent.icon, reset: true });
+  pick = { agent, field, options, anchor, cursor: 0, free: !only };
   anchor.classList.add("open");
   const pop = $("#pop");
-  pop.classList.toggle("model-picker", modelPicker);
-  pop.classList.toggle("effort-picker", effortPicker);
   pop.hidden = false;
-  $("#effortControl").hidden = !effortPicker;
-  pop.querySelector(".search").hidden = effortPicker;
-  pop.querySelector(".picker-body").hidden = effortPicker;
-  placePop(anchor, effortPicker ? 218 : modelPicker ? Math.min(490, innerWidth - 16) : (options.some((o) => o.note && o.note !== o.value) ? 372 : 300), effortPicker ? 90 : modelPicker ? Math.min(420, innerHeight - 16) : 340);
-  if (effortPicker) {
-    renderEffortPicker();
-    $("#effortRange").focus();
-    return;
-  }
+  placePop(anchor, options.some((o) => o.note && o.note !== o.value) ? 372 : 300, 340);
   const q = $("#q");
   q.value = "";
-  q.placeholder = modelPicker ? t("Filter, or type any model id…") : t("Filter {field}…", { field: t(field.label) });
+  q.placeholder = field.label === "model" ? (only ? "Filter models…" : "Filter, or type any model id…") : `Filter ${field.label}…`;
   filter();
   q.focus();
-}
-
-function effortName(option) {
-  if (!option?.value) return t("default");
-  return t(option.label || option.value);
-}
-
-function renderEffortPicker() {
-  const range = $("#effortRange");
-  const options = pick.options;
-  const selected = Math.max(0, options.findIndex((o) => o.value === pick.field.value));
-  range.max = String(Math.max(0, options.length - 1));
-  range.value = String(selected);
-  $("#effortTitle").textContent = t(pick.field.label);
-  const update = () => {
-    const i = Number(range.value);
-    $("#effortValue").textContent = effortName(options[i]);
-    const fill = `${options.length > 1 ? 100 * i / (options.length - 1) : 0}%`;
-    range.style.setProperty("--fill", fill);
-    range.closest(".effort-track").style.setProperty("--fill", fill);
-    range.setAttribute("aria-valuetext", effortName(options[i]));
-  };
-  range.oninput = update;
-  range.onchange = () => {
-    const opened = pick;
-    const option = options[Number(range.value)];
-    if (!opened || !option || option.value === opened.field.value) return;
-    opened.field.value = option.value;
-    const value = opened.anchor.querySelector(".v");
-    if (value) {
-      value.textContent = effortName(option);
-      value.classList.toggle("empty", !option.value);
-    }
-    // Persist every settled slider value, but keep the compact control open so
-    // the user can compare adjacent levels. Queue writes to preserve ordering
-    // when keyboard input changes several stops quickly.
-    opened.effortSave = (opened.effortSave || Promise.resolve()).then(async () => {
-      const next = await api("set", { agent: opened.agent.id, field: opened.field.key, value: option.value });
-      state = next;
-      status(`${opened.agent.name} ${t(opened.field.label)} → ${effortName(option)}`, "ok");
-    }).catch((e) => status(e.message, "err"));
-  };
-  range.onkeydown = (ev) => {
-    if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); closePicker(); }
-  };
-  update();
 }
 
 function filter() {
   if (!pick) return;
   const q = $("#q").value.trim().toLowerCase();
-  let source = pick.options;
-  if (pick.modelPicker && pick.groupFilter === "favorites") source = source.filter((o) => modelFavorites.has(o.value));
-  else if (pick.modelPicker && pick.groupFilter !== "all") source = source.filter((o) => o.group === pick.groupFilter || o.reset);
-  const scored = source.map((o) => ({ o, i: pick.options.indexOf(o), s: score(q, o) })).filter((x) => x.s > 0);
+  const scored = pick.options.map((o, i) => ({ o, i, s: score(q, o) })).filter((x) => x.s > 0);
   // with a query, best matches first; without, catalog order keeps the groups together
   if (q) scored.sort((a, b) => b.s - a.s || a.i - b.i);
   pick.items = scored.map((x) => x.o);
   const typed = $("#q").value.trim();
-  if (typed && pick.free && ["model", "small", "large", ...TIERS].includes(pick.field.label) && !pick.items.some((o) => o.value === typed)) {
-    pick.items.push({ value: typed, note: t("use as typed"), custom: true });
+  if (typed && pick.free && pick.field.label === "model" && !pick.items.some((o) => o.value === typed)) {
+    pick.items.push({ value: typed, note: "use as typed", custom: true });
   }
   pick.cursor = 0;
-  renderPickerRail();
   renderList();
-}
-
-function updatePickerRailSelection() {
-  const rail = $("#pickerRail");
-  const active = rail.querySelector(`.rail-item[data-group="${CSS.escape(pick?.groupFilter || "all")}"]`);
-  for (const b of rail.querySelectorAll(".rail-item")) b.classList.toggle("on", b === active);
-  const thumb = rail.querySelector(".rail-thumb");
-  if (active && thumb) {
-    thumb.style.opacity = "1";
-    thumb.style.transform = `translate3d(0, ${active.offsetTop}px, 0)`;
-  }
-}
-
-function switchPickerGroup(id) {
-  if (!pick?.modelPicker || id === pick.groupFilter) return;
-  const railItems = [...$("#pickerRail").querySelectorAll(".rail-item")];
-  const from = railItems.findIndex((b) => b.dataset.group === pick.groupFilter);
-  const to = railItems.findIndex((b) => b.dataset.group === id);
-  pick.groupFilter = id;
-  updatePickerRailSelection();
-  $("#q").focus();
-
-  const list = $("#list");
-  pick.groupAnimation?.cancel();
-  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (reduced) { filter(); return; }
-  const direction = to >= from ? 1 : -1;
-  const token = (pick.groupTransition || 0) + 1;
-  pick.groupTransition = token;
-  const out = list.animate([
-    { opacity: 1, transform: "translate3d(0, 0, 0)" },
-    { opacity: 0, transform: `translate3d(${-direction * 5}px, 0, 0)` },
-  ], { duration: 75, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" });
-  pick.groupAnimation = out;
-  out.finished.then(() => {
-    if (!pick || pick.groupTransition !== token) return;
-    out.cancel();
-    filter();
-    const incoming = list.animate([
-      { opacity: 0, transform: `translate3d(${direction * 7}px, 0, 0)` },
-      { opacity: 1, transform: "translate3d(0, 0, 0)" },
-    ], { duration: 190, easing: "cubic-bezier(.22, 1, .36, 1)" });
-    pick.groupAnimation = incoming;
-  }).catch(() => {});
-}
-
-function renderPickerRail() {
-  const rail = $("#pickerRail");
-  rail.hidden = !pick?.modelPicker;
-  if (!pick?.modelPicker) { rail.replaceChildren(); rail.dataset.signature = ""; return; }
-  const groups = [];
-  for (const o of pick.options) if (o.group && !groups.includes(o.group)) groups.push(o.group);
-  const signature = groups.join("\u001f");
-  if (rail.dataset.signature !== signature) {
-    rail.replaceChildren();
-    rail.dataset.signature = signature;
-    rail.append(el("span", "rail-thumb"));
-    const add = (id, title, child) => {
-      const b = el("button", "rail-item");
-      b.dataset.group = id;
-      b.title = title;
-      b.setAttribute("aria-label", title);
-      b.append(child);
-      b.onclick = () => switchPickerGroup(id);
-      rail.append(b);
-    };
-    add("all", t("All models"), svg("M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3zM9 9h4v4H9z", 15, 1.4));
-    add("favorites", t("Favorites"), svg("m8 2 1.8 3.7 4.1.6-3 2.9.7 4.1L8 11.4l-3.6 1.9.7-4.1-3-2.9 4.1-.6z", 16, 1.4));
-    if (groups.length) rail.append(el("span", "rail-sep"));
-    for (const group of groups) {
-      const sample = pick.options.find((o) => o.group === group);
-      add(group, group, icon(sample?.icon || "generic"));
-    }
-  }
-  queueMicrotask(updatePickerRailSelection);
 }
 
 function renderList() {
   const list = $("#list");
   list.replaceChildren();
-  if (!pick.items.length) { list.append(el("div", "none", t("No matches."))); return; }
+  if (!pick.items.length) { list.append(el("div", "none", "No matches.")); return; }
   const hasIcons = pick.items.some((o) => o.icon);
   const q = $("#q").value.trim();
   let group = null;
@@ -438,24 +239,10 @@ function renderList() {
     const li = el("li", (idx === pick.cursor ? "sel" : "") + (o.value === pick.field.value ? " cur" : "") + (o.custom ? " custom" : "") + (o.reset ? " reset" : ""));
     li.dataset.i = idx;
     if (hasIcons) li.append(icon(o.icon));
-    const words = el("span", "option-words");
-    words.append(el("span", "v", o.label || o.value));
+    li.append(el("span", "v", o.label || o.value));
     let note = o.note && o.note !== (o.label || o.value) ? o.note : "";
     if (q && o.group && !note) note = o.group;
-    if (note) words.append(el("span", "n", note));
-    li.append(words);
-    if (pick.modelPicker && o.value && !o.custom) {
-      const star = el("button", "favorite" + (modelFavorites.has(o.value) ? " on" : ""));
-      star.title = modelFavorites.has(o.value) ? t("Remove from favorites") : t("Add to favorites");
-      star.append(svg("m8 2 1.8 3.7 4.1.6-3 2.9.7 4.1L8 11.4l-3.6 1.9.7-4.1-3-2.9 4.1-.6z", 14, 1.4));
-      star.onclick = (ev) => {
-        ev.stopPropagation();
-        if (modelFavorites.has(o.value)) modelFavorites.delete(o.value); else modelFavorites.add(o.value);
-        localStorage.setItem("magpie.modelFavorites", JSON.stringify([...modelFavorites]));
-        filter();
-      };
-      li.append(star);
-    }
+    if (note) li.append(el("span", "n", note));
     const ck = el("span", "check");
     ck.append(svg(CHECK, 12, 1.8));
     li.append(ck);
@@ -474,24 +261,18 @@ function move(d) {
 
 async function commit(value) {
   if (!pick || value == null) return;
-  const { agent, field, anchor } = pick;
+  const { agent, field } = pick;
   const opt = pick.options.find((o) => o.value === value);
   closePicker();
-  if (field.menu) {
-    // a tier chosen from the tiers menu: now its model
-    const tier = agent.fields.find((f) => f.key === value);
-    if (tier) openPicker(agent, tier, anchor, { stopPropagation() {} });
-    return;
-  }
   if (value === field.value) return;
   try {
     state = await api("set", { agent: agent.id, field: field.key, value });
     renderAgents();
-    const b = document.querySelector(`.agent[data-id="${agent.id}"] .field[data-key="${TIERS.includes(field.label) ? "tiers" : field.key}"]`);
+    const b = document.querySelector(`.agent[data-id="${agent.id}"] .field:nth-child(${agent.fields.indexOf(field) + 1})`);
     b?.classList.add("flash");
     const shown = opt?.label || value;
     if (state.notice) status(`${agent.name} → ${shown}. ${state.notice}`, "warn", 9000);
-    else status(`${agent.name} ${t(field.label)} → ${shown}`, "ok");
+    else status(`${agent.name} ${field.label} → ${shown}`, "ok");
     if (providers) loadProviders();
   } catch (e) {
     status(e.message, "err");
@@ -500,13 +281,8 @@ async function commit(value) {
 
 function closePicker() {
   if (!pick) return;
-  pick.groupAnimation?.cancel();
   pick.anchor.classList.remove("open");
   $("#pop").hidden = true;
-  $("#pop").classList.remove("model-picker", "effort-picker");
-  $("#pop .search").hidden = false;
-  $("#pop .picker-body").hidden = false;
-  $("#effortControl").hidden = true;
   pick = null;
 }
 
@@ -519,9 +295,7 @@ $("#q").addEventListener("keydown", (e) => {
 });
 document.addEventListener("mousedown", (e) => { if (pick && !$("#pop").contains(e.target)) closePicker(); });
 document.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape" || pick) return;
-  if (editing !== null) cancelEdit();
-  else if (mode === "panel") api("window/hide", {});
+  if (e.key === "Escape" && !pick && mode === "panel") api("window/hide", {});
 });
 
 // ---------- profiles ----------
@@ -531,9 +305,9 @@ async function profileAction(action, name) {
     const data = await api("profile/" + action, { name });
     state = data;
     renderAgents();
-    if (action === "use") status(t(data.changed === 1 ? "{name} applied · {n} setting changed" : "{name} applied · {n} settings changed", { name, n: data.changed }), "ok");
-    else if (action === "save") status(t("Saved {name}", { name }), "ok");
-    else status(t("Deleted {name}", { name }));
+    if (action === "use") status(`${name} applied · ${data.changed} setting${data.changed === 1 ? "" : "s"} changed`, "ok");
+    else if (action === "save") status(`Saved ${name}`, "ok");
+    else status(`Deleted ${name}`);
   } catch (e) {
     status(e.message, "err");
   }
@@ -543,7 +317,7 @@ $("#save").onclick = () => {
   const chips = $("#profiles");
   if (chips.querySelector(".chip-input")) return;
   const input = el("input", "chip-input");
-  input.placeholder = t("Profile name");
+  input.placeholder = "Profile name";
   input.onkeydown = (e) => {
     if (e.key === "Enter" && input.value.trim()) profileAction("save", input.value.trim());
     else if (e.key === "Escape") input.remove();
@@ -562,470 +336,95 @@ $("#save").onclick = () => {
 // the local gateway in whichever API the agent speaks.
 
 async function loadProviders() {
-  if (view === "gateway") renderGatewayLoading();
   providers = await api("providers");
   if (!providers.providers.length && editing === null) adding = true;
-  if (view === "gateway") renderGatewayView();
-  else renderProviders();
+  renderProviders();
 }
 
 // One row per provider: logo, name, the agents pointed at it, key status.
-// Everything else lives in the editor, a dialog over the page.
+// Everything else lives in the editor that opens under the row.
 function renderProviders() {
+  renderGateway();
   const list = $("#providers");
   list.replaceChildren();
   list.hidden = !providers.providers.length;
-  let dialog = null; // the editor, if one is open
   for (const p of providers.providers) {
     const open = editing === p.id;
     const row = el("div", "row provider" + (open ? " selected" : ""));
     row.dataset.id = p.id;
     const who = el("div", "who");
     const name = el("div", "name", p.name);
-    if (p.sponsored) name.append(el("span", "badge", t("sponsored")));
+    if (p.sponsored) name.append(el("span", "badge", "sponsored"));
     const n = p.models.filter((m) => m.on).length;
-    const models = n ? t(n === 1 ? "{n} model" : "{n} models", { n }) : t("no models exposed");
-    who.append(name, el("div", "sub", (p.account ? t("signed in as {user}", { user: p.account.user }) : p.host) + " · " + models));
+    who.append(name, el("div", "sub", p.host + " · " + (n ? `${n} model${n === 1 ? "" : "s"}` : "no models exposed")));
     const using = p.agents.filter((a) => a.current);
     const uses = el("div", "uses");
     for (const a of using) {
       const b = el("button", "use");
-      b.title = t("{name} · {model} — click to change", { name: a.name, model: a.model });
+      b.title = `${a.name} · ${a.model} — click to change`;
       b.append(icon(a.icon));
       b.onclick = (ev) => pickForAgent(a, p, b, ev);
       uses.append(b);
     }
-    let key;
-    if (p.account) {
-      key = el("span", "key acct", accountPlan(p.account));
-      key.title = t("{agent} is signed in; its models are here for every other agent", { agent: p.account.agentName });
-    } else {
-      key = el("span", "key " + (p.key.set ? "on" : p.ready ? "free" : "none"), p.key.set ? p.key.masked : p.ready ? t("no key") : t("needs a key"));
-      key.title = p.key.set ? t("API key {masked}", { masked: p.key.masked }) : p.ready ? t("Local servers need no key") : t("Open the row and paste an API key");
+    if (p.agents.some((a) => !a.current && canUse(a, p))) {
+      const b = el("button", "use add");
+      b.title = using.length ? "Point another agent at " + p.name : "Point an agent at " + p.name;
+      b.append(svg(PLUS, 11, 1.8));
+      b.onclick = (ev) => { ev.stopPropagation(); editing = p.id; draft = null; adding = false; renderProviders(); };
+      uses.append(b);
     }
+    const key = el("span", "key " + (p.key.set ? "on" : p.ready ? "free" : "none"), p.key.set ? p.key.masked : p.ready ? "no key" : "needs a key");
+    key.title = p.key.set ? "API key " + p.key.masked : p.ready ? "Local servers need no key" : "Open the row and paste an API key";
     const chev = el("span", "chev");
     chev.append(svg(CHEV_R, 11, 1.7));
     row.append(icon(p.icon || "generic"), who, uses, key, chev);
     row.onclick = () => { editing = open ? null : p.id; draft = null; adding = false; renderProviders(); };
     list.append(row);
-    if (open) dialog = renderEditor(p);
+    if (open) list.append(renderEditor(p));
   }
-  renderExcluded();
-  dialog = renderAdd() || dialog;
-  if (importing) dialog = renderImport(importing);
-  if (dialog) openModal(dialog); else closeModal();
-}
-
-// Sign-ins magpie found but leaves alone, so nobody wonders why an agent that
-// is clearly logged in is not in the list: the ones the user removed.
-function renderExcluded() {
-  const box = $("#excluded");
-  box.replaceChildren();
-  for (const x of providers.excluded) {
-    const r = el("div", "excluded");
-    r.append(icon(x.agentIcon), el("span", "", ""));
-    r.lastChild.append(el("b", "", t("{agent} is signed in, but stays out of this list. ", { agent: x.agentName })), t(x.why));
-    if (x.provider) {
-      const back = el("button", "link", t("Add it back"));
-      back.onclick = () => providerAction("save", { id: x.provider }, t("{name} added back", { name: x.agentName }));
-      r.lastChild.append(" ", back);
-    }
-    box.append(r);
-  }
-}
-
-// accountPlan names a signed-in account's subscription: "ChatGPT Pro", "GitHub".
-function accountPlan(a) {
-  if (a.agent === "codex") return "ChatGPT" + (a.plan ? " " + a.plan[0].toUpperCase() + a.plan.slice(1) : "");
-  if (a.agent === "copilot") return "GitHub";
-  if (a.agent === "claude") return "Claude" + (a.plan ? " " + a.plan[0].toUpperCase() + a.plan.slice(1) : "");
-  return t("signed in");
-}
-
-// ---------- gateway view ----------
-//
-// The gateway is one local endpoint speaking four APIs; this tab is the
-// page that gets anything else connected to it: base URL, key, model ids,
-// and a snippet in whichever language the reader is holding.
-
-async function copy(text, what, btn) {
-  try { await navigator.clipboard.writeText(text); status(t("{what} copied", { what }), "ok"); flashCopied(btn); }
-  catch { status(text); }
-}
-
-// flashCopied answers on the button itself: the icon becomes a tick and
-// the button takes a green breath, then it reverts on its own. The footer
-// toast says what was copied; this says it landed. Clicking again restarts
-// the pop and re-arms the timer.
-function flashCopied(b) {
-  if (!b) return;
-  b.classList.remove("done");
-  void b.offsetWidth; // restart the animation when clicked again
-  b.classList.add("done");
-  b.title = t("Copied");
-  b.replaceChildren(svg(CHECK, 12, 1.7));
-  clearTimeout(b.copiedT);
-  b.copiedT = setTimeout(() => {
-    b.classList.remove("done");
-    b.title = t("Copy");
-    b.replaceChildren(svg(COPY_ICON, 12, 1.5));
-  }, 1200);
-}
-
-function copyBtn(text, what) {
-  const b = el("button", "copy");
-  b.title = t("Copy");
-  b.append(svg(COPY_ICON, 12, 1.5));
-  b.onclick = (ev) => { ev.stopPropagation(); copy(text, what, b); };
-  return b;
-}
-
-function renderGatewayLoading() {
-  const page = $("#view-gateway");
-  page.classList.add("loading");
-  page.setAttribute("aria-busy", "true");
-  $("#connectNote").textContent = "";
-  $("#callsNote").textContent = "";
-  $("#copyModels").hidden = true;
-
-  const gateway = $("#gateway");
-  gateway.replaceChildren();
-  const mark = el("span", "skeleton gw-sk-dot");
-  const who = el("div", "who gw-sk-who");
-  who.append(el("span", "skeleton gw-sk-title"), el("span", "skeleton gw-sk-sub"));
-  gateway.append(mark, who, el("span", "skeleton gw-sk-url"));
-
-  const connect = $("#connect");
-  connect.replaceChildren();
-  for (let i = 0; i < 4; i++) {
-    connect.append(el("span", "skeleton gw-sk-label"));
-    const value = el("div", "gw-sk-field");
-    value.append(el("span", "skeleton"), el("span", "skeleton short"));
-    connect.append(value);
-  }
-
-  const models = $("#gwModels");
-  models.replaceChildren();
-  for (let i = 0; i < 4; i++) {
-    const row = el("div", "row model gw-sk-row");
-    row.append(el("span", "skeleton gw-sk-model"), el("span", "grow"), el("span", "skeleton gw-sk-provider"));
-    models.append(row);
-  }
-
-  const activity = $("#activity");
-  activity.replaceChildren();
-  for (let i = 0; i < 4; i++) {
-    const row = el("div", "call gw-sk-call");
-    row.append(el("span", "skeleton time"), el("span", "skeleton agent"), el("span", "skeleton model"), el("span", "grow"), el("span", "skeleton result"));
-    activity.append(row);
-  }
-}
-
-function renderGatewayView() {
-  const page = $("#view-gateway");
-  page.classList.remove("loading");
-  page.removeAttribute("aria-busy");
-  renderGateway();
-  renderConnect();
-  renderGatewayModels();
+  renderAdd();
   renderActivity();
+  (list.querySelector(".editor") || $("#addSheet .editor"))?.scrollIntoView({ block: "nearest" });
 }
 
-// The status card: dot, state, the URL.
+// The gateway: where every agent sends its requests. Opens to the recent calls.
 function renderGateway() {
   const g = providers.gateway;
   const box = $("#gateway");
   box.replaceChildren();
+  box.classList.toggle("selected", activity);
   const dot = el("span", "dot " + (g.running ? "on" : ""));
   const who = el("div", "who");
-  const name = el("div", "name", t("Gateway"));
-  name.append(el("span", "state", t(g.running ? (g.mine ? "running" : "running · served by another magpie") : "not running")));
-  const routed = new Set();
-  for (const p of providers.providers) for (const a of p.agents) if (a.current) routed.add(a.id);
-  const n = routed.size;
-  who.append(name, el("div", "sub", g.running
-    ? [t(g.models === 1 ? "{n} model" : "{n} models", { n: g.models }), n ? t(n === 1 ? "{n} agent routed through it" : "{n} agents routed through it", { n }) : t("no agent routed through it yet"), t("four APIs, one URL")].join(" · ")
-    : t("start it with magpie serve, or open magpie at login")));
+  const name = el("div", "name", "Gateway");
+  name.append(el("span", "state", g.running ? (g.mine ? "running" : "running · another dial") : "not running"));
+  who.append(name, el("div", "sub", g.running ? `${g.models} model${g.models === 1 ? "" : "s"} · OpenAI, Responses, Anthropic and Gemini APIs` : "start it with dial serve, or open dial at login"));
   const url = el("button", "url");
-  url.append(el("code", "", g.url));
-  url.title = t("Copy the gateway URL");
-  url.onclick = () => copy(g.url, t("Gateway URL"));
-  box.append(dot, who, url);
-}
-
-// One entry per API the gateway serves: where each SDK's base URL points,
-// the env vars the usual tools read, and a request in four dialects.
-const FLAVORS = {
-  openai: {
-    name: "OpenAI", base: (u) => u + "/v1", baseEnv: "OPENAI_BASE_URL", keyEnv: "OPENAI_API_KEY",
-    note: "Chat Completions, the API most tools speak. Anything with an OpenAI base-URL setting works.",
-    curl: (b, m) => `curl ${b}/chat/completions \\
-  -H "Authorization: Bearer magpie" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${m}",
-       "messages": [{"role": "user", "content": "hi"}]}'`,
-    python: (b, m) => `from openai import OpenAI
-
-client = OpenAI(base_url="${b}", api_key="magpie")
-r = client.chat.completions.create(
-    model="${m}",
-    messages=[{"role": "user", "content": "hi"}],
-)
-print(r.choices[0].message.content)`,
-    node: (b, m) => `import OpenAI from "openai";
-
-const client = new OpenAI({ baseURL: "${b}", apiKey: "magpie" });
-const r = await client.chat.completions.create({
-  model: "${m}",
-  messages: [{ role: "user", content: "hi" }],
-});
-console.log(r.choices[0].message.content);`,
-  },
-  responses: {
-    name: "Responses", base: (u) => u + "/v1", baseEnv: "OPENAI_BASE_URL", keyEnv: "OPENAI_API_KEY",
-    note: "OpenAI's newer API: reasoning, built-in tool items, encrypted reasoning. Codex speaks this.",
-    curl: (b, m) => `curl ${b}/responses \\
-  -H "Authorization: Bearer magpie" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${m}", "input": "hi"}'`,
-    python: (b, m) => `from openai import OpenAI
-
-client = OpenAI(base_url="${b}", api_key="magpie")
-r = client.responses.create(model="${m}", input="hi")
-print(r.output_text)`,
-    node: (b, m) => `import OpenAI from "openai";
-
-const client = new OpenAI({ baseURL: "${b}", apiKey: "magpie" });
-const r = await client.responses.create({ model: "${m}", input: "hi" });
-console.log(r.output_text);`,
-  },
-  anthropic: {
-    name: "Anthropic", base: (u) => u, baseEnv: "ANTHROPIC_BASE_URL", keyEnv: "ANTHROPIC_API_KEY",
-    note: "Messages API. Claude Code reads ANTHROPIC_AUTH_TOKEN instead of the key; the Agents tab sets that for you.",
-    curl: (b, m) => `curl ${b}/v1/messages \\
-  -H "x-api-key: magpie" \\
-  -H "anthropic-version: 2023-06-01" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${m}", "max_tokens": 1024,
-       "messages": [{"role": "user", "content": "hi"}]}'`,
-    python: (b, m) => `import anthropic
-
-client = anthropic.Anthropic(
-    base_url="${b}", api_key="magpie",
-)
-m = client.messages.create(
-    model="${m}",
-    max_tokens=1024,
-    messages=[{"role": "user", "content": "hi"}],
-)
-print(m.content[0].text)`,
-    node: (b, m) => `import Anthropic from "@anthropic-ai/sdk";
-
-const client = new Anthropic({ baseURL: "${b}", apiKey: "magpie" });
-const m = await client.messages.create({
-  model: "${m}",
-  max_tokens: 1024,
-  messages: [{ role: "user", content: "hi" }],
-});
-console.log(m.content[0].text);`,
-  },
-  gemini: {
-    name: "Gemini", base: (u) => u, baseEnv: "GOOGLE_GEMINI_BASE_URL", keyEnv: "GEMINI_API_KEY",
-    note: "Google's generateContent API, v1beta. Gemini CLI and the google-genai SDKs speak this.",
-    curl: (b, m) => `curl ${b}/v1beta/models/${m}:generateContent \\
-  -H "x-goog-api-key: magpie" \\
-  -H "Content-Type: application/json" \\
-  -d '{"contents": [{"parts": [{"text": "hi"}]}]}'`,
-    python: (b, m) => `from google import genai
-
-client = genai.Client(api_key="magpie", http_options={"base_url": "${b}"})
-r = client.models.generate_content(model="${m}", contents="hi")
-print(r.text)`,
-    node: (b, m) => `import { GoogleGenAI } from "@google/genai";
-
-const ai = new GoogleGenAI({
-  apiKey: "magpie",
-  httpOptions: { baseUrl: "${b}" },
-});
-const r = await ai.models.generateContent({ model: "${m}", contents: "hi" });
-console.log(r.text);`,
-  },
-};
-const LANGS = [["shell", "Shell"], ["curl", "curl"], ["python", "Python"], ["node", "Node"]];
-
-// every exposed model, as the ids agents use
-function gatewayModels() {
-  const out = [];
-  for (const p of providers.providers) for (const m of p.models) if (m.on) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p });
-  return out;
-}
-
-function segs(items, current, onPick) {
-  const box = el("div", "segs");
-  const key = items.map(([id]) => id).join("|");
-  for (const [id, name] of items) {
-    const b = el("button", "opt" + (id === current ? " on" : ""), name);
-    b.onclick = () => { for (const x of box.querySelectorAll(".opt")) x.classList.toggle("on", x === b); slide(box, key); onPick(id); };
-    box.append(b);
-  }
-  queueMicrotask(() => slide(box, key)); // once it is in the page
-  return box;
-}
-
-function renderConnect() {
-  const g = providers.gateway;
-  const box = $("#connect");
-  box.replaceChildren();
-  const models = gatewayModels();
-  if (!models.some((m) => m.id === exampleModel)) exampleModel = models[0]?.id || "";
-  const model = exampleModel || "provider/model";
-  const f = FLAVORS[flavor] || FLAVORS.openai;
-  const base = f.base(g.url);
-  $("#connectNote").textContent = t("Loopback only · the key can be anything");
-
-  box.append(...field("API", segs(Object.entries(FLAVORS).map(([k, v]) => [k, v.name]), flavor, (id) => { flavor = id; localStorage.setItem("magpie.flavor", id); renderConnect(); }), t(f.note)));
-
-  const b = el("div", "val");
-  b.append(el("code", "", base), copyBtn(base, "Base URL"));
-  box.append(...field("Base URL", b, t("What {env} takes.", { env: f.baseEnv })));
-
-  const k = el("div", "val");
-  k.append(el("code", "", "magpie"), copyBtn("magpie", t("Key")));
-  box.append(...field(t("API key"), k, t("{env}=magpie. The gateway trusts everything on loopback, so any value works.", { env: f.keyEnv })));
-
-  const m = el("div", "val");
-  m.append(el("code", "", model), copyBtn(model, t("Model id")));
-  box.append(...field(t("Model"), m, t(models.length ? "provider/model, as listed below. Click a model there to put it in the snippets." : "No models yet. Add a provider, or sign in to Codex or Copilot.")));
-
-  const ex = el("div", "stack");
-  ex.append(segs(LANGS, lang, (id) => { lang = id; localStorage.setItem("magpie.lang", id); renderConnect(); }));
-  const code = lang === "shell"
-    ? `export ${f.baseEnv}=${base}\nexport ${f.keyEnv}=magpie`
-    : f[lang](base, model);
-  const pre = el("pre", "snip");
-  const c = el("code");
-  c.append(highlight(code, lang));
-  pre.append(c, copyBtn(code, t("Snippet")));
-  ex.append(pre);
-  box.append(...field(t("Example"), ex, lang === "shell" ? t("Put these in the shell (or the tool's settings) and the tool talks to magpie instead of the vendor.") : ""));
-}
-
-// A small highlighter for the four snippet dialects: strings, comments,
-// keywords, numbers, calls, and the env vars and flags shells care about.
-const KEYWORDS = {
-  python: /^(from|import|def|return|await|async|for|in|if|else|None|True|False)$/,
-  node: /^(import|from|const|let|await|async|new|return|function|export|default)$/,
-  shell: /^(export|curl)$/,
-  curl: /^(curl)$/,
-};
-function highlight(code, lang) {
-  const re = lang === "node"
-    ? /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\/\/.*)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)(?=\s*\()|([A-Za-z_$][\w$]*)|(\s+|.)/g
-    : /("(?:[^"\\]|\\.)*"|'[^']*'|(?<==)\S+)|(#.*)|(\b\d+(?:\.\d+)?\b(?=[,\s\]}]))|(-{1,2}[A-Za-z][\w-]*)|([A-Z][A-Z0-9_]+)(?==)|([A-Za-z_][\w.]*)(?=\s*\()|([A-Za-z_][\w.]*)|(\\\n)|(\s+|.)/g;
-  const out = document.createDocumentFragment();
-  const kw = KEYWORDS[lang] || KEYWORDS.shell;
-  let m;
-  while ((m = re.exec(code))) {
-    let cls = "";
-    if (lang === "node") {
-      if (m[1]) cls = "s"; else if (m[2]) cls = "c"; else if (m[3]) cls = "n";
-      else if (m[4]) cls = kw.test(m[4]) ? "k" : "f"; else if (m[5] && kw.test(m[5])) cls = "k";
-    } else {
-      if (m[1]) cls = "s"; else if (m[2]) cls = "c"; else if (m[3]) cls = "n"; else if (m[4]) cls = "o";
-      else if (m[5]) cls = "v"; else if (m[6]) cls = kw.test(m[6]) ? "k" : "f"; else if (m[7] && kw.test(m[7])) cls = "k";
-      else if (m[9]) cls = "o";
-    }
-    if (cls) out.append(el("span", "tk-" + cls, m[0]));
-    else out.append(m[0]);
-  }
-  return out;
-}
-
-function renderGatewayModels() {
-  const list = $("#gwModels");
-  list.replaceChildren();
-  const models = gatewayModels();
-  $("#copyModels").hidden = !models.length;
-  $("#copyModels").onclick = () => copy(models.map((m) => m.id).join("\n"), t("Model ids"));
-  if (!models.length) {
-    list.append(el("div", "empty-state", "")).append(el("b", "", t("No models exposed yet")), t("Add a provider, or sign in to Codex or Copilot; their models show up here for every agent."));
-    return;
-  }
-  for (const m of models) {
-    const row = el("div", "row model" + (m.id === exampleModel ? " selected" : ""));
-    const who = el("div", "who");
-    who.append(el("div", "name", m.id), el("div", "sub", m.name && m.name !== m.id.split("/")[1] ? `${m.name} · ${m.provider.name}` : m.provider.name));
-    row.append(icon(m.provider.icon || "generic"), who, copyBtn(m.id, t("Model id")));
-    row.title = t("Use this model in the snippets");
-    row.onclick = () => { exampleModel = m.id; localStorage.setItem("magpie.model", m.id); renderConnect(); renderGatewayModels(); };
-    list.append(row);
-  }
-}
-
-function formatWireBody(raw) {
-  if (!raw) return "";
-  try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw; }
-}
-
-function callBodyPanel(label, raw, truncated) {
-  const panel = el("section", "call-body");
-  const head = el("div", "call-body-head");
-  head.append(el("span", "call-body-label", t(label)));
-  if (truncated) head.append(el("span", "call-body-truncated", t("first 256 KB")));
-  const formatted = formatWireBody(raw);
-  if (formatted) head.append(el("span", "grow"), copyBtn(raw, t(label)));
-  panel.append(head);
-  const pre = el("pre");
-  const code = el("code", "", formatted || t("No body captured"));
-  if (!formatted) code.classList.add("empty");
-  pre.append(code);
-  panel.append(pre);
-  return panel;
+  url.append(el("code", "", g.url + "/v1"));
+  url.title = "Copy the base URL";
+  url.onclick = async (ev) => { ev.stopPropagation(); try { await navigator.clipboard.writeText(g.url + "/v1"); status("Base URL copied", "ok"); } catch { status(g.url + "/v1"); } };
+  const chev = el("span", "chev");
+  chev.append(svg(CHEV_R, 11, 1.7));
+  chev.title = activity ? "Hide recent calls" : "Recent calls";
+  box.append(dot, who, url, chev);
+  box.onclick = () => { activity = !activity; renderProviders(); };
 }
 
 function renderActivity() {
-  const g = providers.gateway;
   const box = $("#activity");
   box.replaceChildren();
-  $("#callsNote").textContent = g.running && !g.mine ? t("shown by the magpie that serves the gateway") : "";
-  const calls = g.calls.slice(0, 20);
-  if (!calls.length) { box.append(el("div", "none", t("No requests yet. Point an agent at a model, or run the example above; every call shows up here as it happens."))); return; }
+  box.hidden = !activity;
+  if (!activity) return;
+  const calls = providers.gateway.calls.slice(0, 12);
+  if (!calls.length) { box.append(el("div", "none", "No requests yet. Point an agent at a model here and use it; its calls show up as they happen.")); return; }
   for (const c of calls) {
-    const id = `${c.time}|${c.agent}|${c.model}`;
-    const open = expandedCalls.has(id);
-    const item = el("div", "call-item" + (open ? " open" : "") + (c.status >= 400 ? " bad" : ""));
-    const r = el("div", "call");
-    r.setAttribute("role", "button");
-    r.setAttribute("tabindex", "0");
-    r.setAttribute("aria-expanded", String(open));
-    const chev = el("span", "call-chev");
-    chev.append(svg(CHEV_R, 11, 1.6));
-    r.append(chev);
+    const r = el("div", "call" + (c.status >= 400 ? " bad" : ""));
     r.append(el("span", "when", new Date(c.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })));
-    r.append(el("span", "a", c.agent || "—"));
     r.append(el("span", "m", c.model));
     r.append(el("span", "p", c.from === c.to ? c.from : `${c.from} → ${c.to}`));
     r.append(el("span", "grow"));
     r.append(el("span", "st", c.error ? `${c.status} ${c.error}` : `${c.status} · ${c.ms} ms`));
-    r.title = open ? t("Hide request and response bodies") : t("Show request and response bodies");
-    const toggle = () => {
-      if (expandedCalls.has(id)) expandedCalls.delete(id); else expandedCalls.add(id);
-      renderActivity();
-    };
-    r.onclick = toggle;
-    r.onkeydown = (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); }
-    };
-    item.append(r);
-    if (open) {
-      const details = el("div", "call-details");
-      details.append(
-        callBodyPanel("Request Body", c.requestBody, c.requestTruncated),
-        callBodyPanel("Response Body", c.responseBody, c.responseTruncated),
-      );
-      item.append(details);
-    }
-    box.append(item);
+    r.title = c.error || `${c.provider} · ${c.ms} ms`;
+    box.append(r);
   }
 }
 
@@ -1034,7 +433,8 @@ function modelField(a) {
   const agent = state.agents.find((x) => x.id === a.id);
   return agent?.fields.find((f) => f.key === "model") || null;
 }
-function ofProvider(p) { return new RegExp(`^(magpie/)?${p.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`); }
+function ofProvider(p) { return new RegExp(`^(dial/)?${p.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`); }
+function canUse(a, p) { const f = modelField(a); return !!f && f.options.some((o) => ofProvider(p).test(o.value)); }
 
 // Pick one of this provider's models for an agent, straight from the row.
 function pickForAgent(a, p, btn, ev) {
@@ -1044,7 +444,7 @@ function pickForAgent(a, p, btn, ev) {
   const pre = ofProvider(p);
   if (!field.options.some((o) => pre.test(o.value))) {
     ev.stopPropagation();
-    status(t("{p} exposes no models yet — pick some below", { p: p.name }), "warn");
+    status(`${p.name} exposes no models yet — pick some below`, "warn");
     editing = p.id; draft = null; renderProviders();
     return;
   }
@@ -1058,15 +458,15 @@ function renderAdd() {
   sheet.replaceChildren();
   sheet.hidden = !adding;
   $("#addProvider").hidden = adding;
-  if (!adding) return null;
+  if (!adding) return;
   const head = el("div", "row-head");
-  head.append(el("span", "label", t(providers.providers.length ? "Add a provider" : "Add your first provider")), el("span", "grow"));
-  const q = input(presetQuery, t("Find a vendor…"));
+  head.append(el("span", "label", providers.providers.length ? "Add a provider" : "Add your first provider"), el("span", "grow"));
+  const q = input(presetQuery, "Find a vendor…");
   q.className = "find";
   q.oninput = () => { presetQuery = q.value; drawTiles(); };
   head.append(q);
   if (providers.providers.length) {
-    const x = el("button", "text", t("Close"));
+    const x = el("button", "text", "Close");
     x.onclick = () => { adding = false; editing = null; draft = null; presetQuery = ""; renderProviders(); };
     head.append(x);
   }
@@ -1082,7 +482,7 @@ function renderAdd() {
       const ps = providers.presets.filter((p) => p.kind === kind && hit(p));
       if (!ps.length && !(kind === "local" && !f)) continue;
       any = true;
-      tiles.append(el("div", "kind", t(title)));
+      tiles.append(el("div", "kind", title));
       const grid = el("div", "grid");
       for (const pr of ps) grid.append(tile(pr));
       if (kind === "local" && !f) {
@@ -1090,7 +490,7 @@ function renderAdd() {
         const ic = el("span", "ic plus");
         ic.append(svg(PLUS, 13, 1.8));
         c.append(ic, el("span", "tt"));
-        c.lastChild.append(el("span", "n", t("Custom")), el("span", "s", t("any compatible URL")));
+        c.lastChild.append(el("span", "n", "Custom"), el("span", "s", "any compatible URL"));
         c.onclick = () => { editing = { custom: true }; draft = null; renderProviders(); };
         grid.append(c);
       }
@@ -1098,35 +498,35 @@ function renderAdd() {
     }
     if (!any) {
       const none = el("div", "none");
-      none.append(t("Nothing called “{q}”. ", { q: presetQuery.trim() }));
-      const b = el("button", "link", t("Add it as a custom provider"));
+      none.append(`Nothing called “${presetQuery.trim()}”. `);
+      const b = el("button", "link", "Add it as a custom provider");
       b.onclick = () => { editing = { custom: true }; draft = null; renderProviders(); };
       none.append(b);
       tiles.append(none);
     }
   };
   drawTiles();
-  return editing && typeof editing === "object" ? renderEditor(null, editing.preset) : null;
+  if (editing && typeof editing === "object") sheet.append(renderEditor(null, editing.preset));
 }
 
 function tile(pr) {
-  const b = el("button", "tile" + (pr.added ? " added" : "") + (editing?.preset === pr.id ? " on" : ""));
-  b.append(icon(pr.icon || "generic"));
+  const t = el("button", "tile" + (pr.added ? " added" : "") + (editing?.preset === pr.id ? " on" : ""));
+  t.append(icon(pr.icon || "generic"));
   const tt = el("span", "tt");
   const n = el("span", "n", pr.name);
-  if (pr.sponsored) n.append(el("span", "badge", t("sponsored")));
+  if (pr.sponsored) n.append(el("span", "badge", "sponsored"));
   tt.append(n, el("span", "s", pr.note || hostOf(pr.chat || pr.responses || pr.anthropic)));
-  b.append(tt);
+  t.append(tt);
   if (pr.added) {
     const ck = el("span", "check");
     ck.append(svg(CHECK, 10, 2));
-    b.append(ck);
-    b.title = t("{name} is already added — open it", { name: pr.name });
-    b.onclick = () => { editing = pr.id; adding = false; draft = null; renderProviders(); };
+    t.append(ck);
+    t.title = `${pr.name} is already added — open it`;
+    t.onclick = () => { editing = pr.id; adding = false; draft = null; renderProviders(); };
   } else {
-    b.onclick = () => { editing = { preset: pr.id }; draft = null; renderProviders(); };
+    t.onclick = () => { editing = { preset: pr.id }; draft = null; renderProviders(); };
   }
-  return b;
+  return t;
 }
 
 function field(label, control, hint) {
@@ -1146,201 +546,7 @@ function input(value, placeholder, type = "text") {
   i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") cancelEdit(); };
   return i;
 }
-function cancelEdit() { editing = null; draft = null; importing = null; renderProviders(); }
-
-// Custom request headers: the draft keeps them as an ordered [name, value,
-// json?] list so a half-typed row (and its open JSON editor) survives a
-// re-render; headersOf folds that back into the object the backend stores,
-// dropping rows with an empty name and minifying any value that parses as
-// JSON — a header value is one line, so pretty-printing is display-only.
-function headerRows(obj) {
-  return Object.entries(obj || {}).map(([k, v]) => [k, v, false]);
-}
-function headersOf(rows) {
-  const out = {};
-  for (const [k, v] of rows || []) {
-    const name = (k || "").trim();
-    if (!name) continue;
-    const val = (v || "").trim();
-    // minify only a JSON blob; a plain value like "2.0" must stay verbatim
-    out[name] = looksJSON(val) ? minifyJSON(val) : val;
-  }
-  return out;
-}
-// minifyJSON collapses a value to one line when it is valid JSON, so a
-// pretty-printed blob in the editor never reaches the wire with newlines.
-function minifyJSON(s) {
-  try { return JSON.stringify(JSON.parse(s)); } catch { return s; }
-}
-function prettyJSON(s) {
-  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
-}
-function looksJSON(s) {
-  s = (s || "").trim();
-  return s.startsWith("{") || s.startsWith("[");
-}
-function headerEditor() {
-  const box = el("div", "headers");
-  const render = () => {
-    box.replaceChildren();
-    draft.headers.forEach((row, i) => {
-      const line = el("div", "pair");
-      const name = input(row[0], t("Header-Name"));
-      name.oninput = () => { row[0] = name.value; };
-
-      // the value: a one-line box, or (when the row is expanded) a full-width
-      // textarea that pretty-prints JSON for editing. The toggle is always
-      // offered — a value only becomes JSON after you paste it in.
-      let valCtl;
-      if (row[2]) {
-        valCtl = el("textarea", "json");
-        valCtl.value = prettyJSON(row[1]);
-        valCtl.spellcheck = false;
-        valCtl.wrap = "off"; // each JSON line stays on one line; scroll instead
-        valCtl.rows = Math.min(16, Math.max(4, valCtl.value.split("\n").length));
-        valCtl.placeholder = t("value");
-        valCtl.oninput = () => {
-          row[1] = valCtl.value;
-          valCtl.classList.toggle("bad", looksJSON(valCtl.value) && !parses(valCtl.value));
-        };
-        valCtl.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") cancelEdit(); };
-      } else {
-        valCtl = input(row[1], t("value"));
-        valCtl.oninput = () => { row[1] = valCtl.value; };
-      }
-
-      const side = el("div", "side");
-      const j = el("button", "text" + (row[2] ? " on" : ""), "{ }");
-      j.title = row[2] ? t("Collapse to one line") : t("Edit as JSON");
-      j.onclick = () => { row[2] = !row[2]; if (!row[2]) row[1] = minifyJSON(row[1]); render(); };
-      side.append(j);
-      const del = el("button", "text danger", "×");
-      del.title = t("Remove header");
-      del.onclick = () => { draft.headers.splice(i, 1); render(); };
-      side.append(del);
-
-      if (row[2]) {
-        line.classList.add("col");
-        const top = el("div", "hhead");
-        top.append(name, side);
-        line.append(top, valCtl);
-      } else {
-        line.append(name, valCtl, side);
-      }
-      box.append(line);
-    });
-    const add = el("button", "text", t("+ Add header"));
-    add.onclick = () => { draft.headers.push(["", "", false]); render(); };
-    box.append(add);
-  };
-  render();
-  return box;
-}
-function parses(s) { try { JSON.parse(s); return true; } catch { return false; } }
-
-// iconPicker: a custom provider's icon — one of the built-in ones, or a
-// picture of the user's own, which magpie keeps in ~/.config/magpie/icons.
-function iconPicker(ed) {
-  const box = el("div", "icon-pick");
-  const draw = () => {
-    box.replaceChildren();
-    const now = el("span", "icon-now");
-    now.append(icon(draft.icon || "generic"));
-    box.append(now);
-    const file = el("input");
-    file.type = "file";
-    file.accept = "image/png,image/jpeg,image/gif,image/webp,image/x-icon,image/svg+xml,.ico,.svg";
-    file.hidden = true;
-    file.onchange = async () => {
-      const f = file.files[0];
-      if (!f) return;
-      try {
-        const res = await fetch("/api/icons", { method: "POST", body: f });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || res.statusText);
-        draft.icon = data.icon;
-        editorError("");
-        draw();
-        syncHead();
-      } catch (e) {
-        editorError(e.message);
-      }
-    };
-    const choose = el("button", "text", t("Choose a picture…"));
-    choose.onclick = () => file.click();
-    const builtin = el("button", "text", t("Built-in icons"));
-    builtin.onclick = () => { open = !open; draw(); };
-    box.append(file, choose, builtin);
-    if (draft.icon && draft.icon !== "generic") {
-      const reset = el("button", "text", t("Default"));
-      reset.onclick = () => { draft.icon = ""; draw(); syncHead(); };
-      box.append(reset);
-    }
-    if (open) {
-      const grid = el("div", "icon-grid");
-      const names = [...new Set((providers.presets || []).map((p) => p.icon).filter((n) => n && n !== "generic"))].sort();
-      for (const n of names) {
-        const b = el("button", n === draft.icon ? "on" : "");
-        b.title = n.replace(/-color$/, "");
-        b.append(icon(n));
-        b.onclick = () => { draft.icon = n; open = false; draw(); syncHead(); };
-        grid.append(b);
-      }
-      box.append(grid);
-    }
-  };
-  let open = false;
-  // the dialog's title shows the icon too
-  const syncHead = () => {
-    const old = ed.querySelector(".ehead .ic");
-    if (old) old.replaceWith(icon(draft.icon || "generic"));
-  };
-  draw();
-  return box;
-}
-
-// ---------- modal ----------
-// The provider editor opens as a dialog over the page; Escape, the backdrop
-// or Cancel close it.
-let modalTimer = 0;
-function openModal(content) {
-  const m = $("#modal"), d = m.firstElementChild;
-  clearTimeout(modalTimer);
-  m.classList.remove("out");
-  d.classList.remove("swap");
-  if (!m.hidden) { void d.offsetWidth; d.classList.add("swap"); } // content changed: a soft refresh, not a re-entrance
-  d.replaceChildren(content);
-  m.hidden = false;
-}
-function closeModal() {
-  const m = $("#modal");
-  if (m.hidden || m.classList.contains("out")) return;
-  m.classList.add("out");
-  modalTimer = setTimeout(() => { m.hidden = true; m.classList.remove("out"); m.firstElementChild.replaceChildren(); }, 170);
-}
-$("#modal").onclick = (e) => { if (e.target === e.currentTarget) cancelEdit(); };
-
-// ---------- sliding thumb ----------
-// Pills (the nav, every segmented control) have one thumb that glides to the
-// selected option instead of each option lighting up on its own.
-const thumbs = new Map(); // pill key → where its thumb is, so a re-rendered pill takes over mid-slide
-function slide(box, key) {
-  let th = box.querySelector(":scope > .thumb");
-  if (!th) { th = el("span", "thumb"); box.prepend(th); }
-  const on = box.querySelector(":scope > .on");
-  if (!on) { th.style.opacity = "0"; return; }
-  th.style.opacity = "";
-  const to = { x: on.offsetLeft, w: on.offsetWidth };
-  const last = thumbs.get(key);
-  const from = last && performance.now() - last.at < 300 ? last.from : last; // re-rendered mid-slide: start where the old one started
-  const put = (p) => { th.style.transform = `translateX(${p.x}px)`; th.style.width = p.w + "px"; };
-  th.classList.add("still");
-  put(from || to);
-  void th.offsetWidth;
-  th.classList.remove("still");
-  put(to);
-  thumbs.set(key, { ...to, at: performance.now(), from: from || to });
-}
+function cancelEdit() { editing = null; draft = null; renderProviders(); }
 
 const PROTOS = [["chat", "OpenAI", "Chat Completions — most agents"], ["responses", "Responses", "OpenAI Responses — what Codex speaks"], ["anthropic", "Anthropic", "Anthropic Messages — what Claude Code speaks"]];
 
@@ -1349,55 +555,50 @@ function renderEditor(p, presetID) {
   const pr = presetID ? providers.presets.find((x) => x.id === presetID) : p?.preset ? providers.presets.find((x) => x.id === p.preset) : null;
   const isNew = !p, custom = !pr;
   draft = draft || (p
-    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "", fallback: [...(p.fallback || [])] }
+    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [] }
     : pr
-      ? { id: pr.id, name: pr.name, preset: pr.id, key: "", chosen: [], extra: [], headers: [] }
-      : { id: "", name: "", preset: "", chat: "", responses: "", anthropic: "", catalog: "", key: "", api: "openai", chosen: [], extra: [], headers: [], icon: "" });
+      ? { id: pr.id, name: pr.name, preset: pr.id, key: "", chosen: [], extra: [] }
+      : { id: "", name: "", preset: "", chat: "", responses: "", anthropic: "", catalog: "", key: "", api: "openai", chosen: [], extra: [] });
   const ed = el("div", "editor" + (isNew ? " new" : ""));
   ed.onclick = (e) => e.stopPropagation();
 
-  {
+  if (isNew) {
     const h = el("div", "ehead");
-    h.append(icon(p?.icon || pr?.icon || "generic"), el("b", "", p ? p.name : pr ? pr.name : t("Custom provider")));
+    h.append(icon(pr?.icon || "generic"), el("b", "", pr ? pr.name : "Custom provider"));
     if (pr?.note) h.append(el("span", "note", pr.note));
     h.append(el("span", "grow"));
-    const site = pr?.website || (p?.host ? "https://" + p.host : "");
-    if (site) { const b = el("button", "link", hostOf(site) + " ↗"); b.onclick = () => api("open", { url: site }); h.append(b); }
+    if (pr?.website) { const b = el("button", "link", hostOf(pr.website) + " ↗"); b.onclick = () => api("open", { url: pr.website }); h.append(b); }
     ed.append(h);
   }
 
-  // who uses it: just the agents already pointed here, so a click changes
-  // one's model. Pointing a new agent at the provider happens in the Agent
-  // tab's picker, not here.
+  // who uses it: every agent, the ones on this provider lit, click to pick a model
   if (p) {
-    const on = p.agents.filter((a) => a.current);
-    if (on.length) {
-      const chips = el("div", "achips");
-      for (const a of on) {
-        const c = el("button", "achip on");
-        c.append(icon(a.icon), el("span", "n", a.name), el("span", "m", a.model));
-        c.title = t("{agent} is on {model} — click to change", { agent: a.name, model: a.model });
-        c.onclick = (ev) => pickForAgent(a, p, c, ev);
-        chips.append(c);
-      }
-      ed.append(...field(t("Agents"), chips, ""));
+    const chips = el("div", "achips");
+    for (const a of p.agents) {
+      if (!a.current && !canUse(a, p)) continue; // Gemini CLI, Cursor: their own APIs only
+      const c = el("button", "achip" + (a.current ? " on" : ""));
+      c.append(icon(a.icon), el("span", "n", a.name));
+      if (a.current) c.append(el("span", "m", a.model));
+      c.title = a.current ? `${a.name} is on ${a.model} — click to change` : `Point ${a.name} at a ${p.name} model`;
+      c.onclick = (ev) => pickForAgent(a, p, c, ev);
+      chips.append(c);
     }
+    ed.append(...field("Agents", chips, p.agents.some((a) => a.current) ? "" : "None yet. Click an agent to pick one of these models for it."));
   }
 
   let name, url;
   if (custom) {
-    name = input(draft.name, t("e.g. My Relay"));
+    name = input(draft.name, "e.g. My Relay");
     name.oninput = () => { draft.name = name.value; if (isNew) draft.id = slug(name.value); };
-    ed.append(...field(t("Name"), name));
+    ed.append(...field("Name", name));
 
     const seg = el("div", "segs");
     for (const [v, l, hint] of [["openai", "OpenAI compatible", "…/v1 — chat completions, and responses when the vendor has it"], ["anthropic", "Anthropic compatible", "the root URL, what ANTHROPIC_BASE_URL would take"]]) {
-      const b = el("button", "opt" + (draft.api === v ? " on" : ""), t(l));
-      b.title = t(hint);
-      b.onclick = () => { draft.api = v; const u = url.value; if (v === "anthropic") { draft.anthropic = u; draft.chat = ""; } else { draft.chat = u; draft.anthropic = ""; } for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b); slide(seg, "api"); url.placeholder = v === "anthropic" ? "https://…" : "https://…/v1"; };
+      const b = el("button", "opt" + (draft.api === v ? " on" : ""), l);
+      b.title = hint;
+      b.onclick = () => { draft.api = v; const u = url.value; if (v === "anthropic") { draft.anthropic = u; draft.chat = ""; } else { draft.chat = u; draft.anthropic = ""; } for (const x of seg.children) x.classList.toggle("on", x === b); url.placeholder = v === "anthropic" ? "https://…" : "https://…/v1"; };
       seg.append(b);
     }
-    queueMicrotask(() => slide(seg, "api"));
     url = input(draft.api === "anthropic" ? draft.anthropic : draft.chat, draft.api === "anthropic" ? "https://…" : "https://…/v1", "url");
     url.oninput = () => { if (draft.api === "anthropic") draft.anthropic = url.value; else draft.chat = url.value; };
     const urlWrap = el("div", "stack");
@@ -1405,144 +606,111 @@ function renderEditor(p, presetID) {
     ed.append(...field("Base URL", urlWrap));
   }
 
-  if (p?.account) {
-    // the sign-in belongs to the agent; magpie only borrows it
-    const a = p.account;
-    const acct = el("div", "acct");
-    acct.append(icon(a.agentIcon), el("span", "n", a.user), el("span", "plan", accountPlan(a)));
-    ed.append(...field(t("Account"), acct, t("{agent}'s sign-in, read from its own files. Sign out there and this provider goes away.", { agent: a.agentName })));
-    if (a.logins) ed.append(...field(t("Other accounts"), renderLogins(a), t("To add one, sign in to it in {agent} ({how}); magpie remembers every account it sees there. Sessions already running keep their account until restarted.", { agent: a.agentName, how: a.agent === "codex" ? "codex login" : "claude → /login" })));
-    ed.append(...field(t("Models"), renderModels(p), ""));
-    ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
-    ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
-    const bar = el("div", "bar");
-    // removing only hides it from magpie; the agent stays signed in
-    const del = el("button", "text danger", t("Remove"));
-    del.title = t("{agent} stays signed in; magpie just stops offering it", { agent: a.agentName });
-    del.onclick = () => providerAction("delete", { id: p.id }, t("{name} removed", { name: p.name }));
-    bar.append(del, el("span", "grow"));
-    const cancel = el("button", "text", t("Cancel"));
-    cancel.onclick = cancelEdit;
-    const saveBtn = el("button", "text primary", t("Save"));
-    saveBtn.onclick = () => { saveBtn.classList.add("busy"); providerAction("save", { id: p.id, models: draft.chosen, fallback: draft.fallback }, t("{name} saved", { name: p.name })); };
-    bar.append(cancel, saveBtn);
-    ed.append(bar);
-    return ed;
-  }
-
-  const key = input(draft.key || "", p?.key.set ? t("{masked} · paste a new key to replace it", { masked: p.key.masked }) : t(pr?.noKey || p?.key.optional ? "optional for local servers" : "paste an API key"), "password");
+  const key = input("", p?.key.set ? `${p.key.masked} · paste a new key to replace it` : pr?.noKey || p?.key.optional ? "optional for local servers" : "paste an API key", "password");
   key.oninput = () => { draft.key = key.value; };
   key.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter" && isNew) save(); else if (e.key === "Escape") cancelEdit(); };
   const side = el("div", "side");
-  const eye = el("button", "text", t("Show"));
+  const eye = el("button", "text", "Show");
   let revealed = false; // the saved key is in the box, not a draft
   eye.onclick = async () => {
     if (key.type === "password") {
       if (!key.value && p?.key.set) {
         try { key.value = (await api("provider/key", { id: p.id })).key; revealed = true; } catch (e) { status(e.message, "err"); return; }
       }
-      key.type = "text"; eye.textContent = t("Hide");
+      key.type = "text"; eye.textContent = "Hide";
     } else {
       if (revealed && !draft.key) key.value = "";
       revealed = false;
-      key.type = "password"; eye.textContent = t("Show");
+      key.type = "password"; eye.textContent = "Show";
     }
   };
   side.append(eye);
   const keysUrl = p?.keysUrl || pr?.keysUrl;
-  if (keysUrl) { const b = el("button", "link", t("Get a key ↗")); b.onclick = () => api("open", { url: keysUrl }); side.append(b); }
+  if (keysUrl) { const b = el("button", "link", "Get a key ↗"); b.onclick = () => api("open", { url: keysUrl }); side.append(b); }
   const keyWrap = el("div", "pair");
   keyWrap.append(key, side);
-  ed.append(...field(t("API key"), keyWrap, isNew ? t("Kept in ~/.config/magpie/providers.json, readable by you alone. Nothing is read from your shell.") : ""));
+  ed.append(...field("API key", keyWrap, isNew ? "Kept in ~/.config/dial/providers.json, readable by you alone. Nothing is read from your shell." : ""));
 
-  // A user-defined provider can have its own picture; presets keep theirs.
-  if (custom) ed.append(...field(t("Icon"), iconPicker(ed), ""));
-
-  // Custom request headers are only supported for a user-defined provider.
-  // Presets own their request shape, and signed-in accounts returned above
-  // use the agent's own authentication headers.
-  if (custom) {
-    if (!draft.headers.length) draft.headers.push(["", ""]);
-    ed.append(...field(t("Headers"), headerEditor(), t("Extra HTTP headers sent to the vendor, applied after auth. For gateways that need a private scheme.")));
-  }
-
-  // a relay that offers several regional endpoints: one selector, and the
-  // provider's base URLs follow it
-  let refreshEndpoints = () => {};
-  if (pr?.regions?.length) {
-    const seg = el("div", "segs");
-    const cur = pr.regions.find((r) => r.chat && r.chat === (draft.chat || pr.chat)) || pr.regions[0];
-    for (const r of pr.regions) {
-      const b = el("button", "opt" + (r.id === cur.id ? " on" : ""), t(r.name));
-      b.onclick = () => {
-        draft.chat = r.chat || ""; draft.responses = r.responses || ""; draft.anthropic = r.anthropic || "";
-        for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b);
-        slide(seg, "regions");
-        refreshEndpoints();
-      };
-      seg.append(b);
-    }
-    queueMicrotask(() => slide(seg, "regions"));
-    ed.append(...field(t("Region"), seg, t("which endpoint {p} is reached through", { p: pr.name })));
-  }
-
-  if (p) ed.append(...field(t("Models"), renderModels(p), ""));
-  if (p) ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
+  if (p) ed.append(...field("Models", renderModels(p), ""));
   else if (custom) {
-    const ex = input(draft.extra.join(", "), t("model ids, comma separated · e.g. gpt-5.5, claude-sonnet-5"));
+    const ex = input("", "model ids, comma separated · e.g. gpt-5.5, claude-sonnet-5");
     ex.oninput = () => { draft.extra = ex.value.split(/[,\s]+/).filter(Boolean); };
-    ed.append(...field(t("Models"), ex, t("Optional: magpie asks the vendor for its list after saving.")));
+    ed.append(...field("Models", ex, "Optional: dial asks the vendor for its list after saving."));
   }
 
+  // the endpoints, with a Test that reports against each one
+  const eps = el("div", "eps");
+  const slots = {};
   if (!custom) {
-    const ebox = el("div");
-    refreshEndpoints = () => {
-      const base = p || pr || {};
-      const src = { chat: draft.chat || base.chat || "", responses: draft.responses || base.responses || "", anthropic: draft.anthropic || base.anthropic || "" };
-      ebox.replaceChildren(renderEndpoints(p, src));
-    };
-    refreshEndpoints();
-    ed.append(...field(t("Endpoints"), ebox, ""));
+    const src = p || pr;
+    for (const [proto, label, hint] of PROTOS) {
+      if (!src[proto]) continue;
+      const e = el("div", "ep");
+      const pl = el("span", "pl", label);
+      pl.title = hint;
+      e.append(pl, el("code", "", src[proto]), slots[proto] = el("span", "res"));
+      eps.append(e);
+    }
+    if (p) {
+      const test = el("button", "text", "Test");
+      test.title = "Send a tiny request through each endpoint";
+      test.onclick = async () => {
+        test.classList.add("busy");
+        for (const s of Object.values(slots)) { s.className = "res wait"; s.textContent = "…"; }
+        try {
+          const r = await api("provider/test", { id: p.id });
+          for (const t of r.results) {
+            const s = slots[t.protocol];
+            if (!s) continue;
+            s.className = "res " + (t.ok ? "ok" : "bad");
+            s.replaceChildren();
+            s.append(svg(t.ok ? CHECK : "M4.5 4.5l7 7M11.5 4.5l-7 7", 10, 2));
+            s.append(el("span", "", t.ok ? `${t.ms} ms` : t.status ? `${t.status} · ${t.error}` : t.error));
+            s.title = t.ok ? `model ${t.model}` : t.error;
+          }
+        } catch (e) { for (const s of Object.values(slots)) { s.className = "res"; s.textContent = ""; } status(e.message, "err"); }
+        test.classList.remove("busy");
+      };
+      eps.append(test);
+    }
+    ed.append(...field("Endpoints", eps));
   }
 
   if (custom) {
     const more = el("details", "more");
-    more.append(el("summary", "", t("More endpoints")));
+    more.append(el("summary", "", "More endpoints"));
     const inner = el("div", "inner");
     const add = (label, key, ph, hint) => {
       const i = input(draft[key], ph, "url");
       i.oninput = () => { draft[key] = i.value; };
-      inner.append(...field(t(label), i, t(hint)));
+      inner.append(...field(label, i, hint));
     };
     if (draft.api === "anthropic") add("OpenAI URL", "chat", "https://…/v1", "if the vendor also serves chat completions");
     else add("Anthropic URL", "anthropic", "https://…", "if the vendor also serves Anthropic messages");
     add("Responses URL", "responses", "https://…/v1", "if the vendor serves the OpenAI Responses API (Codex uses it natively)");
-    const cat = input(draft.catalog, t("models.dev id, e.g. openai"));
+    const cat = input(draft.catalog, "models.dev id, e.g. openai");
     cat.oninput = () => { draft.catalog = cat.value; };
-    inner.append(...field(t("Catalog"), cat, t("Display names and reasoning levels for the models")));
+    inner.append(...field("Catalog", cat, "Display names and reasoning levels for the models"));
     more.append(inner);
     ed.append(more);
   }
 
   const bar = el("div", "bar");
   if (p) {
-    const del = el("button", "text danger", t("Remove"));
-    del.onclick = () => providerAction("delete", { id: p.id }, t("{name} removed", { name: p.name }));
+    const del = el("button", "text danger", "Remove");
+    del.onclick = () => providerAction("delete", { id: p.id }, `${p.name} removed`);
     bar.append(del);
   }
   bar.append(el("span", "grow"));
-  const cancel = el("button", "text", t("Cancel"));
+  const cancel = el("button", "text", "Cancel");
   cancel.onclick = cancelEdit;
-  const saveBtn = el("button", "text primary", t(isNew ? "Add" : "Save"));
+  const saveBtn = el("button", "text primary", isNew ? "Add" : "Save");
   const save = () => {
     const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra };
-    if (custom) { body.headers = headersOf(draft.headers); body.icon = draft.icon || "generic"; }
-    if (p) body.fallback = draft.fallback;
-    if (isNew && custom && !body.name) { name.focus(); return editorError(t("Give it a name"), "warn"); }
-    if (isNew && custom && !body.chat && !body.anthropic) { url.focus(); return editorError(t("A base URL is needed"), "warn"); }
-    editorError("");
+    if (isNew && custom && !body.name) { name.focus(); return status("Give it a name", "warn"); }
+    if (isNew && custom && !body.chat && !body.anthropic) { url.focus(); return status("A base URL is needed", "warn"); }
     saveBtn.classList.add("busy");
-    providerAction("save", body, t(isNew ? "{name} added" : "{name} saved", { name: draft.name || draft.id }));
+    providerAction("save", body, `${draft.name || draft.id} ${isNew ? "added" : "saved"}`, body.id || slug(body.name));
   };
   saveBtn.onclick = save;
   bar.append(cancel, saveBtn);
@@ -1551,112 +719,12 @@ function renderEditor(p, presetID) {
   return ed;
 }
 
-// renderImport: what a magpie://import link would add, for the user to
-// check. Nothing is saved until they press Add; the key stays hidden unless
-// they ask to see it.
-function renderImport(im) {
-  const ed = el("div", "editor new import");
-  ed.onclick = (e) => e.stopPropagation();
-  const p = im.provider || {};
-  const h = el("div", "ehead");
-  h.append(icon(p.icon || "generic"), el("b", "", im.error ? t("Import link") : p.name));
-  if (!im.error) h.append(el("span", "note", t("from a link")));
-  ed.append(h);
-  const bar = el("div", "bar");
-  bar.append(el("span", "grow"));
-  const cancel = el("button", "text", t(im.error ? "Close" : "Cancel"));
-  cancel.onclick = cancelEdit;
-  bar.append(cancel);
-  if (im.error) {
-    ed.append(el("div", "warnbox", t("This link can't be imported: {e}", { e: im.error })), bar);
-    return ed;
-  }
-
-  const hosts = [...new Set([p.chat, p.responses, p.anthropic].filter(Boolean).map(hostOf))];
-  ed.append(el("div", "warnbox", t("Added from a link. Your prompts and this key will go to {hosts}; add it only if you trust the site that sent you here.", { hosts: hosts.join(", ") })));
-
-  const name = input(im.name ?? p.name, t("e.g. My Relay"));
-  name.oninput = () => { im.name = name.value; };
-  ed.append(...field(t("Name"), name));
-
-  const key = input(im.key ?? p.key ?? "", t(p.key ? "" : "paste an API key"), "password");
-  key.oninput = () => { im.key = key.value; };
-  key.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") add(); else if (e.key === "Escape") cancelEdit(); };
-  const side = el("div", "side");
-  const eye = el("button", "text", t("Show"));
-  eye.onclick = () => { const on = key.type === "password"; key.type = on ? "text" : "password"; eye.textContent = t(on ? "Hide" : "Show"); };
-  side.append(eye);
-  if (p.keysUrl && !p.key) { const b = el("button", "link", t("Get a key ↗")); b.onclick = () => api("open", { url: p.keysUrl }); side.append(b); }
-  const keyWrap = el("div", "pair");
-  keyWrap.append(key, side);
-  ed.append(...field(t("API key"), keyWrap, p.key ? t("From the link. Kept in ~/.config/magpie/providers.json, readable by you alone.") : ""));
-
-  ed.append(...field(t("Endpoints"), renderEndpoints(null, p), ""));
-  if (p.models?.length) {
-    const chips = el("div", "mchips");
-    for (const m of p.models) chips.append(el("span", "mchip on", m));
-    ed.append(...field(t("Models"), chips, ""));
-  }
-  if (im.replaces) ed.append(el("div", "warnbox soft", t("Replaces your {name}, key and all.", { name: im.replaces })));
-
-  const addBtn = el("button", "text primary", t(im.replaces ? "Replace" : "Add"));
-  const add = () => {
-    const n = (im.name ?? p.name).trim();
-    if (!n) { name.focus(); return status(t("Give it a name"), "warn"); }
-    addBtn.classList.add("busy");
-    providerAction("save", { ...p, name: n, key: (im.key ?? p.key ?? "").trim() }, t("{name} added", { name: n }));
-  };
-  addBtn.onclick = add;
-  bar.append(addBtn);
-  ed.append(bar);
-  setTimeout(() => (p.key ? addBtn : key).focus(), 0);
-  return ed;
-}
-
 // Which of the vendor's models the agents get to see: click to toggle, type
 // to add one the vendor's list lacks, Refresh to ask the vendor again.
-// The endpoints a provider serves, with a Test that reports against each one.
-function renderEndpoints(p, src) {
-  const eps = el("div", "eps");
-  const slots = {};
-  const urls = src || {};
-  for (const [proto, label, hint] of PROTOS) {
-    if (!urls[proto]) continue;
-    const e = el("div", "ep");
-    const pl = el("span", "pl", label);
-    pl.title = t(hint);
-    e.append(pl, el("code", "", urls[proto]), slots[proto] = el("span", "res"));
-    eps.append(e);
-  }
-  if (p) {
-    const test = el("button", "text action", t("Test"));
-    test.title = t("Send a tiny request through each endpoint");
-    test.onclick = async () => {
-      test.classList.add("busy");
-      for (const s of Object.values(slots)) { s.className = "res wait"; s.textContent = "…"; }
-      try {
-        const r = await api("provider/test", { id: p.id });
-        for (const x of r.results) {
-          const s = slots[x.protocol];
-          if (!s) continue;
-          s.className = "res " + (x.ok ? "ok" : "bad");
-          s.replaceChildren();
-          s.append(svg(x.ok ? CHECK : "M4.5 4.5l7 7M11.5 4.5l-7 7", 10, 2));
-          s.append(el("span", "", x.ok ? `${x.ms} ms` : x.status ? `${x.status} · ${x.error}` : x.error));
-          s.title = x.ok ? t("model {model}", { model: x.model }) : x.error;
-        }
-      } catch (e) { for (const s of Object.values(slots)) { s.className = "res"; s.textContent = ""; } status(e.message, "err"); }
-      test.classList.remove("busy");
-    };
-    eps.append(test);
-  }
-  return eps;
-}
-
 function renderModels(p) {
   const box = el("div", "models");
   const chips = el("div", "mchips");
-  const q = p.models.length > 24 ? input("", t("filter {n} models…", { n: p.models.length })) : null;
+  const q = p.models.length > 24 ? input("", `filter ${p.models.length} models…`) : null;
   const draw = () => {
     chips.replaceChildren();
     const f = (q?.value || "").trim().toLowerCase();
@@ -1669,34 +737,34 @@ function renderModels(p) {
       if (m.name && m.name !== m.id) c.title = m.id;
       c.onclick = () => { draft.chosen = on ? draft.chosen.filter((x) => x !== m.id) : [...draft.chosen, m.id]; draw(); };
       chips.append(c);
-      if (++shown >= 80 && !f) { chips.append(el("span", "hint", t("… {n} more, filter to find them", { n: p.models.length - shown }))); break; }
+      if (++shown >= 80 && !f) { chips.append(el("span", "hint", `… ${p.models.length - shown} more, filter to find them`)); break; }
     }
     for (const id of draft.chosen) {
       if (p.models.some((m) => m.id === id)) continue;
       const c = el("button", "mchip on own");
       c.append(el("span", "", id));
-      c.title = t("Added by hand");
+      c.title = "Added by hand";
       c.onclick = () => { draft.chosen = draft.chosen.filter((x) => x !== id); draw(); };
       chips.append(c);
     }
-    if (!p.models.length && !draft.chosen.length) chips.append(el("span", "hint", t("The vendor's list is empty. Refresh, or type a model id.")));
+    if (!p.models.length && !draft.chosen.length) chips.append(el("span", "hint", "The vendor's list is empty. Refresh, or type a model id."));
   };
   if (q) { q.oninput = draw; box.append(q); }
   box.append(chips);
   const foot = el("div", "mfoot");
-  const add = input("", t("add a model id…"));
+  const add = input("", "add a model id…");
   add.onkeydown = (e) => {
     e.stopPropagation();
     if (e.key === "Enter" && add.value.trim()) { const id = add.value.trim(); if (!draft.chosen.includes(id)) draft.chosen.push(id); add.value = ""; draw(); }
     else if (e.key === "Escape") cancelEdit();
   };
-  const refresh = el("button", "text action", t("Refresh"));
-  refresh.title = t("Ask the vendor which models it serves");
+  const refresh = el("button", "text", "Refresh");
+  refresh.title = "Ask the vendor which models it serves";
   refresh.onclick = async () => {
     refresh.classList.add("busy");
     try {
       const r = await api("provider/models", { id: p.id });
-      status(t("{p}: {n} models", { p: p.name, n: r.count }), "ok");
+      status(`${p.name}: ${r.count} models`, "ok");
       const chosen = draft.chosen;
       await loadProviders();
       draft = draft || {};
@@ -1705,101 +773,18 @@ function renderModels(p) {
     } catch (e) { status(e.message, "err"); refresh.classList.remove("busy"); }
   };
   foot.append(add, refresh);
-  if (p.fetched) foot.append(el("span", "hint", t("vendor list · {when}", { when: p.fetched })));
-  else if (p.models.length) foot.append(el("span", "hint", t("from models.dev · Refresh asks the vendor")));
+  if (p.fetched) foot.append(el("span", "hint", `vendor list · ${p.fetched}`));
+  else if (p.models.length) foot.append(el("span", "hint", "from models.dev · Refresh asks the vendor"));
   box.append(foot);
   draw();
   return box;
 }
 
-// renderFallback: where requests go when this provider can't take them —
-// out of quota, rate limited, overloaded or down — tried top to bottom.
-function renderFallback(p) {
-  const box = el("div", "fallback");
-  const list = el("div", "fbl");
-  const sugg = el("div", "mchips");
-  const q = input("", t("add a model: filter, or type provider/model…"));
-  const all = [];
-  for (const o of providers.providers) {
-    if (!o.ready) continue;
-    for (const m of o.models) if (m.on) all.push({ id: o.id + "/" + m.id, label: o.name + " · " + (m.name || m.id), icon: o.icon });
-  }
-  let open = false;
-  const add = (id) => { if (id && !draft.fallback.includes(id)) draft.fallback.push(id); q.value = ""; draw(); };
-  const draw = () => {
-    list.replaceChildren();
-    draft.fallback.forEach((id, i) => {
-      const known = all.find((x) => x.id === id);
-      const row = el("div", "fbrow");
-      row.append(el("span", "i", String(i + 1)), icon(known?.icon || "generic"), el("span", "n", known ? known.label : id), el("span", "grow"));
-      if (!known) row.title = t("No provider serves {id} now; it is skipped", { id });
-      if (i) {
-        const up = el("button", "text", t("Up"));
-        up.onclick = () => { draft.fallback.splice(i - 1, 0, draft.fallback.splice(i, 1)[0]); draw(); };
-        row.append(up);
-      }
-      const rm = el("button", "text", t("Remove"));
-      rm.onclick = () => { draft.fallback.splice(i, 1); draw(); };
-      row.append(rm);
-      list.append(row);
-    });
-    sugg.replaceChildren();
-    if (!open && !q.value.trim()) return;
-    const f = q.value.trim().toLowerCase();
-    const hits = all.filter((x) => !draft.fallback.includes(x.id) && !x.id.startsWith(p.id + "/") && (x.id + " " + x.label).toLowerCase().includes(f));
-    for (const x of hits.slice(0, 12)) {
-      const c = el("button", "mchip");
-      c.append(el("span", "", x.label));
-      c.title = x.id;
-      c.onmousedown = (e) => e.preventDefault(); // keep the box focused
-      c.onclick = () => add(x.id);
-      sugg.append(c);
-    }
-    if (!hits.length && f) sugg.append(el("span", "hint", f.includes("/") ? t("Enter adds {id}", { id: q.value.trim() }) : t("No model matches")));
-  };
-  q.onfocus = () => { open = true; draw(); };
-  q.onblur = () => { open = false; draw(); };
-  q.oninput = draw;
-  q.onkeydown = (e) => {
-    e.stopPropagation();
-    if (e.key === "Enter" && q.value.trim()) add(q.value.trim().includes("/") ? q.value.trim() : sugg.querySelector(".mchip")?.title);
-    else if (e.key === "Escape") cancelEdit();
-  };
-  box.append(list, q, sugg);
-  draw();
-  return box;
-}
-function fallbackHint(p) {
-  return t("When {name} is out of quota, rate limited or down, a request goes to these instead, top first. It only happens before any of the reply is sent, and {name} then sits out a minute.", { name: p.name });
-}
-
-// renderLogins: the agent's other accounts magpie remembers, each one a
-// click away from being the one the agent is signed in to.
-function renderLogins(a) {
-  const list = el("div", "logins");
-  const others = a.logins.filter((l) => !l.active);
-  if (!others.length) list.append(el("div", "none", t("None yet")));
-  for (const l of others) {
-    const row = el("div", "acct");
-    row.append(el("span", "n", l.user), el("span", "plan", accountPlan({ agent: a.agent, plan: l.plan })), el("span", "grow"));
-    const forget = el("button", "text", t("Forget"));
-    forget.title = t("magpie forgets this account's sign-in; the account itself is untouched");
-    forget.onclick = () => providerAction("forget", { agent: a.agent, user: l.user }, t("{user} forgotten", { user: l.user }), "login/");
-    const use = el("button", "text", t("Switch"));
-    use.title = t("Sign {agent} in to this account", { agent: a.agentName });
-    use.onclick = () => { use.classList.add("busy"); providerAction("switch", { agent: a.agent, user: l.user }, t("{agent} is now signed in as {user}", { agent: a.agentName, user: l.user }), "login/"); };
-    row.append(forget, use);
-    list.append(row);
-  }
-  return list;
-}
-
-async function providerAction(action, body, okMsg, base = "provider/") {
+async function providerAction(action, body, okMsg, keep) {
   try {
-    providers = await api(base + action, body);
-    editing = null;
+    providers = await api("provider/" + action, body);
+    editing = action === "save" && keep ? keep : null;
     draft = null;
-    importing = null;
     adding = false;
     presetQuery = "";
     renderProviders();
@@ -1807,29 +792,9 @@ async function providerAction(action, body, okMsg, base = "provider/") {
     renderAgents();
     if (okMsg) status(okMsg, "ok");
   } catch (e) {
-    if (!editorError(e.message, "err")) status(e.message, "err");
+    status(e.message, "err");
     document.querySelector(".editor .busy")?.classList.remove("busy");
   }
-}
-
-// editorError shows what went wrong inside the open provider editor, by its
-// buttons, until the next edit or try; the page's status line sits behind
-// the dialog. False when no editor is open.
-function editorError(msg, kind = "err") {
-  const ed = document.querySelector(".editor");
-  if (!ed) return false;
-  let box = ed.querySelector(".editor-error");
-  if (!msg) { box?.remove(); return true; }
-  if (!box) {
-    box = el("div", "editor-error");
-    box.setAttribute("role", "alert");
-    const bar = ed.querySelector(":scope > .bar");
-    bar ? bar.before(box) : ed.append(box);
-    ed.addEventListener("input", () => box.remove(), { once: true });
-  }
-  box.className = "editor-error " + kind;
-  box.textContent = msg;
-  return true;
 }
 
 function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""); }
@@ -1841,52 +806,9 @@ $("#addProvider").onclick = () => { adding = true; editing = null; draft = null;
 
 const PERIODS = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All"]];
 
-// The subscriptions' quotas come from the vendors and can take a while (or
-// never come without a proxy), so they load on their own and the local log
-// never waits for them. They don't depend on the period either.
-let quotas = null;
 async function loadUsage() {
-  renderUsageLoading();
-  loadQuotas();
   usage = await api("usage?period=" + period);
   renderUsage();
-}
-
-let quotasLoading = null;
-function loadQuotas() {
-  if (quotasLoading) return quotasLoading;
-  quotasLoading = api("usage/quotas")
-    .then((q) => { quotas = q || []; }, () => { quotas = quotas || []; })
-    .finally(() => { quotasLoading = null; renderQuotas(); });
-  return quotasLoading;
-}
-
-function renderUsageLoading() {
-  const view = $("#view-usage");
-  view.classList.add("loading");
-  view.setAttribute("aria-busy", "true");
-  const seg = $("#period");
-  seg.replaceChildren();
-  for (const [id, name] of PERIODS) {
-    const b = el("button", "opt" + (id === period ? " on" : ""), t(name));
-    b.disabled = true;
-    seg.append(b);
-  }
-  slide(seg, "period");
-  $("#usageCost").replaceChildren(el("span", "skeleton sk-cost"));
-  renderQuotas();
-  const stats = $("#stats");
-  stats.classList.remove("empty");
-  stats.replaceChildren();
-  for (let i = 0; i < 4; i++) {
-    const tile = el("div", "kpi loading-kpi");
-    tile.append(el("span", "skeleton sk-number"), el("span", "skeleton sk-label"));
-    stats.append(tile);
-  }
-  $("#chart").hidden = true;
-  for (const id of ["usageAgents", "usageModels"]) $("#" + id).hidden = true;
-  for (const h of $$("#view-usage .row-head")) h.hidden = true;
-  $("#usageNote").textContent = "";
 }
 
 function fmtN(n) {
@@ -1905,69 +827,23 @@ function fmtCost(t) {
 }
 const tokensOf = (t) => t.input + t.output;
 
-function renderQuotas() {
-  const subscriptions = $("#subscriptionUsage");
-  subscriptions.replaceChildren();
-  if (!quotas) {
-    subscriptions.hidden = false;
-    for (let i = 0; i < 2; i++) {
-      const card = el("div", "subscription-card skeleton-card");
-      card.append(el("span", "skeleton sk-title"), el("span", "skeleton sk-line"), el("span", "skeleton sk-line short"));
-      subscriptions.append(card);
-    }
-    return;
-  }
-  subscriptions.hidden = !quotas.length;
-  for (const sub of quotas) {
-    const card = el("div", "subscription-card");
-    const head = el("div", "subscription-head");
-    head.append(icon(sub.icon), el("b", "", sub.name));
-    if (sub.plan) head.append(el("span", "plan", sub.plan));
-    card.append(head);
-    if (sub.error) {
-      card.append(el("div", "subscription-error", t("Usage unavailable")));
-      card.title = sub.error;
-    } else {
-      const windows = el("div", "quota-windows");
-      for (const w of sub.windows) {
-        const quota = el("div", "quota");
-        const labels = el("div", "quota-labels");
-        labels.append(el("span", "", t(w.name)), el("b", "", w.display || `${Math.round(w.used)}%`));
-        const track = el("div", "quota-track");
-        const fill = el("i");
-        fill.style.width = `${Math.max(0, Math.min(100, w.used))}%`;
-        track.append(fill);
-        quota.append(labels, track);
-        if (w.resetsAt) quota.title = t("Resets {when}", { when: new Date(w.resetsAt).toLocaleString() });
-        windows.append(quota);
-      }
-      card.append(windows);
-    }
-    subscriptions.append(card);
-  }
-}
-
 function renderUsage() {
   const u = usage;
-  const view = $("#view-usage");
-  view.classList.remove("loading");
-  view.removeAttribute("aria-busy");
   const seg = $("#period");
   seg.replaceChildren();
   for (const [id, name] of PERIODS) {
-    const b = el("button", "opt" + (id === period ? " on" : ""), t(name));
-    b.onclick = () => { for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b); slide(seg, "period"); period = id; loadUsage().catch((e) => status(e.message, "err")); };
+    const b = el("button", "opt" + (id === period ? " on" : ""), name);
+    b.onclick = () => { period = id; loadUsage().catch((e) => status(e.message, "err")); };
     seg.append(b);
   }
-  slide(seg, "period");
   const cost = $("#usageCost");
   cost.replaceChildren();
   const c = fmtCost(u);
   if (c) {
-    cost.append(el("b", "", "≈" + c), el("span", "", t("list price")));
-    cost.title = u.unpriced ? t(u.unpriced === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n: u.unpriced }) : t("At each model's list price on models.dev");
+    cost.append(el("b", "", "≈" + c), el("span", "", "list price"));
+    cost.title = u.unpriced ? `${u.unpriced} call${u.unpriced === 1 ? "" : "s"} had no known price and are not counted` : "At each model's list price on models.dev";
   } else if (u.calls) {
-    cost.append(el("span", "", t("no price for these models")));
+    cost.append(el("span", "", "no price for these models"));
   }
 
   const stats = $("#stats");
@@ -1978,29 +854,22 @@ function renderUsage() {
   for (const h of $$("#view-usage .row-head")) h.hidden = empty;
   if (empty) {
     stats.classList.add("empty");
-    const none = { today: "No calls today.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[period];
-    stats.append(el("div", "none", t(none) + " " + t("Point an agent at a catalog model and use it; every call through the gateway is counted here.")));
+    const when = { today: "today", "7d": "in the last 7 days", "30d": "in the last 30 days", all: "yet" }[period];
+    stats.append(el("div", "none", `No calls ${when}. Point an agent at a catalog model and use it; every call through the gateway is counted here.`));
     $("#usageNote").textContent = "";
     return;
   }
   stats.classList.remove("empty");
-  const tile = (n, label, sub, title) => {
+  const tile = (n, label, sub) => {
     const t = el("div", "kpi");
-    if (title) t.title = title;
     t.append(el("b", "", n), el("span", "", label));
     if (sub) t.append(el("small", "", sub));
     stats.append(t);
   };
-  tile(fmtN(tokensOf(u)), t("tokens"), t("{a} in · {b} out", { a: fmtN(u.input), b: fmtN(u.output) }));
-  // cache reads are billed at a fraction of input, so how much of the prompt
-  // came from cache is the number that explains the bill; input here already
-  // excludes the cached tokens (the gateway subtracts them). The written
-  // count is secondary and only fits in the tooltip.
-  const promptTokens = u.input + u.cache_read;
-  const hit = u.cache_read && promptTokens ? t("hit rate {p}", { p: Math.round(100 * u.cache_read / promptTokens) + "%" }) : "";
-  tile(fmtN(u.cache_read), t("cache read"), hit, u.cache_write ? t("{n} written", { n: fmtN(u.cache_write) }) : "");
-  tile(fmtN(u.reasoning), t("reasoning"), t("inside output"));
-  tile(String(u.calls), t(u.calls === 1 ? "call" : "calls"), u.errors ? t("{n} failed", { n: u.errors }) : "");
+  tile(fmtN(tokensOf(u)), "tokens", `${fmtN(u.input)} in · ${fmtN(u.output)} out`);
+  tile(fmtN(u.cache_read), "cache read", u.cache_write ? `${fmtN(u.cache_write)} written` : "");
+  tile(fmtN(u.reasoning), "reasoning", "inside output");
+  tile(String(u.calls), u.calls === 1 ? "call" : "calls", u.errors ? `${u.errors} failed` : "");
 
   // the timeline: one bar per hour, day or week; output sits on top of input
   const chart = $("#chart");
@@ -2016,8 +885,8 @@ function renderUsage() {
     inp.style.height = (100 * p.input / peak).toFixed(1) + "%";
     out.style.height = (100 * p.output / peak).toFixed(1) + "%";
     b.append(out, inp);
-    const when = u.bucket === "hour" ? `${p.label}:00` : u.bucket === "week" ? t("week of {label}", { label: p.label }) : p.label;
-    b.title = p.calls ? t(p.calls === 1 ? "{when} · {tokens} tokens · {n} call" : "{when} · {tokens} tokens · {n} calls", { when, tokens: fmtN(tokensOf(p)), n: p.calls }) + (fmtCost(p) ? " · ≈" + fmtCost(p) : "") : t("{when} · nothing", { when });
+    const when = u.bucket === "hour" ? `${p.label}:00` : (u.bucket === "week" ? "week of " : "") + p.label;
+    b.title = p.calls ? `${when} · ${fmtN(tokensOf(p))} tokens · ${p.calls} call${p.calls === 1 ? "" : "s"}${fmtCost(p) ? " · ≈" + fmtCost(p) : ""}` : `${when} · nothing`;
     bars.append(b);
     const last = i === n - 1 && (n - 1) % every >= every / 2;
     labels.append(el("span", "", i % every === 0 || last ? p.label : ""));
@@ -2035,18 +904,18 @@ function renderUsage() {
       who.append(el("div", "name", g.name));
       const sub = [];
       if (g.sub) sub.push(g.sub);
-      sub.push(t(g.calls === 1 ? "{n} call" : "{n} calls", { n: g.calls }));
-      if (g.errors) sub.push(t("{n} failed", { n: g.errors }));
+      sub.push(`${g.calls} call${g.calls === 1 ? "" : "s"}`);
+      if (g.errors) sub.push(`${g.errors} failed`);
       who.append(el("div", "sub", sub.join(" · ")));
       r.append(who);
       const share = el("div", "share");
       const fill = el("i");
       fill.style.width = Math.max(1.5, 100 * tokensOf(g) / total).toFixed(1) + "%";
       share.append(fill);
-      share.title = t("{n}% of tokens", { n: Math.round(100 * tokensOf(g) / total) });
+      share.title = Math.round(100 * tokensOf(g) / total) + "% of tokens";
       r.append(share);
       const num = el("div", "num");
-      num.append(el("b", "", fmtN(tokensOf(g))), el("small", "", t("{a} in · {b} out", { a: fmtN(g.input), b: fmtN(g.output) }) + (g.cache_read ? " · " + t("{n} cached", { n: fmtN(g.cache_read) }) : "")));
+      num.append(el("b", "", fmtN(tokensOf(g))), el("small", "", `${fmtN(g.input)} in · ${fmtN(g.output)} out${g.cache_read ? " · " + fmtN(g.cache_read) + " cached" : ""}`));
       r.append(num);
       r.append(el("div", "cost", fmtCost(g) ? "≈" + fmtCost(g) : ""));
       box.append(r);
@@ -2054,188 +923,22 @@ function renderUsage() {
   };
   list("usageAgents", u.agents);
   list("usageModels", u.models);
-  $("#usageNote").textContent = t("Counted from the providers' own usage reports on every call through the gateway · {path}", { path: u.path });
-}
-
-// ---------- settings ----------
-//
-// Three choices (palette, language, what the tray icon opens) and the facts
-// people come looking for:
-// the version, where magpie keeps its files, the gateway's address.
-
-const THEMES = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
-const LOCALES = [["system", "System"], ["en", "English"], ["zh", "中文"]];
-const TRAYS = [["panel", "Quick panel"], ["window", "Main window"]];
-
-// applyPrefs paints and speaks as the saved settings say. A ?theme= or
-// ?locale= in the URL wins, so a forced look stays forced.
-function applyPrefs(s) {
-  s = s || {};
-  const root = document.documentElement;
-  if (!params.get("theme")) {
-    const want = !s.theme || s.theme === "system" ? undefined : s.theme;
-    if (root.dataset.theme !== want) {
-      if (applyPrefs.ready) { // not on the first paint
-        root.classList.add("theming");
-        clearTimeout(applyPrefs.t);
-        applyPrefs.t = setTimeout(() => root.classList.remove("theming"), 450);
-      }
-      if (want) root.dataset.theme = want; else delete root.dataset.theme;
-    }
-  }
-  applyPrefs.ready = true;
-  const was = locale;
-  setLocale(s.lang);
-  if (was !== locale && mode === "window") queueMicrotask(() => slide($("#nav"), "nav"));
-  return was !== locale;
-}
-
-async function loadSettings() {
-  prefs = await api("settings");
-  renderSettings();
-}
-
-function renderSettings() {
-  const s = prefs;
-  const keep = { theme: s.theme, lang: s.lang, tray: s.tray, proxy: s.proxy || "" };
-  $("#themeSegs").replaceChildren(segs(THEMES.map(([id, name]) => [id, t(name)]), s.theme, (theme) => savePrefs({ ...keep, theme })));
-  $("#langSegs").replaceChildren(segs(LOCALES.map(([id, name]) => [id, t(name)]), s.lang, (lang) => savePrefs({ ...keep, lang })));
-  $("#traySegs").replaceChildren(segs(TRAYS.map(([id, name]) => [id, t(name)]), s.tray || "panel", (tray) => savePrefs({ ...keep, tray })));
-  renderProxy(s, keep);
-
-  const about = $("#about");
-  about.replaceChildren();
-  const row = (name, sub, value, ...tools) => {
-    const r = el("div", "row pref");
-    const who = el("div", "who");
-    who.append(el("div", "name", name));
-    if (sub) who.append(el("div", "sub", sub));
-    const val = el("div", "val");
-    val.append(el("code", "", value), ...tools);
-    r.append(who, val);
-    about.append(r);
-    return r;
-  };
-  renderUpdate(row(t("Version"), "", s.version));
-  const open = el("button", "text", t("Open"));
-  open.onclick = () => api("open", { url: "file://" + s.path });
-  row(t("Config folder"), t("providers, profiles and these settings"), s.dir, copyBtn(s.dir, t("Path")), open);
-  row(t("Gateway URL"), t("the address every agent is pointed at"), s.gateway, copyBtn(s.gateway, t("Gateway URL")));
-}
-
-// renderProxy: magpie's own requests to vendors follow the system proxy on
-// their own; this row says which one, and lets it be turned off or set.
-let proxyCustom = false; // Custom picked, nothing typed yet
-function renderProxy(s, keep) {
-  const cur = !s.proxy ? "auto" : s.proxy === "direct" ? "off" : "custom";
-  const mode = proxyCustom ? "custom" : cur;
-  const sub = $("#proxySub");
-  sub.textContent = {
-    settings: t("Requests to vendors go through {proxy}", { proxy: s.proxyNow }),
-    system: t("Following the system proxy, {proxy}", { proxy: s.proxyNow }),
-    environment: t("Following HTTPS_PROXY, {proxy}", { proxy: s.proxyNow }),
-    off: t("Off: requests to vendors go direct"),
-    none: t("No system proxy found; requests to vendors go direct"),
-  }[s.proxySource] || "";
-  const box = $("#proxySegs");
-  box.replaceChildren();
-  const pick = (id) => {
-    proxyCustom = id === "custom";
-    if (id === "auto") savePrefs({ ...keep, proxy: "" });
-    else if (id === "off") savePrefs({ ...keep, proxy: "direct" });
-    else renderProxy(s, keep);
-  };
-  if (mode === "custom") {
-    const i = input(cur === "custom" ? s.proxy : "", "http://127.0.0.1:7890");
-    i.className = "proxy";
-    const save = () => {
-      const v = i.value.trim();
-      if (!v || v === s.proxy) return;
-      proxyCustom = false;
-      savePrefs({ ...keep, proxy: v });
-    };
-    i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") save(); else if (e.key === "Escape") { proxyCustom = false; renderProxy(s, keep); } };
-    i.onblur = save;
-    box.append(i);
-    if (proxyCustom) queueMicrotask(() => i.focus());
-  }
-  box.append(segs([["auto", t("Auto")], ["off", t("Off")], ["custom", t("Custom")]], mode, pick));
-}
-
-// renderUpdate fills in the version row: whether a newer magpie is out.
-// The app checks and downloads on its own, so usually the row just offers
-// the restart; a check can also be asked for.
-async function renderUpdate(r, u) {
-  u = u || await api("update").catch(() => null);
-  if (!u || !r.isConnected) return;
-  const who = r.querySelector(".who"), val = r.querySelector(".val");
-  const sub = who.querySelector(".sub") || who.appendChild(el("div", "sub"));
-  sub.title = "";
-  for (const b of val.querySelectorAll("button")) b.remove();
-  const btn = (label, fn) => { const b = el("button", "text", label); b.onclick = fn; val.append(b); };
-  const check = async () => {
-    sub.textContent = t("Checking for updates…");
-    renderUpdate(r, await api("update/check", {}).catch((e) => ({ state: "error", error: e.message })));
-  };
-  switch (u.state) {
-    case "ready":
-      sub.textContent = t("{v} is downloaded", { v: u.latest });
-      btn(t("Restart to update"), () => api("update/install", {}));
-      break;
-    case "available":
-      sub.textContent = t("{v} is out", { v: u.latest });
-      btn(t("Download"), () => api("update/install", {}));
-      break;
-    case "downloading":
-      sub.textContent = t("Downloading {v}…", { v: u.latest });
-      setTimeout(() => renderUpdate(r), 2000);
-      break;
-    case "checking":
-      sub.textContent = t("Checking for updates…");
-      setTimeout(() => renderUpdate(r), 1000);
-      break;
-    case "latest":
-      sub.textContent = t("Up to date");
-      btn(t("Check"), check);
-      break;
-    case "error":
-      sub.textContent = t("Couldn't check for updates");
-      sub.title = u.error || "";
-      btn(t("Check"), check);
-      break;
-    default: // built from source, or not asked yet
-      sub.textContent = "";
-  }
-}
-
-async function savePrefs(body) {
-  try {
-    prefs = await api("settings", body);
-    state.settings = prefs;
-    const spoke = applyPrefs(prefs);
-    renderSettings();
-    if (spoke) { renderAgents(); providers = null; usage = null; }
-    status(t("Saved"), "ok", 1500);
-  } catch (e) {
-    status(e.message, "err");
-  }
+  $("#usageNote").textContent = `Counted from the providers' own usage reports on every call through the gateway · ${u.path}`;
 }
 
 // ---------- header / footer ----------
 
 function show(v) {
   view = v;
-  if (mode === "window") { for (const b of $("#nav").querySelectorAll("button")) b.classList.toggle("on", b.dataset.view === v); slide($("#nav"), "nav"); }
-  $("#prefs").classList.toggle("on", v === "settings");
-  for (const id of ["agents", "providers", "gateway", "usage", "settings"]) $("#view-" + id).hidden = v !== id;
+  for (const b of $("#nav").children) b.classList.toggle("on", b.dataset.view === v);
+  $("#view-agents").hidden = v !== "agents";
+  $("#view-providers").hidden = v !== "providers";
+  $("#view-usage").hidden = v !== "usage";
   closePicker();
-  if (v !== "providers" && editing !== null) cancelEdit();
-  if (v === "providers" || v === "gateway") loadProviders().catch((e) => status(e.message, "err"));
+  if (v === "providers") loadProviders().catch((e) => status(e.message, "err"));
   if (v === "usage") loadUsage().catch((e) => status(e.message, "err"));
-  if (v === "settings") loadSettings().catch((e) => status(e.message, "err"));
 }
-if (mode === "window") for (const b of $("#nav").querySelectorAll("button")) b.onclick = () => { show(b.dataset.view); b.blur(); };
-$("#prefs").onclick = () => { if (mode === "window") show("settings"); else api("window/main?view=settings", {}); $("#prefs").blur(); };
+for (const b of $("#nav").children) b.onclick = () => { show(b.dataset.view); b.blur(); };
 
 $("#sync").onclick = async () => {
   const b = $("#sync");
@@ -2244,9 +947,9 @@ $("#sync").onclick = async () => {
     state = await api("sync", {});
     renderAgents();
     if (providers) await loadProviders();
-    status(t("Model lists refreshed"), "ok");
+    status("Model lists refreshed", "ok");
   } catch (e) {
-    status(t("Sync failed: {e}", { e: e.message }), "err");
+    status("Sync failed: " + e.message, "err");
   } finally {
     b.classList.remove("spin");
   }
@@ -2257,21 +960,9 @@ $("#quit").onclick = () => api("window/quit", {});
 if (mode === "window") { $("#open").remove(); $("#openMain").remove(); $("#quit").remove(); }
 else { $("#nav").remove(); }
 
-// Config files may change underneath us (another magpie, an editor); reload when
+// Config files may change underneath us (another dial, an editor); reload when
 // the panel comes back into view.
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 window.addEventListener("focus", load);
-// Opened on a magpie://import link: fetch what it describes (once — the
-// id is spent) and ask before adding it.
-if (mode === "window" && params.get("import")) {
-  const id = params.get("import");
-  params.delete("import");
-  history.replaceState(null, "", "?" + params);
-  api("import/" + encodeURIComponent(id)).then((im) => {
-    importing = im;
-    if (providers && view === "providers") renderProviders();
-  }).catch(() => {});
-}
-if (mode === "window" && ["providers", "gateway", "usage", "settings"].includes(params.get("view"))) show(params.get("view"));
-else if (mode === "window") slide($("#nav"), "nav");
+if (mode === "window" && ["providers", "usage"].includes(params.get("view"))) show(params.get("view"));
 load();
