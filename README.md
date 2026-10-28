@@ -62,7 +62,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 
 | Agent        | File                              | Fields          |
 | ------------ | --------------------------------- | --------------- |
-| Claude Code  | `~/.claude/settings.json`         | provider, model |
+| Claude Code  | `~/.claude/settings.json`         | provider, model, opus/sonnet/haiku/fable (through magpie) |
 | Codex        | `~/.codex/config.toml`            | provider, model, effort |
 | Gemini CLI   | `~/.gemini/settings.json`, `~/.gemini/.env` | auth, model |
 | OpenCode     | `~/.config/opencode/opencode.json(c)` | model, small |
@@ -285,6 +285,8 @@ magpie codex effort high        # other fields
 magpie codex xhigh              # bare effort levels are recognised too
 magpie codex deepseek/deepseek-chat   # any catalog model, through the gateway
 magpie claude moonshot/kimi-k2.5
+magpie claude haiku deepseek/deepseek-v4-flash   # one tier on its own model
+magpie claude haiku ""          # back to the main model
 magpie gemini auth api-key
 magpie opencode anthropic/claude-sonnet-5
 magpie oc small anthropic/claude-haiku-4-5

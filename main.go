@@ -14,6 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudebridge"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
@@ -43,8 +44,12 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
+  magpie provider fallback <id> <provider/model>…   use these when it's out of quota or down
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
+  magpie accounts [agent]         the Claude Code and Codex subscriptions magpie remembers
+  magpie accounts add <agent>     sign in to one more Claude or ChatGPT subscription
+  magpie accounts switch <agent> <email>   sign the agent in to another of them
 
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
@@ -64,6 +69,7 @@ var (
 
 func main() {
 	gateway.Version = version
+	netproxy.Install()
 	update.GUI = hasGUI
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
@@ -128,6 +134,8 @@ func run(args []string) error {
 		return models()
 	case "serve":
 		return serve()
+	case "accounts", "account":
+		return accountsCmd(args)
 	case "usage":
 		return usageCmd(args)
 	case "update":
@@ -188,6 +196,13 @@ func set(a *agent.Agent, key, value string) error {
 
 func fieldForValue(a *agent.Agent, v string) *agent.Field {
 	vals := a.Values()
+	// a model stays with the model, even where other fields offer it too
+	// (Claude Code's opus/sonnet/haiku/fable)
+	for _, o := range a.Fields[0].Options(vals) {
+		if o.Value == v {
+			return nil
+		}
+	}
 	for i := 1; i < len(a.Fields); i++ {
 		for _, o := range a.Fields[i].Options(vals) {
 			if o.Value == v {
@@ -216,6 +231,9 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
+				if v == "" && f.Quiet {
+					continue
+				}
 				if v == "" {
 					v = faint.Render("—")
 				}

@@ -230,6 +230,15 @@ func Run(version string, showMain bool, link string) error {
 	}
 	h.tray.SetMenu(menu)
 	h.tray.AttachWindow(h.panel).WindowOffset(6)
+	// the quick panel by the icon, or the main window if the user would
+	// rather (Settings → Tray icon)
+	h.tray.OnClick(func() {
+		if settings.Load().Tray == "window" {
+			h.ShowMain("")
+			return
+		}
+		h.tray.ToggleWindow()
+	})
 
 	// Wails shows a Windows webview 3s after Show whether or not WebView2
 	// has made its controller yet, and a slow first start then crashes on
