@@ -70,16 +70,6 @@ function icon(name) {
     e.append(svg("M8 2.2 13.2 5.1v5.8L8 13.8 2.8 10.9V5.1Z M8 8v5.8 M2.8 5.1 8 8l5.2-2.9", 16, 1.4));
     return e;
   }
-  if (name?.startsWith("file:")) {
-    // a picture the user gave their own provider
-    const img = el("img");
-    img.src = "/api/icons/" + encodeURIComponent(name.slice(5));
-    img.alt = "";
-    img.draggable = false;
-    img.onerror = () => e.replaceWith(icon("generic"));
-    e.append(img);
-    return e;
-  }
   if (name) {
     if (name.endsWith("-color") || name === "crush") {
       const img = el("img");
@@ -206,9 +196,7 @@ async function load() {
     state = await api("state");
     applyPrefs(state.settings);
     renderAgents();
-    // an open provider editor is someone typing: coming back to the window
-    // must not rebuild it under them
-    if ((view === "providers" || view === "gateway") && !(editing || adding)) await loadProviders();
+    if (view === "providers" || view === "gateway") await loadProviders();
     if (view === "usage") await loadUsage();
     if (view === "settings") await loadSettings();
   } catch (e) {
@@ -1148,157 +1136,6 @@ function input(value, placeholder, type = "text") {
 }
 function cancelEdit() { editing = null; draft = null; importing = null; renderProviders(); }
 
-// Custom request headers: the draft keeps them as an ordered [name, value,
-// json?] list so a half-typed row (and its open JSON editor) survives a
-// re-render; headersOf folds that back into the object the backend stores,
-// dropping rows with an empty name and minifying any value that parses as
-// JSON — a header value is one line, so pretty-printing is display-only.
-function headerRows(obj) {
-  return Object.entries(obj || {}).map(([k, v]) => [k, v, false]);
-}
-function headersOf(rows) {
-  const out = {};
-  for (const [k, v] of rows || []) {
-    const name = (k || "").trim();
-    if (!name) continue;
-    const val = (v || "").trim();
-    // minify only a JSON blob; a plain value like "2.0" must stay verbatim
-    out[name] = looksJSON(val) ? minifyJSON(val) : val;
-  }
-  return out;
-}
-// minifyJSON collapses a value to one line when it is valid JSON, so a
-// pretty-printed blob in the editor never reaches the wire with newlines.
-function minifyJSON(s) {
-  try { return JSON.stringify(JSON.parse(s)); } catch { return s; }
-}
-function prettyJSON(s) {
-  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
-}
-function looksJSON(s) {
-  s = (s || "").trim();
-  return s.startsWith("{") || s.startsWith("[");
-}
-function headerEditor() {
-  const box = el("div", "headers");
-  const render = () => {
-    box.replaceChildren();
-    draft.headers.forEach((row, i) => {
-      const line = el("div", "pair");
-      const name = input(row[0], t("Header-Name"));
-      name.oninput = () => { row[0] = name.value; };
-
-      // the value: a one-line box, or (when the row is expanded) a full-width
-      // textarea that pretty-prints JSON for editing. The toggle is always
-      // offered — a value only becomes JSON after you paste it in.
-      let valCtl;
-      if (row[2]) {
-        valCtl = el("textarea", "json");
-        valCtl.value = prettyJSON(row[1]);
-        valCtl.spellcheck = false;
-        valCtl.wrap = "off"; // each JSON line stays on one line; scroll instead
-        valCtl.rows = Math.min(16, Math.max(4, valCtl.value.split("\n").length));
-        valCtl.placeholder = t("value");
-        valCtl.oninput = () => {
-          row[1] = valCtl.value;
-          valCtl.classList.toggle("bad", looksJSON(valCtl.value) && !parses(valCtl.value));
-        };
-        valCtl.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") cancelEdit(); };
-      } else {
-        valCtl = input(row[1], t("value"));
-        valCtl.oninput = () => { row[1] = valCtl.value; };
-      }
-
-      const side = el("div", "side");
-      const j = el("button", "text" + (row[2] ? " on" : ""), "{ }");
-      j.title = row[2] ? t("Collapse to one line") : t("Edit as JSON");
-      j.onclick = () => { row[2] = !row[2]; if (!row[2]) row[1] = minifyJSON(row[1]); render(); };
-      side.append(j);
-      const del = el("button", "text danger", "×");
-      del.title = t("Remove header");
-      del.onclick = () => { draft.headers.splice(i, 1); render(); };
-      side.append(del);
-
-      if (row[2]) {
-        line.classList.add("col");
-        const top = el("div", "hhead");
-        top.append(name, side);
-        line.append(top, valCtl);
-      } else {
-        line.append(name, valCtl, side);
-      }
-      box.append(line);
-    });
-    const add = el("button", "text", t("+ Add header"));
-    add.onclick = () => { draft.headers.push(["", "", false]); render(); };
-    box.append(add);
-  };
-  render();
-  return box;
-}
-function parses(s) { try { JSON.parse(s); return true; } catch { return false; } }
-
-// iconPicker: a custom provider's icon — one of the built-in ones, or a
-// picture of the user's own, which magpie keeps in ~/.config/magpie/icons.
-function iconPicker(ed) {
-  const box = el("div", "icon-pick");
-  const draw = () => {
-    box.replaceChildren();
-    const now = el("span", "icon-now");
-    now.append(icon(draft.icon || "generic"));
-    box.append(now);
-    const file = el("input");
-    file.type = "file";
-    file.accept = "image/png,image/jpeg,image/gif,image/webp,image/x-icon,image/svg+xml,.ico,.svg";
-    file.hidden = true;
-    file.onchange = async () => {
-      const f = file.files[0];
-      if (!f) return;
-      try {
-        const res = await fetch("/api/icons", { method: "POST", body: f });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || res.statusText);
-        draft.icon = data.icon;
-        editorError("");
-        draw();
-        syncHead();
-      } catch (e) {
-        editorError(e.message);
-      }
-    };
-    const choose = el("button", "text", t("Choose a picture…"));
-    choose.onclick = () => file.click();
-    const builtin = el("button", "text", t("Built-in icons"));
-    builtin.onclick = () => { open = !open; draw(); };
-    box.append(file, choose, builtin);
-    if (draft.icon && draft.icon !== "generic") {
-      const reset = el("button", "text", t("Default"));
-      reset.onclick = () => { draft.icon = ""; draw(); syncHead(); };
-      box.append(reset);
-    }
-    if (open) {
-      const grid = el("div", "icon-grid");
-      const names = [...new Set((providers.presets || []).map((p) => p.icon).filter((n) => n && n !== "generic"))].sort();
-      for (const n of names) {
-        const b = el("button", n === draft.icon ? "on" : "");
-        b.title = n.replace(/-color$/, "");
-        b.append(icon(n));
-        b.onclick = () => { draft.icon = n; open = false; draw(); syncHead(); };
-        grid.append(b);
-      }
-      box.append(grid);
-    }
-  };
-  let open = false;
-  // the dialog's title shows the icon too
-  const syncHead = () => {
-    const old = ed.querySelector(".ehead .ic");
-    if (old) old.replaceWith(icon(draft.icon || "generic"));
-  };
-  draw();
-  return box;
-}
-
 // ---------- modal ----------
 // The provider editor opens as a dialog over the page; Escape, the backdrop
 // or Cancel close it.
@@ -1349,10 +1186,10 @@ function renderEditor(p, presetID) {
   const pr = presetID ? providers.presets.find((x) => x.id === presetID) : p?.preset ? providers.presets.find((x) => x.id === p.preset) : null;
   const isNew = !p, custom = !pr;
   draft = draft || (p
-    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "" }
+    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [] }
     : pr
-      ? { id: pr.id, name: pr.name, preset: pr.id, key: "", chosen: [], extra: [], headers: [] }
-      : { id: "", name: "", preset: "", chat: "", responses: "", anthropic: "", catalog: "", key: "", api: "openai", chosen: [], extra: [], headers: [], icon: "" });
+      ? { id: pr.id, name: pr.name, preset: pr.id, key: "", chosen: [], extra: [] }
+      : { id: "", name: "", preset: "", chat: "", responses: "", anthropic: "", catalog: "", key: "", api: "openai", chosen: [], extra: [] });
   const ed = el("div", "editor" + (isNew ? " new" : ""));
   ed.onclick = (e) => e.stopPropagation();
 
@@ -1428,7 +1265,7 @@ function renderEditor(p, presetID) {
     return ed;
   }
 
-  const key = input(draft.key || "", p?.key.set ? t("{masked} · paste a new key to replace it", { masked: p.key.masked }) : t(pr?.noKey || p?.key.optional ? "optional for local servers" : "paste an API key"), "password");
+  const key = input("", p?.key.set ? t("{masked} · paste a new key to replace it", { masked: p.key.masked }) : t(pr?.noKey || p?.key.optional ? "optional for local servers" : "paste an API key"), "password");
   key.oninput = () => { draft.key = key.value; };
   key.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter" && isNew) save(); else if (e.key === "Escape") cancelEdit(); };
   const side = el("div", "side");
@@ -1453,17 +1290,6 @@ function renderEditor(p, presetID) {
   keyWrap.append(key, side);
   ed.append(...field(t("API key"), keyWrap, isNew ? t("Kept in ~/.config/magpie/providers.json, readable by you alone. Nothing is read from your shell.") : ""));
 
-  // A user-defined provider can have its own picture; presets keep theirs.
-  if (custom) ed.append(...field(t("Icon"), iconPicker(ed), ""));
-
-  // Custom request headers are only supported for a user-defined provider.
-  // Presets own their request shape, and signed-in accounts returned above
-  // use the agent's own authentication headers.
-  if (custom) {
-    if (!draft.headers.length) draft.headers.push(["", ""]);
-    ed.append(...field(t("Headers"), headerEditor(), t("Extra HTTP headers sent to the vendor, applied after auth. For gateways that need a private scheme.")));
-  }
-
   // a relay that offers several regional endpoints: one selector, and the
   // provider's base URLs follow it
   let refreshEndpoints = () => {};
@@ -1486,7 +1312,7 @@ function renderEditor(p, presetID) {
 
   if (p) ed.append(...field(t("Models"), renderModels(p), ""));
   else if (custom) {
-    const ex = input(draft.extra.join(", "), t("model ids, comma separated · e.g. gpt-5.5, claude-sonnet-5"));
+    const ex = input("", t("model ids, comma separated · e.g. gpt-5.5, claude-sonnet-5"));
     ex.oninput = () => { draft.extra = ex.value.split(/[,\s]+/).filter(Boolean); };
     ed.append(...field(t("Models"), ex, t("Optional: magpie asks the vendor for its list after saving.")));
   }
@@ -1533,10 +1359,8 @@ function renderEditor(p, presetID) {
   const saveBtn = el("button", "text primary", t(isNew ? "Add" : "Save"));
   const save = () => {
     const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra };
-    if (custom) { body.headers = headersOf(draft.headers); body.icon = draft.icon || "generic"; }
-    if (isNew && custom && !body.name) { name.focus(); return editorError(t("Give it a name"), "warn"); }
-    if (isNew && custom && !body.chat && !body.anthropic) { url.focus(); return editorError(t("A base URL is needed"), "warn"); }
-    editorError("");
+    if (isNew && custom && !body.name) { name.focus(); return status(t("Give it a name"), "warn"); }
+    if (isNew && custom && !body.chat && !body.anthropic) { url.focus(); return status(t("A base URL is needed"), "warn"); }
     saveBtn.classList.add("busy");
     providerAction("save", body, t(isNew ? "{name} added" : "{name} saved", { name: draft.name || draft.id }));
   };
@@ -1721,29 +1545,9 @@ async function providerAction(action, body, okMsg) {
     renderAgents();
     if (okMsg) status(okMsg, "ok");
   } catch (e) {
-    if (!editorError(e.message, "err")) status(e.message, "err");
+    status(e.message, "err");
     document.querySelector(".editor .busy")?.classList.remove("busy");
   }
-}
-
-// editorError shows what went wrong inside the open provider editor, by its
-// buttons, until the next edit or try; the page's status line sits behind
-// the dialog. False when no editor is open.
-function editorError(msg, kind = "err") {
-  const ed = document.querySelector(".editor");
-  if (!ed) return false;
-  let box = ed.querySelector(".editor-error");
-  if (!msg) { box?.remove(); return true; }
-  if (!box) {
-    box = el("div", "editor-error");
-    box.setAttribute("role", "alert");
-    const bar = ed.querySelector(":scope > .bar");
-    bar ? bar.before(box) : ed.append(box);
-    ed.addEventListener("input", () => box.remove(), { once: true });
-  }
-  box.className = "editor-error " + kind;
-  box.textContent = msg;
-  return true;
 }
 
 function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""); }
