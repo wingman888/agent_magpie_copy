@@ -5,9 +5,10 @@ package gateway
 // least used first. Whichever goes first, a key that suits the request
 // still goes before one that doesn't, and one resting after a failure
 // waits at the back for as long as its failure says: out of credit for
-// half an hour, out of quota until it says it resets, rate limited until
-// it says to try again, and otherwise a minute, longer each time it
-// fails again.
+// half an hour, out of quota until it says it resets — or, for a
+// subscription, until the window it filled does — rate limited until it
+// says to try again, and otherwise a minute, longer each time it fails
+// again.
 
 import (
 	"math"
@@ -66,7 +67,9 @@ var (
 	// creditWords: the account or key has no money left.
 	creditWords = regexp.MustCompile(`(?i)insufficient.?(balance|credit|fund)|balance|credit|billing|payment|arrear|overdue|suspended|余额|欠费|充值|账户.*(不足|停)`)
 	// quotaWords: it has used up what its plan allows for now.
-	usedUpWords = regexp.MustCompile(`(?i)quota|usage.?limit|limit.?reached|exceeded.*(plan|limit)|额度|用量|套餐|上限`)
+	usedUpWords = regexp.MustCompile(`(?i)quota|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|exceeded.*(plan|limit)|额度|用量|套餐|上限`)
+	// resetsWords: Claude Code's "usage limit reached|<when it resets>".
+	resetsWords = regexp.MustCompile(`(?i)limit reached\|(\d{10})\b`)
 )
 
 // Why a candidate failed, as rest tells it.
@@ -90,32 +93,85 @@ func failure(status int, body []byte) string {
 	return failOther
 }
 
+// Rest is why a candidate sits out after a failure, and until when.
+type Rest struct {
+	Why    string    `json:"why"`    // failCredit, failQuota, failRate, failOther
+	Status int       `json:"status"` // what it answered
+	Until  time.Time `json:"until"`
+	// By is what set how long: "credit" (half an hour), "retry-after" (the
+	// vendor's own headers), "resets" (the time Claude Code gave), "window"
+	// (the allowance window it filled renews), "quota" (no word of when),
+	// "cooldown" (a minute), "backoff" (longer each time it fails again).
+	By       string `json:"by"`
+	Failures int    `json:"failures,omitempty"` // in a row, for a backoff
+}
+
 // restAfter sets a failed candidate aside for as long as its failure says.
-func (s *Server) restAfter(rest string, status int, header http.Header, body []byte) {
+func (s *Server) restAfter(c candidate, status int, header http.Header, body []byte) Rest {
 	now := time.Now()
 	d := fallbackCooldown
-	switch failure(status, body) {
+	why := failure(status, body)
+	r := Rest{Why: why, Status: status, By: "cooldown"}
+	switch why {
 	case failCredit:
-		d = creditRest
+		d, r.By = creditRest, "credit"
 	case failQuota:
-		d = quotaRest
+		d, r.By = quotaRest, "quota"
 		if w := retryAfter(header, now); w > 0 {
-			d = w
+			d, r.By = w, "retry-after"
+		} else if m := resetsWords.FindSubmatch(body); m != nil {
+			if n, _ := strconv.ParseInt(string(m[1]), 10, 64); time.Unix(n, 0).After(now) {
+				d, r.By = time.Unix(n, 0).Sub(now), "resets"
+			}
+		} else if t := c.full(now); !t.IsZero() {
+			d, r.By = t.Sub(now), "window"
 		}
 	case failRate:
 		if w := retryAfter(header, now); w > 0 {
-			d = w
+			d, r.By = w, "retry-after"
 		}
 	default:
 		routed.Lock()
-		routed.failures[rest]++
-		n := routed.failures[rest]
+		routed.failures[c.rest]++
+		n := routed.failures[c.rest]
 		routed.Unlock()
-		d = min(fallbackCooldown<<min(n-1, 10), longestRetry)
+		d, r.By, r.Failures = min(fallbackCooldown<<min(n-1, 10), longestRetry), "backoff", n
+		// a subscription that failed with a window full is out of it,
+		// whatever it said
+		if t := c.full(now); !t.IsZero() {
+			d, r.By = t.Sub(now), "window"
+		}
 	}
+	if a := c.p.Account; a != nil && why != failOther {
+		provider.StaleAllowance(a.Agent, a.User) // ask again what it has left
+	}
+	r.Until = now.Add(d)
 	restingUntil.Lock()
-	restingUntil.m[rest] = now.Add(d)
+	restingUntil.m[c.rest] = r.Until
+	restingUntil.note[c.rest] = r
 	restingUntil.Unlock()
+	return r
+}
+
+// full is when a subscription whose allowance, as last known, has a window
+// used up for the candidate's model renews; zero otherwise.
+func (c candidate) full(now time.Time) time.Time {
+	if c.p.Account == nil {
+		return time.Time{}
+	}
+	return allowances(c.p.Account.Agent)[c.p.Account.User].Full(c.model, usedShare, now)
+}
+
+// keepRetry passes on, with a vendor's error, what it said about when to
+// try again: restAfter reads it to rest the candidate that long, and an
+// agent given the error reads it too.
+func keepRetry(dst, src http.Header) {
+	for k, vs := range src {
+		l := strings.ToLower(k)
+		if l == "retry-after" || strings.Contains(l, "ratelimit") && strings.Contains(l, "reset") {
+			dst[k] = vs
+		}
+	}
 }
 
 // retryAfter is when a vendor says to try again: Retry-After, in seconds
@@ -149,7 +205,7 @@ func retryAfter(h http.Header, now time.Time) time.Duration {
 	return min(d, longestWait)
 }
 
-var allowanceUsed = provider.AllowanceUsed
+var allowances = provider.Allowances
 
 // Shares of an allowance past which an account is kept for when the others
 // can't take a request: low, and all but used up.
@@ -160,24 +216,68 @@ const (
 
 // route orders one provider's candidates as its routing says.
 func route(p provider.Provider, cs []candidate, model string, from provider.Protocol) []candidate {
+	cs, _ = weigh(p, cs, model, from)
+	return cs
+}
+
+// weighing is what one provider's candidates were ordered by: the share of
+// its allowance each account has used and when that renews, and the tokens
+// each served lately. The routing trace shows the same.
+type weighing struct {
+	lefts map[string]left // the accounts the vendor said what they have left of
+
+	tokens map[string]float64 // least used: tokens each served lately
+}
+
+type left struct {
+	used   float64
+	renews []time.Time
+}
+
+// weigh orders one provider's candidates as its routing says, and tells
+// what it went by.
+func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
+	return weighWith(p.Routing, p.ID, p.Account == nil, cs, model, from, nil)
+}
+
+// weighWith is weigh by a routing, not a provider's: the candidates may be
+// of several providers, as in a routing group. scope names the count that
+// rotating goes by; keys is whether to put the keys that suit the request
+// first; turns, when it gives a list, is who is next in turn.
+func weighWith(routing, scope string, keys bool, cs []candidate, model string, from provider.Protocol, turns func([]candidate) []candidate) ([]candidate, weighing) {
+	var wg weighing
 	if len(cs) < 2 {
-		return cs
+		return cs, wg
 	}
-	var share map[string]float64
-	if p.Account != nil {
-		share = allowanceUsed(p.Account.Agent)
-	}
-	shareOf := func(c candidate) float64 { // 0 when not known
+	known := map[string]map[string]provider.Allowance{}
+	now := time.Now()
+	wg.lefts = map[string]left{}
+	for _, c := range cs {
 		if c.p.Account == nil {
-			return 0
+			continue
 		}
-		return share[c.p.Account.User]
+		agent := c.p.Account.Agent
+		if _, ok := known[agent]; !ok {
+			known[agent] = allowances(agent)
+		}
+		if a, ok := known[agent][c.p.Account.User]; ok {
+			u, r := a.For(c.model, now)
+			wg.lefts[c.rest] = left{u, r} // one not known counts as unused
+		}
 	}
-	switch p.Routing {
+	lefts := wg.lefts
+	shareOf := func(c candidate) float64 { return lefts[c.rest].used }
+	switch routing {
 	case "":
-		// the first while it has quota to spare, keeping the vendor's
-		// prompt cache warm; past that, whichever has the most left, and
-		// one all but used up only when nothing else can take it
+		// of those with quota to spare, the one whose allowance renews
+		// soonest, since what it has left is lost then, while one renewing
+		// later keeps: the biggest window decides — the week, not the five
+		// hours in it — and the next one only when that renews in the
+		// same hour. Those alike stay in their order, keeping the vendor's
+		// prompt cache warm. Past that, whichever has the most left, and
+		// one all but used up only when nothing else can take it. Only the
+		// windows that count the model do: Opus's own weekly allowance
+		// being used up leaves Sonnet alone.
 		var fine, low, spent []candidate
 		for _, c := range cs {
 			switch v := shareOf(c); {
@@ -189,6 +289,26 @@ func route(p provider.Provider, cs []candidate, model string, from provider.Prot
 				fine = append(fine, c)
 			}
 		}
+		sort.SliceStable(fine, func(i, j int) bool {
+			ri, rj := lefts[fine[i].rest].renews, lefts[fine[j].rest].renews
+			for k := 0; k < len(ri) || k < len(rj); k++ {
+				var a, b time.Time // to the hour, so a few minutes don't reorder
+				if k < len(ri) {
+					a = ri[k].Truncate(time.Hour)
+				}
+				if k < len(rj) {
+					b = rj[k].Truncate(time.Hour)
+				}
+				switch {
+				case a.Equal(b):
+					continue
+				case a.IsZero() || b.IsZero(): // not known: after those known
+					return b.IsZero()
+				}
+				return a.Before(b)
+			}
+			return false
+		})
 		for _, l := range [][]candidate{low, spent} {
 			sort.SliceStable(l, func(i, j int) bool {
 				return shareOf(l[i]) < shareOf(l[j])
@@ -196,21 +316,28 @@ func route(p provider.Provider, cs []candidate, model string, from provider.Prot
 		}
 		cs = append(append(fine, low...), spent...)
 	case provider.Ordered:
-		return cs
+		return cs, wg
 	case provider.Rotate:
+		if turns != nil {
+			if next := turns(cs); next != nil {
+				cs = next
+				break
+			}
+		}
 		routed.Lock()
-		n := routed.turn[p.ID] % len(cs)
-		routed.turn[p.ID]++
+		n := routed.turn[scope] % len(cs)
+		routed.turn[scope]++
 		routed.Unlock()
 		cs = append(append([]candidate{}, cs[n:]...), cs[:n]...)
 	case provider.LeastUsed:
 		// a subscription by the share of its allowance used, as the vendor
 		// says; then, and for keys, by what magpie sent it lately
-		now := time.Now()
 		routed.Lock()
 		tokens := make([]float64, len(cs))
+		wg.tokens = map[string]float64{}
 		for i, c := range cs {
 			tokens[i] = routed.used[c.rest].now(now)
+			wg.tokens[c.rest] = tokens[i]
 		}
 		routed.Unlock()
 		idx := make([]int, len(cs))
@@ -230,10 +357,10 @@ func route(p provider.Provider, cs []candidate, model string, from provider.Prot
 		}
 		cs = out
 	default:
-		return cs
+		return cs, wg
 	}
-	if p.Account == nil {
+	if keys {
 		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, model, from) < keyFit(cs[j].p, model, from) })
 	}
-	return cs
+	return cs, wg
 }

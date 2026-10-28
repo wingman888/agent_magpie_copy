@@ -240,6 +240,10 @@ func (s *signInFlow) finish(out SignInState) bool {
 	out.ID, out.Agent, out.URL, out.Code = s.st.ID, s.st.Agent, s.st.URL, s.st.Code
 	s.st = out
 	s.mu.Unlock()
+	if out.State == "done" {
+		// signing in again brings back an account removed from magpie
+		_ = ShowAccount(out.Agent)
+	}
 	close(s.done)
 	if s.stop != nil {
 		s.stop()
@@ -402,7 +406,7 @@ func claudeExchange(ctx context.Context, code, verifier, redirect, state string)
 		return savedLogin{}, err
 	}
 	profile, _ := json.Marshal(acct)
-	return savedLogin{Agent: "claude", User: email, Plan: c.OAuth.SubscriptionType, Auth: auth, Profile: profile}, nil
+	return savedLogin{Agent: "claude", User: claudeUser(email, c.OAuth.SubscriptionType, acct), Plan: c.OAuth.SubscriptionType, Auth: auth, Profile: profile}, nil
 }
 
 // claudePlans names Claude's organization types the way Claude Code does.
@@ -481,7 +485,7 @@ func addLogin(l savedLogin) (using bool, err error) {
 	defer loginsMu.Unlock()
 	l.Seen = time.Now().UTC().Truncate(time.Second)
 	live, signedIn := liveLogin(l.Agent)
-	using = !signedIn || strings.EqualFold(live.User, l.User)
+	using = !signedIn || sameLogin(live, l)
 	ls := readLogins()
 	if signedIn && !using {
 		// the current account, as fresh as the agent has it

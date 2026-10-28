@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -274,9 +275,14 @@ func TestKeysMadeForOneProtocol(t *testing.T) {
 	}))
 	defer srv.Close()
 	p := provider.Provider{ID: "relay", Name: "Relay", Chat: srv.URL + "/v1", Anthropic: srv.URL,
-		Key: "k-oai", KeyProtocol: provider.Chat, Models: []string{"claude-opus-4-8", "gpt-5.5"},
+		Key: "k-oai", KeyProtocol: provider.Chat, Models: []string{"claude-opus-4-8", "gpt-5.5", "glm-5"},
 		Keys: []provider.KeyAccount{{Key: "k-ant", Protocol: provider.Anthropic}}}
 	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	// the vendor lists glm-5 to the Anthropic key only
+	if err := catalog.SaveLive("relay", srv.URL, []catalog.Model{{ID: "gpt-5.5", Keys: []string{provider.KeyID("k-oai")}},
+		{ID: "glm-5", Keys: []string{provider.KeyID("k-ant")}}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, x := range []struct{ path, body, want string }{
@@ -286,6 +292,8 @@ func TestKeysMadeForOneProtocol(t *testing.T) {
 		{"/v1/chat/completions", `{"model":"relay/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
 		// Claude Code asking for GPT: translated, to the OpenAI key
 		{"/v1/messages", `{"model":"relay/gpt-5.5","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
+		// a model only the Anthropic key lists goes there, whatever the agent spoke
+		{"/v1/chat/completions", `{"model":"relay/glm-5","messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
 	} {
 		seen = nil
 		code, body := post(t, x.path, x.body)

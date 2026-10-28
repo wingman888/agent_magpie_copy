@@ -354,6 +354,13 @@ func claudeAccount() (Provider, bool) {
 	if statusPlan != "" {
 		plan = statusPlan
 	}
+	if m, err := readClaudeProfile(); err == nil && user != "" {
+		if acct, ok := m["oauthAccount"].(map[string]any); ok {
+			if email, _ := acct["emailAddress"].(string); strings.EqualFold(email, user) {
+				user = claudeUser(user, plan, acct)
+			}
+		}
+	}
 	if user == "" {
 		user = "Claude account"
 		if plan != "" {
@@ -633,7 +640,15 @@ func codexAccount(home string) (Provider, bool) {
 	acct.sign = codexSign(func(ctx context.Context) (string, string, error) { return codexToken(ctx, path) })
 	acct.body = codexBody
 	acct.models = catalog.Codex
-	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
+	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
+		ms, err := codexModels(ctx, acct.sign)
+		if err != nil {
+			return nil, err
+		}
+		catalog.SaveLive(accountModels("codex", acct.User), CodexBase, ms)
+		codexFetchSaved(ctx)
+		return ms, catalog.SaveLive("codex", CodexBase, ms)
+	}
 	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 

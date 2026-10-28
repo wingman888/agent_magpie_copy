@@ -243,20 +243,3 @@ func pruneIcons(f file) {
 		}
 	}
 }
-
-// RestoreIcon puts a picture from a backup back under its own name. Only a
-// name StoreIcon could have made is taken, a picture already here stays as
-// it is, and one over MaxIcon is ignored.
-func RestoreIcon(name string, data []byte) error {
-	path := IconFile(name)
-	if path == "" || len(data) == 0 || len(data) > MaxIcon {
-		return nil
-	}
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	}
-	if err := os.MkdirAll(IconDir(), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}

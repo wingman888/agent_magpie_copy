@@ -1,0 +1,101 @@
+package gui
+
+/*
+#cgo CFLAGS: -x objective-c
+#cgo LDFLAGS: -framework Cocoa -framework QuartzCore
+#import <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
+
+// The panel hangs from the menu bar, so its top edge stays where it is and
+// the bottom moves; the system animates the frame on its own display clock.
+static void glidePanel(void *w, int height, int ms, double x1, double y1, double x2, double y2) {
+	NSWindow *win = (NSWindow *)w;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		NSRect f = win.frame;
+		NSRect to = NSMakeRect(f.origin.x, NSMaxY(f) - height, f.size.width, height);
+		[NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+			ctx.duration = ms / 1000.0;
+			ctx.timingFunction = [CAMediaTimingFunction functionWithControlPoints:x1 :y1 :x2 :y2];
+			ctx.allowsImplicitAnimation = YES;
+			[[win animator] setFrame:to display:YES];
+		} completionHandler:nil];
+	});
+}
+
+// The page is drawn a frame or two after the panel grows, and until then
+// WebKit fills the new edge with its own dark background. So the webview
+// draws no background of its own (a key WebKit has long honoured, though not
+// a public one) and the page's colour is painted in a view under it, which the
+// system sizes along with the panel: the new edge shows that colour until the
+// page catches up. Says 0 when the webview can't be made to draw none, and
+// the page keeps painting its own.
+static int tintPanel(void *w, int r, int g, int b, int a, int ms) {
+	NSWindow *win = (NSWindow *)w;
+	if (![win respondsToSelector:@selector(webView)]) return 0;
+	__block int ok = 0;
+	dispatch_sync(dispatch_get_main_queue(), ^{
+		NSView *web = [win performSelector:@selector(webView)];
+		NSView *host = web.superview;
+		if (host == nil) return;
+		@try {
+			[web setValue:@NO forKey:@"drawsBackground"];
+		} @catch (NSException *e) {
+			return;
+		}
+		NSView *tint = nil;
+		for (NSView *v in host.subviews) {
+			if ([v.identifier isEqualToString:@"magpie-tint"]) tint = v;
+		}
+		CGColorRef colour = CGColorCreateSRGB(r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+		if (tint == nil) {
+			tint = [[NSView alloc] initWithFrame:host.bounds];
+			tint.identifier = @"magpie-tint";
+			tint.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+			// a layer of its own, which AppKit leaves alone
+			tint.layer = [CALayer layer];
+			tint.wantsLayer = YES;
+			tint.layer.cornerRadius = 12;
+			tint.layer.masksToBounds = YES;
+			tint.layer.backgroundColor = colour;
+			[host addSubview:tint positioned:NSWindowBelow relativeTo:web];
+			[tint release];
+		} else {
+			// a change of theme fades as the page's own colours do
+			[CATransaction begin];
+			CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"backgroundColor"];
+			fade.fromValue = (id)tint.layer.backgroundColor;
+			fade.toValue = (__bridge id)colour;
+			fade.duration = ms / 1000.0;
+			fade.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+			tint.layer.backgroundColor = colour;
+			if (ms > 0) [tint.layer addAnimation:fade forKey:@"tint"];
+			[CATransaction commit];
+		}
+		CGColorRelease(colour);
+		ok = 1;
+	});
+	return ok;
+}
+*/
+import "C"
+
+// glidePanel moves the shown panel to height, its top edge held under the
+// menu bar. It says false when it can't, for the caller to size it plainly.
+func (h *host) glidePanel(height int, g Glide) bool {
+	w := h.panel.NativeWindow()
+	if w == nil {
+		return false
+	}
+	c := g.Curve
+	C.glidePanel(w, C.int(height), C.int(g.MS), C.double(c[0]), C.double(c[1]), C.double(c[2]), C.double(c[3]))
+	return true
+}
+
+// TintPanel paints the panel's tint under the page, fading to it over ms.
+func (h *host) TintPanel(c [4]uint8, ms int) bool {
+	w := h.panel.NativeWindow()
+	if w == nil {
+		return false
+	}
+	return C.tintPanel(w, C.int(c[0]), C.int(c[1]), C.int(c[2]), C.int(c[3]), C.int(ms)) == 1
+}

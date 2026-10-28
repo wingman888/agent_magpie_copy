@@ -6,9 +6,11 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"log"
+	"net/http"
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -34,6 +36,7 @@ type host struct {
 	tray  *application.SystemTray
 
 	panelHeight int
+	glides      atomic.Int64 // the newest panel glide; older ones stop
 	query       string // what the windows' URLs carry (a forced theme)
 
 	ready     chan struct{} // closed once the main window can be shown
@@ -60,7 +63,7 @@ func (h *host) ShowMain(view string) {
 
 // Import opens the window on an import link, for the user to confirm.
 func (h *host) Import(link string) {
-	id := stashImport(link)
+	id := stash(link)
 	h.whenReady(func() {
 		h.panel.Hide()
 		h.main.SetURL("/?view=providers&import=" + id + h.query)
@@ -68,19 +71,24 @@ func (h *host) Import(link string) {
 		h.main.Focus()
 	})
 }
-func (h *host) Quit()              { h.app.Quit() }
-func (h *host) OpenURL(url string) { _ = h.app.Browser.OpenURL(url) }
+func (h *host) Quit()                  { h.app.Quit() }
+func (h *host) OpenURL(url string)     { _ = h.app.Browser.OpenURL(url) }
+func (h *host) OpenFolder(path string) { _ = h.app.Env.OpenFileManager(path, false) }
 
 const panelWidth, panelMin, panelMax = 440, 220, 720
 
 // FitPanel grows or shrinks the panel to its content and keeps it anchored
-// under the tray icon.
-func (h *host) FitPanel(height int) {
+// under the tray icon; a shown panel glides there when g says how.
+func (h *host) FitPanel(height int, g Glide) {
 	height = max(panelMin, min(panelMax, height))
 	if h.panelHeight == height {
 		return
 	}
 	h.panelHeight = height
+	if h.panel.IsVisible() && h.glidePanel(height, g) {
+		return
+	}
+	h.glides.Add(1)
 	h.panel.SetSize(panelWidth, height)
 	if h.panel.IsVisible() {
 		_ = h.tray.PositionWindow(h.panel, 6)
@@ -92,47 +100,15 @@ func (h *host) FitPanel(height int) {
 // showMain opens the window immediately; otherwise only the tray icon appears.
 // link is a magpie:// link the app was started with, to confirm and import.
 func Run(version string, showMain bool, link string) error {
+	Version = version
+	// `make dev` runs the backend on its own, so a Go change restarts only
+	// that, behind windows that stay up.
+	if devRole() == "backend" {
+		return devBackend(func(w Windows) http.Handler { return Handler(w, startBackend()) })
+	}
 	// After an update off the Mac, the old process starts this one and then
 	// quits; let it go before looking for the gateway.
 	update.AwaitPredecessor()
-	// The gateway runs inside the app. If another magpie already has the
-	// port, that one serves and this one only shows its status.
-	var gw *gateway.Server
-	if !gateway.Running() {
-		gw = gateway.New()
-		go func() {
-			if err := gw.ListenAndServe(context.Background()); err != nil {
-				log.Println("gateway:", err)
-			}
-		}()
-	}
-	// Model lists are fetched, never compiled in: whatever the agents can see
-	// comes from the models.dev catalog plus each vendor's own /models answer.
-	// Keep both halves warm without making the user click anything.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if catalog.Stale() {
-			if err := catalog.Sync(ctx); err != nil {
-				log.Println("catalog:", err)
-			}
-		}
-		cancel()
-		// A signed-in agent's list exists only at the vendor; fill it in the
-		// first time so the picker never shows a stale snapshot.
-		for _, p := range provider.All() {
-			if p.Account == nil || !p.Ready() {
-				continue
-			}
-			if _, ok := p.Fetched(); ok {
-				continue
-			}
-			c, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			if _, err := p.Fetch(c); err != nil {
-				log.Println(p.ID + ": " + err.Error())
-			}
-			cancel()
-		}
-	}()
 	go func() {
 		if err := registerScheme(); err != nil {
 			log.Println("magpie:// links:", err)
@@ -143,8 +119,11 @@ func Run(version string, showMain bool, link string) error {
 	if t := os.Getenv("MAGPIE_THEME"); t != "" {
 		theme = "&theme=" + t
 	}
-	Version = version
 	h := &host{query: theme, ready: make(chan struct{})}
+	handler := devShell(h)
+	if handler == nil {
+		handler = Handler(h, startBackend())
+	}
 	h.app = application.New(application.Options{
 		// Windows and Linux start a new process for a magpie:// link (or a
 		// second launch); it hands its arguments to the running one and quits.
@@ -153,12 +132,12 @@ func Run(version string, showMain bool, link string) error {
 		Name:           "magpie",
 		Description:    "one place to pick every agent's model",
 		Icon:           appIcon,
-		Assets:         application.AssetOptions{Handler: Handler(h, gw)},
+		Assets:         application.AssetOptions{Handler: handler},
 		Mac:            application.MacOptions{ActivationPolicy: application.ActivationPolicyAccessory},
 		Windows:        application.WindowsOptions{DisableQuitOnLastWindowClosed: true},
 		// A version downloaded but not restarted into is installed on the
 		// way out, so the next launch is the new one.
-		OnShutdown: func() { updates.install() },
+		OnShutdown: func() { updates.install(false) },
 		// Wails exits on some webview errors; say why before it does.
 		ErrorHandler: func(err error) { log.Println("magpie:", err) },
 	})
@@ -270,6 +249,48 @@ func Run(version string, showMain bool, link string) error {
 		}
 	})
 	return h.app.Run()
+}
+
+// startBackend starts what serves the page and the agents: the gateway,
+// unless another magpie has it (then that one serves and this one only
+// shows its status, and gw is nil), and the model lists kept warm.
+func startBackend() (gw *gateway.Server) {
+	if !gateway.Running() {
+		gw = gateway.New()
+		go func() {
+			if err := gw.ListenAndServe(context.Background()); err != nil {
+				log.Println("gateway:", err)
+			}
+		}()
+	}
+	// Model lists are fetched, never compiled in: whatever the agents can see
+	// comes from the models.dev catalog plus each vendor's own /models answer.
+	// Keep both halves warm without making the user click anything.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if catalog.Stale() {
+			if err := catalog.Sync(ctx); err != nil {
+				log.Println("catalog:", err)
+			}
+		}
+		cancel()
+		// A signed-in agent's list exists only at the vendor; fill it in the
+		// first time so the picker never shows a stale snapshot.
+		for _, p := range provider.All() {
+			if p.Account == nil || !p.Ready() {
+				continue
+			}
+			if _, ok := p.Fetched(); ok {
+				continue
+			}
+			c, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			if _, err := p.Fetch(c); err != nil {
+				log.Println(p.ID + ": " + err.Error())
+			}
+			cancel()
+		}
+	}()
+	return gw
 }
 
 // singleInstance makes a second launch hand over to this one, off the Mac.
