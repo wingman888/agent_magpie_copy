@@ -352,11 +352,37 @@ func AwaitPredecessor() {
 	}
 }
 
-// download fetches a to path and checks its hash.
+type progressKey struct{}
+
+// WithProgress has downloads made under ctx report how far along they are;
+// total is 0 while the size is unknown.
+func WithProgress(ctx context.Context, f func(done, total int64)) context.Context {
+	return context.WithValue(ctx, progressKey{}, f)
+}
+
+// download fetches a to path and checks its hash. A connection that drops
+// part way — GitHub from some networks — gets two more tries.
 func download(ctx context.Context, a Asset, path string) error {
 	if a.SHA256 == "" {
 		return errors.New("the release lists no checksum for " + filepath.Base(path))
 	}
+	var err error
+	for try := 0; try < 3; try++ {
+		if try > 0 {
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(time.Duration(try) * 2 * time.Second):
+			}
+		}
+		if err = fetch(ctx, a, path); err == nil || ctx.Err() != nil {
+			break
+		}
+	}
+	return err
+}
+
+func fetch(ctx context.Context, a Asset, path string) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", a.URL, nil)
 	if err != nil {
 		return err
@@ -374,7 +400,16 @@ func download(ctx context.Context, a Asset, path string) error {
 		return err
 	}
 	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(f, h), res.Body)
+	var body io.Reader = res.Body
+	if report, ok := ctx.Value(progressKey{}).(func(done, total int64)); ok {
+		total := res.ContentLength
+		if total <= 0 {
+			total = a.Size
+		}
+		body = &counter{r: res.Body, total: max(total, 0), report: report}
+		report(0, max(total, 0))
+	}
+	_, err = io.Copy(io.MultiWriter(f, h), body)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -385,4 +420,19 @@ func download(ctx context.Context, a Asset, path string) error {
 		os.Remove(path)
 	}
 	return err
+}
+
+// counter reports bytes as they are read.
+type counter struct {
+	r      io.Reader
+	done   int64
+	total  int64
+	report func(done, total int64)
+}
+
+func (c *counter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.done += int64(n)
+	c.report(c.done, c.total)
+	return n, err
 }
