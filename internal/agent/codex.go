@@ -130,7 +130,7 @@ func codex(home string) *Agent {
 					if p := get("model_provider"); p != "" && p != dialID {
 						own = group(p, own)
 					}
-					return append(own, viaDial("")...)
+					return append(own, viaDialFor("codex", "")...)
 				},
 			},
 			{

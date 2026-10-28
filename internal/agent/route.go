@@ -21,8 +21,24 @@ const dialID = "dial"
 func viaDial(prefix string) []Option {
 	var out []Option
 	for _, e := range provider.Catalog() {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
+		note := e.Provider.Name + " · via dial"
+		if a := e.Provider.Account; a != nil {
+			note = a.User + " · via dial"
+		}
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
+	}
+	return out
+}
+
+// viaDialFor is viaDial without the agent's own account: Codex CLI going
+// through dial to its own ChatGPT login would only add a hop.
+func viaDialFor(agentID, prefix string) []Option {
+	var out []Option
+	for _, o := range viaDial(prefix) {
+		if !strings.HasPrefix(o.Value, prefix+agentID+"/") {
+			out = append(out, o)
+		}
 	}
 	return out
 }

@@ -18,6 +18,9 @@ const manyModels = 24
 // Available lists every model the vendor is known to serve: its own list
 // when fetched (see Fetch), else the models.dev catalog for the vendor.
 func (p Provider) Available() []catalog.Model {
+	if p.Account != nil && p.Account.models != nil {
+		return p.Account.models()
+	}
 	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -39,6 +42,9 @@ func (p Provider) Fetched() (time.Time, bool) {
 
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
+	if p.Account != nil && p.Account.fetch != nil {
+		return p.Account.fetch(ctx)
+	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
 		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key)

@@ -23,6 +23,7 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
+	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -50,6 +51,10 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// Account is set when the provider is an agent the user signed in to
+	// (see account.go); it is derived, never stored.
+	Account *Account `json:"-"`
 }
 
 type file struct {
@@ -88,13 +93,38 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added.
+// All lists the configured providers in the order they were added, then
+// the signed-in agents. An entry in the file with no URL is only the
+// model picks for one of those accounts.
 func All() []Provider {
-	out := load().Providers
-	for i := range out {
-		out[i] = normalize(out[i])
+	stored := load().Providers
+	picks := map[string][]string{}
+	var out []Provider
+	for _, p := range stored {
+		p = normalize(p)
+		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+			picks[p.ID] = p.Models
+			continue
+		}
+		out = append(out, p)
+	}
+	for _, a := range Accounts() {
+		if _, taken := find(out, a.ID); taken {
+			continue
+		}
+		a.Models = picks[a.ID]
+		out = append(out, a)
 	}
 	return out
+}
+
+func find(ps []Provider, id string) (Provider, bool) {
+	for _, p := range ps {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return Provider{}, false
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -130,11 +160,17 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-		return errors.New("a provider needs a base URL")
-	}
-	if p.Key == "" && !keyOptional(p) {
-		return fmt.Errorf("%s needs an API key", p.Name)
+	if a, ok := find(Accounts(), p.ID); ok {
+		// an account keeps only the user's model picks; the rest is the
+		// agent's own sign-in
+		p = Provider{ID: a.ID, Models: p.Models}
+	} else {
+		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+			return errors.New("a provider needs a base URL")
+		}
+		if p.Key == "" && !keyOptional(p) {
+			return fmt.Errorf("%s needs an API key", p.Name)
+		}
 	}
 	f := load()
 	for i := range f.Providers {
@@ -147,8 +183,20 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider.
+// Delete removes a provider. For an account it forgets the model picks;
+// signing out is the agent's job.
 func Delete(id string) error {
+	if _, ok := find(Accounts(), id); ok {
+		f := load()
+		keep := f.Providers[:0]
+		for _, p := range f.Providers {
+			if p.ID != id {
+				keep = append(keep, p)
+			}
+		}
+		f.Providers = keep
+		return store(f)
+	}
 	f := load()
 	keep := f.Providers[:0]
 	found := false
@@ -276,5 +324,6 @@ func Mask(s string) string {
 	return s[:4] + "…" + s[len(s)-4:]
 }
 
-// Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
+// Ready reports whether the provider can be used: it has a key, needs
+// none, or is a signed-in agent.
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }

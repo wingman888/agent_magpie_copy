@@ -43,10 +43,12 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" {
+		if p.Preset == "" && p.Account == nil {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
+		case p.Account != nil:
+			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -70,6 +72,14 @@ func providers() error {
 	}
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
+	}
+	for _, x := range provider.Excluded() {
+		name := x.Agent
+		if a, err := agent.Find(x.Agent); err == nil {
+			name = a.Name
+		}
+		fmt.Println()
+		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why))
 	}
 	return nil
 }
@@ -299,7 +309,7 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" {
+	if p.Preset == "" && p.Account == nil {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
@@ -307,6 +317,12 @@ func showProvider(p provider.Provider) error {
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
 	switch {
+	case p.Account != nil:
+		who := p.Account.User
+		if p.Account.Plan != "" {
+			who += muted.Render("  " + p.Account.Plan)
+		}
+		kv("account", who+muted.Render("  from "+p.Account.Agent+"'s own sign-in"))
 	case p.Key != "":
 		kv("key", muted.Render(provider.Mask(p.Key)))
 	case p.Ready():

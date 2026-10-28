@@ -47,6 +47,14 @@ type providerJSON struct {
 	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
 	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
 	Sponsored bool            `json:"sponsored"`
+	Account   *accountJSON    `json:"account,omitempty"` // a signed-in agent, see provider.Account
+}
+
+type accountJSON struct {
+	provider.Account
+	Agent string `json:"agent"`     // the agent's id
+	Name  string `json:"agentName"` // the agent's name, for "from Codex CLI's sign-in"
+	Icon  string `json:"agentIcon"`
 }
 
 type providerAgent struct {
@@ -70,9 +78,16 @@ type gatewayJSON struct {
 	Calls   []gateway.Call `json:"calls"`
 }
 
+type excludedJSON struct {
+	provider.Exclusion
+	Name string `json:"agentName"`
+	Icon string `json:"agentIcon"`
+}
+
 type providersJSON struct {
 	Providers []providerJSON `json:"providers"`
 	Presets   []presetJSON   `json:"presets"`
+	Excluded  []excludedJSON `json:"excluded"` // sign-ins dial found but will not share
 	Gateway   gatewayJSON    `json:"gateway"`
 }
 
@@ -109,6 +124,12 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 	if !out.Key.Set && p.Ready() {
 		out.Key.Optional = true
 	}
+	if a := p.Account; a != nil {
+		out.Account = &accountJSON{Account: *a, Agent: a.Agent, Name: a.Agent, Icon: "generic"}
+		if ag, err := agent.Find(a.Agent); err == nil {
+			out.Account.Name, out.Account.Icon = ag.Name, ag.Icon
+		}
+	}
 	exposed := map[string]bool{}
 	for _, m := range p.Exposed() {
 		exposed[m.ID] = true
@@ -137,7 +158,14 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 
 func providersState(gw *gateway.Server) providersJSON {
 	agents := agent.Detected()
-	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}}
+	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Excluded: []excludedJSON{}}
+	for _, x := range provider.Excluded() {
+		e := excludedJSON{Exclusion: x, Name: x.Agent, Icon: "generic"}
+		if a, err := agent.Find(x.Agent); err == nil {
+			e.Name, e.Icon = a.Name, a.Icon
+		}
+		s.Excluded = append(s.Excluded, e)
+	}
 	have := map[string]bool{}
 	for _, p := range provider.All() {
 		have[p.ID] = true
