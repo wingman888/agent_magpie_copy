@@ -10,13 +10,21 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
+// Go reads the proxy environment once per process, so it is fixed here.
+func TestMain(m *testing.M) {
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "REQUEST_METHOD"} {
+		os.Unsetenv(k)
+	}
+	os.Setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+	os.Setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+	os.Setenv("NO_PROXY", "skip.example.org")
+	os.Exit(m.Run())
+}
+
 func isolate(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "REQUEST_METHOD"} {
-		t.Setenv(k, "")
-	}
 }
 
 func mustURL(t *testing.T, s string) *url.URL {
@@ -77,15 +85,10 @@ func TestAcceptForSettingsPriority(t *testing.T) {
 func TestAcceptForEnvironment(t *testing.T) {
 	isolate(t)
 	u := mustURL(t, "https://chatgpt.com/x")
-	if p, err := netproxy.For(u); err != nil || p != nil {
-		t.Fatalf("nothing configured: %v %v", p, err)
-	}
-	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
 	if p, err := netproxy.For(u); err != nil || str(p) != "http://127.0.0.1:9999" {
 		t.Fatalf("env: %v %v", p, err)
 	}
-	t.Setenv("NO_PROXY", "chatgpt.com")
-	if p, err := netproxy.For(u); err != nil || p != nil {
+	if p, err := netproxy.For(mustURL(t, "https://skip.example.org/")); err != nil || p != nil {
 		t.Fatalf("no_proxy: %v %v", p, err)
 	}
 	if p, _ := netproxy.For(mustURL(t, "https://other.example.org/")); str(p) != "http://127.0.0.1:9999" {
@@ -95,8 +98,6 @@ func TestAcceptForEnvironment(t *testing.T) {
 
 func TestAcceptFuncLoopback(t *testing.T) {
 	isolate(t)
-	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
-	t.Setenv("HTTP_PROXY", "http://127.0.0.1:9999")
 	if err := settings.Save(settings.Settings{Proxy: "http://127.0.0.1:7890"}); err != nil {
 		t.Fatal(err)
 	}
@@ -123,8 +124,6 @@ func TestAcceptDescribe(t *testing.T) {
 			t.Fatalf("Describe = (%q, %q), want (%q, %q)", p, s, wp, ws)
 		}
 	}
-	check("", "none")
-	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
 	check("http://127.0.0.1:9999", "environment")
 	settings.Save(settings.Settings{Proxy: "  socks5://127.0.0.1:1080 "})
 	check("socks5://127.0.0.1:1080", "settings")
@@ -136,7 +135,6 @@ func TestAcceptInstall(t *testing.T) {
 	isolate(t)
 	old := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = old })
-	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
 	netproxy.Install()
 	tr, ok := http.DefaultTransport.(*http.Transport)
 	if !ok || tr.Proxy == nil {
@@ -154,7 +152,6 @@ func TestAcceptInstall(t *testing.T) {
 	if p, _ := tr.Proxy(&http.Request{URL: mustURL(t, "https://chatgpt.com/")}); p != nil {
 		t.Fatalf("direct: %v", p)
 	}
-	_ = os.Getenv
 }
 
 func TestAcceptSystemNoPanic(t *testing.T) {
