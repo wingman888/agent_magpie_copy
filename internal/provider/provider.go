@@ -44,17 +44,26 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
+	// Headers are extra HTTP request headers sent to the vendor, exactly as
+	// the user typed them. They ride on every request magpie makes to a plain
+	// key+URL provider — forwarded calls, connectivity tests, and model-list
+	// fetches — applied after the auth headers, so the user can override those
+	// when a gateway insists on a private scheme. Signed-in agent accounts
+	// ignore them: their auth is the agent's own.
+	Headers map[string]string `json:"headers,omitempty"`
+
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
+	// Fallback lists, in order, the provider/model entries the gateway tries
+	// when this provider cannot answer a request (quota, rate limit, overload,
+	// outage). Each entry is anything Resolve understands.
+	Fallback []string `json:"fallback,omitempty"`
+
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
-
-	// Headers are extra request headers for a custom provider, sent in the
-	// case typed and replacing the default auth headers of the same name.
-	Headers map[string]string `json:"headers,omitempty"`
 
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
@@ -98,6 +107,7 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
+	pruneIcons(f)
 	return os.Chmod(p, 0o600)
 }
 
@@ -121,6 +131,7 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -197,11 +208,11 @@ func Save(p Provider) error {
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			return storeAndSweep(f)
+			return store(f)
 		}
 	}
 	f.Providers = append(f.Providers, p)
-	return storeAndSweep(f)
+	return store(f)
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -232,7 +243,7 @@ func Delete(id string) error {
 		return fmt.Errorf("no provider %q", id)
 	}
 	f.Providers = keep
-	return storeAndSweep(f)
+	return store(f)
 }
 
 // keyOptional is true for local servers, which usually have no key.
@@ -255,9 +266,14 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
 	p.Headers = cleanHeaders(p.Headers)
-	if pr := Preset(p.Preset); pr != nil {
+	if p.Preset != "" {
+		// Presets own their request shape; custom headers are supported only
+		// for user-defined providers.
 		p.Headers = nil
+	}
+	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
 		}
@@ -274,25 +290,27 @@ func normalize(p Provider) Provider {
 	return p
 }
 
-func cleanHeaders(h map[string]string) map[string]string {
-	var out map[string]string
-	for k, v := range h {
-		if k = strings.TrimSpace(k); k != "" {
-			if out == nil {
-				out = map[string]string{}
-			}
-			out[k] = strings.TrimSpace(v)
-		}
-	}
-	return out
-}
-
 func cleanList(xs []string) []string {
 	var out []string
 	for _, x := range xs {
 		if x = strings.TrimSpace(x); x != "" && !contains(out, x) {
 			out = append(out, x)
 		}
+	}
+	return out
+}
+
+// cleanHeaders trims header names and values and drops entries with an empty
+// name, returning nil when nothing is left so the field stays out of the JSON.
+func cleanHeaders(h map[string]string) map[string]string {
+	out := make(map[string]string, len(h))
+	for k, v := range h {
+		if k = strings.TrimSpace(k); k != "" {
+			out[k] = strings.TrimSpace(v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
