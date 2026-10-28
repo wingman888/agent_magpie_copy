@@ -38,7 +38,7 @@ func TestAcceptProviderFallbackCLI(t *testing.T) {
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		o := ansi.ReplaceAllString(string(out), "")
-		t.Logf("run %v => %s", args, strings.ReplaceAll(o, "\n", " | "))
+		t.Logf("run %v => %s", args, strings.ReplaceAll(strings.ReplaceAll(o, "\n", " | "), "\"", "~"))
 		return o, err
 	}
 
