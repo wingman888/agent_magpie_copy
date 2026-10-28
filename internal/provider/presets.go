@@ -1,0 +1,150 @@
+package provider
+
+// A preset is a vendor dial already knows: adding one only asks for the key.
+
+// Kind groups presets in the picker.
+type Kind string
+
+const (
+	KindVendor Kind = "vendor" // the model's own maker
+	KindRelay  Kind = "relay"  // an aggregator / API relay reselling many vendors
+	KindLocal  Kind = "local"  // something running on this machine
+)
+
+// PresetDef describes one preset.
+type PresetDef struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Icon      string   `json:"icon"`
+	Kind      Kind     `json:"kind"`
+	Chat      string   `json:"chat,omitempty"`
+	Responses string   `json:"responses,omitempty"`
+	Anthropic string   `json:"anthropic,omitempty"`
+	Catalog   string   `json:"catalog,omitempty"`
+	Defaults  []string `json:"defaults,omitempty"` // models to expose until the user picks
+	Website   string   `json:"website,omitempty"`
+	KeysURL   string   `json:"keysUrl,omitempty"`
+	NoKey     bool     `json:"noKey,omitempty"`     // local servers: a key is optional
+	Sponsored bool     `json:"sponsored,omitempty"` // shown first, with a tag
+	Note      string   `json:"note,omitempty"`      // one line under the name
+}
+
+// presets are ordered as they appear in the picker.
+var presets = []PresetDef{
+	{ID: "anthropic", Name: "Anthropic", Icon: "claude-color", Kind: KindVendor, Catalog: "anthropic",
+		Anthropic: "https://api.anthropic.com",
+		Defaults:  []string{"claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"},
+		Website:   "https://console.anthropic.com", KeysURL: "https://console.anthropic.com/settings/keys"},
+	{ID: "openai", Name: "OpenAI", Icon: "openai", Kind: KindVendor, Catalog: "openai",
+		Chat: "https://api.openai.com/v1", Responses: "https://api.openai.com/v1",
+		Defaults: []string{"gpt-5.6-sol", "gpt-5.5", "gpt-5.3-codex"},
+		Website:  "https://platform.openai.com", KeysURL: "https://platform.openai.com/api-keys"},
+	{ID: "google", Name: "Google Gemini", Icon: "gemini-color", Kind: KindVendor, Catalog: "google",
+		Chat:     "https://generativelanguage.googleapis.com/v1beta/openai",
+		Note:     "Gemini Developer API",
+		Defaults: []string{"gemini-3.1-pro", "gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"},
+		Website:  "https://aistudio.google.com", KeysURL: "https://aistudio.google.com/apikey"},
+	{ID: "deepseek", Name: "DeepSeek", Icon: "deepseek-color", Kind: KindVendor, Catalog: "deepseek",
+		Chat: "https://api.deepseek.com/v1", Responses: "https://api.deepseek.com/v1", Anthropic: "https://api.deepseek.com/anthropic",
+		Website: "https://platform.deepseek.com", KeysURL: "https://platform.deepseek.com/api_keys"},
+	{ID: "xai", Name: "xAI", Icon: "xai", Kind: KindVendor, Catalog: "xai",
+		Chat: "https://api.x.ai/v1", Responses: "https://api.x.ai/v1", Anthropic: "https://api.x.ai",
+		Website: "https://console.x.ai", KeysURL: "https://console.x.ai"},
+	{ID: "moonshot", Name: "Kimi", Icon: "kimi", Kind: KindVendor, Catalog: "moonshotai",
+		Chat: "https://api.moonshot.ai/v1", Anthropic: "https://api.moonshot.ai/anthropic",
+		Website: "https://platform.moonshot.ai", KeysURL: "https://platform.moonshot.ai/console/api-keys"},
+	{ID: "moonshot-cn", Name: "Kimi (China)", Icon: "kimi", Kind: KindVendor, Catalog: "moonshotai",
+		Chat: "https://api.moonshot.cn/v1", Anthropic: "https://api.moonshot.cn/anthropic",
+		Website: "https://platform.moonshot.cn", KeysURL: "https://platform.moonshot.cn/console/api-keys"},
+	{ID: "zhipu", Name: "Zhipu GLM", Icon: "zhipu-color", Kind: KindVendor, Catalog: "zhipuai",
+		Chat: "https://open.bigmodel.cn/api/paas/v4", Anthropic: "https://open.bigmodel.cn/api/anthropic",
+		Website: "https://open.bigmodel.cn", KeysURL: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys"},
+	{ID: "zai", Name: "Z.ai", Icon: "zai", Kind: KindVendor, Catalog: "zhipuai",
+		Chat: "https://api.z.ai/api/paas/v4", Anthropic: "https://api.z.ai/api/anthropic",
+		Website: "https://z.ai", KeysURL: "https://z.ai/manage-apikey/apikey-list"},
+	{ID: "minimax", Name: "MiniMax", Icon: "minimax-color", Kind: KindVendor, Catalog: "minimax",
+		Chat: "https://api.minimax.io/v1", Anthropic: "https://api.minimax.io/anthropic",
+		Website: "https://platform.minimax.io", KeysURL: "https://platform.minimax.io/user-center/basic-information/interface-key"},
+	{ID: "minimax-cn", Name: "MiniMax (China)", Icon: "minimax-color", Kind: KindVendor, Catalog: "minimax",
+		Chat: "https://api.minimaxi.com/v1", Anthropic: "https://api.minimaxi.com/anthropic",
+		Website: "https://platform.minimaxi.com", KeysURL: "https://platform.minimaxi.com/user-center/basic-information/interface-key"},
+	{ID: "qwen", Name: "Qwen", Icon: "qwen-color", Kind: KindVendor, Catalog: "alibaba",
+		Chat: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", Anthropic: "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+		Note:    "DashScope · intl",
+		Website: "https://modelstudio.console.alibabacloud.com", KeysURL: "https://modelstudio.console.alibabacloud.com/?tab=playground#/api-key"},
+	{ID: "qwen-cn", Name: "Qwen (China)", Icon: "qwen-color", Kind: KindVendor, Catalog: "alibaba",
+		Chat: "https://dashscope.aliyuncs.com/compatible-mode/v1", Anthropic: "https://dashscope.aliyuncs.com/apps/anthropic",
+		Note:    "DashScope · China",
+		Website: "https://bailian.console.aliyun.com", KeysURL: "https://bailian.console.aliyun.com/?tab=model#/api-key"},
+	{ID: "mistral", Name: "Mistral", Icon: "mistral-color", Kind: KindVendor, Catalog: "mistral",
+		Chat:    "https://api.mistral.ai/v1",
+		Website: "https://console.mistral.ai", KeysURL: "https://console.mistral.ai/api-keys"},
+	{ID: "groq", Name: "Groq", Icon: "groq", Kind: KindVendor, Catalog: "groq",
+		Chat: "https://api.groq.com/openai/v1", Responses: "https://api.groq.com/openai/v1",
+		Website: "https://console.groq.com", KeysURL: "https://console.groq.com/keys"},
+
+	{ID: "openrouter", Name: "OpenRouter", Icon: "openrouter", Kind: KindRelay, Catalog: "openrouter",
+		Chat: "https://openrouter.ai/api/v1", Anthropic: "https://openrouter.ai/api",
+		Website: "https://openrouter.ai", KeysURL: "https://openrouter.ai/keys"},
+	{ID: "together", Name: "Together AI", Icon: "together-color", Kind: KindRelay, Catalog: "togetherai",
+		Chat:    "https://api.together.xyz/v1",
+		Website: "https://api.together.ai", KeysURL: "https://api.together.ai/settings/api-keys"},
+	{ID: "fireworks", Name: "Fireworks", Icon: "fireworks-color", Kind: KindRelay, Catalog: "fireworks-ai",
+		Chat:    "https://api.fireworks.ai/inference/v1",
+		Website: "https://fireworks.ai", KeysURL: "https://app.fireworks.ai/settings/users/api-keys"},
+	{ID: "siliconflow", Name: "SiliconFlow", Icon: "siliconcloud-color", Kind: KindRelay, Catalog: "siliconflow",
+		Chat:    "https://api.siliconflow.cn/v1",
+		Website: "https://cloud.siliconflow.cn", KeysURL: "https://cloud.siliconflow.cn/account/ak"},
+	{ID: "aihubmix", Name: "AiHubMix", Icon: "aihubmix-color", Kind: KindRelay,
+		Chat: "https://aihubmix.com/v1", Anthropic: "https://aihubmix.com",
+		Website: "https://aihubmix.com", KeysURL: "https://aihubmix.com/token"},
+	{ID: "302ai", Name: "302.AI", Icon: "ai302-color", Kind: KindRelay,
+		Chat: "https://api.302.ai/v1", Anthropic: "https://api.302.ai",
+		Website: "https://302.ai", KeysURL: "https://dash.302.ai/apis/list"},
+
+	{ID: "ollama", Name: "Ollama", Icon: "ollama", Kind: KindLocal, NoKey: true,
+		Chat: "http://localhost:11434/v1", Anthropic: "http://localhost:11434",
+		Note: "your local models", Website: "https://ollama.com"},
+	{ID: "lmstudio", Name: "LM Studio", Icon: "lmstudio", Kind: KindLocal, NoKey: true,
+		Chat: "http://localhost:1234/v1",
+		Note: "local server on :1234", Website: "https://lmstudio.ai"},
+}
+
+// Presets lists every preset, sponsored ones first within their kind.
+func Presets() []PresetDef {
+	out := make([]PresetDef, 0, len(presets))
+	for _, p := range presets {
+		if p.Sponsored {
+			out = append(out, p)
+		}
+	}
+	for _, p := range presets {
+		if !p.Sponsored {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// Preset finds a preset by id.
+func Preset(id string) *PresetDef {
+	for i := range presets {
+		if presets[i].ID == id {
+			return &presets[i]
+		}
+	}
+	return nil
+}
+
+// FromPreset builds a provider from a preset; the caller adds the key.
+func FromPreset(id string) (Provider, error) {
+	pr := Preset(id)
+	if pr == nil {
+		return Provider{}, errorf("no preset %q — dial presets lists them", id)
+	}
+	return Provider{
+		ID: pr.ID, Name: pr.Name, Icon: pr.Icon, Preset: pr.ID,
+		Chat: pr.Chat, Responses: pr.Responses, Anthropic: pr.Anthropic,
+		Catalog: pr.Catalog, Website: pr.Website, KeysURL: pr.KeysURL,
+	}, nil
+}
