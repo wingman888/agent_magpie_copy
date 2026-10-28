@@ -102,7 +102,7 @@ func callbackBaseURL() string {
 	return "http://" + host + ":" + port
 }
 
-func (b *subscriptionBridge) start(ctx context.Context, req *Request, model string) (*subscriptionRun, <-chan Event, error) {
+func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, oauth string) (*subscriptionRun, <-chan Event, error) {
 	binary, err := claudeBinary()
 	if err != nil {
 		return nil, nil, err
@@ -144,6 +144,10 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model stri
 	cmd := exec.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
 	cmd.Env = cleanClaudeEnv(os.Environ())
+	if oauth != "" {
+		// a saved account in use beside the one Claude Code is signed in to
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN="+oauth)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cleanup()
@@ -216,6 +220,7 @@ func cleanClaudeEnv(env []string) []string {
 	blocked := map[string]bool{
 		"ANTHROPIC_BASE_URL": true, "ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true,
 		"CLAUDECODE": true, "CLAUDE_CODE_ENTRYPOINT": true, "CLAUDE_CODE_SSE_PORT": true,
+		"CLAUDE_CODE_OAUTH_TOKEN": true,
 	}
 	out := make([]string, 0, len(env)+3)
 	for _, e := range env {
@@ -556,7 +561,7 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	_ = os.RemoveAll(run.tmp)
 }
 
-func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) (int, string) {
+func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, usage *Usage) (int, string) {
 	req, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
@@ -569,15 +574,45 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	if run != nil {
 		events, err = run.continueWith(results)
 	} else {
-		run, events, err = s.subscription.start(r.Context(), req, model)
+		var token string
+		if token, _, err = p.Account.Token(r.Context()); err == nil {
+			run, events, err = s.subscription.start(r.Context(), req, model, token)
+		}
 	}
 	if err != nil {
 		return writeError(w, from, 502, "Claude Code: "+err.Error()), err.Error()
 	}
 
 	if stream {
+		// an error before any of the answer — out of quota, rate limited —
+		// is a status, not a stream, so another account can take over
+		var head []Event
+		for ev := range events {
+			head = append(head, ev)
+			if ev.Kind != KStart && ev.Kind != KUsage {
+				break
+			}
+		}
+		if n := len(head); n == 0 || head[n-1].Kind == KError {
+			msg := "Claude Code ended without an answer"
+			if n > 0 {
+				msg = head[n-1].Text
+			}
+			run.abort()
+			code := 502
+			if quotaWords.MatchString(msg) {
+				code = 429
+			}
+			return writeError(w, from, code, "Claude Code: "+msg), msg
+		}
 		enc := encoder(from, newSSEWriter(w), req.Model)
 		var failed string
+		for _, ev := range head {
+			if ev.Kind == KStart || ev.Kind == KUsage {
+				usage.add(ev.Usage)
+			}
+			enc.event(ev)
+		}
 		for ev := range events {
 			if ev.Kind == KError {
 				failed = ev.Text
