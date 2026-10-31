@@ -25,6 +25,8 @@ import (
 //	models     model ids to show agents, comma separated
 //	catalog    models.dev provider id, for names and reasoning levels
 //	website    the vendor's site; keys: where keys are made
+//	icon       an https picture of the vendor's own, fetched only after the
+//	           user confirms; falls back to the generic mark when absent
 //
 // A link never saves anything by itself: the app shows what it would add
 // and the user says yes.
@@ -88,6 +90,13 @@ func ParseImport(link string) (Provider, error) {
 		}
 		p.Website = page(get("website"))
 		p.KeysURL = page(get("keys"))
+	}
+	if raw := get("icon"); raw != "" {
+		u, err := iconURL(raw)
+		if err != nil {
+			return Provider{}, err
+		}
+		p.IconURL = u
 	}
 
 	if id := get("id"); id != "" {
@@ -153,4 +162,22 @@ func page(raw string) string {
 		return u.String()
 	}
 	return ""
+}
+
+// iconURL accepts the picture a link names: an https URL on a public host,
+// which the app fetches only after the user confirms the import. A plain
+// http or a bare host is rejected rather than guessed at, since this is the
+// one parameter that makes magpie reach out on the link's behalf.
+func iconURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" {
+		return "", errorf("the link's icon= is not a picture URL: %q", raw)
+	}
+	if u.Scheme != "https" {
+		return "", errorf("the link's icon= must use https: %q", raw)
+	}
+	if local(u.Hostname()) {
+		return "", errorf("the link's icon= must be on a public host: %q", raw)
+	}
+	return u.String(), nil
 }
