@@ -49,9 +49,9 @@ var (
 const (
 	codexDefaultBase    = "https://chatgpt.com/backend-api/codex"
 	codexDefaultRefresh = "https://auth.openai.com/oauth/token"
-	codexClientID  = "app_EMoamEEZ73f0CkXaXp7hrann"
-	codexSignedOut = "Codex is signed out; run `codex login` again"
-	copilotOut     = "Copilot is signed out; sign in to GitHub Copilot again"
+	codexClientID       = "app_EMoamEEZ73f0CkXaXp7hrann"
+	codexSignedOut      = "Codex is signed out; run `codex login` again"
+	copilotOut          = "Copilot is signed out; sign in to GitHub Copilot again"
 )
 
 // SignedOutError means the agent's login is gone or no longer works.
