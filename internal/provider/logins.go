@@ -28,6 +28,7 @@ type Login struct {
 	Plan   string    `json:"plan,omitempty"`
 	Seen   time.Time `json:"seen"`
 	Active bool      `json:"active"` // the agent is signed in to this one now
+	On     bool      `json:"on"`     // in use: the active one, or next in line
 }
 
 type savedLogin struct {
@@ -35,6 +36,9 @@ type savedLogin struct {
 	User  string    `json:"user"`
 	Plan  string    `json:"plan,omitempty"`
 	Seen  time.Time `json:"seen"`
+	// On puts the account in use beside the one the agent is signed in to:
+	// requests go to it when that one is out of quota (see logins_on.go).
+	On bool `json:"on,omitempty"`
 	// Auth is the agent's credential blob as the agent stores it: Codex's
 	// auth.json, Claude Code's keychain item / .credentials.json.
 	Auth json.RawMessage `json:"auth"`
@@ -104,6 +108,7 @@ func writePrivate(path string, b []byte) error {
 func upsertLogin(ls []savedLogin, l savedLogin) []savedLogin {
 	for i := range ls {
 		if ls[i].Agent == l.Agent && strings.EqualFold(ls[i].User, l.User) {
+			l.On = l.On || ls[i].On
 			ls[i] = l
 			return ls
 		}
@@ -236,8 +241,9 @@ func Logins(agent string) []Login {
 		if agent != "" && l.Agent != agent {
 			continue
 		}
+		using := strings.EqualFold(active[l.Agent], l.User)
 		out = append(out, Login{Agent: l.Agent, User: l.User, Plan: l.Plan, Seen: l.Seen,
-			Active: strings.EqualFold(active[l.Agent], l.User)})
+			Active: using, On: using || l.On})
 	}
 	return out
 }
@@ -263,9 +269,15 @@ func SwitchLogin(agent, user string) error {
 		if strings.EqualFold(live.User, want.User) {
 			return nil
 		}
-		// the credentials being replaced, as fresh as the agent has them
+		// the credentials being replaced, as fresh as the agent has them;
+		// in use still if the one taking over was: it is next in line now
 		live.Seen = time.Now().UTC().Truncate(time.Second)
 		ls = upsertLogin(ls, live)
+		for i := range ls {
+			if ls[i].Agent == agent && strings.EqualFold(ls[i].User, live.User) {
+				ls[i].On = want.On
+			}
+		}
 		if err := writeLogins(ls); err != nil {
 			return err
 		}

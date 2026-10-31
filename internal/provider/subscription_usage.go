@@ -163,28 +163,37 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	}
 	_, plan, _ := claudeIdentity()
 	q.Plan = plan
+	q.Windows, err = claudeWindows(ctx, token)
+	if err != nil {
+		q.Error = err.Error()
+	}
+	return q
+}
+
+// claudeWindows is the allowance of the Claude account token signs in to.
+func claudeWindows(ctx context.Context, token string) ([]QuotaWindow, error) {
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
+	err := accountJSON(ctx, claudeBase+"/api/oauth/usage", token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
-		q.Error = err.Error()
-		return q
+		return []QuotaWindow{}, err
 	}
+	out := []QuotaWindow{}
 	for _, x := range []struct {
 		name string
 		w    *quotaWire
 	}{{"5 hours", data.FiveHour}, {"7 days", data.SevenDay}, {"7 days · Opus", data.SevenDayOpus}, {"7 days · Sonnet", data.SevenDaySonnet}} {
 		if x.w != nil {
-			q.Windows = append(q.Windows, x.w.window(x.name))
+			out = append(out, x.w.window(x.name))
 		}
 	}
-	return q
+	return out, nil
 }
 
 type quotaWire struct {
@@ -207,6 +216,16 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		q.Error = err.Error()
 		return q
 	}
+	q.Plan, q.Windows, err = codexWindows(ctx, token, accountID)
+	if err != nil {
+		q.Error = err.Error()
+	}
+	return q
+}
+
+// codexWindows is the plan and allowance of the ChatGPT account token
+// signs in to.
+func codexWindows(ctx context.Context, token, accountID string) (plan string, out []QuotaWindow, err error) {
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -215,19 +234,17 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
-	if err != nil {
-		q.Error = err.Error()
-		return q
+	out = []QuotaWindow{}
+	if err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data); err != nil {
+		return "", out, err
 	}
-	q.Plan = data.PlanType
 	if data.RateLimit.Primary != nil {
-		q.Windows = append(q.Windows, data.RateLimit.Primary.window())
+		out = append(out, data.RateLimit.Primary.window())
 	}
 	if data.RateLimit.Secondary != nil {
-		q.Windows = append(q.Windows, data.RateLimit.Secondary.window())
+		out = append(out, data.RateLimit.Secondary.window())
 	}
-	return q
+	return data.PlanType, out, nil
 }
 
 type codexWindow struct {
