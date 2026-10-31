@@ -18,7 +18,6 @@ let pick = null; // { agent, field, options, items, cursor, anchor }
 let editing = null; // provider id being edited; { preset } or { custom: true } for a new one
 let draft = null; // the editor's working copy
 let adding = false; // the preset sheet is open
-let importing = null; // a magpie://import link waiting for a yes: { provider, error, replaces }
 // the gateway tab's choices, kept per machine
 let flavor = params.get("flavor") || localStorage.getItem("magpie.flavor") || "openai"; // which API the snippets speak
 let lang = params.get("lang") || localStorage.getItem("magpie.lang") || "shell";        // which snippet
@@ -564,7 +563,6 @@ function renderProviders() {
   }
   renderExcluded();
   dialog = renderAdd() || dialog;
-  if (importing) dialog = renderImport(importing);
   if (dialog) openModal(dialog); else closeModal();
 }
 
@@ -1093,7 +1091,7 @@ function input(value, placeholder, type = "text") {
   i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") cancelEdit(); };
   return i;
 }
-function cancelEdit() { editing = null; draft = null; importing = null; renderProviders(); }
+function cancelEdit() { editing = null; draft = null; renderProviders(); }
 
 // ---------- modal ----------
 // The provider editor opens as a dialog over the page; Escape, the backdrop
@@ -1326,68 +1324,6 @@ function renderEditor(p, presetID) {
   return ed;
 }
 
-// renderImport: what a magpie://import link would add, for the user to
-// check. Nothing is saved until they press Add; the key stays hidden unless
-// they ask to see it.
-function renderImport(im) {
-  const ed = el("div", "editor new import");
-  ed.onclick = (e) => e.stopPropagation();
-  const p = im.provider || {};
-  const h = el("div", "ehead");
-  h.append(icon(p.icon || "generic"), el("b", "", im.error ? t("Import link") : p.name));
-  if (!im.error) h.append(el("span", "note", t("from a link")));
-  ed.append(h);
-  const bar = el("div", "bar");
-  bar.append(el("span", "grow"));
-  const cancel = el("button", "text", t(im.error ? "Close" : "Cancel"));
-  cancel.onclick = cancelEdit;
-  bar.append(cancel);
-  if (im.error) {
-    ed.append(el("div", "warnbox", t("This link can't be imported: {e}", { e: im.error })), bar);
-    return ed;
-  }
-
-  const hosts = [...new Set([p.chat, p.responses, p.anthropic].filter(Boolean).map(hostOf))];
-  ed.append(el("div", "warnbox", t("Added from a link. Your prompts and this key will go to {hosts}; add it only if you trust the site that sent you here.", { hosts: hosts.join(", ") })));
-
-  const name = input(im.name ?? p.name, t("e.g. My Relay"));
-  name.oninput = () => { im.name = name.value; };
-  ed.append(...field(t("Name"), name));
-
-  const key = input(im.key ?? p.key ?? "", t(p.key ? "" : "paste an API key"), "password");
-  key.oninput = () => { im.key = key.value; };
-  key.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") add(); else if (e.key === "Escape") cancelEdit(); };
-  const side = el("div", "side");
-  const eye = el("button", "text", t("Show"));
-  eye.onclick = () => { const on = key.type === "password"; key.type = on ? "text" : "password"; eye.textContent = t(on ? "Hide" : "Show"); };
-  side.append(eye);
-  if (p.keysUrl && !p.key) { const b = el("button", "link", t("Get a key ↗")); b.onclick = () => api("open", { url: p.keysUrl }); side.append(b); }
-  const keyWrap = el("div", "pair");
-  keyWrap.append(key, side);
-  ed.append(...field(t("API key"), keyWrap, p.key ? t("From the link. Kept in ~/.config/magpie/providers.json, readable by you alone.") : ""));
-
-  ed.append(...field(t("Endpoints"), renderEndpoints(null, p), ""));
-  if (p.models?.length) {
-    const chips = el("div", "mchips");
-    for (const m of p.models) chips.append(el("span", "mchip on", m));
-    ed.append(...field(t("Models"), chips, ""));
-  }
-  if (im.replaces) ed.append(el("div", "warnbox soft", t("Replaces your {name}, key and all.", { name: im.replaces })));
-
-  const addBtn = el("button", "text primary", t(im.replaces ? "Replace" : "Add"));
-  const add = () => {
-    const n = (im.name ?? p.name).trim();
-    if (!n) { name.focus(); return status(t("Give it a name"), "warn"); }
-    addBtn.classList.add("busy");
-    providerAction("save", { ...p, name: n, key: (im.key ?? p.key ?? "").trim() }, t("{name} added", { name: n }));
-  };
-  addBtn.onclick = add;
-  bar.append(addBtn);
-  ed.append(bar);
-  setTimeout(() => (p.key ? addBtn : key).focus(), 0);
-  return ed;
-}
-
 // Which of the vendor's models the agents get to see: click to toggle, type
 // to add one the vendor's list lacks, Refresh to ask the vendor again.
 // The endpoints a provider serves, with a Test that reports against each one.
@@ -1492,7 +1428,6 @@ async function providerAction(action, body, okMsg) {
     providers = await api("provider/" + action, body);
     editing = null;
     draft = null;
-    importing = null;
     adding = false;
     presetQuery = "";
     renderProviders();
@@ -1872,17 +1807,6 @@ else { $("#nav").remove(); }
 // the panel comes back into view.
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 window.addEventListener("focus", load);
-// Opened on a magpie://import link: fetch what it describes (once — the
-// id is spent) and ask before adding it.
-if (mode === "window" && params.get("import")) {
-  const id = params.get("import");
-  params.delete("import");
-  history.replaceState(null, "", "?" + params);
-  api("import/" + encodeURIComponent(id)).then((im) => {
-    importing = im;
-    if (providers && view === "providers") renderProviders();
-  }).catch(() => {});
-}
 if (mode === "window" && ["providers", "gateway", "usage", "settings"].includes(params.get("view"))) show(params.get("view"));
 else if (mode === "window") slide($("#nav"), "nav");
 load();
