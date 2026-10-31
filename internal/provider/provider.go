@@ -44,6 +44,12 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
+	// Fallback is where a request goes when this provider can't take it —
+	// out of quota, rate limited, overloaded or down — before any of the
+	// reply has been sent: models as agents pick them (provider/model),
+	// tried in order.
+	Fallback []string `json:"fallback,omitempty"`
+
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
 	// key+URL provider — forwarded calls, connectivity tests, and model-list
@@ -125,7 +131,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models = picks[a.ID].Models
+		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -189,7 +195,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -260,6 +266,7 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
 		// Presets own their request shape; custom headers are supported only
