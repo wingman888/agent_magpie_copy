@@ -58,30 +58,39 @@ func TestSeveralKeys(t *testing.T) {
 	}
 }
 
-func TestKeyProtocolFollowsKey(t *testing.T) {
+func TestKeyProtocol(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	if err := Save(Provider{ID: "relay", Name: "Relay", Key: "k-one", Chat: "http://c/v1", Anthropic: "http://a"}); err != nil {
+	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1", Anthropic: "https://relay.test", Key: "sk-oai-1111"}); err != nil {
 		t.Fatal(err)
 	}
-	if AddKey("relay", "", "k-bad", "carrier-pigeon") == nil {
-		t.Fatal("unknown protocol accepted")
-	}
-	if err := AddKey("relay", "", "k-two", Anthropic); err != nil {
+	if err := AddKey("relay", "Claude", "sk-ant-2222", Anthropic); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetKeyProtocol("relay", keyID("k-one"), Chat); err != nil {
-		t.Fatal(err)
+	if err := AddKey("relay", "", "sk-x-3333", "carrier-pigeon"); err == nil {
+		t.Fatal("took an unknown protocol")
 	}
-	if err := UseKey("relay", keyID("k-two")); err != nil {
+	if err := SetKeyProtocol("relay", keyID("sk-oai-1111"), Chat); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := Find("relay")
 	ks := p.KeyList()
-	if len(ks) != 2 || ks[0].Protocol != Anthropic || ks[1].Protocol != Chat {
-		t.Fatalf("%+v", ks)
+	if ks[0].Protocol != Chat || ks[1].Protocol != Anthropic {
+		t.Fatalf("keys %+v", ks)
 	}
-	if q := p.WithKey(p.Keys[0]); q.Anthropic != "" || q.Chat == "" || p.Anthropic == "" {
-		t.Fatalf("%+v", q)
+	// it goes with the key when the order changes
+	if err := UseKey("relay", keyID("sk-ant-2222")); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = Find("relay")
+	if p.Key != "sk-ant-2222" || p.KeyProtocol != Anthropic || p.Keys[0].Protocol != Chat {
+		t.Fatalf("after use: %+v", p)
+	}
+	q := p.WithKey(p.Keys[0])
+	if q.Key != "sk-oai-1111" || q.Chat == "" || q.Anthropic != "" || q.Responses != "" {
+		t.Fatalf("with the OpenAI key: %+v", q)
+	}
+	if q := p.WithKey(KeyAccount{Key: "k"}); q.Chat == "" || q.Anthropic == "" {
+		t.Fatalf("a key for any protocol: %+v", q)
 	}
 }

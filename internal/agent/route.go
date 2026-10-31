@@ -19,16 +19,42 @@ const magpieID = "magpie"
 
 // viaMagpie lists the catalog for a picker, one group per provider.
 func viaMagpie(prefix string) []Option {
-	var out []Option
+	var groups, out []Option
 	for _, e := range provider.Catalog() {
+		if e.Group != nil {
+			groups = append(groups, groupOption(prefix, e))
+			continue
+		}
 		note := e.Provider.Name + " · via magpie"
 		if a := e.Provider.Account; a != nil {
 			note = a.User + " · via magpie"
 		}
 		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
-			Icon: e.Provider.Icon, Group: e.Provider.Name})
+			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
 	}
-	return out
+	return append(groups, out...)
+}
+
+// groupsSection is the picker section the routing groups sit in, first.
+const groupsSection = "Routing groups"
+
+// groupOption is a routing group in a picker. Its icon is the first of its
+// members' providers; Icons has every provider's, each once.
+func groupOption(prefix string, e provider.Entry) Option {
+	var icons []string
+	for _, m := range e.Group.Members {
+		pid, _, _ := strings.Cut(m, "/")
+		p, err := provider.Find(pid)
+		if err != nil || !p.Ready() || p.Icon == "" || contains(icons, p.Icon) {
+			continue
+		}
+		icons = append(icons, p.Icon)
+	}
+	o := Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie", Group: groupsSection, Ref: e.ID, Icons: icons}
+	if len(icons) > 0 {
+		o.Icon = icons[0]
+	}
+	return o
 }
 
 // viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going
