@@ -334,7 +334,7 @@ func showProvider(p provider.Provider) error {
 		if a.Plan != "" {
 			desc += " · " + a.Plan
 		}
-		kv("account", desc+" · via "+via)
+		kv("account", desc+" · via "+via+" ("+a.Agent+")")
 	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)

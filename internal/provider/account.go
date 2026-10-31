@@ -236,7 +236,9 @@ func resetExcluded() { exMu.Lock(); exKey, exAt, exCache = "", time.Time{}, nil;
 // Excluded lists logins dial recognises but will not offer. It only checks
 // that a Claude Code login exists; it never reads one.
 func Excluded() []Exclusion {
-	key := homeDir() + "\x00" + os.Getenv("CLAUDE_CONFIG_DIR")
+	// The key includes whether the credentials file exists right now, so a
+	// login appearing or vanishing invalidates the cache immediately.
+	key := homeDir() + "\x00" + os.Getenv("CLAUDE_CONFIG_DIR") + "\x00" + fmt.Sprint(claudeFileExists())
 	exMu.Lock()
 	defer exMu.Unlock()
 	if exKey == key && time.Since(exAt) < time.Minute {
@@ -250,12 +252,17 @@ func Excluded() []Exclusion {
 	return append([]Exclusion(nil), out...)
 }
 
-func claudeSignedIn() bool {
+func claudeFileExists() bool {
 	dir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if dir == "" {
 		dir = filepath.Join(homeDir(), ".claude")
 	}
-	if st, err := os.Stat(filepath.Join(dir, ".credentials.json")); err == nil && !st.IsDir() {
+	st, err := os.Stat(filepath.Join(dir, ".credentials.json"))
+	return err == nil && !st.IsDir()
+}
+
+func claudeSignedIn() bool {
+	if claudeFileExists() {
 		return true
 	}
 	if runtime.GOOS == "darwin" {

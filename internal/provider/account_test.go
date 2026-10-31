@@ -240,6 +240,23 @@ func TestExcluded(t *testing.T) {
 	}
 }
 
+func TestExcludedCacheInvalidatesOnFileChange(t *testing.T) {
+	home := envSetup(t)
+	cred := filepath.Join(home, ".claude", ".credentials.json")
+	if len(Excluded()) != 0 {
+		t.Fatal("unexpected exclusion")
+	}
+	os.MkdirAll(filepath.Dir(cred), 0o755)
+	os.WriteFile(cred, []byte("{}"), 0o600)
+	if len(Excluded()) != 1 { // no resetExcluded: existence change must bust the cache
+		t.Fatal("login appearing not noticed")
+	}
+	os.Remove(cred)
+	if len(Excluded()) != 0 {
+		t.Fatal("login vanishing not noticed")
+	}
+}
+
 func TestSaveBareAccountID(t *testing.T) {
 	home := envSetup(t)
 	writeCodex(t, home, time.Now().Add(time.Hour), nil)
