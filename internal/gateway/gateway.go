@@ -213,7 +213,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	p, model, ok := provider.Resolve(modelOf(body))
 	// Claude Subscription generations run through the Claude Code binary. Its
 	// OAuth token must not take a direct HTTP side path just for token counting.
-	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok") {
+	if ok && p.Account != nil && p.Account.Agent == "claude" {
 		req, err := parseAnthropic(body)
 		if err != nil {
 			writeError(w, provider.Anthropic, 400, err.Error())
@@ -371,15 +371,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
 		if !last && hw.failed() {
-			s.restAfter(c.rest, hw.status, hw.header, hw.held.Bytes())
+			s.rest(c.rest)
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
 		hw.release()
 		model = c.model
-		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-		}
 		break
 	}
 	if len(skipped) > 0 {
@@ -404,22 +401,6 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
 		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
-	}
-	// Cursor's API belongs to its own clients: its CLI does the talking
-	if p.Account != nil && p.Account.Agent == "cursor" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startCursor(ctx, req, model)
-		}
-		return s.serveSubscription(w, r, from, "Cursor", model, body, &call.Usage, start)
-	}
-	// and so does Grok's
-	if p.Account != nil && p.Account.Agent == "grok" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startGrok(ctx, req, model, p.Account.Home)
-		}
-		return s.serveSubscription(w, r, from, "Grok", model, body, &call.Usage, start)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
