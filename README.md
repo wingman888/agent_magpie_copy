@@ -71,7 +71,6 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
-| DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
 
 Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
@@ -204,7 +203,6 @@ you press *Add*. `magpie import <link>` does the same in a terminal.
 | `models`    | model ids to expose, comma separated                               |
 | `catalog`   | models.dev provider id, for model names and reasoning levels       |
 | `website`, `keys` | the vendor's site and its API-key page (https)               |
-| `icon`      | an https picture of the vendor's own (PNG, JPEG, GIF, WebP, ICO, SVG, at most 1 MB). magpie downloads it once, after you confirm the import, into its icons folder; without one it falls back to the catalog's logo or a plain mark |
 
 Base URLs must be https (plain http only to this machine or the local
 network). Web pages and GitHub don't link custom schemes reliably, so link
