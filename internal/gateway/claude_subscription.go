@@ -52,7 +52,23 @@ type subscriptionRun struct {
 	closed  bool
 	stderr  strings.Builder
 	timer   *time.Timer
+
+	// An agent whose stream does not carry its tool calls in full (Cursor)
+	// learns of them here, as the MCP helper hands each one over, and opens
+	// each answer with a message start of its own.
+	onCall func(id, name string, args json.RawMessage)
+	begin  func() Event
+	resume func() // after a resumed turn has its segment
+
+	// patience, when set, is how long a tool call may park before the agent
+	// is told it is still running (its MCP client gives up on a call at a
+	// minute); the result is then collected with waitTool, from late.
+	patience time.Duration
+	late     map[string]chan mcpToolResult
 }
+
+// waitTool collects a tool result that took longer than an agent's patience.
+const waitTool = "magpie_wait"
 
 type mcpToolResult struct {
 	Content []map[string]any `json:"content"`
@@ -102,7 +118,7 @@ func callbackBaseURL() string {
 	return "http://" + host + ":" + port
 }
 
-func (b *subscriptionBridge) start(ctx context.Context, req *Request, model string) (*subscriptionRun, <-chan Event, error) {
+func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, oauth string) (*subscriptionRun, <-chan Event, error) {
 	binary, err := claudeBinary()
 	if err != nil {
 		return nil, nil, err
@@ -117,17 +133,7 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model stri
 	}
 	cleanup := func() { _ = os.RemoveAll(tmp) }
 
-	tools := make([]bridgeTool, 0, len(req.Tools))
-	for _, t := range req.Tools {
-		if req.ToolChoice == "none" || (strings.HasPrefix(req.ToolChoice, "name:") && t.Name != strings.TrimPrefix(req.ToolChoice, "name:")) {
-			continue
-		}
-		schema := t.Schema
-		if len(schema) == 0 {
-			schema = json.RawMessage(`{"type":"object","properties":{}}`)
-		}
-		tools = append(tools, bridgeTool{Name: t.Name, Description: t.Description, InputSchema: schema})
-	}
+	tools := bridgeTools(req)
 	toolsPath := filepath.Join(tmp, "tools.json")
 	toolBytes, _ := json.Marshal(tools)
 	if err := os.WriteFile(toolsPath, toolBytes, 0o600); err != nil {
@@ -144,6 +150,10 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model stri
 	cmd := exec.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
 	cmd.Env = cleanClaudeEnv(os.Environ())
+	if oauth != "" {
+		// a saved account in use beside the one Claude Code is signed in to
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN="+oauth)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cleanup()
@@ -216,6 +226,7 @@ func cleanClaudeEnv(env []string) []string {
 	blocked := map[string]bool{
 		"ANTHROPIC_BASE_URL": true, "ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true,
 		"CLAUDECODE": true, "CLAUDE_CODE_ENTRYPOINT": true, "CLAUDE_CODE_SSE_PORT": true,
+		"CLAUDE_CODE_OAUTH_TOKEN": true,
 	}
 	out := make([]string, 0, len(env)+3)
 	for _, e := range env {
@@ -244,6 +255,12 @@ func (r *subscriptionRun) attach() chan Event {
 	ch := make(chan Event, 64)
 	r.segment = ch
 	return ch
+}
+
+func (r *subscriptionRun) attached() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.segment != nil
 }
 
 func (r *subscriptionRun) emit(ev Event) {
@@ -457,6 +474,9 @@ func (r *subscriptionRun) continueWith(results []Part) (<-chan Event, error) {
 		r.timer.Reset(30 * time.Minute)
 	}
 	ch := r.attach()
+	if r.begin != nil {
+		r.emit(r.begin())
+	}
 	for _, p := range results {
 		r.mu.Lock()
 		waiter := r.pending[p.CallID]
@@ -464,7 +484,7 @@ func (r *subscriptionRun) continueWith(results []Part) (<-chan Event, error) {
 		r.mu.Unlock()
 		if waiter == nil {
 			r.abort()
-			return nil, fmt.Errorf("Claude Code is not waiting for tool result %s", p.CallID)
+			return nil, fmt.Errorf("the agent is not waiting for tool result %s", p.CallID)
 		}
 		r.bridge.mu.Lock()
 		delete(r.bridge.calls, p.CallID)
@@ -472,6 +492,9 @@ func (r *subscriptionRun) continueWith(results []Part) (<-chan Event, error) {
 		content := []map[string]any{{"type": "text", "text": p.Text}}
 		waiter <- mcpToolResult{Content: content, IsError: p.IsError}
 		close(waiter)
+	}
+	if r.resume != nil {
+		r.resume()
 	}
 	return ch, nil
 }
@@ -494,6 +517,10 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid tool call", http.StatusBadRequest)
 		return
 	}
+	if call.Name == waitTool && run.patience > 0 {
+		run.await(w, r, call.Arguments)
+		return
+	}
 	waiter := make(chan mcpToolResult, 1)
 	run.mu.Lock()
 	run.pending[call.ToolCallID] = waiter
@@ -501,16 +528,71 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	b.calls[call.ToolCallID] = run
 	b.mu.Unlock()
+	if run.onCall != nil {
+		run.onCall(call.ToolCallID, call.Name, call.Arguments)
+	}
+	var expire <-chan time.Time
+	if run.patience > 0 {
+		t := time.NewTimer(run.patience)
+		defer t.Stop()
+		expire = t.C
+	}
 	select {
 	case result, ok := <-waiter:
 		if !ok {
-			http.Error(w, "Claude run ended", http.StatusGone)
+			http.Error(w, "the agent's run ended", http.StatusGone)
 			return
 		}
 		writeJSON(w, 200, result)
+	case <-expire:
+		run.mu.Lock()
+		run.late[call.ToolCallID] = waiter
+		run.mu.Unlock()
+		writeJSON(w, 200, stillRunning(call.ToolCallID, call.Name))
 	case <-r.Context().Done():
 		return
 	}
+}
+
+// await answers waitTool: the late result once it is in, or that the call
+// is still running.
+func (r *subscriptionRun) await(w http.ResponseWriter, req *http.Request, args json.RawMessage) {
+	var a struct {
+		Call string `json:"call"`
+	}
+	_ = json.Unmarshal(args, &a)
+	r.mu.Lock()
+	ch := r.late[a.Call]
+	r.mu.Unlock()
+	if ch == nil {
+		writeJSON(w, 200, mcpToolResult{IsError: true, Content: []map[string]any{{"type": "text", "text": fmt.Sprintf("No tool call %q is running.", a.Call)}}})
+		return
+	}
+	t := time.NewTimer(r.patience)
+	defer t.Stop()
+	select {
+	case result, ok := <-ch:
+		r.mu.Lock()
+		delete(r.late, a.Call)
+		r.mu.Unlock()
+		if !ok {
+			http.Error(w, "the agent's run ended", http.StatusGone)
+			return
+		}
+		writeJSON(w, 200, result)
+	case <-t.C:
+		writeJSON(w, 200, stillRunning(a.Call, ""))
+	case <-req.Context().Done():
+	}
+}
+
+func stillRunning(id, name string) mcpToolResult {
+	what := "The tool call"
+	if name != "" {
+		what = "The " + name + " call"
+	}
+	return mcpToolResult{Content: []map[string]any{{"type": "text", "text": fmt.Sprintf(
+		"%s is still running in the user's environment. Call %s with {\"call\": %q} to wait for its result. Do not make the call again.", what, waitTool, id)}}}
 }
 
 func (r *subscriptionRun) finish() {
@@ -556,7 +638,22 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	_ = os.RemoveAll(run.tmp)
 }
 
-func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) (int, string) {
+func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, usage *Usage) (int, string) {
+	start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+		token, _, err := p.Account.Token(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return s.subscription.start(ctx, req, model, token)
+	}
+	return s.serveSubscription(w, r, from, "Claude Code", model, body, usage, start)
+}
+
+// serveSubscription answers a request through an agent's own binary: a new
+// turn starts it, a request carrying tool results resumes the turn waiting
+// on them.
+func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, name, model string, body []byte, usage *Usage,
+	start func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error)) (int, string) {
 	req, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
@@ -569,15 +666,42 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	if run != nil {
 		events, err = run.continueWith(results)
 	} else {
-		run, events, err = s.subscription.start(r.Context(), req, model)
+		run, events, err = start(r.Context(), req)
 	}
 	if err != nil {
-		return writeError(w, from, 502, "Claude Code: "+err.Error()), err.Error()
+		return writeError(w, from, 502, name+": "+err.Error()), err.Error()
 	}
 
 	if stream {
+		// an error before any of the answer — out of quota, rate limited —
+		// is a status, not a stream, so another account can take over
+		var head []Event
+		for ev := range events {
+			head = append(head, ev)
+			if ev.Kind != KStart && ev.Kind != KUsage {
+				break
+			}
+		}
+		if n := len(head); n == 0 || head[n-1].Kind == KError {
+			msg := name + " ended without an answer"
+			if n > 0 {
+				msg = head[n-1].Text
+			}
+			run.abort()
+			code := 502
+			if quotaWords.MatchString(msg) {
+				code = 429
+			}
+			return writeError(w, from, code, name+": "+msg), msg
+		}
 		enc := encoder(from, newSSEWriter(w), req.Model)
 		var failed string
+		for _, ev := range head {
+			if ev.Kind == KStart || ev.Kind == KUsage {
+				usage.add(ev.Usage)
+			}
+			enc.event(ev)
+		}
 		for ev := range events {
 			if ev.Kind == KError {
 				failed = ev.Text
@@ -596,7 +720,7 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 	if col.err != "" && len(col.res.Parts) == 0 {
 		run.abort()
-		return writeError(w, from, 502, "Claude Code: "+col.err), col.err
+		return writeError(w, from, 502, name+": "+col.err), col.err
 	}
 	res := col.finish()
 	usage.add(res.Usage)
