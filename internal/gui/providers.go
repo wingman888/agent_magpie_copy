@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -39,26 +38,20 @@ type providerJSON struct {
 	Website   string            `json:"website"`
 	KeysURL   string            `json:"keysUrl"`
 	Headers   map[string]string `json:"headers,omitempty"`
-	// where a custom provider's balance is asked (see provider.Balance)
-	BalanceURL  string `json:"balanceURL,omitempty"`
-	BalancePath string `json:"balancePath,omitempty"`
-	Key         struct {
+	Key       struct {
 		Set      bool   `json:"set"`
 		Masked   string `json:"masked"`
 		Optional bool   `json:"optional"`
 	} `json:"key"`
-	Ready     bool               `json:"ready"`
-	Chosen    []string           `json:"chosen"`   // the user's explicit picks, if any
-	Fallback  []string           `json:"fallback"` // where requests go when this one can't take them
-	Routing   string             `json:"routing"`  // how requests spread over its keys or accounts
-	Affinity  string             `json:"affinity"` // how long a conversation stays with who answered it
-	Models    []modelJSON        `json:"models"`   // everything the vendor lists, exposed ones flagged
-	Exposed   int                `json:"exposed"`  // how many reach the agents
-	Fetched   string             `json:"fetched"`  // "3h ago" when the list came from the vendor
-	Agents    []providerAgent    `json:"agents"`   // detected agents, current ones flagged
-	Sponsored bool               `json:"sponsored"`
-	KeyList   []provider.KeyInfo `json:"keyList"`           // its keys, in the order requests try them
-	Account   *accountJSON       `json:"account,omitempty"` // a signed-in agent, see provider.Account
+	Ready     bool            `json:"ready"`
+	Chosen    []string        `json:"chosen"`   // the user's explicit picks, if any
+	Fallback  []string        `json:"fallback"` // where requests go when this one can't take them
+	Models    []modelJSON     `json:"models"`   // everything the vendor lists, exposed ones flagged
+	Exposed   int             `json:"exposed"`  // how many reach the agents
+	Fetched   string          `json:"fetched"`  // "3h ago" when the list came from the vendor
+	Agents    []providerAgent `json:"agents"`   // detected agents, current ones flagged
+	Sponsored bool            `json:"sponsored"`
+	Account   *accountJSON    `json:"account,omitempty"` // a signed-in agent, see provider.Account
 }
 
 type accountJSON struct {
@@ -89,15 +82,6 @@ type gatewayJSON struct {
 	Mine    bool           `json:"mine"` // this process serves it
 	Models  int            `json:"models"`
 	Calls   []gateway.Call `json:"calls"`
-	Groups  []gwGroupJSON  `json:"groups"` // the catalog's routing groups, listed before the models
-}
-
-// gwGroupJSON is a routing group as the Gateway view lists it.
-type gwGroupJSON struct {
-	ID        string   `json:"id"` // group/<id>, what a request names
-	Name      string   `json:"name"`
-	Icons     []string `json:"icons"`     // its providers', one each
-	Providers []string `json:"providers"` // their names, in the group's order
 }
 
 type excludedJSON struct {
@@ -119,9 +103,6 @@ func currentProvider(a *agent.Agent) (string, string) {
 		return "", ""
 	}
 	v := strings.TrimPrefix(a.Fields[0].Get(), "magpie/")
-	if strings.HasPrefix(v, provider.GroupPrefix) {
-		return "", "" // a routing group: no one provider
-	}
 	if pid, model, ok := strings.Cut(v, "/"); ok {
 		if _, err := provider.Find(pid); err == nil {
 			return pid, model
@@ -135,9 +116,9 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
-		Headers: p.Headers, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath,
-		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
-		Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity,
+		Headers: p.Headers,
+		Ready:   p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
+		Fallback: p.Fallback,
 	}
 	if out.Fallback == nil {
 		out.Fallback = []string{}
@@ -151,10 +132,6 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 	}
 	out.Key.Set = p.Key != ""
 	out.Key.Masked = provider.Mask(p.Key)
-	out.KeyList = p.KeyList()
-	if out.KeyList == nil {
-		out.KeyList = []provider.KeyInfo{}
-	}
 	if !out.Key.Set && p.Ready() {
 		out.Key.Optional = true
 	}
@@ -162,11 +139,6 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		out.Account = &accountJSON{Account: *a, Agent: a.Agent, Name: a.Agent, Icon: "generic"}
 		if ag, err := agent.Find(a.Agent); err == nil {
 			out.Account.Name, out.Account.Icon = ag.Name, ag.Icon
-		} else if a.Agent == "cursor" {
-			// cursor-agent runs behind the gateway, not as an agent magpie configures
-			out.Account.Name, out.Account.Icon = "Cursor CLI", "cursor"
-		} else if a.Agent == "grok" {
-			out.Account.Name, out.Account.Icon = "Grok CLI", "xai"
 		}
 		out.Account.Logins = provider.Logins(a.Agent)
 	}
@@ -214,22 +186,7 @@ func providersState(gw *gateway.Server) providersJSON {
 	for _, pr := range provider.Presets() {
 		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID]})
 	}
-	cat := provider.Catalog()
-	s.Gateway = gatewayJSON{URL: gateway.URL(), Models: len(cat), Calls: []gateway.Call{}, Groups: []gwGroupJSON{}}
-	for _, e := range cat {
-		if e.Group == "" {
-			continue
-		}
-		g := gwGroupJSON{ID: e.ID, Name: e.Name, Icons: e.Icons}
-		if _, ms, ok := provider.FindGroup(e.ID); ok {
-			for _, m := range ms {
-				if !slices.Contains(g.Providers, m.Provider.Name) {
-					g.Providers = append(g.Providers, m.Provider.Name)
-				}
-			}
-		}
-		s.Gateway.Groups = append(s.Gateway.Groups, g)
-	}
+	s.Gateway = gatewayJSON{URL: gateway.URL(), Models: len(provider.Catalog()), Calls: []gateway.Call{}}
 	if gw != nil {
 		s.Gateway.Running, s.Gateway.Mine = true, true
 		s.Gateway.Calls = gw.Recent()
@@ -254,9 +211,6 @@ func ago(t time.Time) string {
 }
 
 func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
-	importAppsRoutes(mux, gw)
-	traceRoutes(mux, gw)
-	groupRoutes(mux)
 	mux.HandleFunc("GET /api/providers", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, providersState(gw))
 	})
@@ -310,14 +264,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
-			if old != nil {
-				// the other keys are kept apart, in the Accounts list
-				in.Keys = old.Keys
-				in.Routing = old.Routing // set on its own, with route
-				if in.Key == old.Key {
-					in.KeyName, in.KeyProtocol = old.KeyName, old.KeyProtocol
-				}
-			}
 			if in.Icon == "" && old != nil && in.Preset == "" {
 				in.Icon = old.Icon
 			}
@@ -341,16 +287,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			}
 			writeJSON(rw, map[string]string{"key": p.Key})
 			return
-		case "route":
-			if err := provider.SetRouting(in.ID, in.Routing); err != nil {
-				fail(rw, err)
-				return
-			}
-		case "affinity":
-			if err := provider.SetAffinity(in.ID, in.Affinity); err != nil {
-				fail(rw, err)
-				return
-			}
 		case "delete":
 			if err := provider.Delete(in.ID); err != nil {
 				fail(rw, err)
@@ -393,12 +329,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 		}
 		writeJSON(rw, providersState(gw))
 	})
-	// How much of its allowance each of an agent's accounts has used.
-	mux.HandleFunc("GET /api/login/usage", func(rw http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-		defer cancel()
-		writeJSON(rw, provider.LoginUsage(ctx, r.URL.Query().Get("agent")))
-	})
 	// Switching the account an agent is signed in to, among those magpie
 	// remembers, and forgetting one.
 	mux.HandleFunc("POST /api/login/{action}", func(rw http.ResponseWriter, r *http.Request) {
@@ -413,42 +343,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			err = provider.SwitchLogin(in.Agent, in.User)
 		case "forget":
 			err = provider.ForgetLogin(in.Agent, in.User)
-		case "on", "off":
-			err = provider.SetLoginOn(in.Agent, in.User, r.PathValue("action") == "on")
-		default:
-			http.NotFound(rw, r)
-			return
-		}
-		if err != nil {
-			fail(rw, err)
-			return
-		}
-		writeJSON(rw, providersState(gw))
-	})
-	// A provider's several keys: add one, put one in use, name or remove it.
-	mux.HandleFunc("POST /api/keys/{action}", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct {
-			ID, Key, Name, Ref string
-			Protocol           provider.Protocol
-		}
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			fail(rw, err)
-			return
-		}
-		var err error
-		switch r.PathValue("action") {
-		case "add":
-			err = provider.AddKey(in.ID, in.Name, in.Key, in.Protocol)
-		case "protocol":
-			err = provider.SetKeyProtocol(in.ID, in.Ref, in.Protocol)
-		case "use":
-			err = provider.UseKey(in.ID, in.Ref)
-		case "remove":
-			err = provider.RemoveKey(in.ID, in.Ref)
-		case "rename":
-			err = provider.RenameKey(in.ID, in.Ref, in.Name)
-		case "on", "off":
-			err = provider.SetKeyOn(in.ID, in.Ref, r.PathValue("action") == "on")
 		default:
 			http.NotFound(rw, r)
 			return
