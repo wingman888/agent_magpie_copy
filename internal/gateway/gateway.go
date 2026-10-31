@@ -225,7 +225,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ok && p.Anthropic != "" {
-		for _, kp := range anthropicKeys(p) { // never a key limited to OpenAI
+		for _, kp := range relayAnthropicKeys(p) { // never a key limited to OpenAI
 			res, err := s.forward(r.Context(), kp, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 			if err != nil {
 				continue
@@ -366,20 +366,20 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	var failed []string
-	var final attempt
+	var final relayAttempt
 	for i, a := range cands {
 		final = a
-		g := newGate(w)
+		g := newRelayGate(w)
 		var u Usage
 		call.Provider = a.p.ID
 		status, msg := s.attempt(g, r, from, a, body, &u, &call)
-		if g.held && i < len(cands)-1 && r.Context().Err() == nil && retryable(g.status, g.buf.Bytes()) {
+		if g.held && i < len(cands)-1 && r.Context().Err() == nil && relayRetryable(g.status, g.buf.Bytes()) {
 			s.rested(a.cool)
 			failed = append(failed, a.label)
 			continue
 		}
 		if g.held {
-			if retryable(g.status, g.buf.Bytes()) {
+			if relayRetryable(g.status, g.buf.Bytes()) {
 				s.rested(a.cool)
 			}
 			g.release()
@@ -397,8 +397,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
-// attempt answers the request through one candidate.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, a attempt, body []byte, u *Usage, call *Call) (int, string) {
+// relayAttempt answers the request through one candidate.
+func (s *Server) relayAttempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, a relayAttempt, body []byte, u *Usage, call *Call) (int, string) {
 	p, model := a.p, a.model
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when

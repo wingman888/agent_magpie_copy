@@ -11,7 +11,7 @@ import (
 
 // A raw listener, because net/http's server canonicalizes header names and
 // would hide whether the name was sent as typed.
-func TestCustomHeadersReachUpstream(t *testing.T) {
+func TestCustomHeadersReachUpstream_Mine(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -60,7 +60,7 @@ func TestCustomHeadersReachUpstream(t *testing.T) {
 				mu.Unlock()
 				body := `{"data":[{"id":"m1"}],"choices":[{"message":{"content":"x"}}]}`
 				c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " +
-					itoa(len(body)) + "\r\n\r\n" + body))
+					mineItoa(len(body)) + "\r\n\r\n" + body))
 			}(c)
 		}
 	}()
@@ -90,7 +90,7 @@ func TestCustomHeadersReachUpstream(t *testing.T) {
 	}
 }
 
-func itoa(n int) string {
+func mineItoa(n int) string {
 	if n == 0 {
 		return "0"
 	}

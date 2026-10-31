@@ -11,20 +11,20 @@ import (
 	"time"
 )
 
-func isolateCfg(t *testing.T) {
+func mineIsolateCfg(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 }
 
-func custom(t *testing.T, key string) {
+func mineCustom(t *testing.T, key string) {
 	t.Helper()
 	if err := Save(Provider{ID: "relay", Name: "Relay", Key: key, Chat: "https://r.example/v1"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func get(t *testing.T) Provider {
+func mineGet(t *testing.T) Provider {
 	t.Helper()
 	p, err := Find("relay")
 	if err != nil {
@@ -33,9 +33,9 @@ func get(t *testing.T) Provider {
 	return *p
 }
 
-func TestKeyLifecycle(t *testing.T) {
-	isolateCfg(t)
-	custom(t, "k1")
+func TestKeyLifecycle_Mine(t *testing.T) {
+	mineIsolateCfg(t)
+	mineCustom(t, "k1")
 	if err := AddKey("relay", "team", "k2", Anthropic); err != nil {
 		t.Fatal(err)
 	}
@@ -51,36 +51,36 @@ func TestKeyLifecycle(t *testing.T) {
 	if err := UseKey("relay", KeyRef("k2")); err != nil {
 		t.Fatal(err)
 	}
-	p := get(t)
+	p := mineGet(t)
 	if p.Key != "k2" || p.KeyName != "team" || p.KeyProtocol != Anthropic || len(p.Keys) != 1 || p.Keys[0].Key != "k1" || p.Keys[0].Protocol != Chat || p.Keys[0].Off {
 		t.Fatalf("after use: %+v", p)
 	}
 	if err := SetKeyOn("relay", KeyRef("k2"), false); err != nil {
 		t.Fatal(err)
 	}
-	p = get(t)
+	p = mineGet(t)
 	if p.Key != "k1" || !p.Keys[0].Off || p.Keys[0].Key != "k2" || p.Keys[0].Name != "team" {
 		t.Fatalf("after off: %+v", p)
 	}
 	if SetKeyOn("relay", KeyRef("k1"), false) == nil || RemoveKey("relay", KeyRef("k1")) == nil {
 		t.Fatal("last enabled key was removable")
 	}
-	if err := RenameKey("relay", KeyRef("k1"), " me "); err != nil || get(t).KeyName != "me" {
+	if err := RenameKey("relay", KeyRef("k1"), " me "); err != nil || mineGet(t).KeyName != "me" {
 		t.Fatal("rename", err)
 	}
-	if err := RemoveKey("relay", KeyRef("k2")); err != nil || len(get(t).Keys) != 0 {
+	if err := RemoveKey("relay", KeyRef("k2")); err != nil || len(mineGet(t).Keys) != 0 {
 		t.Fatal("remove extra", err)
 	}
 	if err := AddKey("relay", "", "k3", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveKey("relay", KeyRef("k1")); err != nil || get(t).Key != "k3" {
-		t.Fatalf("remove first: %+v", get(t))
+	if err := RemoveKey("relay", KeyRef("k1")); err != nil || mineGet(t).Key != "k3" {
+		t.Fatalf("remove first: %+v", mineGet(t))
 	}
 }
 
-func TestSaveNormalizes(t *testing.T) {
-	isolateCfg(t)
+func TestSaveNormalizes_Mine(t *testing.T) {
+	mineIsolateCfg(t)
 	err := Save(Provider{ID: "relay", Key: "k", Chat: "r.example/v1", KeyProtocol: "nope"})
 	if err == nil {
 		t.Fatal("bad keyProtocol saved")
@@ -90,7 +90,7 @@ func TestSaveNormalizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := get(t)
+	p := mineGet(t)
 	if p.Headers["X-Org-Id"] != "acme" || len(p.Headers) != 1 || len(p.Fallback) != 2 || p.Catalog != "openai,deepseek" {
 		t.Fatalf("%+v", p)
 	}
@@ -101,8 +101,8 @@ func TestSaveNormalizes(t *testing.T) {
 	}
 }
 
-func TestHeadersOnWire(t *testing.T) {
-	isolateCfg(t)
+func TestHeadersOnWire_Mine(t *testing.T) {
+	mineIsolateCfg(t)
 	var got http.Header
 	var raw []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,15 +129,15 @@ func TestHeadersOnWire(t *testing.T) {
 	}
 }
 
-var png = []byte("\x89PNG\r\n\x1a\n0000")
+var minePng = []byte("\x89PNG\r\n\x1a\n0000")
 
-func TestIcons(t *testing.T) {
-	isolateCfg(t)
-	a, err := StoreIcon(png)
+func TestIcons_Mine(t *testing.T) {
+	mineIsolateCfg(t)
+	a, err := StoreIcon(minePng)
 	if err != nil || len(a) != len("file:")+16+4 {
 		t.Fatal(a, err)
 	}
-	if b, _ := StoreIcon(png); b != a {
+	if b, _ := StoreIcon(minePng); b != a {
 		t.Fatal("not deduped")
 	}
 	if _, err := StoreIcon(nil); err == nil {

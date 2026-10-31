@@ -16,22 +16,22 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// cooldown is how long a failed candidate is tried last. A var for tests.
-var cooldown = time.Minute
+// relayCooldown is how long a failed candidate is tried last. A var for tests.
+var relayCooldown = time.Minute
 
-// attempt is one way of answering a request.
-type attempt struct {
+// relayAttempt is one way of answering a request.
+type relayAttempt struct {
 	p     provider.Provider // already narrowed to one key / one account
 	model string
-	label string // shown in Call.Fallback when this attempt fails
-	cool  string // cooldown identity
+	label string // shown in Call.Fallback when this relayAttempt fails
+	cool  string // relayCooldown identity
 }
 
 // ---- model families ---------------------------------------------------------
 
-var oSeries = regexp.MustCompile(`^o\d`)
+var relayOSeries = regexp.MustCompile(`^o\d`)
 
-func bareModel(model string) string {
+func relayBareModel(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
 	if i := strings.LastIndex(m, "/"); i >= 0 {
 		m = m[i+1:]
@@ -39,18 +39,18 @@ func bareModel(model string) string {
 	return m
 }
 
-func isClaudeModel(model string) bool { return strings.Contains(bareModel(model), "claude") }
+func relayIsClaude(model string) bool { return strings.Contains(relayBareModel(model), "claude") }
 
-func isOpenAIModel(model string) bool {
-	m := bareModel(model)
-	return strings.HasPrefix(m, "gpt") || oSeries.MatchString(m) || strings.Contains(m, "codex") || strings.HasPrefix(m, "chatgpt")
+func relayIsOpenAI(model string) bool {
+	m := relayBareModel(model)
+	return strings.HasPrefix(m, "gpt") || relayOSeries.MatchString(m) || strings.Contains(m, "codex") || strings.HasPrefix(m, "chatgpt")
 }
 
 // ---- keys ------------------------------------------------------------------
 
-// keyVariant is p narrowed to one key; a key limited to a protocol also
+// relayKeyVariant is p narrowed to one key; a key limited to a protocol also
 // loses the other endpoints, so nothing can send it elsewhere.
-func keyVariant(p provider.Provider, k provider.KeyInfo) (provider.Provider, bool) {
+func relayKeyVariant(p provider.Provider, k provider.KeyInfo) (provider.Provider, bool) {
 	p.Key, p.KeyName, p.KeyProtocol, p.Keys = k.Key, k.Name, k.Protocol, nil
 	if k.Protocol == "" {
 		return p, true
@@ -74,11 +74,11 @@ func keyVariant(p provider.Provider, k provider.KeyInfo) (provider.Provider, boo
 	return p, true
 }
 
-// keyScore ranks a key variant for a model; lower is better.
-func keyScore(p provider.Provider, model string, from provider.Protocol) int {
+// relayKeyScore ranks a key variant for a model; lower is better.
+func relayKeyScore(p provider.Provider, model string, from provider.Protocol) int {
 	limit := p.KeyProtocol
 	switch {
-	case isClaudeModel(model):
+	case relayIsClaude(model):
 		switch {
 		case limit == provider.Anthropic, limit == "" && p.Anthropic != "":
 			return 0
@@ -86,7 +86,7 @@ func keyScore(p provider.Provider, model string, from provider.Protocol) int {
 			return 1
 		}
 		return 2
-	case isOpenAIModel(model):
+	case relayIsOpenAI(model):
 		openai := p.Chat != "" || p.Responses != ""
 		switch {
 		case limit == provider.Chat, limit == provider.Responses, limit == "" && openai:
@@ -102,8 +102,8 @@ func keyScore(p provider.Provider, model string, from provider.Protocol) int {
 	return 1
 }
 
-// keyVariants lists a provider's usable keys, best first for the model.
-func keyVariants(p provider.Provider, model string, from provider.Protocol) []provider.Provider {
+// relayKeyVariants lists a provider's usable keys, best first for the model.
+func relayKeyVariants(p provider.Provider, model string, from provider.Protocol) []provider.Provider {
 	keys := p.KeyList()
 	if len(keys) == 0 {
 		return []provider.Provider{p}
@@ -117,11 +117,11 @@ func keyVariants(p provider.Provider, model string, from provider.Protocol) []pr
 		if k.Off {
 			continue
 		}
-		v, ok := keyVariant(p, k)
+		v, ok := relayKeyVariant(p, k)
 		if !ok {
 			continue
 		}
-		all = append(all, scored{v, keyScore(v, model, from)})
+		all = append(all, scored{v, relayKeyScore(v, model, from)})
 	}
 	var out []provider.Provider
 	for s := 0; s <= 2; s++ {
@@ -134,9 +134,9 @@ func keyVariants(p provider.Provider, model string, from provider.Protocol) []pr
 	return out
 }
 
-// anthropicKeys are the keys that may count Anthropic tokens: not the ones
+// relayAnthropicKeys are the keys that may count Anthropic tokens: not the ones
 // limited to OpenAI endpoints.
-func anthropicKeys(p provider.Provider) []provider.Provider {
+func relayAnthropicKeys(p provider.Provider) []provider.Provider {
 	if p.Anthropic == "" {
 		return nil
 	}
@@ -149,7 +149,7 @@ func anthropicKeys(p provider.Provider) []provider.Provider {
 		if k.Off || (k.Protocol != "" && k.Protocol != provider.Anthropic) {
 			continue
 		}
-		if v, ok := keyVariant(p, k); ok {
+		if v, ok := relayKeyVariant(p, k); ok {
 			out = append(out, v)
 		}
 	}
@@ -158,7 +158,7 @@ func anthropicKeys(p provider.Provider) []provider.Provider {
 
 // ---- candidates --------------------------------------------------------------
 
-func (s *Server) expand(p provider.Provider, model string, from provider.Protocol) []attempt {
+func (s *Server) expand(p provider.Provider, model string, from provider.Protocol) []relayAttempt {
 	var vs []provider.Provider
 	if p.Account != nil {
 		vs = []provider.Provider{p}
@@ -166,11 +166,11 @@ func (s *Server) expand(p provider.Provider, model string, from provider.Protoco
 			vs = provider.LoginProviders(p)
 		}
 	} else {
-		vs = keyVariants(p, model, from)
+		vs = relayKeyVariants(p, model, from)
 	}
-	var out []attempt
+	var out []relayAttempt
 	for i, v := range vs {
-		a := attempt{p: v, model: model, label: p.ID, cool: p.ID + "\x00" + model}
+		a := relayAttempt{p: v, model: model, label: p.ID, cool: p.ID + "\x00" + model}
 		switch {
 		case v.Account != nil && i > 0:
 			a.label += " (" + v.Account.User + ")"
@@ -188,8 +188,8 @@ func (s *Server) expand(p provider.Provider, model string, from provider.Protoco
 
 // candidates lists, in order, who may answer: the provider's own keys or
 // accounts, then each fallback. Resting candidates go last.
-func (s *Server) candidates(p provider.Provider, model string, from provider.Protocol) []attempt {
-	var all []attempt
+func (s *Server) candidates(p provider.Provider, model string, from provider.Protocol) []relayAttempt {
+	var all []relayAttempt
 	seen := map[string]bool{}
 	add := func(p provider.Provider, model string) {
 		for _, a := range s.expand(p, model, from) {
@@ -212,7 +212,7 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 		}
 		add(*fp, m)
 	}
-	var ready, resting []attempt
+	var ready, resting []relayAttempt
 	for _, a := range all {
 		if s.resting(a.cool) {
 			resting = append(resting, a)
@@ -235,19 +235,19 @@ func (s *Server) rested(id string) {
 	if s.rest == nil {
 		s.rest = map[string]time.Time{}
 	}
-	s.rest[id] = time.Now().Add(cooldown)
+	s.rest[id] = time.Now().Add(relayCooldown)
 }
 
 // ---- when to move on ---------------------------------------------------------
 
-var quotaWords = []string{
+var relayQuotaWords = []string{
 	"quota", "insufficient", "balance", "exhaust", "credit", "billing", "rate limit", "usage limit", "limit reached",
 	"额度", "余额", "用完", "用尽", "欠费", "配额", "限额",
 }
 
-func hasQuotaWords(body []byte) bool {
+func relayHasQuotaWords(body []byte) bool {
 	low := strings.ToLower(string(body))
-	for _, w := range quotaWords {
+	for _, w := range relayQuotaWords {
 		if strings.Contains(low, w) {
 			return true
 		}
@@ -255,14 +255,14 @@ func hasQuotaWords(body []byte) bool {
 	return false
 }
 
-// retryable reports whether an upstream error means "this candidate cannot
+// relayRetryable reports whether an upstream error means "this candidate cannot
 // answer now" rather than "the request is wrong".
-func retryable(status int, body []byte) bool {
+func relayRetryable(status int, body []byte) bool {
 	switch status {
 	case 429, 402, 502, 503, 504, 529:
 		return true
 	case 403:
-		return hasQuotaWords(body)
+		return relayHasQuotaWords(body)
 	case 400, 401, 404, 413, 422:
 		return false
 	}
@@ -275,9 +275,9 @@ func retryable(status int, body []byte) bool {
 
 // ---- holding back an error ---------------------------------------------------
 
-// gate passes a successful reply to the client as it comes, but keeps an
+// relayGate passes a successful reply to the client as it comes, but keeps an
 // error reply back so the caller can swap in another candidate.
-type gate struct {
+type relayGate struct {
 	w       http.ResponseWriter
 	h       http.Header
 	started bool
@@ -286,11 +286,11 @@ type gate struct {
 	buf     bytes.Buffer
 }
 
-func newGate(w http.ResponseWriter) *gate { return &gate{w: w, h: http.Header{}} }
+func newRelayGate(w http.ResponseWriter) *relayGate { return &relayGate{w: w, h: http.Header{}} }
 
-func (g *gate) Header() http.Header { return g.h }
+func (g *relayGate) Header() http.Header { return g.h }
 
-func (g *gate) start(code int) {
+func (g *relayGate) start(code int) {
 	g.started = true
 	dst := g.w.Header()
 	for k, v := range g.h {
@@ -299,7 +299,7 @@ func (g *gate) start(code int) {
 	g.w.WriteHeader(code)
 }
 
-func (g *gate) WriteHeader(code int) {
+func (g *relayGate) WriteHeader(code int) {
 	if g.started || g.held {
 		return
 	}
@@ -310,7 +310,7 @@ func (g *gate) WriteHeader(code int) {
 	g.start(code)
 }
 
-func (g *gate) Write(p []byte) (int, error) {
+func (g *relayGate) Write(p []byte) (int, error) {
 	if g.held {
 		if g.buf.Len() < 1<<20 {
 			g.buf.Write(p)
@@ -323,7 +323,7 @@ func (g *gate) Write(p []byte) (int, error) {
 	return g.w.Write(p)
 }
 
-func (g *gate) Flush() {
+func (g *relayGate) Flush() {
 	if g.held {
 		return
 	}
@@ -336,7 +336,7 @@ func (g *gate) Flush() {
 }
 
 // release sends a held error to the client.
-func (g *gate) release() {
+func (g *relayGate) release() {
 	if !g.held {
 		return
 	}

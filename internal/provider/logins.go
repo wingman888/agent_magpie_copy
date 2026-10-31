@@ -53,7 +53,7 @@ var loginMu sync.Mutex
 // LoginsPath is where the remembered accounts live.
 func LoginsPath() string { return filepath.Join(filepath.Dir(Path()), "logins.json") }
 
-func decodeMap(b []byte) (map[string]any, error) {
+func relayDecodeMap(b []byte) (map[string]any, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	var m map[string]any
@@ -66,8 +66,8 @@ func decodeMap(b []byte) (map[string]any, error) {
 	return m, nil
 }
 
-// normMap deep-copies a JSON object through its encoding, numbers kept exact.
-func normMap(v any) map[string]any {
+// relayNormMap deep-copies a JSON object through its encoding, numbers kept exact.
+func relayNormMap(v any) map[string]any {
 	if v == nil {
 		return nil
 	}
@@ -75,7 +75,7 @@ func normMap(v any) map[string]any {
 	if err != nil {
 		return nil
 	}
-	m, err := decodeMap(b)
+	m, err := relayDecodeMap(b)
 	if err != nil || len(m) == 0 {
 		return nil
 	}
@@ -178,12 +178,12 @@ func claudeProfile() map[string]any {
 	if err != nil {
 		return nil
 	}
-	m, err := decodeMap(b)
+	m, err := relayDecodeMap(b)
 	if err != nil {
 		return nil
 	}
 	o, _ := m["oauthAccount"].(map[string]any)
-	return normMap(o)
+	return relayNormMap(o)
 }
 
 func claudeProfileEmail() string {
@@ -221,7 +221,7 @@ func currentClaudeLogin(fresh bool) (liveLogin, bool) {
 	if statusPlan != "" {
 		plan = statusPlan
 	}
-	return liveLogin{user: user, plan: plan, cred: normMap(c.raw["claudeAiOauth"]), profile: profile}, true
+	return liveLogin{user: user, plan: plan, cred: relayNormMap(c.raw["claudeAiOauth"]), profile: profile}, true
 }
 
 func codexAuthPath() string {
@@ -234,7 +234,7 @@ func currentCodexLogin() (liveLogin, bool) {
 	if err != nil {
 		return liveLogin{}, false
 	}
-	raw, err := decodeMap(b)
+	raw, err := relayDecodeMap(b)
 	if err != nil {
 		return liveLogin{}, false
 	}
@@ -258,7 +258,7 @@ func currentCodexLogin() (liveLogin, bool) {
 		}
 	}
 	return liveLogin{user: user, plan: claimString(claims, "https://api.openai.com/auth", "chatgpt_plan_type"),
-		cred: normMap(toks), profile: normMap(profile)}, true
+		cred: relayNormMap(toks), profile: relayNormMap(profile)}, true
 }
 
 func indexLogin(list []savedLogin, user string) int {
@@ -451,7 +451,7 @@ func writeClaudeLogin(e savedLogin) error {
 	var cfg map[string]any
 	var cfgMode os.FileMode = 0o600
 	if b, err := os.ReadFile(cfgPath); err == nil {
-		if cfg, err = decodeMap(b); err != nil {
+		if cfg, err = relayDecodeMap(b); err != nil {
 			return fmt.Errorf("%s is not valid JSON; not touching it", cfgPath)
 		}
 		if st, err := os.Stat(cfgPath); err == nil {
@@ -482,7 +482,7 @@ func writeClaudeLogin(e savedLogin) error {
 	if c.raw == nil {
 		c.raw = map[string]any{}
 	}
-	c.raw["claudeAiOauth"] = normMap(e.Cred)
+	c.raw["claudeAiOauth"] = relayNormMap(e.Cred)
 	b, _ := json.Marshal(c.raw)
 	parsed, ok := parseClaudeCredentials(b)
 	if !ok {
@@ -492,7 +492,7 @@ func writeClaudeLogin(e savedLogin) error {
 		return err
 	}
 
-	profile := normMap(e.Profile)
+	profile := relayNormMap(e.Profile)
 	if profile == nil {
 		profile = map[string]any{"emailAddress": e.User}
 	}
@@ -518,7 +518,7 @@ func writeCodexLogin(e savedLogin) error {
 	raw := map[string]any{}
 	var mode os.FileMode = 0o600
 	if b, err := os.ReadFile(path); err == nil {
-		if raw, err = decodeMap(b); err != nil {
+		if raw, err = relayDecodeMap(b); err != nil {
 			return fmt.Errorf("%s is not valid JSON; not touching it", path)
 		}
 		if st, err := os.Stat(path); err == nil {
@@ -527,7 +527,7 @@ func writeCodexLogin(e savedLogin) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	raw["tokens"] = normMap(e.Cred)
+	raw["tokens"] = relayNormMap(e.Cred)
 	for k, v := range e.Profile {
 		raw[k] = v
 	}

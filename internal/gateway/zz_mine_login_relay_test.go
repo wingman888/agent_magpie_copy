@@ -17,7 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-func TestCodexSideAccountTakesOverOnQuota(t *testing.T) {
+func TestCodexSideAccountTakesOverOnQuota_Mine(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))

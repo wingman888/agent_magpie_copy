@@ -12,87 +12,87 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// hit is one request an upstream saw.
-type hit struct{ path, key, model string }
+// mineHit is one request an mineUpstream saw.
+type mineHit struct{ path, key, model string }
 
-// upstream records requests and answers through reply.
-type upstream struct {
+// mineUpstream records requests and answers through mineReply.
+type mineUpstream struct {
 	mu    sync.Mutex
-	hits  []hit
-	reply func(h hit, w http.ResponseWriter)
+	hits  []mineHit
+	mineReply func(h mineHit, w http.ResponseWriter)
 }
 
-func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (u *mineUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(r.Body)
 	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if k := r.Header.Get("x-api-key"); k != "" {
 		key = k
 	}
-	h := hit{r.URL.Path, key, modelOf(b)}
+	h := mineHit{r.URL.Path, key, modelOf(b)}
 	u.mu.Lock()
 	u.hits = append(u.hits, h)
 	u.mu.Unlock()
 	u.reply(h, w)
 }
 
-func (u *upstream) list() []hit {
+func (u *mineUpstream) list() []mineHit {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return append([]hit(nil), u.hits...)
+	return append([]mineHit(nil), u.hits...)
 }
 
-const okChat = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
+const mineOkChat = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
 
-func jsonReply(w http.ResponseWriter, code int, body string) {
+func mineJsonReply(w http.ResponseWriter, code int, body string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	io.WriteString(w, body)
 }
 
-func okStatus(code int, body string) func(h hit, w http.ResponseWriter) {
-	return func(h hit, w http.ResponseWriter) { jsonReply(w, code, body) }
+func mineOkStatus(code int, body string) func(h mineHit, w http.ResponseWriter) {
+	return func(h mineHit, w http.ResponseWriter) { mineJsonReply(w, code, body) }
 }
 
-func isolate(t *testing.T) {
+func mineIsolate(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 }
 
-func serveUp(t *testing.T, u *upstream) string {
+func mineServeUp(t *testing.T, u *mineUpstream) string {
 	srv := httptest.NewServer(u)
 	t.Cleanup(srv.Close)
 	return srv.URL
 }
 
-func send(s *Server, path, body string) (int, string) {
+func mineSend(s *Server, path, body string) (int, string) {
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
 	return rec.Code, rec.Body.String()
 }
 
-const chatBody = `{"model":"%s","messages":[{"role":"user","content":"hi"}]}`
+const mineChatBody = `{"model":"%s","messages":[{"role":"user","content":"hi"}]}`
 
-func chatReq(model string) string { return strings.Replace(chatBody, "%s", model, 1) }
+func mineChatReq(model string) string { return strings.Replace(mineChatBody, "%s", model, 1) }
 
-func TestKeysRelayInOrder(t *testing.T) {
-	isolate(t)
-	u := &upstream{reply: func(h hit, w http.ResponseWriter) {
+func TestKeysRelayInOrder_Mine(t *testing.T) {
+	mineIsolate(t)
+	u := &mineUpstream{mineReply: func(h mineHit, w http.ResponseWriter) {
 		if h.key == "k1" {
-			jsonReply(w, 429, `{"error":{"message":"slow down"}}`)
+			mineJsonReply(w, 429, `{"error":{"message":"slow down"}}`)
 			return
 		}
-		jsonReply(w, 200, okChat)
+		mineJsonReply(w, 200, mineOkChat)
 	}}
-	url := serveUp(t, u)
+	url := mineServeUp(t, u)
 	err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: url + "/v1", Key: "k1", KeyName: "personal",
 		Keys: []provider.Key{{Name: "team", Key: "k2"}, {Name: "spare", Key: "k3", Off: true}}, Models: []string{"m1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := New()
-	code, body := send(s, "/v1/chat/completions", chatReq("relay/m1"))
+	code, body := mineSend(s, "/v1/chat/completions", mineChatReq("relay/m1"))
 	if code != 200 || !strings.Contains(body, `"ok"`) {
 		t.Fatalf("%d %s", code, body)
 	}
@@ -100,7 +100,7 @@ func TestKeysRelayInOrder(t *testing.T) {
 	if c.Provider != "relay" || !strings.Contains(c.Fallback, "relay") || !strings.Contains(c.Fallback, "personal") {
 		t.Errorf("call: %+v", c)
 	}
-	if code, _ = send(s, "/v1/chat/completions", chatReq("relay/m1")); code != 200 {
+	if code, _ = mineSend(s, "/v1/chat/completions", mineChatReq("relay/m1")); code != 200 {
 		t.Fatal(code)
 	}
 	var keys []string
@@ -115,23 +115,23 @@ func TestKeysRelayInOrder(t *testing.T) {
 	}
 }
 
-func TestKeysBeforeFallbackModel(t *testing.T) {
-	isolate(t)
-	u := &upstream{reply: func(h hit, w http.ResponseWriter) {
+func TestKeysBeforeFallbackModel_Mine(t *testing.T) {
+	mineIsolate(t)
+	u := &mineUpstream{mineReply: func(h mineHit, w http.ResponseWriter) {
 		if h.key == "k1" {
-			jsonReply(w, 402, `{"error":{"message":"insufficient balance"}}`)
+			mineJsonReply(w, 402, `{"error":{"message":"insufficient balance"}}`)
 			return
 		}
-		jsonReply(w, 200, okChat)
+		mineJsonReply(w, 200, mineOkChat)
 	}}
-	url := serveUp(t, u)
-	f := &upstream{reply: okStatus(200, okChat)}
-	furl := serveUp(t, f)
+	url := mineServeUp(t, u)
+	f := &mineUpstream{mineReply: mineOkStatus(200, mineOkChat)}
+	furl := mineServeUp(t, f)
 	provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: url + "/v1", Key: "k1", Keys: []provider.Key{{Key: "k2"}},
 		Models: []string{"m1"}, Fallback: []string{"other/fb-model"}})
 	provider.Save(provider.Provider{ID: "other", Name: "Other", Chat: furl + "/v1", Key: "o", Models: []string{"fb-model"}})
 	s := New()
-	if code, body := send(s, "/v1/chat/completions", chatReq("relay/m1")); code != 200 {
+	if code, body := mineSend(s, "/v1/chat/completions", mineChatReq("relay/m1")); code != 200 {
 		t.Fatal(code, body)
 	}
 	if len(f.list()) != 0 {
@@ -142,11 +142,11 @@ func TestKeysBeforeFallbackModel(t *testing.T) {
 	}
 }
 
-func TestProtocolLimitedKeys(t *testing.T) {
+func TestProtocolLimitedKeys_Mine(t *testing.T) {
 	for _, order := range []string{"anthropic-first", "openai-first"} {
 		t.Run(order, func(t *testing.T) {
-			isolate(t)
-			u := &upstream{reply: func(h hit, w http.ResponseWriter) {
+			mineIsolate(t)
+			u := &mineUpstream{mineReply: func(h mineHit, w http.ResponseWriter) {
 				if h.path == "/v1/messages" {
 					w.Header().Set("Content-Type", "text/event-stream")
 					io.WriteString(w, sse(
@@ -162,7 +162,7 @@ func TestProtocolLimitedKeys(t *testing.T) {
 				io.WriteString(w, sse(`data: {"id":"c","choices":[{"delta":{"content":"hi"}}]}`,
 					`data: {"id":"c","choices":[{"delta":{},"finish_reason":"stop"}]}`, `data: [DONE]`))
 			}}
-			url := serveUp(t, u)
+			url := mineServeUp(t, u)
 			p := provider.Provider{ID: "relay", Name: "Relay", Chat: url + "/v1", Anthropic: url, Models: []string{"claude-x", "gpt-x"}}
 			ak := provider.Key{Name: "a", Key: "ak", Protocol: provider.Anthropic}
 			ck := provider.Key{Name: "c", Key: "ck", Protocol: provider.Chat}
@@ -177,18 +177,18 @@ func TestProtocolLimitedKeys(t *testing.T) {
 			s := New()
 			anth := `{"model":"%s","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
 			// Claude Code, Claude model → Anthropic endpoint, Anthropic key
-			if code, b := send(s, "/v1/messages", strings.Replace(anth, "%s", "relay/claude-x", 1)); code != 200 {
+			if code, b := mineSend(s, "/v1/messages", strings.Replace(anth, "%s", "relay/claude-x", 1)); code != 200 {
 				t.Fatal(code, b)
 			}
 			// OpenAI client, Claude model → translated to the Anthropic endpoint
-			if code, b := send(s, "/v1/chat/completions", chatReq("relay/claude-x")); code != 200 {
+			if code, b := mineSend(s, "/v1/chat/completions", mineChatReq("relay/claude-x")); code != 200 {
 				t.Fatal(code, b)
 			}
 			// Claude Code, GPT model → translated to the chat endpoint with the OpenAI key
-			if code, b := send(s, "/v1/messages", strings.Replace(anth, "%s", "relay/gpt-x", 1)); code != 200 {
+			if code, b := mineSend(s, "/v1/messages", strings.Replace(anth, "%s", "relay/gpt-x", 1)); code != 200 {
 				t.Fatal(code, b)
 			}
-			want := []hit{{"/v1/messages", "ak", "claude-x"}, {"/v1/messages", "ak", "claude-x"}, {"/v1/chat/completions", "ck", "gpt-x"}}
+			want := []mineHit{{"/v1/messages", "ak", "claude-x"}, {"/v1/messages", "ak", "claude-x"}, {"/v1/chat/completions", "ck", "gpt-x"}}
 			got := u.list()
 			if len(got) != len(want) {
 				t.Fatalf("hits %v", got)
@@ -202,13 +202,13 @@ func TestProtocolLimitedKeys(t *testing.T) {
 	}
 }
 
-func TestLimitedKeyNeverLeavesItsEndpoint(t *testing.T) {
-	isolate(t)
-	u := &upstream{reply: okStatus(404, `{"error":{"message":"nope"}}`)}
-	url := serveUp(t, u)
+func TestLimitedKeyNeverLeavesItsEndpoint_Mine(t *testing.T) {
+	mineIsolate(t)
+	u := &mineUpstream{mineReply: mineOkStatus(404, `{"error":{"message":"nope"}}`)}
+	url := mineServeUp(t, u)
 	provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: url + "/v1", Responses: url + "/v1", Key: "ck", KeyProtocol: provider.Chat, Models: []string{"m"}})
 	s := New()
-	send(s, "/v1/responses", `{"model":"relay/m","input":"hi"}`)
+	mineSend(s, "/v1/responses", `{"model":"relay/m","input":"hi"}`)
 	for _, h := range u.list() {
 		if h.path != "/v1/chat/completions" {
 			t.Errorf("chat-only key reached %s", h.path)
@@ -216,13 +216,13 @@ func TestLimitedKeyNeverLeavesItsEndpoint(t *testing.T) {
 	}
 }
 
-func TestCountTokensSkipsOpenAIOnlyKey(t *testing.T) {
-	isolate(t)
-	u := &upstream{reply: okStatus(200, `{"input_tokens":42}`)}
-	url := serveUp(t, u)
+func TestCountTokensSkipsOpenAIOnlyKey_Mine(t *testing.T) {
+	mineIsolate(t)
+	u := &mineUpstream{mineReply: mineOkStatus(200, `{"input_tokens":42}`)}
+	url := mineServeUp(t, u)
 	provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: url + "/v1", Anthropic: url, Key: "ck", KeyProtocol: provider.Chat,
 		Keys: []provider.Key{{Key: "ak", Protocol: provider.Anthropic}}, Models: []string{"claude-x"}})
-	code, body := send(New(), "/v1/messages/count_tokens", `{"model":"relay/claude-x","messages":[{"role":"user","content":"hi"}]}`)
+	code, body := mineSend(New(), "/v1/messages/count_tokens", `{"model":"relay/claude-x","messages":[{"role":"user","content":"hi"}]}`)
 	if code != 200 || !strings.Contains(body, "42") {
 		t.Fatal(code, body)
 	}
@@ -233,22 +233,22 @@ func TestCountTokensSkipsOpenAIOnlyKey(t *testing.T) {
 	}
 }
 
-func fallbackSetup(t *testing.T, primary, fb http.HandlerFunc) (*Server, *upstream, *upstream) {
-	isolate(t)
-	pu := &upstream{reply: func(h hit, w http.ResponseWriter) { primary(w, nil) }}
-	fu := &upstream{reply: func(h hit, w http.ResponseWriter) { fb(w, nil) }}
-	purl, furl := serveUp(t, pu), serveUp(t, fu)
+func mineFallbackSetup(t *testing.T, primary, fb http.HandlerFunc) (*Server, *mineUpstream, *mineUpstream) {
+	mineIsolate(t)
+	pu := &mineUpstream{mineReply: func(h mineHit, w http.ResponseWriter) { primary(w, nil) }}
+	fu := &mineUpstream{mineReply: func(h mineHit, w http.ResponseWriter) { fb(w, nil) }}
+	purl, furl := mineServeUp(t, pu), mineServeUp(t, fu)
 	provider.Save(provider.Provider{ID: "main", Name: "Main", Chat: purl + "/v1", Key: "m", Models: []string{"big"},
 		Fallback: []string{" other/small ", "other/small", "nonsense", "ghost/x", "/", "other/"}})
 	provider.Save(provider.Provider{ID: "other", Name: "Other", Chat: furl + "/v1", Key: "o", Models: []string{"small"}})
 	return New(), pu, fu
 }
 
-func reply(code int, body string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) { jsonReply(w, code, body) }
+func mineReply(code int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) { mineJsonReply(w, code, body) }
 }
 
-func TestFallbackModel(t *testing.T) {
+func TestFallbackModel_Mine(t *testing.T) {
 	cases := []struct {
 		name string
 		code int
@@ -263,13 +263,13 @@ func TestFallbackModel(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s, pu, fu := fallbackSetup(t, reply(c.code, c.body), reply(200, okChat))
-			code, body := send(s, "/v1/chat/completions", chatReq("main/big"))
+			s, pu, fu := mineFallbackSetup(t, mineReply(c.code, c.body), mineReply(200, mineOkChat))
+			code, body := mineSend(s, "/v1/chat/completions", mineChatReq("main/big"))
 			if code != 200 || !strings.Contains(body, `"ok"`) {
 				t.Fatalf("%d %s", code, body)
 			}
 			if h := fu.list(); len(h) != 1 || h[0].model != "small" {
-				t.Errorf("fallback upstream saw %v", h)
+				t.Errorf("fallback mineUpstream saw %v", h)
 			}
 			if h := pu.list(); len(h) != 1 || h[0].model != "big" {
 				t.Errorf("primary saw %v", h)
@@ -279,7 +279,7 @@ func TestFallbackModel(t *testing.T) {
 				t.Errorf("call %+v", call)
 			}
 			// the failed provider rests: next request goes straight to the fallback
-			if code, _ := send(s, "/v1/chat/completions", chatReq("main/big")); code != 200 {
+			if code, _ := mineSend(s, "/v1/chat/completions", mineChatReq("main/big")); code != 200 {
 				t.Fatal(code)
 			}
 			if len(pu.list()) != 1 || len(fu.list()) != 2 {
@@ -289,22 +289,22 @@ func TestFallbackModel(t *testing.T) {
 	}
 }
 
-func TestFallbackRestEnds(t *testing.T) {
-	old := cooldown
-	cooldown = 30 * time.Millisecond
-	defer func() { cooldown = old }()
-	s, pu, _ := fallbackSetup(t, reply(429, `{"error":{"message":"x"}}`), reply(200, okChat))
-	send(s, "/v1/chat/completions", chatReq("main/big"))
+func TestFallbackRestEnds_Mine(t *testing.T) {
+	old := relayCooldown
+	relayCooldown = 30 * time.Millisecond
+	defer func() { relayCooldown = old }()
+	s, pu, _ := mineFallbackSetup(t, mineReply(429, `{"error":{"message":"x"}}`), mineReply(200, mineOkChat))
+	mineSend(s, "/v1/chat/completions", mineChatReq("main/big"))
 	time.Sleep(60 * time.Millisecond)
-	send(s, "/v1/chat/completions", chatReq("main/big"))
+	mineSend(s, "/v1/chat/completions", mineChatReq("main/big"))
 	if len(pu.list()) != 2 {
 		t.Errorf("primary should be tried again after resting, hits %d", len(pu.list()))
 	}
 }
 
-func TestBadRequestDoesNotFallBack(t *testing.T) {
-	s, _, fu := fallbackSetup(t, reply(400, `{"error":{"message":"bad param"}}`), reply(200, okChat))
-	code, body := send(s, "/v1/chat/completions", chatReq("main/big"))
+func TestBadRequestDoesNotFallBack_Mine(t *testing.T) {
+	s, _, fu := mineFallbackSetup(t, mineReply(400, `{"error":{"message":"bad param"}}`), mineReply(200, mineOkChat))
+	code, body := mineSend(s, "/v1/chat/completions", mineChatReq("main/big"))
 	if code != 400 || !strings.Contains(body, "bad param") {
 		t.Fatalf("%d %s", code, body)
 	}
@@ -315,15 +315,15 @@ func TestBadRequestDoesNotFallBack(t *testing.T) {
 		t.Error("fallback recorded")
 	}
 	// a 403 that is not about quota is not retried either
-	s, _, fu = fallbackSetup(t, reply(403, `{"error":{"message":"forbidden region"}}`), reply(200, okChat))
-	if code, _ := send(s, "/v1/chat/completions", chatReq("main/big")); code != 403 || len(fu.list()) != 0 {
+	s, _, fu = mineFallbackSetup(t, mineReply(403, `{"error":{"message":"forbidden region"}}`), mineReply(200, mineOkChat))
+	if code, _ := mineSend(s, "/v1/chat/completions", mineChatReq("main/big")); code != 403 || len(fu.list()) != 0 {
 		t.Errorf("403: %d, fallback hits %d", code, len(fu.list()))
 	}
 }
 
-func TestAllCandidatesFailReturnsLastError(t *testing.T) {
-	s, pu, fu := fallbackSetup(t, reply(429, `{"error":{"message":"first"}}`), reply(503, `{"error":{"message":"last one"}}`))
-	code, body := send(s, "/v1/chat/completions", chatReq("main/big"))
+func TestAllCandidatesFailReturnsLastError_Mine(t *testing.T) {
+	s, pu, fu := mineFallbackSetup(t, mineReply(429, `{"error":{"message":"first"}}`), mineReply(503, `{"error":{"message":"last one"}}`))
+	code, body := mineSend(s, "/v1/chat/completions", mineChatReq("main/big"))
 	if code != 503 || !strings.Contains(body, "last one") || strings.Contains(body, "first") {
 		t.Fatalf("%d %s", code, body)
 	}
@@ -335,18 +335,18 @@ func TestAllCandidatesFailReturnsLastError(t *testing.T) {
 	}
 }
 
-func TestFallbackFromStreamingStart(t *testing.T) {
-	s, _, fu := fallbackSetup(t, reply(429, `{"error":{"message":"x"}}`), func(w http.ResponseWriter, _ *http.Request) {
+func TestFallbackFromStreamingStart_Mine(t *testing.T) {
+	s, _, fu := mineFallbackSetup(t, mineReply(429, `{"error":{"message":"x"}}`), func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, sse(`data: {"id":"c","choices":[{"delta":{"content":"streamed"}}]}`, `data: [DONE]`))
 	})
-	code, body := send(s, "/v1/chat/completions", `{"model":"main/big","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	code, body := mineSend(s, "/v1/chat/completions", `{"model":"main/big","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if code != 200 || !strings.Contains(body, "streamed") || len(fu.list()) != 1 {
 		t.Fatalf("%d %s", code, body)
 	}
 }
 
-func TestRetryable(t *testing.T) {
+func TestRetryable_Mine(t *testing.T) {
 	for _, c := range []struct {
 		status int
 		body   string
@@ -355,7 +355,7 @@ func TestRetryable(t *testing.T) {
 		{429, "", true}, {402, "", true}, {529, "", true}, {503, "", true}, {400, "quota exceeded", false},
 		{403, "余额不足", true}, {403, "forbidden", false}, {401, "", false}, {500, "plain", false}, {500, "overloaded", true},
 	} {
-		if got := retryable(c.status, []byte(c.body)); got != c.want {
+		if got := relayRetryable(c.status, []byte(c.body)); got != c.want {
 			t.Errorf("retryable(%d, %q) = %v", c.status, c.body, got)
 		}
 	}

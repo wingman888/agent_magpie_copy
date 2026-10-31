@@ -69,7 +69,7 @@ func TestDecorateCarriesTemperature(t *testing.T) {
 	}
 }
 
-func TestDecorateStripsVendorPrefix(t *testing.T) {
+func TestDecorateStripsVendorPrefix_Mine(t *testing.T) {
 	known := []Model{{ID: "deepseek-chat", Name: "DeepSeek Chat", Efforts: []string{"high"}}, {ID: "gpt-5.5", Name: "GPT"}}
 	out := Decorate([]Model{{ID: "deepseek/deepseek-chat", Name: "deepseek/deepseek-chat"}, {ID: "x/unknown"}}, known)
 	if out[0].Name != "DeepSeek Chat" || len(out[0].Efforts) != 1 || out[1].Name != "" || out[1].ID != "x/unknown" {

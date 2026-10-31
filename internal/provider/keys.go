@@ -30,20 +30,20 @@ func ValidProtocol(p Protocol) bool {
 	return p == "" || p == Chat || p == Responses || p == Anthropic
 }
 
-func checkProtocol(p Protocol) error {
+func relayCheckProtocol(p Protocol) error {
 	if !ValidProtocol(p) {
 		return fmt.Errorf("unknown protocol %q — use chat, responses, anthropic, or leave it empty", string(p))
 	}
 	return nil
 }
 
-// validate rejects what normalize would otherwise have to guess at.
-func validate(p Provider) error {
-	if err := checkProtocol(p.KeyProtocol); err != nil {
+// relayValidate rejects what normalize would otherwise have to guess at.
+func relayValidate(p Provider) error {
+	if err := relayCheckProtocol(p.KeyProtocol); err != nil {
 		return err
 	}
 	for _, k := range p.Keys {
-		if err := checkProtocol(k.Protocol); err != nil {
+		if err := relayCheckProtocol(k.Protocol); err != nil {
 			return err
 		}
 	}
@@ -53,8 +53,8 @@ func validate(p Provider) error {
 	return nil
 }
 
-// cleanKeys trims the extra keys and drops empty ones and repeats.
-func cleanKeys(p Provider) []Key {
+// relayCleanKeys trims the extra keys and drops empty ones and repeats.
+func relayCleanKeys(p Provider) []Key {
 	var out []Key
 	seen := map[string]bool{strings.TrimSpace(p.Key): true}
 	for _, k := range p.Keys {
@@ -69,9 +69,9 @@ func cleanKeys(p Provider) []Key {
 	return out
 }
 
-// cleanHeaders keeps headers for custom providers only, trimmed, without
+// relayCleanHeaders keeps headers for custom providers only, trimmed, without
 // nameless entries; an empty map is nil so it is not written.
-func cleanHeaders(p Provider) map[string]string {
+func relayCleanHeaders(p Provider) map[string]string {
 	if p.Preset != "" {
 		return nil
 	}
@@ -115,8 +115,8 @@ func (p Provider) KeyList() []KeyInfo {
 	return out
 }
 
-// mutate edits one stored (non-account) provider and saves the file.
-func mutate(id string, fn func(p *Provider) error) error {
+// relayMutate edits one stored (non-account) provider and saves the file.
+func relayMutate(id string, fn func(p *Provider) error) error {
 	id = strings.ToLower(strings.TrimSpace(id))
 	f := load()
 	for i := range f.Providers {
@@ -168,10 +168,10 @@ func AddKey(id, name, key string, proto Protocol) error {
 	if key == "" {
 		return errors.New("empty key")
 	}
-	if err := checkProtocol(proto); err != nil {
+	if err := relayCheckProtocol(proto); err != nil {
 		return err
 	}
-	return mutate(id, func(p *Provider) error {
+	return relayMutate(id, func(p *Provider) error {
 		for _, k := range p.KeyList() {
 			if k.Key == key {
 				return fmt.Errorf("%s already has that key (%s)", p.ID, k.Ref)
@@ -190,7 +190,7 @@ func AddKey(id, name, key string, proto Protocol) error {
 // UseKey makes a key the current one. The key it replaces stays enabled,
 // right behind it; names and protocol limits travel with their keys.
 func UseKey(id, keyRef string) error {
-	return mutate(id, func(p *Provider) error {
+	return relayMutate(id, func(p *Provider) error {
 		i, err := p.keyIndex(keyRef)
 		if err != nil {
 			return err
@@ -211,7 +211,7 @@ func UseKey(id, keyRef string) error {
 // SetKeyOn enables or disables a key. Disabling the current key hands over
 // to the next enabled one; the last enabled key cannot be disabled.
 func SetKeyOn(id, keyRef string, on bool) error {
-	return mutate(id, func(p *Provider) error {
+	return relayMutate(id, func(p *Provider) error {
 		i, err := p.keyIndex(keyRef)
 		if err != nil {
 			return err
@@ -236,7 +236,7 @@ func SetKeyOn(id, keyRef string, on bool) error {
 
 // RemoveKey deletes a key; the last enabled key cannot be deleted.
 func RemoveKey(id, keyRef string) error {
-	return mutate(id, func(p *Provider) error {
+	return relayMutate(id, func(p *Provider) error {
 		i, err := p.keyIndex(keyRef)
 		if err != nil {
 			return err
@@ -258,7 +258,7 @@ func RemoveKey(id, keyRef string) error {
 
 // RenameKey changes a key's name.
 func RenameKey(id, keyRef, name string) error {
-	return mutate(id, func(p *Provider) error {
+	return relayMutate(id, func(p *Provider) error {
 		i, err := p.keyIndex(keyRef)
 		if err != nil {
 			return err
@@ -275,10 +275,10 @@ func RenameKey(id, keyRef, name string) error {
 
 // SetKeyProtocol limits a key to one protocol, or clears the limit with "".
 func SetKeyProtocol(id, keyRef string, proto Protocol) error {
-	if err := checkProtocol(proto); err != nil {
+	if err := relayCheckProtocol(proto); err != nil {
 		return err
 	}
-	return mutate(id, func(p *Provider) error {
+	return relayMutate(id, func(p *Provider) error {
 		i, err := p.keyIndex(keyRef)
 		if err != nil {
 			return err

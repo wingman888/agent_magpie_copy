@@ -428,7 +428,7 @@ func (b *subscriptionBridge) findRun(req *Request) (*subscriptionRun, []Part) {
 	// Claude emits message_stop just before its MCP calls are all scheduled.
 	// A very fast client can return a result while the callback is still being
 	// registered; give that tiny race a bounded grace period.
-	for attempt := 0; attempt < 20; attempt++ {
+	for relayAttempt := 0; relayAttempt < 20; relayAttempt++ {
 		var found *subscriptionRun
 		var results []Part
 		b.mu.Lock()
@@ -444,7 +444,7 @@ func (b *subscriptionBridge) findRun(req *Request) (*subscriptionRun, []Part) {
 			found, results = run, append(results, p)
 		}
 		b.mu.Unlock()
-		if found != nil || len(all) == 0 || attempt == 19 {
+		if found != nil || len(all) == 0 || relayAttempt == 19 {
 			return found, results
 		}
 		time.Sleep(25 * time.Millisecond)

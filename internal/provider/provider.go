@@ -177,7 +177,7 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
-	if err := validate(p); err != nil {
+	if err := relayValidate(p); err != nil {
 		return err
 	}
 	p = normalize(p)
@@ -261,7 +261,7 @@ func normalize(p Provider) Provider {
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
 	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p)
+	p.Keys = relayCleanKeys(p)
 	if p.Key == "" && len(p.Keys) > 0 {
 		for i, k := range p.Keys {
 			if !k.Off {
@@ -271,7 +271,7 @@ func normalize(p Provider) Provider {
 			}
 		}
 	}
-	p.Headers = cleanHeaders(p)
+	p.Headers = relayCleanHeaders(p)
 	p.Fallback = cleanList(p.Fallback)
 	p.Icon = strings.TrimSpace(p.Icon)
 	p.Catalog = strings.Join(cleanList(strings.Split(p.Catalog, ",")), ",")

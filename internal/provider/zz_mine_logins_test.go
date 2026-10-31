@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// codexLogin writes a ChatGPT login for email into the home's auth.json,
+// mineCodexLogin writes a ChatGPT login for email into the home's auth.json,
 // keeping a foreign field Codex CLI owns.
-func codexLogin(t *testing.T, home, email, refresh string, exp time.Time) {
+func mineCodexLogin(t *testing.T, home, email, refresh string, exp time.Time) {
 	t.Helper()
 	writeFile(t, filepath.Join(home, ".codex", "auth.json"), map[string]any{
 		"auth_mode":      "chatgpt",
@@ -31,33 +31,33 @@ func codexLogin(t *testing.T, home, email, refresh string, exp time.Time) {
 	})
 }
 
-func readAuth(t *testing.T, home string) map[string]any {
+func mineReadAuth(t *testing.T, home string) map[string]any {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := decodeMap(b)
+	m, err := relayDecodeMap(b)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return m
 }
 
-func authRefresh(m map[string]any) string {
+func mineAuthRefresh(m map[string]any) string {
 	s, _ := m["tokens"].(map[string]any)["refresh_token"].(string)
 	return s
 }
 
-func TestCodexLoginsSwitchForget(t *testing.T) {
+func TestCodexLoginsSwitchForget_Mine(t *testing.T) {
 	home := claudeHome(t)
-	codexLogin(t, home, "a@example.com", "ra", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "a@example.com", "ra", time.Now().Add(time.Hour))
 	logins, err := Logins("codex")
 	if err != nil || len(logins) != 1 || !logins[0].Current || logins[0].User != "a@example.com" || logins[0].Plan != "plus" {
 		t.Fatalf("logins: %+v %v", logins, err)
 	}
 	// the agent signs in to another account behind magpie's back
-	codexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
 	logins, _ = Logins("cc2")
 	if logins != nil {
 		t.Fatal("unknown agent listed")
@@ -71,7 +71,7 @@ func TestCodexLoginsSwitchForget(t *testing.T) {
 	}
 
 	// B refreshes its token; the switch must keep that latest pair
-	codexLogin(t, home, "b@example.com", "rb-latest", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "b@example.com", "rb-latest", time.Now().Add(time.Hour))
 	if _, err := SwitchLogin("codex", "nobody@example.com"); err == nil {
 		t.Fatal("switched to an unknown account")
 	}
@@ -79,8 +79,8 @@ func TestCodexLoginsSwitchForget(t *testing.T) {
 	if err != nil || l.User != "a@example.com" {
 		t.Fatalf("switch: %+v %v", l, err)
 	}
-	auth := readAuth(t, home)
-	if authRefresh(auth) != "ra" || auth["custom"].(map[string]any)["keep"] != "me" || auth["auth_mode"] != "chatgpt" {
+	auth := mineReadAuth(t, home)
+	if mineAuthRefresh(auth) != "ra" || auth["custom"].(map[string]any)["keep"] != "me" || auth["auth_mode"] != "chatgpt" {
 		t.Fatalf("auth after switch: %v", auth)
 	}
 	if _, ok := auth["OPENAI_API_KEY"]; !ok {
@@ -115,13 +115,13 @@ func TestCodexLoginsSwitchForget(t *testing.T) {
 	}
 }
 
-func TestLoginOnAndSwitchInheritance(t *testing.T) {
+func TestLoginOnAndSwitchInheritance_Mine(t *testing.T) {
 	home := claudeHome(t)
-	codexLogin(t, home, "a@example.com", "ra", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "a@example.com", "ra", time.Now().Add(time.Hour))
 	Logins("codex")
-	codexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
 	Logins("codex")
-	codexLogin(t, home, "c@example.com", "rc", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "c@example.com", "rc", time.Now().Add(time.Hour))
 	Logins("codex")
 
 	if err := SetLoginOn("codex", "c@example.com", false); err == nil {
@@ -167,12 +167,12 @@ func TestLoginOnAndSwitchInheritance(t *testing.T) {
 
 // An account that is on alongside the current one signs with its own tokens,
 // refreshes into magpie's store, and never touches the agent's credentials.
-func TestLoginProvidersSignWithOwnCredentials(t *testing.T) {
+func TestLoginProvidersSignWithOwnCredentials_Mine(t *testing.T) {
 	home := claudeHome(t)
 	// A is saved with an already-expired token, then B takes over the agent
-	codexLogin(t, home, "a@example.com", "ra", time.Now().Add(-time.Hour))
+	mineCodexLogin(t, home, "a@example.com", "ra", time.Now().Add(-time.Hour))
 	Logins("codex")
-	codexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
 	if err := SetLoginOn("codex", "a@example.com", true); err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestLoginProvidersSignWithOwnCredentials(t *testing.T) {
 	}
 }
 
-func TestClaudeLoginSwitch(t *testing.T) {
+func TestClaudeLoginSwitch_Mine(t *testing.T) {
 	home := claudeHome(t)
 	creds := claudeSignIn(t, home, time.Now().Add(time.Hour))
 	cfg := filepath.Join(home, ".claude.json")
@@ -260,7 +260,7 @@ func TestClaudeLoginSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(creds)
-	got, _ := decodeMap(b)
+	got, _ := relayDecodeMap(b)
 	if o := got["claudeAiOauth"].(map[string]any); o["accessToken"] != "sk-ant-oat01-old" || o["refreshToken"] != "sk-ant-ort01-old" {
 		t.Fatalf("credentials: %v", got)
 	}
@@ -268,7 +268,7 @@ func TestClaudeLoginSwitch(t *testing.T) {
 		t.Fatalf("other credential fields lost: %v", got)
 	}
 	cb, _ := os.ReadFile(cfg)
-	c, _ := decodeMap(cb)
+	c, _ := relayDecodeMap(cb)
 	if c["theme"] != "dark" || c["numStartups"].(json.Number).String() != "1234567890123" ||
 		c["oauthAccount"].(map[string]any)["emailAddress"] != "a@example.com" || c["oauthAccount"].(map[string]any)["organizationName"] != "A org" {
 		t.Fatalf("config: %s", cb)
@@ -287,20 +287,20 @@ func TestClaudeLoginSwitch(t *testing.T) {
 	}
 }
 
-func TestAddLoginKeepsCurrentAndTurnsSecondOn(t *testing.T) {
+func TestAddLoginKeepsCurrentAndTurnsSecondOn_Mine(t *testing.T) {
 	home := claudeHome(t)
-	codexLogin(t, home, "a@example.com", "ra", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "a@example.com", "ra", time.Now().Add(time.Hour))
 	old := loginRun
 	defer func() { loginRun = old }()
 	loginRun = func(ctx context.Context, agent string, out io.Writer) error {
-		codexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
+		mineCodexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
 		return nil
 	}
 	l, err := AddLogin(context.Background(), "codex", nil)
 	if err != nil || l.User != "b@example.com" || l.Current || !l.On {
 		t.Fatalf("add: %+v %v", l, err)
 	}
-	if auth := readAuth(t, home); authRefresh(auth) != "ra" {
+	if auth := mineReadAuth(t, home); mineAuthRefresh(auth) != "ra" {
 		t.Fatalf("the agent's login changed: %v", auth)
 	}
 	ls, _ := Logins("codex")
@@ -315,11 +315,11 @@ func TestAddLoginKeepsCurrentAndTurnsSecondOn(t *testing.T) {
 	}
 }
 
-func TestLoginUsage(t *testing.T) {
+func TestLoginUsage_Mine(t *testing.T) {
 	home := claudeHome(t)
-	codexLogin(t, home, "a@example.com", "ra", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "a@example.com", "ra", time.Now().Add(time.Hour))
 	Logins("codex")
-	codexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
+	mineCodexLogin(t, home, "b@example.com", "rb", time.Now().Add(time.Hour))
 	SetLoginOn("codex", "a@example.com", true)
 
 	hits, failA := 0, false
