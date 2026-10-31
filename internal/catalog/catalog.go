@@ -1,5 +1,5 @@
 // Package catalog knows which models exist. It reads the models.dev catalog
-// (from magpie's own cache or OpenCode's), Codex's model cache, and falls back
+// (from dial's own cache or OpenCode's), Codex's model cache, and falls back
 // to a small built-in list so the picker is never empty.
 package catalog
 
@@ -19,16 +19,12 @@ import (
 
 // Model is one entry the picker can offer.
 type Model struct {
-	ID          string // e.g. "claude-sonnet-5"
-	Name        string // display name
-	Provider    string // models.dev provider id
-	Released    string // YYYY-MM-DD, used for ordering
-	Efforts     []string
-	Temperature *bool  // false when the model refuses temperature/top_p
-	Price       *Price // USD per million tokens, when models.dev lists it
-	// Keys, for a vendor whose keys each see models of their own, are the
-	// keys (by fingerprint) whose list has this one; empty is every key.
-	Keys []string `json:",omitempty"`
+	ID       string // e.g. "claude-sonnet-5"
+	Name     string // display name
+	Provider string // models.dev provider id
+	Released string // YYYY-MM-DD, used for ordering
+	Efforts  []string
+	Price    *Price // USD per million tokens, when models.dev lists it
 }
 
 // Price is what a model costs, in USD per million tokens.
@@ -57,7 +53,6 @@ type mdModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	ReleaseDate string `json:"release_date"`
-	Temperature *bool  `json:"temperature"` // false: rejects temperature/top_p
 	Reasoning   []struct {
 		Type   string   `json:"type"`
 		Values []string `json:"values"`
@@ -73,17 +68,15 @@ const modelsDevURL = "https://models.dev/api.json"
 var (
 	once sync.Once
 	mdev map[string]mdProvider
-
-	syncMu sync.Mutex
 )
 
-// CachePath is where `magpie sync` stores the models.dev catalog.
+// CachePath is where `dial sync` stores the models.dev catalog.
 func CachePath() string {
 	if x := os.Getenv("XDG_CACHE_HOME"); x != "" {
-		return filepath.Join(x, "magpie", "models.json")
+		return filepath.Join(x, "dial", "models.json")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cache", "magpie", "models.json")
+	return filepath.Join(home, ".cache", "dial", "models.json")
 }
 
 func opencodeCache() string {
@@ -124,16 +117,13 @@ func Reset() {
 	mdev = nil
 }
 
-// Sync downloads the models.dev catalog into CachePath. It serializes with
-// itself so a background refresh and a manual one cannot interleave writes.
+// Sync downloads the models.dev catalog into CachePath.
 func Sync(ctx context.Context) error {
-	syncMu.Lock()
-	defer syncMu.Unlock()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsDevURL, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "magpie")
+	req.Header.Set("User-Agent", "dial")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -200,26 +190,30 @@ func PriceOf(providerID, modelID string) (Price, bool) {
 }
 
 // Provider returns the text models of one models.dev provider, newest first.
-// The list comes from the synced models.dev catalog; nothing is compiled in.
-// A vendor's own /models answer, once fetched, is layered over it by the
-// provider package (see provider.Provider.Available).
+// Built-in models are merged in so the list is usable without any cache.
 func Provider(id string) []Model {
-	p, ok := load()[id]
-	if !ok {
-		return nil
-	}
+	seen := map[string]bool{}
 	var out []Model
-	for _, m := range p.Models {
-		if !textModel(m) {
-			continue
-		}
-		mm := Model{ID: m.ID, Name: m.Name, Provider: id, Released: m.ReleaseDate, Price: m.Cost, Temperature: m.Temperature}
-		for _, r := range m.Reasoning {
-			if r.Type == "effort" {
-				mm.Efforts = r.Values
+	if p, ok := load()[id]; ok {
+		for _, m := range p.Models {
+			if !textModel(m) {
+				continue
 			}
+			mm := Model{ID: m.ID, Name: m.Name, Provider: id, Released: m.ReleaseDate, Price: m.Cost}
+			for _, r := range m.Reasoning {
+				if r.Type == "effort" {
+					mm.Efforts = r.Values
+				}
+			}
+			seen[m.ID] = true
+			out = append(out, mm)
 		}
-		out = append(out, mm)
+	}
+	for _, m := range builtin[id] {
+		if !seen[m.ID] {
+			m.Provider = id
+			out = append(out, m)
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Released != out[j].Released {
@@ -261,13 +255,12 @@ func Providers() []string {
 	return ids
 }
 
-// Codex returns the models Codex itself lists, straight from the cache the
-// Codex CLI writes; there is no compiled-in list to fall back to.
+// Codex returns the models Codex itself lists (from its local cache).
 func Codex() []Model {
 	home, _ := os.UserHomeDir()
 	b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json"))
 	if err != nil {
-		return nil
+		return builtin["codex"]
 	}
 	var cache struct {
 		Models []struct {
@@ -281,7 +274,7 @@ func Codex() []Model {
 		} `json:"models"`
 	}
 	if json.Unmarshal(b, &cache) != nil || len(cache.Models) == 0 {
-		return nil
+		return builtin["codex"]
 	}
 	sort.SliceStable(cache.Models, func(i, j int) bool { return cache.Models[i].Priority < cache.Models[j].Priority })
 	var out []Model
@@ -307,3 +300,54 @@ func Efforts(models []Model, id string) []string {
 	}
 	return nil
 }
+
+// builtin keeps the picker useful with no catalog on disk.
+var builtin = map[string][]Model{
+	"anthropic": {
+		{ID: "claude-fable-5-1", Name: "Claude Fable 5.1", Released: "2026-09-01"},
+		{ID: "claude-opus-5", Name: "Claude Opus 5", Released: "2026-07-01"},
+		{ID: "claude-sonnet-5", Name: "Claude Sonnet 5", Released: "2026-07-01"},
+		{ID: "claude-haiku-4-5-20251001", Name: "Claude Haiku 4.5", Released: "2025-10-01"},
+	},
+	"openai": {
+		{ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol"},
+		{ID: "gpt-5.5", Name: "GPT-5.5"},
+		{ID: "gpt-5.3-codex", Name: "GPT-5.3 Codex"},
+	},
+	"codex": {
+		{ID: "gpt-6-astra", Name: "GPT-6-Astra", Efforts: []string{"low", "medium", "high", "xhigh", "max", "ultra"}},
+		{ID: "gpt-5.6-sol", Name: "GPT-5.6-Sol", Efforts: []string{"low", "medium", "high", "xhigh"}},
+		{ID: "gpt-5.6-terra", Name: "GPT-5.6-Terra", Efforts: []string{"low", "medium", "high", "xhigh"}},
+		{ID: "gpt-5.6-luna", Name: "GPT-5.6-Luna", Efforts: []string{"low", "medium", "high", "xhigh"}},
+		{ID: "gpt-5.5", Name: "GPT-5.5", Efforts: []string{"low", "medium", "high", "xhigh"}},
+	},
+	"deepseek": {
+		{ID: "deepseek-flash", Name: "DeepSeek V4.1 Flash", Released: "2026-09-10", Efforts: []string{"low", "high", "max"}},
+		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Released: "2026-08-12", Efforts: []string{"low", "high", "max"}},
+	},
+	"google": {
+		{ID: "gemini-3.1-pro", Name: "Gemini 3.1 Pro"},
+		{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash"},
+		{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro"},
+		{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"},
+	},
+	"copilot": {
+		{ID: "auto", Name: "Let Copilot pick"},
+		{ID: "claude-fable-5", Name: "Claude Fable 5"},
+		{ID: "claude-opus-4.8", Name: "Claude Opus 4.8"},
+		{ID: "claude-sonnet-4.5", Name: "Claude Sonnet 4.5"},
+		{ID: "claude-haiku-4.5", Name: "Claude Haiku 4.5"},
+		{ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol"},
+		{ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra"},
+		{ID: "gpt-5.6-luna", Name: "GPT-5.6 Luna"},
+		{ID: "gpt-5.5", Name: "GPT-5.5"},
+		{ID: "gpt-5.4", Name: "GPT-5.4"},
+		{ID: "gpt-5.4-mini", Name: "GPT-5.4 mini"},
+		{ID: "gpt-5.3-codex", Name: "GPT-5.3 Codex"},
+		{ID: "gemini-3.6-flash", Name: "Gemini 3.6 Flash"},
+		{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash"},
+	},
+}
+
+// Builtin exposes a built-in list by name (e.g. "copilot").
+func Builtin(name string) []Model { return builtin[name] }
