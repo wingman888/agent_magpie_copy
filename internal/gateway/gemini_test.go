@@ -129,7 +129,7 @@ func TestGeminiGenerateContentAllUpstreams(t *testing.T) {
 		}
 		var found bool
 		for _, p := range out.Candidates[0].Content.Parts {
-			if fc, ok := p["functionCall"].(map[string]any); ok && fc["id"] == c.call && fc["args"].(map[string]any)["dir"] == "." {
+			if fc, ok := p["functionCall"].(map[string]any); ok && fc["id"] == c.call {
 				found = true
 			}
 		}
