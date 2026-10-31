@@ -1,11 +1,13 @@
 package gui
 
 import (
+	"context"
 	"net/http"
+	"time"
 
-	"github.com/yetone/dial/internal/agent"
-	"github.com/yetone/dial/internal/provider"
-	"github.com/yetone/dial/internal/usage"
+	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // usageGroup is a usage.Group with what the UI needs to draw it.
@@ -18,14 +20,17 @@ type usageGroup struct {
 
 type usageJSON struct {
 	usage.Summary
-	Agents []usageGroup `json:"agents"`
-	Models []usageGroup `json:"models"`
-	Path   string       `json:"path"`
+	Agents        []usageGroup                 `json:"agents"`
+	Models        []usageGroup                 `json:"models"`
+	Path          string                       `json:"path"`
+	Subscriptions []provider.SubscriptionQuota `json:"subscriptions"`
 }
 
-func usageState(p usage.Period) usageJSON {
+func usageState(ctx context.Context, p usage.Period) usageJSON {
 	s := usage.Summarize(p)
-	out := usageJSON{Summary: s, Agents: []usageGroup{}, Models: []usageGroup{}, Path: tilde(usage.Path())}
+	quotaCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	out := usageJSON{Summary: s, Agents: []usageGroup{}, Models: []usageGroup{}, Path: tilde(usage.Path()), Subscriptions: provider.SubscriptionUsage(quotaCtx)}
 	agents := map[string]*agent.Agent{}
 	for _, a := range agent.All() {
 		agents[a.ID] = a
@@ -62,6 +67,6 @@ func usageRoutes(mux *http.ServeMux) {
 		default:
 			p = usage.Month
 		}
-		writeJSON(rw, usageState(p))
+		writeJSON(rw, usageState(r.Context(), p))
 	})
 }
