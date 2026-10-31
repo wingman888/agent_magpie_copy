@@ -372,7 +372,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		g := newRelayGate(w)
 		var u Usage
 		call.Provider = a.p.ID
-		status, msg := s.attempt(g, r, from, a, body, &u, &call)
+		status, msg := s.relayTry(g, r, from, a, body, &u, &call)
 		if g.held && i < len(cands)-1 && r.Context().Err() == nil && relayRetryable(g.status, g.buf.Bytes()) {
 			s.rested(a.cool)
 			failed = append(failed, a.label)
@@ -397,8 +397,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
-// relayAttempt answers the request through one candidate.
-func (s *Server) relayAttempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, a relayAttempt, body []byte, u *Usage, call *Call) (int, string) {
+// relayTry answers the request through one candidate.
+func (s *Server) relayTry(w http.ResponseWriter, r *http.Request, from provider.Protocol, a relayAttempt, body []byte, u *Usage, call *Call) (int, string) {
 	p, model := a.p, a.model
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
