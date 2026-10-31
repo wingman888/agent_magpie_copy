@@ -203,6 +203,7 @@ func TestExcluded(t *testing.T) {
 	}
 	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
 	os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte("{}"), 0o600)
+	resetExcluded()
 	ex := Excluded()
 	if len(ex) != 1 || ex[0].Why == "" {
 		t.Fatal(ex)
