@@ -574,10 +574,11 @@ func claimString(m map[string]any, keys ...string) string {
 
 // ---- Codex CLI: a ChatGPT account ----------------------------------------------
 
-const (
-	codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
-	codexTokenURL = "https://auth.openai.com/oauth/token"
-)
+const codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
+
+// codexTokenURL is where ChatGPT's tokens are issued and refreshed; a var
+// so tests can point it elsewhere.
+var codexTokenURL = "https://auth.openai.com/oauth/token"
 
 // CodexBase is where a ChatGPT account's Codex requests go; a var so tests
 // can point it elsewhere.
