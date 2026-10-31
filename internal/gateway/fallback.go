@@ -22,38 +22,12 @@ const fallbackCooldown = time.Minute
 type candidate struct {
 	p     provider.Provider
 	model string
-	rest  string // what rests after a failure: the provider, or one of its keys
-	label string // how a skipped try is recorded
-}
-
-// expand turns a provider into one candidate per enabled key, each carrying
-// that key as p.Key. A provider with at most one key stays as it was.
-func expand(p provider.Provider, model string) []candidate {
-	keys := p.KeysOn()
-	if len(keys) <= 1 {
-		rest := p.ID
-		if len(keys) == 1 {
-			rest += "#" + keys[0].ID
-		}
-		return []candidate{{p, model, rest, p.ID}}
-	}
-	var out []candidate
-	for _, k := range keys {
-		kp := p
-		kp.Key, kp.KeyName, kp.Keys = k.Key, k.Name, nil
-		who := k.Name
-		if who == "" {
-			who = provider.Mask(k.Key)
-		}
-		out = append(out, candidate{kp, model, p.ID + "#" + k.ID, p.ID + "(" + who + ")"})
-	}
-	return out
 }
 
 // candidates is the primary and then its fallbacks, those resting after a
 // recent failure moved behind the rest.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := expand(p, model)
+	out := []candidate{{p, model}}
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -61,14 +35,14 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, expand(fp, fm)...)
+		out = append(out, candidate{fp, fm})
 	}
 	if len(out) == 1 {
 		return out
 	}
 	var ready, resting []candidate
 	for _, c := range out {
-		if s.resting(c.rest) {
+		if s.resting(c.p.ID) {
 			resting = append(resting, c)
 		} else {
 			ready = append(ready, c)
