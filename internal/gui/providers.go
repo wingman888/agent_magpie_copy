@@ -24,17 +24,18 @@ type modelJSON struct {
 }
 
 type providerJSON struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Icon      string `json:"icon"`
-	Preset    string `json:"preset"`
-	Host      string `json:"host"`
-	Chat      string `json:"chat"`
-	Responses string `json:"responses"`
-	Anthropic string `json:"anthropic"`
-	Catalog   string `json:"catalog"`
-	Website   string `json:"website"`
-	KeysURL   string `json:"keysUrl"`
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Account   *provider.Account `json:"account,omitempty"`
+	Icon      string            `json:"icon"`
+	Preset    string            `json:"preset"`
+	Host      string            `json:"host"`
+	Chat      string            `json:"chat"`
+	Responses string            `json:"responses"`
+	Anthropic string            `json:"anthropic"`
+	Catalog   string            `json:"catalog"`
+	Website   string            `json:"website"`
+	KeysURL   string            `json:"keysUrl"`
 	Key       struct {
 		Set      bool   `json:"set"`
 		Masked   string `json:"masked"`
@@ -71,9 +72,10 @@ type gatewayJSON struct {
 }
 
 type providersJSON struct {
-	Providers []providerJSON `json:"providers"`
-	Presets   []presetJSON   `json:"presets"`
-	Gateway   gatewayJSON    `json:"gateway"`
+	Providers []providerJSON       `json:"providers"`
+	Presets   []presetJSON         `json:"presets"`
+	Gateway   gatewayJSON          `json:"gateway"`
+	Excluded  []provider.Exclusion `json:"excluded"`
 }
 
 // currentProvider reads which provider (and model) an agent is routed to now.
@@ -92,7 +94,7 @@ func currentProvider(a *agent.Agent) (string, string) {
 
 func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 	out := providerJSON{
-		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
+		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(), Account: p.Account,
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
@@ -137,7 +139,10 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 
 func providersState(gw *gateway.Server) providersJSON {
 	agents := agent.Detected()
-	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}}
+	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Excluded: provider.Excluded()}
+	if s.Excluded == nil {
+		s.Excluded = []provider.Exclusion{}
+	}
 	have := map[string]bool{}
 	for _, p := range provider.All() {
 		have[p.ID] = true

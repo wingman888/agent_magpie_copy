@@ -210,19 +210,8 @@ func buildResponses(r *Request, model string) []byte {
 		input = []map[string]any{}
 	}
 	out := map[string]any{"model": model, "input": input, "stream": r.Stream, "store": false}
-	sys := r.System
-	if r.JSON && len(r.JSONSchema) == 0 {
-		sys = joinSystem(sys, r.jsonPrompt())
-	}
-	if sys != "" {
-		out["instructions"] = sys
-	}
-	if r.JSON {
-		if len(r.JSONSchema) > 0 {
-			out["text"] = map[string]any{"format": map[string]any{"type": "json_schema", "name": "response", "schema": r.JSONSchema}}
-		} else {
-			out["text"] = map[string]any{"format": map[string]any{"type": "json_object"}}
-		}
+	if r.System != "" {
+		out["instructions"] = r.System
 	}
 	if r.MaxTokens > 0 {
 		out["max_output_tokens"] = r.MaxTokens

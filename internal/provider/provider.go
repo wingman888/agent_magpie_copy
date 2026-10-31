@@ -23,10 +23,7 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-
-	// Gemini is a client-side API only: the gateway serves it, but no
-	// upstream is ever spoken to in it, so it is not in Protocols.
-	Gemini Protocol = "gemini"
+	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -35,10 +32,14 @@ var Protocols = []Protocol{Chat, Responses, Anthropic}
 // Provider is one configured vendor.
 type Provider struct {
 	ID     string `json:"id"`
-	Name   string `json:"name"`
+	Name   string `json:"name,omitempty"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key,omitempty"`    // API key, as typed by the user
+
+	// Account is set for providers that borrow another agent's login
+	// (Codex, Copilot). Never stored; derived from the agent's own files.
+	Account *Account `json:"account,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -92,11 +93,40 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added.
+func hasBase(p Provider) bool { return p.Chat != "" || p.Responses != "" || p.Anthropic != "" }
+
+// All lists the configured providers in the order they were added, then
+// the signed-in account providers. A stored provider with an address wins
+// over an account of the same id; a stored record without one only holds
+// the model choice for that account.
 func All() []Provider {
-	out := load().Providers
-	for i := range out {
-		out[i] = normalize(out[i])
+	stored := load().Providers
+	accounts := Accounts()
+	var out []Provider
+	custom := map[string]bool{}
+	for _, p := range stored {
+		p = normalize(p)
+		if hasBase(p) {
+			custom[p.ID] = true
+		}
+	}
+	for _, p := range stored {
+		p = normalize(p)
+		if !hasBase(p) && IsAccountID(p.ID) {
+			continue // a model choice, not a provider
+		}
+		out = append(out, p)
+	}
+	for _, a := range accounts {
+		if custom[a.ID] {
+			continue
+		}
+		for _, p := range stored {
+			if p.ID == a.ID && !hasBase(normalize(p)) {
+				a.Models = cleanList(p.Models)
+			}
+		}
+		out = append(out, a)
 	}
 	return out
 }
@@ -128,6 +158,9 @@ func Save(p Provider) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
+	if p.Account != nil || (IsAccountID(p.ID) && !hasBase(p)) {
+		return saveChoice(p)
+	}
 	if p.ID == "dial" {
 		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
 	}
@@ -151,9 +184,49 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider.
+// saveChoice keeps only which models of an account provider to expose.
+func saveChoice(p Provider) error {
+	id := p.ID
+	if p.Account != nil && p.Account.Agent != "" {
+		id = p.Account.Agent
+	}
+	if !IsAccountID(id) {
+		return fmt.Errorf("%q is not an account provider", p.ID)
+	}
+	f := load()
+	keep := f.Providers[:0]
+	for _, q := range f.Providers {
+		if q.ID == id && !hasBase(normalize(q)) {
+			continue
+		}
+		keep = append(keep, q)
+	}
+	f.Providers = keep
+	if models := cleanList(p.Models); len(models) > 0 {
+		f.Providers = append(f.Providers, Provider{ID: id, Models: models})
+	}
+	return store(f)
+}
+
+// Delete removes a provider. For an account provider that only clears the
+// model choice: signing out is the agent's business.
 func Delete(id string) error {
 	f := load()
+	if IsAccountID(id) {
+		custom := false
+		for _, p := range f.Providers {
+			if p.ID == id && hasBase(normalize(p)) {
+				custom = true
+			}
+		}
+		if !custom {
+			for _, a := range Accounts() {
+				if a.ID == id {
+					return saveChoice(Provider{ID: id})
+				}
+			}
+		}
+	}
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -281,4 +354,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
