@@ -2,5 +2,5 @@
 
 package netproxy
 
-// Linux has no system proxy beyond the environment.
-func readSystem() *SystemConfig { return nil }
+// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
+func system() Proxy { return Proxy{} }
