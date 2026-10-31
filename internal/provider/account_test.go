@@ -493,3 +493,16 @@ func TestClaudeSignedOut(t *testing.T) {
 		t.Fatal("claude listed after sign-out")
 	}
 }
+
+func TestFallbackNormalizedAndKept(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	fb := []string{" codex/gpt-5.5 ", "", "codex/gpt-5.5", "other/m"}
+	if err := Save(Provider{ID: "x", Name: "X", Key: "k", Chat: "https://x.example/v1", Fallback: fb}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Find("x")
+	if err != nil || strings.Join(p.Fallback, "|") != "codex/gpt-5.5|other/m" {
+		t.Fatalf("%+v %v", p, err)
+	}
+}

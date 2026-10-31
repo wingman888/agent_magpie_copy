@@ -65,13 +65,7 @@ func SaveLive(provider, base string, models []Model) error {
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with a hook that may add headers (applied last, so
-// they win over the built-in ones).
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers func(http.Header)) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -115,7 +109,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers fu
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers func(http.Header)) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -131,8 +125,10 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers func
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	if headers != nil {
-		headers(req.Header)
+	// The user's own headers, after the defaults so a private auth scheme
+	// wins. Written directly so the name keeps the exact case the user typed.
+	for k, v := range headers {
+		req.Header[k] = []string{v}
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
