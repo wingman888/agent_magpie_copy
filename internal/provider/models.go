@@ -236,20 +236,11 @@ type Entry struct {
 	Model    string   `json:"model"` // what magpie sends the vendor
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
-	Provider Provider `json:"-"`               // a group's: its first member's
-	Group    string   `json:"group,omitempty"` // set on a routing group (group.go)
-	Icons    []string `json:"-"`               // a group's: its providers' icons, one per provider
+	Provider Provider `json:"-"`
 }
 
-// Catalog lists every exposed model of every ready provider, then the
-// routing groups.
+// Catalog lists every exposed model of every ready provider.
 func Catalog() []Entry {
-	entries := providerEntries()
-	return append(entries, groupEntries(entries)...)
-}
-
-// providerEntries is the catalog without its groups.
-func providerEntries() []Entry {
 	var out []Entry
 	for _, p := range All() {
 		if !p.Ready() {
@@ -265,21 +256,9 @@ func providerEntries() []Entry {
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
 // It accepts catalog ids, "provider/model" for any model (exposed or not),
 // and the bare model id when exactly one provider serves it.
-// A group's id resolves to its first member.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
-	if strings.HasPrefix(id, GroupPrefix) {
-		for _, e := range Catalog() {
-			if e.ID == id {
-				return e.Provider, e.Model, true
-			}
-		}
-		return Provider{}, "", false
-	}
-	return resolveIn(providerEntries(), id)
-}
-
-func resolveIn(entries []Entry, id string) (Provider, string, bool) {
+	entries := Catalog()
 	for _, e := range entries {
 		if e.ID == id {
 			return e.Provider, e.Model, true
