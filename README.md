@@ -103,7 +103,8 @@ with the app; `dial serve` runs it alone. It exposes:
 | `/v1/responses`          | OpenAI Responses           |
 | `/v1/messages`           | Anthropic Messages         |
 | `/v1/messages/count_tokens` | Anthropic token counting |
-| `/v1/models`             | the catalog                |
+| `/v1beta/models/{model}:generateContent` | Google Gemini (also `:streamGenerateContent`, `:countTokens`) |
+| `/v1/models`, `/v1beta/models` | the catalog            |
 
 Requests pass straight through when the vendor speaks the agent's API and
 are translated otherwise, streaming, tool calls and reasoning included. The
@@ -123,7 +124,10 @@ Codex reads its model list at start-up, so restart it after a switch.
 **OpenCode, Pi, Crush** get a `dial` provider entry and `dial/provider/model`.
 
 **Gemini CLI** switches `auth` between API key, Google account and Vertex;
-the API key goes to `~/.gemini/.env`.
+the API key goes to `~/.gemini/.env`. Picking a catalog model points
+`GOOGLE_GEMINI_BASE_URL` at the gateway (which speaks the Gemini API), sets
+`auth` to API key with the gateway token, and names the model in
+`settings.json`; a native model puts the previous auth back.
 
 ## Install
 
