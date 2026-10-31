@@ -158,19 +158,8 @@ func dataURL(p Part) string {
 	return "data:" + p.MediaType + ";base64," + p.Data
 }
 
-// reasoningModel is a model that rejects temperature and top_p.
-func reasoningModel(model string) bool {
-	m := strings.ToLower(model)
-	for _, pre := range []string{"gpt-5", "o1", "o3", "o4", "codex"} {
-		if strings.HasPrefix(m, pre) || strings.Contains(m, "/"+pre) {
-			return true
-		}
-	}
-	return false
-}
-
 // buildChat renders a request for a Chat Completions upstream.
-func buildChat(r *Request, model, host string) []byte {
+func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	var msgs []map[string]any
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
@@ -249,7 +238,7 @@ func buildChat(r *Request, model, host string) []byte {
 			out["max_tokens"] = r.MaxTokens
 		}
 	}
-	if !reasoningModel(model) {
+	if !rejectTemp {
 		if r.Temp != nil {
 			out["temperature"] = *r.Temp
 		}
