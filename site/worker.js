@@ -45,9 +45,19 @@ export default {
       if (!asset) return new Response("not found\n", { status: 404 });
       return Response.redirect(asset.url, 302);
     }
-    return env.ASSETS.fetch(req);
+    return beacon(await env.ASSETS.fetch(req));
   },
 };
+
+// beacon adds Cloudflare Web Analytics to a page. The dashboard's automatic
+// injection skips whatever a worker returns, and every page passes through
+// this one.
+const BEACON = `<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "c09e76abf16b40b2aa5571c196efb847"}'></script>`;
+
+function beacon(res) {
+  if (!(res.headers.get("Content-Type") || "").startsWith("text/html")) return res;
+  return new HTMLRewriter().on("body", { element: (el) => el.append(BEACON, { html: true }) }).transform(res);
+}
 
 // latest is the newest release, condensed, with each file's SHA-256 taken
 // from the release's SHA256SUMS. GitHub's API gives the notes and sizes but
