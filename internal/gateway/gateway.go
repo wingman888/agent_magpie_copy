@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,7 +60,6 @@ type Call struct {
 	Agent             string            `json:"agent"` // who called, from the client's User-Agent
 	Model             string            `json:"model"`
 	Provider          string            `json:"provider"`
-	Fallback          string            `json:"fallback,omitempty"` // candidates that failed before this one answered
 	From              provider.Protocol `json:"from"`
 	To                provider.Protocol `json:"to"`
 	Status            int               `json:"status"`
@@ -85,7 +82,6 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	rest         map[string]time.Time // failed candidates and when they may be tried first again
 }
 
 // New makes a gateway.
@@ -99,7 +95,6 @@ func New() *Server {
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
-		rest:         make(map[string]time.Time),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -225,19 +220,15 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ok && p.Anthropic != "" {
-		for _, kp := range relayAnthropicKeys(p) { // never a key limited to OpenAI
-			res, err := s.forward(r.Context(), kp, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-			if err != nil {
-				continue
-			}
+		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+		if err == nil {
+			defer res.Body.Close()
 			if res.StatusCode < 400 {
-				defer res.Body.Close()
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(res.StatusCode)
 				io.Copy(w, res.Body)
 				return
 			}
-			res.Body.Close()
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -356,74 +347,52 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	cands := s.candidates(p, model, from)
-	if len(cands) == 0 {
-		call.Status, call.Error = 502, p.Name+" has no key usable for this request"
-		writeError(w, from, call.Status, call.Error)
-		call.Millis = time.Since(start).Milliseconds()
-		finishCapture()
-		s.record(call)
-		return
-	}
-	var failed []string
-	var final relayAttempt
-	for i, a := range cands {
-		final = a
-		g := newRelayGate(w)
-		var u Usage
-		call.Provider = a.p.ID
-		status, msg := s.relayTry(g, r, from, a, body, &u, &call)
-		if g.held && i < len(cands)-1 && r.Context().Err() == nil && relayRetryable(g.status, g.buf.Bytes()) {
-			s.rested(a.cool)
-			failed = append(failed, a.label)
-			continue
-		}
-		if g.held {
-			if relayRetryable(g.status, g.buf.Bytes()) {
-				s.rested(a.cool)
-			}
-			g.release()
-		}
-		call.Status, call.Error = status, msg
-		call.Usage = u
-		break
-	}
-	call.Fallback = strings.Join(failed, " → ")
-	call.Millis = time.Since(start).Milliseconds()
-	finishCapture()
-	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: final.p.ID, Model: final.model,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-}
-
-// relayTry answers the request through one candidate.
-func (s *Server) relayTry(w http.ResponseWriter, r *http.Request, from provider.Protocol, a relayAttempt, body []byte, u *Usage, call *Call) (int, string) {
-	p, model := a.p, a.model
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, model, body, u)
+		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
-	if p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body)) {
+	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
+	if relay {
 		call.To = from
-		return s.passthrough(w, r, p, from, model, body, u)
+		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+	} else {
+		to := p.Speaks()
+		if len(to) == 0 {
+			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
+			writeError(w, from, call.Status, call.Error)
+			call.Millis = time.Since(start).Milliseconds()
+			finishCapture()
+			s.record(call)
+			return
+		}
+		call.To = to[0]
+		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 	}
-	to := p.Speaks()
-	if len(to) == 0 {
-		msg := p.Name + " has no endpoint configured"
-		return writeError(w, from, 502, msg), msg
-	}
-	call.To = to[0]
-	return s.translate(w, r, p, from, to[0], model, body, u)
+	call.Millis = time.Since(start).Milliseconds()
+	finishCapture()
+	s.record(call)
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
+	if to == provider.Chat {
+		body = developerToSystem(body)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -439,8 +408,8 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	if p.IsOpenCode() {
-		req.Header.Set("x-opencode-session", conversationID(in, body))
+	if provider.IsOpenCodeHost(p.Base(to)) {
+		req.Header.Set("x-opencode-session", opencodeSession(in, body))
 	}
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
@@ -452,11 +421,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
-	body = rewriteModel(body, model)
-	if proto == provider.Chat {
-		body = developerAsSystem(body)
-	}
-	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
+	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(rewriteModel(body, model)), r.Header)
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}
@@ -746,85 +711,6 @@ func modelOf(body []byte) string {
 // rewriteModel swaps the model field, keeping every other field as it was.
 func rewriteModel(body []byte, model string) []byte {
 	return withFields(body, map[string]any{"model": model})
-}
-
-// developerAsSystem turns "developer" messages into "system" ones. Agents
-// such as Pi send the developer role to reasoning models, which OpenAI
-// accepts, but other Chat Completions backends (DeepSeek among them) reject
-// the whole request; every backend accepts system, OpenAI included.
-func developerAsSystem(body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"developer"`)) {
-		return body
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var m map[string]any
-	if err := dec.Decode(&m); err != nil {
-		return body
-	}
-	msgs, _ := m["messages"].([]any)
-	changed := false
-	for _, v := range msgs {
-		if msg, ok := v.(map[string]any); ok && msg["role"] == "developer" {
-			msg["role"] = "system"
-			changed = true
-		}
-	}
-	if !changed {
-		return body
-	}
-	out, err := json.Marshal(m)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
-// sessionHeaders are where agents already name their conversation: OpenCode
-// (to its own gateway, and to everyone else), Pi, Codex and Claude Code.
-var sessionHeaders = []string{
-	"x-opencode-session", "x-session-affinity", "x-session-id",
-	"session_id", "session-id", "x-claude-code-session-id",
-}
-
-// conversationID is a stable id for the conversation a request belongs to.
-// It is the agent's own session id when it sends one; otherwise it is derived
-// from the conversation's first user message, which every later turn repeats.
-func conversationID(in http.Header, body []byte) string {
-	for _, h := range sessionHeaders {
-		if v := strings.TrimSpace(in.Get(h)); v != "" {
-			return v
-		}
-	}
-	var m struct {
-		Messages []json.RawMessage `json:"messages"`
-		Input    json.RawMessage   `json:"input"`
-	}
-	// An undecodable body still gets an id: the hash of the whole body.
-	_ = json.Unmarshal(body, &m)
-	items := m.Messages
-	if len(items) == 0 && len(m.Input) > 0 && m.Input[0] == '[' {
-		// A malformed input array leaves items empty, and the whole body is hashed.
-		_ = json.Unmarshal(m.Input, &items)
-	}
-	first := []byte(m.Input)
-	if len(items) > 0 {
-		first = items[0]
-	}
-	for _, it := range items {
-		var r struct {
-			Role string `json:"role"`
-		}
-		if json.Unmarshal(it, &r) == nil && r.Role == "user" {
-			first = it
-			break
-		}
-	}
-	if len(first) == 0 {
-		first = body
-	}
-	sum := sha256.Sum256(first)
-	return "magpie-" + hex.EncodeToString(sum[:12])
 }
 
 // withFields sets top-level fields, keeping every other field as it was.

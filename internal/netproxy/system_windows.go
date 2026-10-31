@@ -1,21 +1,18 @@
 package netproxy
 
-import "golang.org/x/sys/windows/registry"
+import (
+	"context"
+	"os/exec"
+	"time"
+)
 
-// system reads Internet Options' manual proxy (what most proxy clients set).
-func system() Proxy {
-	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.QUERY_VALUE)
+func readSystem() *SystemConfig {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "reg", "query", `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`)
+	out, err := cmd.Output()
 	if err != nil {
-		return Proxy{}
+		return nil
 	}
-	defer k.Close()
-	if on, _, err := k.GetIntegerValue("ProxyEnable"); err != nil || on == 0 {
-		return Proxy{}
-	}
-	server, _, err := k.GetStringValue("ProxyServer")
-	if err != nil {
-		return Proxy{}
-	}
-	override, _, _ := k.GetStringValue("ProxyOverride")
-	return parseWindows(server, override)
+	return ParseWinReg(string(out))
 }

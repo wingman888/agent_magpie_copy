@@ -1,13 +1,17 @@
 package netproxy
 
-import "os/exec"
+import (
+	"context"
+	"os/exec"
+	"time"
+)
 
-// system reads what System Settings → Network → Proxies says, through
-// scutil (the same dictionary CFNetwork uses).
-func system() Proxy {
-	out, err := exec.Command("scutil", "--proxy").Output()
+func readSystem() *SystemConfig {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "scutil", "--proxy").Output()
 	if err != nil {
-		return Proxy{}
+		return nil
 	}
-	return parseScutil(string(out))
+	return ParseScutil(string(out))
 }

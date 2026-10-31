@@ -24,9 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		for _, c := range p.Catalogs() {
-			known = append(known, catalog.Provider(c)...)
-		}
+		known = catalog.Provider(p.Catalog)
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -56,11 +54,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		var hdr map[string]string
-		if p.Preset == "" && p.Account == nil {
-			hdr = p.Headers
-		}
-		ms, err := catalog.Fetch(ctx, p.Base(proto), p.fetchKey(proto), proto == Anthropic, hdr)
+		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic)
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -72,41 +66,18 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	return nil, lastErr
 }
 
-// fetchKey picks the first enabled key that is unrestricted or limited to
-// the protocol being asked; failing that, the current key.
-func (p Provider) fetchKey(proto Protocol) string {
-	for _, k := range p.KeyList() {
-		if !k.Off && (k.Protocol == "" || k.Protocol == proto) {
-			return k.Key
-		}
-	}
-	return p.Key
-}
-
 // Exposed lists the models magpie offers to agents for this provider: the
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
 	byID := make(map[string]catalog.Model, len(avail))
 	for _, m := range avail {
-		if _, dup := byID[m.ID]; !dup {
-			byID[m.ID] = m
-		}
+		byID[m.ID] = m
 	}
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
-			m, ok := byID[id]
-			if !ok {
-				if i := strings.LastIndex(id, "/"); i >= 0 {
-					// "vendor/model" from a multi-vendor gateway: borrow the
-					// catalog's name and reasoning levels for the model part
-					if k, found := byID[id[i+1:]]; found {
-						k.ID, ok, m = id, true, k
-					}
-				}
-			}
-			if ok {
+			if m, ok := byID[id]; ok {
 				out = append(out, m)
 			} else {
 				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})

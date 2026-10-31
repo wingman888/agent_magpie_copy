@@ -56,11 +56,6 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
-	if p.Preset == "" { // custom providers only; applied after auth so they can override it
-		for k, v := range p.Headers {
-			catalog.SetHeader(req.Header, k, v)
-		}
-	}
 	return nil
 }
 
@@ -74,20 +69,14 @@ func (p Provider) Prepare(body []byte) []byte {
 
 // Exclusion is a sign-in magpie found but will not offer as a provider.
 type Exclusion struct {
-	Agent    string `json:"agent"`
-	Provider string `json:"provider,omitempty"` // set when the user removed it; saving it brings it back
-	Why      string `json:"why"`
+	Agent string `json:"agent"`
+	Why   string `json:"why"`
 }
 
-// Excluded lists sign-ins magpie detects but leaves out: the accounts the
-// user removed from magpie.
-func Excluded() []Exclusion {
-	var out []Exclusion
-	for _, a := range Hidden() {
-		out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID, Why: "You removed it from magpie."})
-	}
-	return out
-}
+// Excluded lists sign-ins magpie detects but cannot expose. It is currently
+// empty, but remains part of the API so the CLI and GUI can explain future
+// account types that are detectable but not usable.
+func Excluded() []Exclusion { return nil }
 
 const (
 	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -122,7 +111,6 @@ var (
 	claudeStatusAt   time.Time
 	claudeStatusUser string
 	claudeStatusPlan string
-	claudeStatusOut  bool // Claude Code says nobody is signed in
 
 	claudeCacheMu  sync.Mutex
 	claudeCacheAt  time.Time
@@ -277,8 +265,7 @@ func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) err
 	return nil
 }
 
-// claudeExecutable finds the claude CLI; a var so tests can fake it.
-var claudeExecutable = func() string {
+func claudeExecutable() string {
 	if p, err := exec.LookPath("claude"); err == nil {
 		return p
 	}
@@ -295,46 +282,54 @@ var claudeExecutable = func() string {
 // blob intentionally contains tokens and plan metadata but no display identity;
 // `claude auth status --json` is the authoritative, non-secret view shown by the
 // CLI. Cache it briefly because the providers screen refreshes often.
-//
-// It also says when Claude Code is signed out even though credentials are
-// still lying around (a keychain item logout left behind), so a signed-out
-// account stops showing up as a provider.
-func claudeIdentity() (user, plan string, signedOut bool) {
+func claudeIdentity() (string, string) {
 	claudeStatusMu.Lock()
 	defer claudeStatusMu.Unlock()
 	if time.Since(claudeStatusAt) < 30*time.Second {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return claudeStatusUser, claudeStatusPlan
 	}
 	claudeStatusAt = time.Now()
 	path := claudeExecutable()
 	if path == "" {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return claudeStatusUser, claudeStatusPlan
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// signed out, `claude auth status` exits 1 but still prints the JSON
-	out, _ := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
+	out, err := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
+	if err != nil {
+		return claudeStatusUser, claudeStatusPlan
+	}
 	var status struct {
-		LoggedIn         *bool  `json:"loggedIn"`
+		LoggedIn         bool   `json:"loggedIn"`
 		Email            string `json:"email"`
 		SubscriptionType string `json:"subscriptionType"`
 	}
-	if json.Unmarshal(out, &status) != nil || status.LoggedIn == nil {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
-	}
-	claudeStatusOut = !*status.LoggedIn
-	claudeStatusUser, claudeStatusPlan = "", ""
-	if *status.LoggedIn {
+	if json.Unmarshal(out, &status) == nil && status.LoggedIn {
 		claudeStatusUser = strings.TrimSpace(status.Email)
 		claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
 	}
-	return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+	return claudeStatusUser, claudeStatusPlan
 }
 
-// claudeSigner signs a request with the token tok yields.
-func claudeSigner(tok func(ctx context.Context) (string, error)) func(ctx context.Context, req *http.Request, body []byte) error {
-	return func(ctx context.Context, req *http.Request, body []byte) error {
-		tok, err := tok(ctx)
+func claudeAccount() (Provider, bool) {
+	c, _, ok := claudeCredential()
+	if !ok {
+		return Provider{}, false
+	}
+	user, statusPlan := claudeIdentity()
+	plan := c.OAuth.SubscriptionType
+	if statusPlan != "" {
+		plan = statusPlan
+	}
+	if user == "" {
+		user = "Claude account"
+		if plan != "" {
+			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
+		}
+	}
+	acct := &Account{Agent: "claude", User: user, Plan: plan}
+	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
+		tok, err := claudeToken(ctx)
 		if err != nil {
 			return err
 		}
@@ -350,35 +345,6 @@ func claudeSigner(tok func(ctx context.Context) (string, error)) func(ctx contex
 		}
 		return nil
 	}
-}
-
-func claudeAccount() (Provider, bool) {
-	c, _, ok := claudeCredential()
-	if !ok {
-		return Provider{}, false
-	}
-	user, statusPlan, signedOut := claudeIdentity()
-	if signedOut {
-		return Provider{}, false
-	}
-	plan := c.OAuth.SubscriptionType
-	if statusPlan != "" {
-		plan = statusPlan
-	}
-	if user == "" {
-		user = claudeProfileEmail()
-	}
-	if user != "" {
-		rememberLogin("claude")
-	}
-	if user == "" {
-		user = "Claude account"
-		if plan != "" {
-			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
-		}
-	}
-	acct := &Account{Agent: "claude", User: user, Plan: plan}
-	acct.sign = claudeSigner(claudeToken)
 	acct.body = claudeBody
 	acct.models = func() []catalog.Model { return catalog.Provider("anthropic") }
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
@@ -487,35 +453,16 @@ func claudeToken(ctx context.Context) (string, error) {
 	if c.OAuth.RefreshToken == "" {
 		return "", errors.New("Claude Code OAuth token expired; run claude auth login")
 	}
-	access, refresh, expiresAt, err := claudeRefresh(ctx, c.OAuth.RefreshToken)
-	if err != nil {
-		return "", err
-	}
-	c.OAuth.AccessToken = access
-	if refresh != "" {
-		c.OAuth.RefreshToken = refresh
-	}
-	if expiresAt > 0 {
-		c.OAuth.ExpiresAt = expiresAt
-	}
-	if err := saveClaudeCredential(loc, c); err != nil {
-		return "", err
-	}
-	return access, nil
-}
-
-// claudeRefresh trades a refresh token for a new pair; expiresAt is in ms.
-func claudeRefresh(ctx context.Context, refreshToken string) (access, refresh string, expiresAt int64, err error) {
-	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": refreshToken,
+	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": c.OAuth.RefreshToken,
 		"client_id": claudeClientID})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeTokenURL, bytes.NewReader(body))
 	if err != nil {
-		return "", "", 0, err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "", 0, errors.New("Claude Code token refresh: " + err.Error())
+		return "", errors.New("Claude Code token refresh: " + err.Error())
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -525,12 +472,19 @@ func claudeRefresh(ctx context.Context, refreshToken string) (access, refresh st
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if res.StatusCode != http.StatusOK || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return "", "", 0, errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
+		return "", errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
+	}
+	c.OAuth.AccessToken = fresh.AccessToken
+	if fresh.RefreshToken != "" {
+		c.OAuth.RefreshToken = fresh.RefreshToken
 	}
 	if fresh.ExpiresIn > 0 {
-		expiresAt = time.Now().Add(time.Duration(fresh.ExpiresIn) * time.Second).UnixMilli()
+		c.OAuth.ExpiresAt = time.Now().Add(time.Duration(fresh.ExpiresIn) * time.Second).UnixMilli()
 	}
-	return fresh.AccessToken, fresh.RefreshToken, expiresAt, nil
+	if err := saveClaudeCredential(loc, c); err != nil {
+		return "", err
+	}
+	return fresh.AccessToken, nil
 }
 
 // Accounts lists the signed-in agents as providers.
@@ -594,11 +548,10 @@ func claimString(m map[string]any, keys ...string) string {
 
 // ---- Codex CLI: a ChatGPT account ----------------------------------------------
 
-const codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
-
-// codexTokenURL is where a ChatGPT login is refreshed; a var so tests can
-// point it elsewhere.
-var codexTokenURL = "https://auth.openai.com/oauth/token"
+const (
+	codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
+	codexTokenURL = "https://auth.openai.com/oauth/token"
+)
 
 // CodexBase is where a ChatGPT account's Codex requests go; a var so tests
 // can point it elsewhere.
@@ -627,20 +580,9 @@ func codexAccount(home string) (Provider, bool) {
 		User: claimString(id, "email"), Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")}
 	if acct.User == "" {
 		acct.User = "ChatGPT"
-	} else {
-		rememberLogin("codex")
 	}
-	acct.sign = codexSigner(func(ctx context.Context) (string, string, error) { return codexToken(ctx, path) })
-	acct.body = codexBody
-	acct.models = catalog.Codex
-	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
-}
-
-// codexSigner signs a request with the token and ChatGPT account tok yields.
-func codexSigner(tok func(ctx context.Context) (string, string, error)) func(ctx context.Context, req *http.Request, body []byte) error {
-	return func(ctx context.Context, req *http.Request, _ []byte) error {
-		tok, accountID, err := tok(ctx)
+	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
+		tok, accountID, err := codexToken(ctx, path)
 		if err != nil {
 			return err
 		}
@@ -652,6 +594,10 @@ func codexSigner(tok func(ctx context.Context) (string, string, error)) func(ctx
 		req.Header.Set("originator", "magpie")
 		return nil
 	}
+	acct.body = codexBody
+	acct.models = catalog.Codex
+	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
+	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI
@@ -671,9 +617,26 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 	if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
 		return a.Tokens.AccessToken, accountID, nil
 	}
-	fresh, err := codexRefresh(ctx, a.Tokens.RefreshToken)
+	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
+		"refresh_token": a.Tokens.RefreshToken, "scope": "openid profile email"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, bytes.NewReader(body))
 	if err != nil {
 		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", errors.New("Codex token refresh: " + err.Error())
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	var fresh struct {
+		IDToken      string `json:"id_token"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if res.StatusCode != 200 || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
+		return "", "", errors.New("Codex is signed out (token refresh failed); run codex login")
 	}
 	// keep every other field of the file as Codex CLI wrote it
 	var raw map[string]any
@@ -696,34 +659,6 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 		}
 	}
 	return fresh.AccessToken, accountID, nil
-}
-
-type codexFresh struct{ IDToken, AccessToken, RefreshToken string }
-
-// codexRefresh trades a refresh token for new tokens.
-func codexRefresh(ctx context.Context, refreshToken string) (codexFresh, error) {
-	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
-		"refresh_token": refreshToken, "scope": "openid profile email"})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, bytes.NewReader(body))
-	if err != nil {
-		return codexFresh{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return codexFresh{}, errors.New("Codex token refresh: " + err.Error())
-	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	var f struct {
-		IDToken      string `json:"id_token"`
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-	}
-	if res.StatusCode != 200 || json.Unmarshal(b, &f) != nil || f.AccessToken == "" {
-		return codexFresh{}, errors.New("Codex is signed out (token refresh failed); run codex login")
-	}
-	return codexFresh{f.IDToken, f.AccessToken, f.RefreshToken}, nil
 }
 
 // codexBody makes a Responses request acceptable to the ChatGPT backend:
@@ -953,11 +888,4 @@ func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) 
 		return nil, errors.New("Copilot lists no chat model for this account")
 	}
 	return out, nil
-}
-
-// forgetClaudeStatus drops what `claude auth status` said; tests use it.
-func forgetClaudeStatus() {
-	claudeStatusMu.Lock()
-	claudeStatusAt, claudeStatusUser, claudeStatusPlan, claudeStatusOut = time.Time{}, "", "", false
-	claudeStatusMu.Unlock()
 }

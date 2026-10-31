@@ -10,6 +10,7 @@
 package update
 
 import (
+	_ "github.com/yetone/magpie/internal/netproxy" // routes http.DefaultTransport through the proxy rules
 	"context"
 	"crypto/sha256"
 	"encoding/hex"

@@ -7,6 +7,7 @@
 package provider
 
 import (
+	_ "github.com/yetone/magpie/internal/netproxy" // routes http.DefaultTransport through the proxy rules
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,18 +38,6 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName names the key above; KeyProtocol, when set, limits it to one
-	// protocol ("" means any). Keys are further keys, tried after it.
-	KeyName     string   `json:"keyName,omitempty"`
-	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
-	Keys        []Key    `json:"keys,omitempty"`
-
-	// Headers are extra request headers for a custom provider.
-	Headers map[string]string `json:"headers,omitempty"`
-
-	// Fallback lists "provider/model" to try when this one cannot answer.
-	Fallback []string `json:"fallback,omitempty"`
-
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -63,10 +52,6 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
-
-	// Hidden is set on an account the user removed from magpie; the
-	// agent stays signed in, magpie just leaves it alone.
-	Hidden bool `json:"hidden,omitempty"`
 
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
@@ -114,36 +99,22 @@ func store(f file) error {
 // model picks for one of those accounts.
 func All() []Provider {
 	stored := load().Providers
-	picks := map[string]Provider{}
+	picks := map[string][]string{}
 	var out []Provider
 	for _, p := range stored {
 		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			picks[p.ID] = p
+			picks[p.ID] = p.Models
 			continue
 		}
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
+		if _, taken := find(out, a.ID); taken {
 			continue
 		}
-		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
+		a.Models = picks[a.ID]
 		out = append(out, a)
-	}
-	return out
-}
-
-// Hidden lists the signed-in accounts the user removed from magpie.
-func Hidden() []Provider {
-	var out []Provider
-	for _, a := range Accounts() {
-		for _, p := range load().Providers {
-			if p.ID == a.ID && p.Hidden {
-				out = append(out, a)
-			}
-		}
 	}
 	return out
 }
@@ -177,9 +148,6 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
-	if err := relayValidate(p); err != nil {
-		return err
-	}
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -195,8 +163,8 @@ func Save(p Provider) error {
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		// agent's own sign-in
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -209,25 +177,25 @@ func Save(p Provider) error {
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			return storeAndClean(f)
+			return store(f)
 		}
 	}
 	f.Providers = append(f.Providers, p)
-	return storeAndClean(f)
+	return store(f)
 }
 
-// Delete removes a provider. An account is only hidden from magpie (its
-// model picks kept); signing out is the agent's job.
+// Delete removes a provider. For an account it forgets the model picks;
+// signing out is the agent's job.
 func Delete(id string) error {
 	if _, ok := find(Accounts(), id); ok {
 		f := load()
-		for i := range f.Providers {
-			if f.Providers[i].ID == id {
-				f.Providers[i].Hidden = true
-				return store(f)
+		keep := f.Providers[:0]
+		for _, p := range f.Providers {
+			if p.ID != id {
+				keep = append(keep, p)
 			}
 		}
-		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
+		f.Providers = keep
 		return store(f)
 	}
 	f := load()
@@ -244,7 +212,7 @@ func Delete(id string) error {
 		return fmt.Errorf("no provider %q", id)
 	}
 	f.Providers = keep
-	return storeAndClean(f)
+	return store(f)
 }
 
 // keyOptional is true for local servers, which usually have no key.
@@ -260,21 +228,6 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = relayCleanKeys(p)
-	if p.Key == "" && len(p.Keys) > 0 {
-		for i, k := range p.Keys {
-			if !k.Off {
-				p.Key, p.KeyName, p.KeyProtocol = k.Key, k.Name, k.Protocol
-				p.Keys = append(p.Keys[:i:i], p.Keys[i+1:]...)
-				break
-			}
-		}
-	}
-	p.Headers = relayCleanHeaders(p)
-	p.Fallback = cleanList(p.Fallback)
-	p.Icon = strings.TrimSpace(p.Icon)
-	p.Catalog = strings.Join(cleanList(strings.Split(p.Catalog, ",")), ",")
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -352,14 +305,6 @@ func (p Provider) Host() string {
 	return ""
 }
 
-// IsOpenCode reports whether the provider is OpenCode's gateway (Zen or Go),
-// which routes and caches by conversation and turns away requests that do
-// not name one in x-opencode-session.
-func (p Provider) IsOpenCode() bool {
-	h := p.Host()
-	return h == "opencode.ai" || strings.HasSuffix(h, ".opencode.ai")
-}
-
 // HostOf pulls the host out of a URL, for display.
 func HostOf(u string) string {
 	u = strings.TrimSpace(u)
@@ -383,3 +328,27 @@ func Mask(s string) string {
 // Ready reports whether the provider can be used: it has a key, needs
 // none, or is a signed-in agent.
 func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+
+// IsOpenCode reports whether the provider's endpoints are on opencode.ai or
+// one of its subdomains; its gateway wants a session header.
+func (p Provider) IsOpenCode() bool {
+	for _, pr := range Protocols {
+		if IsOpenCodeHost(p.Base(pr)) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsOpenCodeHost reports whether a URL's host is opencode.ai or a subdomain.
+func IsOpenCodeHost(raw string) bool {
+	h := HostOf(raw)
+	if i := strings.LastIndex(h, "@"); i >= 0 {
+		h = h[i+1:]
+	}
+	if i := strings.LastIndex(h, ":"); i >= 0 && !strings.HasSuffix(h, "]") {
+		h = h[:i]
+	}
+	h = strings.TrimSuffix(h, ".")
+	return h == "opencode.ai" || strings.HasSuffix(h, ".opencode.ai")
+}

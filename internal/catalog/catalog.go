@@ -4,6 +4,7 @@
 package catalog
 
 import (
+	_ "github.com/yetone/magpie/internal/netproxy" // routes http.DefaultTransport through the proxy rules
 	"context"
 	"encoding/json"
 	"fmt"

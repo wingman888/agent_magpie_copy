@@ -164,8 +164,15 @@ func magpieProviderJSON(shape string) any {
 		for _, m := range models {
 			// reasoning lets Pi offer its thinking levels for the model
 			e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-			if levels := piThinkingLevels(m.Efforts); levels != nil {
-				e["thinkingLevelMap"] = levels
+			// Pi only offers xhigh / max for models that declare them
+			tl := map[string]string{}
+			for _, lv := range m.Efforts {
+				if lv == "xhigh" || lv == "max" {
+					tl[lv] = lv
+				}
+			}
+			if len(tl) > 0 {
+				e["thinkingLevelMap"] = tl
 			}
 			ms = append(ms, e)
 		}
@@ -175,22 +182,6 @@ func magpieProviderJSON(shape string) any {
 		return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
 	}
 	return nil
-}
-
-// piThinkingLevels is the thinkingLevelMap for a model's efforts. Pi offers
-// xhigh and max only for models that map them, so without it a model whose
-// top level is max stopped at high in Pi.
-func piThinkingLevels(efforts []string) map[string]any {
-	var levels map[string]any
-	for _, e := range efforts {
-		if e == "xhigh" || e == "max" {
-			if levels == nil {
-				levels = map[string]any{}
-			}
-			levels[e] = e
-		}
-	}
-	return levels
 }
 
 func opencode(home, cfg string) *Agent {
