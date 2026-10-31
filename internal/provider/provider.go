@@ -23,7 +23,10 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
+
+	// Gemini is a client-facing protocol only: the gateway serves it but
+	// no upstream is ever spoken to in it, so it is not in Protocols.
+	Gemini Protocol = "gemini" // Google Gemini API
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -51,10 +54,6 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
-
-	// Account is set for providers that are an agent's sign-in (Codex,
-	// Copilot). It names the account; the tokens stay in the agent's files.
-	Account *Account `json:"account,omitempty"`
 }
 
 type file struct {
@@ -94,35 +93,13 @@ func store(f file) error {
 }
 
 // All lists the configured providers in the order they were added.
-//
-// Signed-in agent accounts (see Accounts) follow the user's own providers.
-// A stored entry for an account id without a URL is only the user's model
-// choice for that account; it counts for nothing once the agent signs out.
 func All() []Provider {
-	var out []Provider
-	have := map[string]bool{}
-	picks := map[string][]string{}
-	for _, p := range load().Providers {
-		p = normalize(p)
-		if isAccountID(p.ID) && !hasURL(p) {
-			picks[p.ID] = p.Models
-			continue
-		}
-		p.Account = nil
-		out = append(out, p)
-		have[p.ID] = true
-	}
-	for _, a := range Accounts() {
-		if have[a.ID] {
-			continue // the user's own provider of that id wins
-		}
-		a.Models = cleanList(picks[a.ID])
-		out = append(out, a)
+	out := load().Providers
+	for i := range out {
+		out[i] = normalize(out[i])
 	}
 	return out
 }
-
-func hasURL(p Provider) bool { return p.Chat != "" || p.Responses != "" || p.Anthropic != "" }
 
 // Find looks a provider up by id (or name, case-insensitively).
 func Find(id string) (*Provider, error) {
@@ -148,12 +125,6 @@ func Save(p Provider) error {
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
-	if isAccountID(p.ID) {
-		if ok, err := saveAccountPick(p); ok {
-			return err
-		}
-	}
-	p.Account = nil
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
@@ -180,45 +151,7 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// saveAccountPick stores the model choice for an account provider and
-// nothing else. It reports false when p is not about an account: the user
-// has their own provider of that id, or nobody is signed in and p is a
-// provider with an address of its own.
-func saveAccountPick(p Provider) (bool, error) {
-	f := load()
-	idx := -1
-	for i, q := range f.Providers {
-		if q.ID == p.ID {
-			idx = i
-			if hasURL(normalize(q)) {
-				return false, nil
-			}
-		}
-	}
-	if _, signedIn := accountByID(p.ID); !signedIn {
-		if p.Account == nil && hasURL(p) {
-			return false, nil
-		}
-		if idx < 0 && len(p.Models) == 0 {
-			return true, nil
-		}
-	}
-	pick := Provider{ID: p.ID, Models: cleanList(p.Models)}
-	switch {
-	case len(pick.Models) == 0 && idx >= 0:
-		f.Providers = append(f.Providers[:idx], f.Providers[idx+1:]...)
-	case len(pick.Models) == 0:
-		return true, nil
-	case idx >= 0:
-		f.Providers[idx] = pick
-	default:
-		f.Providers = append(f.Providers, pick)
-	}
-	return true, store(f)
-}
-
-// Delete removes a provider. For an agent account it only forgets the
-// model choice: signing out is the agent's business.
+// Delete removes a provider.
 func Delete(id string) error {
 	f := load()
 	keep := f.Providers[:0]
@@ -231,9 +164,6 @@ func Delete(id string) error {
 		keep = append(keep, p)
 	}
 	if !found {
-		if _, ok := accountByID(id); ok {
-			return nil
-		}
 		return fmt.Errorf("no provider %q", id)
 	}
 	f.Providers = keep
@@ -298,15 +228,6 @@ func contains(xs []string, x string) bool {
 
 // Base returns the base URL for a protocol, or "" when the vendor lacks it.
 func (p Provider) Base(proto Protocol) string {
-	if p.Account != nil {
-		switch {
-		case p.Account.Agent == "codex" && proto == Responses:
-			return CodexBase
-		case p.Account.Agent == "copilot" && proto == Chat:
-			return copilotDefaultAPI
-		}
-		return ""
-	}
 	switch proto {
 	case Chat:
 		return p.Chat
@@ -360,4 +281,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }

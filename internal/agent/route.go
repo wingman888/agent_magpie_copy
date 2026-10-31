@@ -18,38 +18,13 @@ import (
 const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
-func viaDial(prefix string) []Option { return viaDialFor("", prefix) }
-
-// viaDialFor is viaDial for one agent: an agent never sees its own
-// account's models through dial, that would only loop back to itself.
-func viaDialFor(agentID, prefix string) []Option {
+func viaDial(prefix string) []Option {
 	var out []Option
-	for _, e := range catalogFor(agentID) {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: owner(e.Provider) + " · via dial",
+	for _, e := range provider.Catalog() {
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
-}
-
-// catalogFor is the dial catalog minus the agent's own account.
-func catalogFor(agentID string) []provider.Entry {
-	var out []provider.Entry
-	for _, e := range provider.Catalog() {
-		if agentID != "" && e.Provider.Account != nil && e.Provider.Account.Agent == agentID {
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
-}
-
-// owner is whose models a provider's are: the signed-in user for an
-// agent account, else the provider's name.
-func owner(p provider.Provider) string {
-	if p.Account != nil && p.Account.User != "" {
-		return p.Account.User
-	}
-	return p.Name
 }
 
 // isDial reports whether a model value is a catalog reference.
@@ -60,12 +35,10 @@ func isDial(v string) bool {
 
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-func dialModels() []catalog.Model { return dialModelsFor("") }
-
-func dialModelsFor(agentID string) []catalog.Model {
+func dialModels() []catalog.Model {
 	var out []catalog.Model
-	for _, e := range catalogFor(agentID) {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + owner(e.Provider), Provider: e.Provider.Catalog, Efforts: e.Efforts})
+	for _, e := range provider.Catalog() {
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }

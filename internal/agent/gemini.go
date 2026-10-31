@@ -15,20 +15,14 @@ import (
 // authenticates: Google sign-in, a Gemini API key, or Vertex AI. The choice
 // lives in settings.json (security.auth.selectedType). A Google provider
 // added in dial lends its key through ~/.gemini/.env, which the CLI loads.
-//
-// Any catalog model works too: the gateway serves the Gemini API, so dial
-// points GOOGLE_GEMINI_BASE_URL at it, uses the gateway token as the API
-// key and names the catalog model in model.name.
 
 func gemini(home string) *Agent {
 	dir := filepath.Join(home, ".gemini")
 	path := filepath.Join(dir, "settings.json")
 	envPath := filepath.Join(dir, ".env")
 	auth := jsonGet(path, "security.auth.selectedType")
-	model := jsonGet(path, "model.name")
 	base := func() string { v, _ := edit.GetEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL"); return v }
 	envKey := func() string { v, _ := edit.GetEnvFile(envPath, "GEMINI_API_KEY"); return v }
-	routed := func() bool { return base() == gateway.URL() }
 	dialKey := func() string {
 		for _, id := range []string{"google", "gemini"} {
 			if p, err := provider.Find(id); err == nil && p.Key != "" {
@@ -37,25 +31,27 @@ func gemini(home string) *Agent {
 		}
 		return ""
 	}
-	// unroute puts back what routing through the gateway replaced
+
+	routed := func() bool { return base() == gateway.URL() }
+	// unroute puts back what the config said before dial pointed it at the
+	// gateway; items that were absent are removed.
 	unroute := func() error {
-		if !routed() {
+		if base() != gateway.URL() {
 			return nil
 		}
-		if err := edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"); err != nil {
-			return err
-		}
-		var env []edit.KV
 		if u := unstash("gemini.base_url"); u != "" {
-			env = append(env, edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: u})
-		}
-		if k := unstash("gemini.api_key"); k != "" {
-			env = append(env, edit.KV{Path: "GEMINI_API_KEY", Value: k})
-		}
-		if len(env) > 0 {
-			if err := edit.SetEnvFile(envPath, env...); err != nil {
+			if err := edit.SetEnvFile(envPath, edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: u}); err != nil {
 				return err
 			}
+		} else if err := edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL"); err != nil {
+			return err
+		}
+		if k := unstash("gemini.api_key"); k != "" {
+			if err := edit.SetEnvFile(envPath, edit.KV{Path: "GEMINI_API_KEY", Value: k}); err != nil {
+				return err
+			}
+		} else if err := edit.DelEnvFile(envPath, "GEMINI_API_KEY"); err != nil {
+			return err
 		}
 		if a := unstash("gemini.auth"); a != "" {
 			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: a}); err != nil {
@@ -69,35 +65,10 @@ func gemini(home string) *Agent {
 		}
 		return edit.DelJSON(path, "model.name")
 	}
-	setModel := func(v string) error {
-		if v == "" {
-			if routed() {
-				forget("gemini.base_url", "gemini.api_key", "gemini.auth", "gemini.model")
-				if err := edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"); err != nil {
-					return err
-				}
-				return edit.DelJSON(path, "security.auth.selectedType", "model.name")
-			}
-			return edit.DelJSON(path, "model.name")
-		}
-		if isDial(v) {
-			if !routed() {
-				stash(map[string]string{"gemini.base_url": base(), "gemini.api_key": envKey(), "gemini.auth": auth(), "gemini.model": model()})
-			}
-			if err := edit.SetEnvFile(envPath, edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: gateway.URL()}, edit.KV{Path: "GEMINI_API_KEY", Value: gateway.Token}); err != nil {
-				return err
-			}
-			return edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "gemini-api-key"}, edit.KV{Path: "model.name", Value: v})
-		}
-		if err := unroute(); err != nil {
-			return err
-		}
-		return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
-	}
 
 	current := func() string {
 		if routed() {
-			return dialID
+			return "dial"
 		}
 		if base() != "" {
 			return "custom"
@@ -111,11 +82,11 @@ func gemini(home string) *Agent {
 		return "google"
 	}
 	use := func(id string) error {
-		if id == dialID {
-			if routed() {
-				return nil
+		if id == "dial" {
+			if !routed() {
+				return fmt.Errorf("dial routes Gemini CLI through the local gateway; pick a catalog model instead (dial gemini <provider/model>) to enable it")
 			}
-			return fmt.Errorf("pick a model via dial instead; that routes Gemini CLI through the gateway")
+			return nil
 		}
 		if err := unroute(); err != nil {
 			return err
@@ -183,19 +154,48 @@ func gemini(home string) *Agent {
 						key,
 						{Value: "vertex", Label: "Vertex AI", Icon: "googlecloud-color", Note: "Vertex AI · $GOOGLE_CLOUD_PROJECT"},
 					}
-					switch current() {
-					case "custom":
+					if routed() {
+						out = append(out, Option{Value: "dial", Label: "dial", Icon: "dial", Note: "local gateway · models from every provider"})
+					}
+					if current() == "custom" {
 						out = append(out, Option{Value: "custom", Note: hostOf(base()) + " (from .env)"})
-					case dialID:
-						out = append(out, Option{Value: dialID, Label: "dial", Note: "the local gateway · every provider's models"})
 					}
 					return out
 				},
 			},
 			{
 				Key: "model", Label: "model",
-				Get: model,
-				Set: setModel,
+				Get: jsonGet(path, "model.name"),
+				Set: func(v string) error {
+					if v == "" {
+						if err := unroute(); err != nil {
+							return err
+						}
+						return edit.DelJSON(path, "model.name")
+					}
+					if isDial(v) {
+						if !routed() {
+							stash(map[string]string{
+								"gemini.base_url": base(),
+								"gemini.api_key":  envKey(),
+								"gemini.auth":     auth(),
+								"gemini.model":    jsonGet(path, "model.name")(),
+							})
+						}
+						if err := edit.SetEnvFile(envPath,
+							edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: gateway.URL()},
+							edit.KV{Path: "GEMINI_API_KEY", Value: gateway.Token}); err != nil {
+							return err
+						}
+						return edit.SetJSON(path,
+							edit.KV{Path: "security.auth.selectedType", Value: "gemini-api-key"},
+							edit.KV{Path: "model.name", Value: v})
+					}
+					if err := unroute(); err != nil {
+						return err
+					}
+					return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
+				},
 				Options: func(map[string]string) []Option {
 					var ms []catalog.Model
 					for _, m := range catalog.Provider("google") {
@@ -203,8 +203,7 @@ func gemini(home string) *Agent {
 							ms = append(ms, m)
 						}
 					}
-					own := group("Gemini CLI", options(ms, ""))
-					return append(own, viaDial("")...)
+					return append(group("Gemini CLI", options(ms, "")), viaDial("")...)
 				},
 			},
 		},
