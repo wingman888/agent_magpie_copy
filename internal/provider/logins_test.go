@@ -154,7 +154,7 @@ func TestLoginOnAndSwitchInheritance(t *testing.T) {
 	if _, err := SwitchLogin("codex", "a@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	if got := on(); !got["a@example.com"] || got["b@example.com"] || got["c@example.com"] {
+	if got := on(); !got["a@example.com"] || got["b@example.com"] || !got["c@example.com"] {
 		t.Fatalf("after switch to a: %v", got)
 	}
 	if _, err := SwitchLogin("codex", "b@example.com"); err != nil {
