@@ -177,6 +177,48 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 `auth` to API key with the gateway token, and names the model in
 `settings.json`; a native model puts the previous auth back.
 
+## Import links
+
+A vendor or relay can hand you a ready-made provider as one link:
+
+```
+magpie://import?preset=deepseek&key=sk-…
+magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&anthropic=https://api.acme.example&key=sk-…&models=gpt-5.5,claude-sonnet-5
+```
+
+Run `magpie import '<link>'` (add `-y` in scripts). Opening a `magpie://` link
+passes it to magpie as the first argument; the OS registration (macOS URL
+scheme, Windows current-user registry key, Linux `.desktop` entry with
+`x-scheme-handler/magpie`) belongs to the installer.
+
+**A link never saves anything by itself.** magpie first shows the name, id,
+models and every host your prompts and API key will be sent to, warns when it
+would replace an existing provider, and asks `Add it? [y/N]`. Only `y`/`yes`
+adds it. Without a terminal and without `-y` magpie refuses. Malformed or
+dangerous links (non-https endpoints other than localhost/LAN, credentials in
+URLs, control characters in keys, the id `magpie`) are rejected, not repaired.
+
+| Parameter | Meaning |
+| --- | --- |
+| `preset` | preset id (`magpie presets`); its endpoints are used |
+| `region` | one of the preset's regions; unknown region is an error |
+| `name` | provider name; required without `preset`, overrides the preset's name |
+| `id` | provider id; defaults to the preset id, or is derived from the name |
+| `key` | API key; if absent, add it later with `magpie provider key <id> <key>` |
+| `chat` | OpenAI Chat Completions base URL (`…/v1`) |
+| `responses` | OpenAI Responses base URL (`…/v1`) |
+| `anthropic` | Anthropic Messages base URL (root, no `/v1`) |
+| `models` | comma-separated model ids to expose (max 200) |
+| `catalog` | models.dev provider id, for names and reasoning levels |
+| `website`, `keys` | vendor site and key page (https only) |
+
+Without `preset`, at least one of `chat`, `responses`, `anthropic` is needed;
+with `preset`, those and `catalog`/`website`/`keys` are ignored. Values are
+URL-encoded.
+
+On a web page, link to `https://usemagpie.ai/import#<same parameters>`: the
+parameters sit in the fragment, so browsers never send them to a server.
+
 ## Install
 
 Download the app for macOS, Windows or Linux from
