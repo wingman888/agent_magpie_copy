@@ -34,7 +34,7 @@ const providerUsage = `usage:
 // providers: `magpie providers`
 func providers() error {
 	all := provider.All()
-	if len(all) == 0 && len(provider.Excluded()) == 0 {
+	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
 		return nil
 	}
@@ -80,11 +80,7 @@ func providers() error {
 			name = a.Name
 		}
 		fmt.Println()
-		back := ""
-		if x.Provider != "" {
-			back = " · magpie provider add " + x.Provider + " brings it back"
-		}
-		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why+back))
+		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why))
 	}
 	return nil
 }

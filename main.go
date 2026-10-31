@@ -14,7 +14,6 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudebridge"
 	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
@@ -65,7 +64,6 @@ var (
 
 func main() {
 	gateway.Version = version
-	netproxy.Install()
 	update.GUI = hasGUI
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
@@ -190,13 +188,6 @@ func set(a *agent.Agent, key, value string) error {
 
 func fieldForValue(a *agent.Agent, v string) *agent.Field {
 	vals := a.Values()
-	// a model stays with the model, even where other fields offer it too
-	// (Claude Code's opus/sonnet/haiku/fable)
-	for _, o := range a.Fields[0].Options(vals) {
-		if o.Value == v {
-			return nil
-		}
-	}
 	for i := 1; i < len(a.Fields); i++ {
 		for _, o := range a.Fields[i].Options(vals) {
 			if o.Value == v {
@@ -225,9 +216,6 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
-				if v == "" && f.Quiet {
-					continue
-				}
 				if v == "" {
 					v = faint.Render("—")
 				}
