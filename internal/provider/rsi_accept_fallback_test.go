@@ -19,8 +19,7 @@ func TestAcceptFallbackNormalizedAndKept(t *testing.T) {
 	if err != nil || !slices.Equal(p.Fallback, []string{"codex/gpt-5.5", "other/m"}) {
 		t.Fatalf("%v %v", p, err)
 	}
-	all, _ := provider.Load()
-	for _, q := range all {
+	for _, q := range provider.All() {
 		if q.ID == "plan" && !slices.Equal(q.Fallback, []string{"codex/gpt-5.5", "other/m"}) {
 			t.Fatalf("reload %v", q.Fallback)
 		}

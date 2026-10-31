@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -40,7 +41,19 @@ func (u *up) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 func (u *up) n() int { u.mu.Lock(); defer u.mu.Unlock(); return u.hits }
 
-func env(t *testing.T) {
+var seq int
+
+// env isolates config and returns unique provider ids (resting state is process-wide).
+func env(t *testing.T) (plan, spare, third, req string) {
+	seq++
+	n := strconv.Itoa(seq)
+	plan, spare, third = planID+n, spareID+n, thirdID+n
+	req = `{"model":"` + plan + `/m1","messages":[{"role":"user","content":"hi"}]}`
+	envDirs(t)
+	return
+}
+
+func envDirs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -55,7 +68,6 @@ func add(t *testing.T, id, model string, fb []string, u *up) {
 	}
 }
 
-const req = `{"model":"plan/m1","messages":[{"role":"user","content":"hi"}]}`
 
 func send(s *gateway.Server, body string) (int, string) {
 	rec := httptest.NewRecorder()
@@ -79,11 +91,11 @@ func TestAcceptFallbackOnRetryableErrors(t *testing.T) {
 		{"403 rate", 403, "Too many requests"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env(t)
+			planID, spareID, thirdID, req := env(t)
 			plan := &up{code: tc.code, reply: `{"error":{"message":"` + tc.msg + `"}}`}
 			spare := &up{reply: okBody}
-			add(t, "plan", "m1", []string{"nowhere/x", "spare/m2", "spare/m2"}, plan)
-			add(t, "spare", "m2", nil, spare)
+			add(t, planID, "m1", []string{"nowhere/x", spareID+"/m2", spareID+"/m2"}, plan)
+			add(t, spareID, "m2", nil, spare)
 			code, body := send(gateway.New(), req)
 			if code != 200 || !strings.Contains(body, "from-spare") || strings.Contains(body, tc.msg) {
 				t.Fatalf("%d %s", code, body)
@@ -96,17 +108,17 @@ func TestAcceptFallbackOnRetryableErrors(t *testing.T) {
 }
 
 func TestAcceptFallbackRestAndRecord(t *testing.T) {
-	env(t)
+	planID, spareID, thirdID, req := env(t)
 	plan := &up{code: 429, reply: `{"error":{"message":"rate limited"}}`}
 	spare := &up{reply: okBody}
-	add(t, "plan", "m1", []string{"spare/m2"}, plan)
-	add(t, "spare", "m2", nil, spare)
+	add(t, planID, "m1", []string{spareID+"/m2"}, plan)
+	add(t, spareID, "m2", nil, spare)
 	s := gateway.New()
 	if code, _ := send(s, req); code != 200 {
 		t.Fatal(code)
 	}
 	c := s.Recent()[0]
-	if c.Provider != "spare" || !strings.HasPrefix(c.Fallback, "plan: ") {
+	if c.Provider != spareID || !strings.HasPrefix(c.Fallback, planID+": ") {
 		t.Fatalf("%+v", c)
 	}
 	before := plan.n()
@@ -118,18 +130,18 @@ func TestAcceptFallbackRestAndRecord(t *testing.T) {
 		t.Fatal("resting provider was tried")
 	}
 	c = s.Recent()[0]
-	if c.Provider != "spare" || !strings.Contains(c.Fallback, "plan: ") {
+	if c.Provider != spareID || !strings.Contains(c.Fallback, planID+": ") {
 		t.Fatalf("second %+v", c)
 	}
 }
 
 func TestAcceptNoFallbackOnPlain400(t *testing.T) {
 	for _, code := range []int{400, 404} {
-		env(t)
+		planID, spareID, thirdID, req := env(t)
 		plan := &up{code: code, reply: `{"error":{"message":"messages: field required"}}`}
 		spare := &up{reply: okBody}
-		add(t, "plan", "m1", []string{"spare/m2"}, plan)
-		add(t, "spare", "m2", nil, spare)
+		add(t, planID, "m1", []string{spareID+"/m2"}, plan)
+		add(t, spareID, "m2", nil, spare)
 		s := gateway.New()
 		c, body := send(s, req)
 		if c != code || !strings.Contains(body, "field required") || spare.n() != 0 {
@@ -142,11 +154,11 @@ func TestAcceptNoFallbackOnPlain400(t *testing.T) {
 }
 
 func TestAcceptLastErrorWins(t *testing.T) {
-	env(t)
+	planID, spareID, thirdID, req := env(t)
 	plan := &up{code: 429, reply: `{"error":{"message":"plan limit"}}`}
 	spare := &up{code: 503, reply: `{"error":{"message":"spare down"}}`}
-	add(t, "plan", "m1", []string{"spare/m2"}, plan)
-	add(t, "spare", "m2", nil, spare)
+	add(t, planID, "m1", []string{spareID+"/m2"}, plan)
+	add(t, spareID, "m2", nil, spare)
 	code, body := send(gateway.New(), req)
 	if code != 503 || !strings.Contains(body, "spare down") || strings.Contains(body, "plan limit") {
 		t.Fatalf("%d %s", code, body)
@@ -154,13 +166,13 @@ func TestAcceptLastErrorWins(t *testing.T) {
 }
 
 func TestAcceptNoFallbackRecursion(t *testing.T) {
-	env(t)
+	planID, spareID, thirdID, req := env(t)
 	plan := &up{code: 429, reply: `{"error":{"message":"plan limit"}}`}
 	spare := &up{code: 503, reply: `{"error":{"message":"spare down"}}`}
 	third := &up{reply: okBody}
-	add(t, "plan", "m1", []string{"spare/m2"}, plan)
-	add(t, "spare", "m2", []string{"third/m3"}, spare)
-	add(t, "third", "m3", nil, third)
+	add(t, planID, "m1", []string{spareID+"/m2"}, plan)
+	add(t, spareID, "m2", []string{thirdID+"/m3"}, spare)
+	add(t, thirdID, "m3", nil, third)
 	code, _ := send(gateway.New(), req)
 	if code != 503 || third.n() != 0 {
 		t.Fatalf("%d third=%d", code, third.n())
@@ -168,9 +180,9 @@ func TestAcceptNoFallbackRecursion(t *testing.T) {
 }
 
 func TestAcceptNoProviderWithoutFallbackUnchanged(t *testing.T) {
-	env(t)
+	planID, spareID, thirdID, req := env(t)
 	plan := &up{code: 429, reply: `{"error":{"message":"slow"}}`}
-	add(t, "plan", "m1", nil, plan)
+	add(t, planID, "m1", nil, plan)
 	s := gateway.New()
 	code, body := send(s, req)
 	if code != 429 || !strings.Contains(body, "slow") || s.Recent()[0].Fallback != "" {
@@ -179,7 +191,7 @@ func TestAcceptNoProviderWithoutFallbackUnchanged(t *testing.T) {
 }
 
 func TestAcceptStreamStartedNeverSwitches(t *testing.T) {
-	env(t)
+	planID, spareID, thirdID, req := env(t)
 	plan := &up{h: func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n")
@@ -187,9 +199,9 @@ func TestAcceptStreamStartedNeverSwitches(t *testing.T) {
 		panic(http.ErrAbortHandler)
 	}}
 	spare := &up{reply: okBody}
-	add(t, "plan", "m1", []string{"spare/m2"}, plan)
-	add(t, "spare", "m2", nil, spare)
-	_, body := send(gateway.New(), `{"model":"plan/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	add(t, planID, "m1", []string{spareID+"/m2"}, plan)
+	add(t, spareID, "m2", nil, spare)
+	_, body := send(gateway.New(), `{"model":"`+planID+`/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if spare.n() != 0 || strings.Contains(body, "from-spare") {
 		t.Fatalf("switched after output began: %s", body)
 	}
