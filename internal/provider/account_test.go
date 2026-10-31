@@ -110,8 +110,15 @@ func TestAccountsAreProviders(t *testing.T) {
 	if err := Delete("codex"); err != nil {
 		t.Fatal(err)
 	}
-	if codex, _ = find(All(), "codex"); len(codex.Models) != 0 || codex.Account == nil {
-		t.Fatalf("after delete: %+v", codex)
+	// removing an account only hides it; the agent's login stays
+	if _, ok := find(All(), "codex"); ok {
+		t.Fatal("codex still listed after removal")
+	}
+	if err := Save(Provider{ID: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if codex, _ = find(All(), "codex"); len(codex.Models) != 1 || codex.Account == nil {
+		t.Fatalf("after restore: %+v", codex)
 	}
 
 	// signed out: gone, and a stale picks entry is not a provider
