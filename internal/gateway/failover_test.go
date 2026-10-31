@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,6 +43,7 @@ func (s *script) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if st.hang {
+		io.Copy(io.Discard, r.Body) // so a closed connection is noticed
 		<-r.Context().Done()
 		return
 	}
