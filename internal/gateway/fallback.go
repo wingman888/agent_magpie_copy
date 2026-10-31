@@ -607,7 +607,7 @@ func classifyEvent(proto provider.Protocol, block string) (int, streamErr) {
 	}
 	var v struct {
 		Type    string          `json:"type"`
-		Message string          `json:"message"`
+		Message json.RawMessage `json:"message"`
 		Code    json.RawMessage `json:"code"`
 		Error   json.RawMessage `json:"error"`
 		Resp    struct {
@@ -624,6 +624,9 @@ func classifyEvent(proto provider.Protocol, block string) (int, streamErr) {
 	if v.Type == "" {
 		v.Type = name
 	}
+	var vmsg string
+	json.Unmarshal(v.Message, &vmsg) // a string, or an object that is no message
+
 	fail := func(obj json.RawMessage, outer string) (int, streamErr) {
 		var e struct {
 			Type    string          `json:"type"`
@@ -648,12 +651,12 @@ func classifyEvent(proto provider.Protocol, block string) (int, streamErr) {
 		case "message_start", "ping":
 			return evHold, streamErr{}
 		case "error":
-			return fail(v.Error, v.Message)
+			return fail(v.Error, vmsg)
 		}
 		return evContent, streamErr{}
 	case provider.Chat:
 		if isObj(v.Error) {
-			return fail(v.Error, v.Message)
+			return fail(v.Error, vmsg)
 		}
 		for _, c := range v.Choices {
 			for k, val := range c.Delta {
@@ -680,10 +683,10 @@ func classifyEvent(proto provider.Protocol, block string) (int, streamErr) {
 			return evError, streamErr{status: 500, body: []byte(raw), msg: "response failed"}
 		case "error":
 			if isObj(v.Error) {
-				return fail(v.Error, v.Message)
+				return fail(v.Error, vmsg)
 			}
 			code := strings.Trim(string(v.Code), `"`)
-			return evError, streamErr{status: statusOfError("", code, v.Message), body: []byte(raw), msg: v.Message}
+			return evError, streamErr{status: statusOfError("", code, vmsg), body: []byte(raw), msg: vmsg}
 		}
 		return evContent, streamErr{}
 	}
