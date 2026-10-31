@@ -44,12 +44,11 @@ type providerJSON struct {
 		Optional bool   `json:"optional"`
 	} `json:"key"`
 	Ready     bool            `json:"ready"`
-	Chosen    []string        `json:"chosen"`   // the user's explicit picks, if any
-	Fallback  []string        `json:"fallback"` // where requests go when this one can't take them
-	Models    []modelJSON     `json:"models"`   // everything the vendor lists, exposed ones flagged
-	Exposed   int             `json:"exposed"`  // how many reach the agents
-	Fetched   string          `json:"fetched"`  // "3h ago" when the list came from the vendor
-	Agents    []providerAgent `json:"agents"`   // detected agents, current ones flagged
+	Chosen    []string        `json:"chosen"`  // the user's explicit picks, if any
+	Models    []modelJSON     `json:"models"`  // everything the vendor lists, exposed ones flagged
+	Exposed   int             `json:"exposed"` // how many reach the agents
+	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
+	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
 	Sponsored bool            `json:"sponsored"`
 	Account   *accountJSON    `json:"account,omitempty"` // a signed-in agent, see provider.Account
 }
@@ -59,8 +58,6 @@ type accountJSON struct {
 	Agent string `json:"agent"`     // the agent's id
 	Name  string `json:"agentName"` // the agent's name, for "from Codex CLI's sign-in"
 	Icon  string `json:"agentIcon"`
-	// Logins are the agent's accounts magpie remembers, to switch between
-	Logins []provider.Login `json:"logins,omitempty"`
 }
 
 type providerAgent struct {
@@ -118,10 +115,6 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Headers: p.Headers,
 		Ready:   p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
-		Fallback: p.Fallback,
-	}
-	if out.Fallback == nil {
-		out.Fallback = []string{}
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
@@ -140,7 +133,6 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		if ag, err := agent.Find(a.Agent); err == nil {
 			out.Account.Name, out.Account.Icon = ag.Name, ag.Icon
 		}
-		out.Account.Logins = provider.Logins(a.Agent)
 	}
 	exposed := map[string]bool{}
 	for _, m := range p.Exposed() {
@@ -251,7 +243,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			// a preset needs nothing but the key; a saved provider keeps
 			// its key when the form left it blank
 			if pr, err := provider.FromPreset(in.Preset); err == nil && in.Chat == "" && in.Responses == "" && in.Anthropic == "" {
-				pr.Key, pr.Models, pr.Fallback = in.Key, in.Models, in.Fallback
+				pr.Key, pr.Models = in.Key, in.Models
 				if in.Name != "" {
 					pr.Name = in.Name
 				}
@@ -325,30 +317,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			return
 		default:
 			http.NotFound(rw, r)
-			return
-		}
-		writeJSON(rw, providersState(gw))
-	})
-	// Switching the account an agent is signed in to, among those magpie
-	// remembers, and forgetting one.
-	mux.HandleFunc("POST /api/login/{action}", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct{ Agent, User string }
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			fail(rw, err)
-			return
-		}
-		var err error
-		switch r.PathValue("action") {
-		case "switch":
-			err = provider.SwitchLogin(in.Agent, in.User)
-		case "forget":
-			err = provider.ForgetLogin(in.Agent, in.User)
-		default:
-			http.NotFound(rw, r)
-			return
-		}
-		if err != nil {
-			fail(rw, err)
 			return
 		}
 		writeJSON(rw, providersState(gw))

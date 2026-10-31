@@ -1349,7 +1349,7 @@ function renderEditor(p, presetID) {
   const pr = presetID ? providers.presets.find((x) => x.id === presetID) : p?.preset ? providers.presets.find((x) => x.id === p.preset) : null;
   const isNew = !p, custom = !pr;
   draft = draft || (p
-    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "", fallback: [...(p.fallback || [])] }
+    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "" }
     : pr
       ? { id: pr.id, name: pr.name, preset: pr.id, key: "", chosen: [], extra: [], headers: [] }
       : { id: "", name: "", preset: "", chat: "", responses: "", anthropic: "", catalog: "", key: "", api: "openai", chosen: [], extra: [], headers: [], icon: "" });
@@ -1411,9 +1411,7 @@ function renderEditor(p, presetID) {
     const acct = el("div", "acct");
     acct.append(icon(a.agentIcon), el("span", "n", a.user), el("span", "plan", accountPlan(a)));
     ed.append(...field(t("Account"), acct, t("{agent}'s sign-in, read from its own files. Sign out there and this provider goes away.", { agent: a.agentName })));
-    if (a.logins) ed.append(...field(t("Other accounts"), renderLogins(a), t("To add one, sign in to it in {agent} ({how}); magpie remembers every account it sees there. Sessions already running keep their account until restarted.", { agent: a.agentName, how: a.agent === "codex" ? "codex login" : "claude → /login" })));
     ed.append(...field(t("Models"), renderModels(p), ""));
-    ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
     ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
     const bar = el("div", "bar");
     // removing only hides it from magpie; the agent stays signed in
@@ -1424,7 +1422,7 @@ function renderEditor(p, presetID) {
     const cancel = el("button", "text", t("Cancel"));
     cancel.onclick = cancelEdit;
     const saveBtn = el("button", "text primary", t("Save"));
-    saveBtn.onclick = () => { saveBtn.classList.add("busy"); providerAction("save", { id: p.id, models: draft.chosen, fallback: draft.fallback }, t("{name} saved", { name: p.name })); };
+    saveBtn.onclick = () => { saveBtn.classList.add("busy"); providerAction("save", { id: p.id, models: draft.chosen }, t("{name} saved", { name: p.name })); };
     bar.append(cancel, saveBtn);
     ed.append(bar);
     return ed;
@@ -1487,7 +1485,6 @@ function renderEditor(p, presetID) {
   }
 
   if (p) ed.append(...field(t("Models"), renderModels(p), ""));
-  if (p) ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
   else if (custom) {
     const ex = input(draft.extra.join(", "), t("model ids, comma separated · e.g. gpt-5.5, claude-sonnet-5"));
     ex.oninput = () => { draft.extra = ex.value.split(/[,\s]+/).filter(Boolean); };
@@ -1537,7 +1534,6 @@ function renderEditor(p, presetID) {
   const save = () => {
     const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra };
     if (custom) { body.headers = headersOf(draft.headers); body.icon = draft.icon || "generic"; }
-    if (p) body.fallback = draft.fallback;
     if (isNew && custom && !body.name) { name.focus(); return editorError(t("Give it a name"), "warn"); }
     if (isNew && custom && !body.chat && !body.anthropic) { url.focus(); return editorError(t("A base URL is needed"), "warn"); }
     editorError("");
@@ -1712,91 +1708,9 @@ function renderModels(p) {
   return box;
 }
 
-// renderFallback: where requests go when this provider can't take them —
-// out of quota, rate limited, overloaded or down — tried top to bottom.
-function renderFallback(p) {
-  const box = el("div", "fallback");
-  const list = el("div", "fbl");
-  const sugg = el("div", "mchips");
-  const q = input("", t("add a model: filter, or type provider/model…"));
-  const all = [];
-  for (const o of providers.providers) {
-    if (!o.ready) continue;
-    for (const m of o.models) if (m.on) all.push({ id: o.id + "/" + m.id, label: o.name + " · " + (m.name || m.id), icon: o.icon });
-  }
-  let open = false;
-  const add = (id) => { if (id && !draft.fallback.includes(id)) draft.fallback.push(id); q.value = ""; draw(); };
-  const draw = () => {
-    list.replaceChildren();
-    draft.fallback.forEach((id, i) => {
-      const known = all.find((x) => x.id === id);
-      const row = el("div", "fbrow");
-      row.append(el("span", "i", String(i + 1)), icon(known?.icon || "generic"), el("span", "n", known ? known.label : id), el("span", "grow"));
-      if (!known) row.title = t("No provider serves {id} now; it is skipped", { id });
-      if (i) {
-        const up = el("button", "text", t("Up"));
-        up.onclick = () => { draft.fallback.splice(i - 1, 0, draft.fallback.splice(i, 1)[0]); draw(); };
-        row.append(up);
-      }
-      const rm = el("button", "text", t("Remove"));
-      rm.onclick = () => { draft.fallback.splice(i, 1); draw(); };
-      row.append(rm);
-      list.append(row);
-    });
-    sugg.replaceChildren();
-    if (!open && !q.value.trim()) return;
-    const f = q.value.trim().toLowerCase();
-    const hits = all.filter((x) => !draft.fallback.includes(x.id) && !x.id.startsWith(p.id + "/") && (x.id + " " + x.label).toLowerCase().includes(f));
-    for (const x of hits.slice(0, 12)) {
-      const c = el("button", "mchip");
-      c.append(el("span", "", x.label));
-      c.title = x.id;
-      c.onmousedown = (e) => e.preventDefault(); // keep the box focused
-      c.onclick = () => add(x.id);
-      sugg.append(c);
-    }
-    if (!hits.length && f) sugg.append(el("span", "hint", f.includes("/") ? t("Enter adds {id}", { id: q.value.trim() }) : t("No model matches")));
-  };
-  q.onfocus = () => { open = true; draw(); };
-  q.onblur = () => { open = false; draw(); };
-  q.oninput = draw;
-  q.onkeydown = (e) => {
-    e.stopPropagation();
-    if (e.key === "Enter" && q.value.trim()) add(q.value.trim().includes("/") ? q.value.trim() : sugg.querySelector(".mchip")?.title);
-    else if (e.key === "Escape") cancelEdit();
-  };
-  box.append(list, q, sugg);
-  draw();
-  return box;
-}
-function fallbackHint(p) {
-  return t("When {name} is out of quota, rate limited or down, a request goes to these instead, top first. It only happens before any of the reply is sent, and {name} then sits out a minute.", { name: p.name });
-}
-
-// renderLogins: the agent's other accounts magpie remembers, each one a
-// click away from being the one the agent is signed in to.
-function renderLogins(a) {
-  const list = el("div", "logins");
-  const others = a.logins.filter((l) => !l.active);
-  if (!others.length) list.append(el("div", "none", t("None yet")));
-  for (const l of others) {
-    const row = el("div", "acct");
-    row.append(el("span", "n", l.user), el("span", "plan", accountPlan({ agent: a.agent, plan: l.plan })), el("span", "grow"));
-    const forget = el("button", "text", t("Forget"));
-    forget.title = t("magpie forgets this account's sign-in; the account itself is untouched");
-    forget.onclick = () => providerAction("forget", { agent: a.agent, user: l.user }, t("{user} forgotten", { user: l.user }), "login/");
-    const use = el("button", "text", t("Switch"));
-    use.title = t("Sign {agent} in to this account", { agent: a.agentName });
-    use.onclick = () => { use.classList.add("busy"); providerAction("switch", { agent: a.agent, user: l.user }, t("{agent} is now signed in as {user}", { agent: a.agentName, user: l.user }), "login/"); };
-    row.append(forget, use);
-    list.append(row);
-  }
-  return list;
-}
-
-async function providerAction(action, body, okMsg, base = "provider/") {
+async function providerAction(action, body, okMsg) {
   try {
-    providers = await api(base + action, body);
+    providers = await api("provider/" + action, body);
     editing = null;
     draft = null;
     importing = null;
