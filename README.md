@@ -129,6 +129,29 @@ The generated harness stays out of Anthropic's system-prompt classifier while
 its instructions remain part of the user context. This requires Claude Code
 to be installed and signed in. A Gemini CLI Google login is planned.
 
+### Import links
+
+A vendor or relay can offer a one-click provider. A `magpie://import` link shows what will be added (name, the hosts requests and the key go to, models, a masked key) and saves only after you confirm:
+
+```
+magpie://import?preset=deepseek&key=sk-…
+magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…
+```
+
+From a terminal: `magpie import [-y] '<link>'` (asks `Add it? [y/N]`; `-y` skips the question; without a terminal and without `-y` it refuses). A link with no key adds the provider; set the key with `magpie provider key <id> <key>`.
+
+Parameters (values URL-encoded): `preset`, `region`, `name` (required without `preset`), `id`, `key`, `chat` / `responses` / `anthropic` (base URLs; https only, http allowed for localhost and private hosts; no credentials, query or fragment), `models` (comma separated, up to 200), `catalog` (models.dev id), `website` / `keys` (https only, others are ignored). Invalid links are rejected whole.
+
+Web pages and GitHub cannot reliably open custom schemes. Use `https://usemagpie.ai/import#<same parameters>` instead; the parameters sit in the fragment and are never sent to the server.
+
+### Claude Code tiers
+
+`magpie claude deepseek/pro` sets the main model; opus, sonnet, haiku and fable follow it. Pin a tier with `magpie claude haiku deepseek/flash` (haiku also sets the small fast model); `magpie claude haiku ""` makes it follow again. Pinned tiers stay put when the main model changes, and while any tier is pinned the subagent model is no longer forced to the main one. Tiers can only be set once Claude Code goes through magpie.
+
+### Removing an account
+
+`magpie provider rm codex` (or claude, copilot) hides the signed-in account from magpie without touching the agent's own login; `magpie provider add codex` brings it back with its model picks. A Claude Code that reports `claude auth status` as signed out is not listed even if credentials linger.
+
 ### Connecting anything else
 
 The gateway listens on `127.0.0.1:3425` (`MAGPIE_ADDR` changes it) and starts
