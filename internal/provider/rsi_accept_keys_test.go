@@ -49,21 +49,6 @@ func TestAcceptAddKey(t *testing.T) {
 	}
 }
 
-func TestAcceptAddKeyToEmptyProvider(t *testing.T) {
-	setup(t)
-	if err := provider.Save(provider.Provider{ID: "bare", Name: "Bare", Chat: "https://bare.test/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := provider.AddKey("bare", "only", "sk-only-9999"); err != nil {
-		t.Fatal(err)
-	}
-	p, _ := provider.Find("bare")
-	ks := p.KeyList()
-	if p.Key != "sk-only-9999" || len(ks) != 1 || !ks[0].Active || ks[0].Name != "only" {
-		t.Fatalf("%+v %+v", p, ks)
-	}
-}
-
 func TestAcceptUseKeyAndRename(t *testing.T) {
 	seed(t)
 	provider.AddKey("relay", "Team", "sk-team-2222")

@@ -1,6 +1,7 @@
 package gateway_test
 
 import (
+	"regexp"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -79,25 +80,25 @@ func TestAcceptKeysTakeOverFromEachOther(t *testing.T) {
 	up := &byKey{limited: map[string]bool{"k-personal": true}}
 	srv := httptest.NewServer(up)
 	defer srv.Close()
-	save(t, provider.Provider{ID: "planA", Name: "Plan", Models: []string{"m1"}, Key: "k-personal"}, srv.URL,
+	save(t, provider.Provider{ID: "plana", Name: "Plan", Models: []string{"m1"}, Key: "k-personal"}, srv.URL,
 		[3]string{"Idle", "k-idle", "off"}, [3]string{"Team", "k-team", ""})
-	p, _ := provider.Find("planA")
-	if err := provider.RenameKey("planA", p.KeyList()[0].ID, "个人"); err != nil {
+	p, _ := provider.Find("plana")
+	if err := provider.RenameKey("plana", p.KeyList()[0].ID, "个人"); err != nil {
 		t.Fatal(err)
 	}
 	s := gateway.New()
-	if body := req(s, "planA/m1"); !strings.Contains(body, "from-k-team") {
+	if body := req(s, "plana/m1"); !strings.Contains(body, "from-k-team") {
 		t.Fatalf("body %s", body)
 	}
 	if got := up.take(); got != "k-personal,k-team" {
 		t.Fatalf("tried %s", got)
 	}
 	c := s.Recent()[0]
-	if c.Provider != "planA" || !strings.Contains(c.Fallback, "planA(个人)") || !strings.Contains(c.Fallback, "rate limited") && !strings.Contains(c.Fallback, "429") {
+	if c.Provider != "plana" || !labelled(c.Fallback, "plana", "个人") || !strings.Contains(c.Fallback, "rate limited") && !strings.Contains(c.Fallback, "429") {
 		t.Fatalf("recorded %+v", c)
 	}
 	// resting: no further attempt on the limited key; idle never tried
-	if body := req(s, "planA/m1"); !strings.Contains(body, "from-k-team") || up.take() != "k-team" {
+	if body := req(s, "plana/m1"); !strings.Contains(body, "from-k-team") || up.take() != "k-team" {
 		t.Fatalf("body %s", body)
 	}
 }
@@ -107,16 +108,16 @@ func TestAcceptUnnamedKeyShowsMaskInRecord(t *testing.T) {
 	up := &byKey{limited: map[string]bool{"sk-secret-first-1234567890": true}}
 	srv := httptest.NewServer(up)
 	defer srv.Close()
-	save(t, provider.Provider{ID: "planB", Name: "Plan", Models: []string{"m1"}, Key: "sk-secret-first-1234567890"}, srv.URL,
+	save(t, provider.Provider{ID: "planb", Name: "Plan", Models: []string{"m1"}, Key: "sk-secret-first-1234567890"}, srv.URL,
 		[3]string{"", "sk-secret-second-0987654321", ""})
-	p, _ := provider.Find("planB")
+	p, _ := provider.Find("planb")
 	mask := p.KeyList()[0].Masked
 	s := gateway.New()
-	if body := req(s, "planB/m1"); !strings.Contains(body, "from-sk-secret-second") {
+	if body := req(s, "planb/m1"); !strings.Contains(body, "from-sk-secret-second") {
 		t.Fatalf("body %s", body)
 	}
 	c := s.Recent()[0]
-	if !strings.Contains(c.Fallback, "planB("+mask+")") {
+	if !labelled(c.Fallback, "planb", mask) {
 		t.Fatalf("want mask %q in %q", mask, c.Fallback)
 	}
 	if strings.Contains(c.Fallback, "sk-secret-first-1234567890") || strings.Contains(c.Error, "sk-secret") {
@@ -129,10 +130,10 @@ func TestAcceptOffKeyNeverUsed(t *testing.T) {
 	up := &byKey{limited: map[string]bool{"k-a": true, "k-b": true}}
 	srv := httptest.NewServer(up)
 	defer srv.Close()
-	save(t, provider.Provider{ID: "planC", Name: "Plan", Models: []string{"m1"}, Key: "k-a"}, srv.URL,
+	save(t, provider.Provider{ID: "planc", Name: "Plan", Models: []string{"m1"}, Key: "k-a"}, srv.URL,
 		[3]string{"Free", "k-free", "off"}, [3]string{"B", "k-b", ""})
 	s := gateway.New()
-	req(s, "planC/m1")
+	req(s, "planc/m1")
 	if got := up.take(); got != "k-a,k-b" {
 		t.Fatalf("tried %s", got)
 	}
@@ -143,14 +144,14 @@ func TestAcceptUseKeyChangesGatewayOrder(t *testing.T) {
 	up := &byKey{}
 	srv := httptest.NewServer(up)
 	defer srv.Close()
-	save(t, provider.Provider{ID: "planD", Name: "Plan", Models: []string{"m1"}, Key: "k-a"}, srv.URL,
+	save(t, provider.Provider{ID: "pland", Name: "Plan", Models: []string{"m1"}, Key: "k-a"}, srv.URL,
 		[3]string{"Team", "k-b", ""})
-	p, _ := provider.Find("planD")
-	if err := provider.UseKey("planD", p.KeyList()[1].ID); err != nil {
+	p, _ := provider.Find("pland")
+	if err := provider.UseKey("pland", p.KeyList()[1].ID); err != nil {
 		t.Fatal(err)
 	}
 	s := gateway.New()
-	if body := req(s, "planD/m1"); !strings.Contains(body, "from-k-b") || up.take() != "k-b" {
+	if body := req(s, "pland/m1"); !strings.Contains(body, "from-k-b") || up.take() != "k-b" {
 		t.Fatalf("body %s", body)
 	}
 }
@@ -163,18 +164,18 @@ func TestAcceptAllKeysFailThenFallbackModel(t *testing.T) {
 	spare := &byKey{}
 	srv2 := httptest.NewServer(spare)
 	defer srv2.Close()
-	save(t, provider.Provider{ID: "spareE", Name: "Spare", Models: []string{"m2"}, Key: "s-1"}, srv2.URL)
-	save(t, provider.Provider{ID: "planE", Name: "Plan", Models: []string{"m1"}, Key: "k-a", Fallback: []string{"spareE/m2"}}, srv.URL,
+	save(t, provider.Provider{ID: "sparee", Name: "Spare", Models: []string{"m2"}, Key: "s-1"}, srv2.URL)
+	save(t, provider.Provider{ID: "plane", Name: "Plan", Models: []string{"m1"}, Key: "k-a", Fallback: []string{"sparee/m2"}}, srv.URL,
 		[3]string{"B", "k-b", ""})
 	s := gateway.New()
-	if body := req(s, "planE/m1"); !strings.Contains(body, "from-s-1") {
+	if body := req(s, "plane/m1"); !strings.Contains(body, "from-s-1") {
 		t.Fatalf("body %s", body)
 	}
 	if got := up.take(); got != "k-a,k-b" {
 		t.Fatalf("tried %s", got)
 	}
 	c := s.Recent()[0]
-	if !strings.Contains(c.Fallback, "planE(") {
+	if !labelled(c.Fallback, "plane", "B") {
 		t.Fatalf("%+v", c)
 	}
 }
@@ -187,14 +188,18 @@ func TestAcceptSingleKeyRecordFormatUnchanged(t *testing.T) {
 	spare := &byKey{}
 	srv2 := httptest.NewServer(spare)
 	defer srv2.Close()
-	save(t, provider.Provider{ID: "spareF", Name: "Spare", Models: []string{"m2"}, Key: "s-1"}, srv2.URL)
-	save(t, provider.Provider{ID: "planF", Name: "Plan", Models: []string{"m1"}, Key: "k-a", Fallback: []string{"spareF/m2"}}, srv.URL)
+	save(t, provider.Provider{ID: "sparef", Name: "Spare", Models: []string{"m2"}, Key: "s-1"}, srv2.URL)
+	save(t, provider.Provider{ID: "planf", Name: "Plan", Models: []string{"m1"}, Key: "k-a", Fallback: []string{"sparef/m2"}}, srv.URL)
 	s := gateway.New()
-	if body := req(s, "planF/m1"); !strings.Contains(body, "from-s-1") {
+	if body := req(s, "planf/m1"); !strings.Contains(body, "from-s-1") {
 		t.Fatalf("body %s", body)
 	}
 	c := s.Recent()[0]
-	if !strings.Contains(c.Fallback, "planF: ") || strings.Contains(c.Fallback, "planF(") {
+	if !strings.Contains(c.Fallback, "planf: ") || strings.Contains(c.Fallback, "planf (") || strings.Contains(c.Fallback, "planf(") {
 		t.Fatalf("%q", c.Fallback)
 	}
+}
+
+func labelled(fb, id, who string) bool {
+	return regexp.MustCompile(regexp.QuoteMeta(id) + `\s?` + regexp.QuoteMeta("("+who+")")).MatchString(fb)
 }
