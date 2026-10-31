@@ -49,11 +49,7 @@ func providers() error {
 		}
 		switch {
 		case p.Account != nil:
-			who := "signed in as " + p.Account.User
-			if p.Account.Plan != "" {
-				who += " · " + p.Account.Plan
-			}
-			r.key = green.Render("●") + " " + muted.Render(who)
+			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -82,14 +78,10 @@ func providers() error {
 	return nil
 }
 
-// printExcluded notes the logins dial recognises but does not offer.
+// printExcluded says which agent logins dial saw and left alone, and why.
 func printExcluded() {
 	for _, x := range provider.Excluded() {
-		name := x.Agent
-		if name == "claude" {
-			name = "Claude Code"
-		}
-		fmt.Printf("  %s %s\n", amber.Render("!"), name+" is signed in but not offered: "+x.Why)
+		fmt.Printf("  %s %s\n", amber.Render("!"), provider.AgentName(x.Agent)+" is signed in but not offered: "+x.Why)
 	}
 }
 
@@ -185,7 +177,7 @@ func providerCmd(args []string) error {
 			return err
 		}
 		if p.Account != nil {
-			return fmt.Errorf("%s uses the %s sign-in; there is no key to set", p.Name, p.Account.Agent)
+			return fmt.Errorf("%s uses the %s login; sign in or out there", p.Name, p.Account.AgentName())
 		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
@@ -326,21 +318,18 @@ func showProvider(p provider.Provider) error {
 	}
 	fmt.Println(" ", name)
 	if a := p.Account; a != nil {
-		via := map[string]string{"codex": "Codex", "copilot": "Copilot"}[a.Agent]
-		if via == "" {
-			via = a.Agent
-		}
-		desc := a.User
+		who := a.User
 		if a.Plan != "" {
-			desc += " · " + a.Plan
+			who += " (" + a.Plan + ")"
 		}
-		kv("account", desc+" · via "+via+" ("+a.Agent+")")
+		kv("account", who+muted.Render(" via "+a.AgentName()))
 	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
 	switch {
 	case p.Account != nil:
+		kv("key", muted.Render("none · uses the "+p.Account.AgentName()+" login"))
 	case p.Key != "":
 		kv("key", muted.Render(provider.Mask(p.Key)))
 	case p.Ready():

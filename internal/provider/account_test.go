@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,311 +12,395 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/yetone/dial/internal/catalog"
 )
 
 func jwt(claims map[string]any) string {
-	b, _ := json.Marshal(claims)
-	return "x." + base64.RawURLEncoding.EncodeToString(b) + ".y"
+	enc := func(v any) string {
+		b, _ := json.Marshal(v)
+		return base64.RawURLEncoding.EncodeToString(b)
+	}
+	return enc(map[string]any{"alg": "none"}) + "." + enc(claims) + ".sig"
 }
 
-func envSetup(t *testing.T) string {
+// env gives every test its own HOME and config dirs.
+func env(t *testing.T) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	resetExcluded()
 	return home
 }
 
-func writeCodex(t *testing.T, home string, exp time.Time, extra map[string]any) {
-	os.MkdirAll(filepath.Join(home, ".codex"), 0o755)
-	m := map[string]any{"auth_mode": "chatgpt", "keep": "me", "tokens": map[string]any{
-		"access_token": jwt(map[string]any{"exp": exp.Unix(), "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro", "chatgpt_account_id": "acc1"}}),
-		"id_token":     jwt(map[string]any{"email": "a@b.com"}), "refresh_token": "r1", "account_id": "acc1"}}
-	for k, v := range extra {
-		m[k] = v
+func writeCodex(t *testing.T, home string, auth map[string]any) string {
+	dir := filepath.Join(home, ".codex")
+	os.MkdirAll(dir, 0o755)
+	b, _ := json.Marshal(auth)
+	p := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	b, _ := json.Marshal(m)
-	os.WriteFile(filepath.Join(home, ".codex", "auth.json"), b, 0o600)
+	return p
+}
+
+func codexAuth(exp int64) map[string]any {
+	return map[string]any{
+		"auth_mode": "chatgpt", "OPENAI_API_KEY": nil, "extra": map[string]any{"keep": "me"},
+		"tokens": map[string]any{
+			"id_token": jwt(map[string]any{"email": "me@x.com",
+				"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro"}}),
+			"access_token":  jwt(map[string]any{"exp": exp}),
+			"refresh_token": "r1", "account_id": "acct-1",
+		},
+	}
 }
 
 func writeCopilot(t *testing.T, home string) {
-	d := filepath.Join(home, ".config", "github-copilot")
-	os.MkdirAll(d, 0o755)
-	os.WriteFile(filepath.Join(d, "apps.json"), []byte(`{"github.com:Iv1.x":{"oauth_token":"gho_x","user":"octo"}}`), 0o600)
+	dir := filepath.Join(home, ".config", "github-copilot")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "apps.json"), []byte(`{"github.com:Iv1.x":{"user":"octocat","oauth_token":"gho_abc"}}`), 0o600)
 }
 
-func TestAccountsAndStore(t *testing.T) {
-	home := envSetup(t)
-	writeCodex(t, home, time.Now().Add(time.Hour), nil)
+func TestAccountsDetectAndLogout(t *testing.T) {
+	home := env(t)
+	if len(Accounts()) != 0 {
+		t.Fatal("no accounts expected")
+	}
+	cp := writeCodex(t, home, codexAuth(time.Now().Add(time.Hour).Unix()))
 	writeCopilot(t, home)
 	all := All()
-	if len(all) != 2 || all[0].ID != "codex" || all[0].Account.User != "a@b.com" || all[0].Account.Plan != "pro" || all[1].Account.User != "octo" {
-		t.Fatalf("%+v", all)
+	if len(all) != 2 || all[0].ID != "codex" || all[1].ID != "copilot" {
+		t.Fatalf("got %+v", all)
 	}
-	if !all[0].Ready() || !all[1].Ready() {
-		t.Fatal("not ready")
+	if a := all[0].Account; a.User != "me@x.com" || a.Plan != "pro" || a.Agent != "codex" {
+		t.Fatalf("codex account %+v", a)
 	}
-	if p, m, ok := Resolve("codex/gpt-5.5"); !ok || p.ID != "codex" || m != "gpt-5.5" {
-		t.Fatal("resolve")
+	if all[1].Account.User != "octocat" || !all[0].Ready() || !all[1].Ready() {
+		t.Fatalf("copilot %+v", all[1])
 	}
-	ids := strings.Join(IDs(), " ")
-	if !strings.Contains(ids, "copilot/claude-sonnet-4.5") || strings.Contains(ids, "copilot/auto") {
-		t.Fatal(ids)
+	cat := Catalog()
+	ids := map[string]bool{}
+	for _, e := range cat {
+		ids[e.ID] = true
 	}
-	p := all[0]
-	p.Models, p.Chat, p.Key = []string{"gpt-5.5"}, "http://x", "sekrit"
-	if err := Save(p); err != nil {
+	if !ids["codex/gpt-5.5"] || !ids["copilot/claude-sonnet-4.5"] || ids["copilot/auto"] {
+		t.Fatalf("catalog %v", IDs())
+	}
+	p, m, ok := Resolve("codex/gpt-5.5")
+	if !ok || p.ID != "codex" || m != "gpt-5.5" {
+		t.Fatal("resolve", p.ID, m, ok)
+	}
+	if b, _ := json.Marshal(all[0]); strings.Contains(string(b), "access") || strings.Contains(string(b), "r1") {
+		t.Fatalf("token leaked: %s", b)
+	}
+	// logged out, with a stale selection record left in the config
+	if err := Save(Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(cp)
+	for _, p := range All() {
+		if p.ID == "codex" {
+			t.Fatal("codex survived logout")
+		}
+	}
+	if _, err := Find("codex"); err == nil {
+		t.Fatal("found logged-out codex")
+	}
+}
+
+func TestCodexAPIKeyModeIsNotAccount(t *testing.T) {
+	home := env(t)
+	writeCodex(t, home, map[string]any{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-1"})
+	writeCodex(t, home, map[string]any{"OPENAI_API_KEY": "sk-1"})
+	if len(Accounts()) != 0 {
+		t.Fatal("api key mode counted")
+	}
+	a := codexAuth(time.Now().Add(time.Hour).Unix())
+	a["auth_mode"] = "apikey"
+	writeCodex(t, home, a)
+	if len(Accounts()) != 0 {
+		t.Fatal("apikey auth_mode counted")
+	}
+}
+
+func TestCodexNameFallback(t *testing.T) {
+	home := env(t)
+	writeCodex(t, home, map[string]any{"tokens": map[string]any{"access_token": "a", "account_id": "x"}})
+	a := Accounts()
+	if len(a) != 1 || a[0].Account.User != "ChatGPT" {
+		t.Fatalf("%+v", a)
+	}
+}
+
+func TestSaveAndDeleteAccount(t *testing.T) {
+	home := env(t)
+	writeCodex(t, home, codexAuth(time.Now().Add(time.Hour).Unix()))
+	err := Save(Provider{ID: "codex", Name: "Evil", Key: "sk-secret", Chat: "http://evil.example", Models: []string{"gpt-5.5", "gpt-5.4"}})
+	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(Path())
-	if strings.Contains(string(b), "sekrit") || strings.Contains(string(b), "http://x") || strings.Contains(string(b), "key") {
-		t.Fatal(string(b))
+	if strings.Contains(string(b), "secret") || strings.Contains(string(b), "evil") || strings.Contains(string(b), "Evil") {
+		t.Fatalf("config leaked: %s", b)
 	}
-	q, _ := Find("codex")
-	if len(q.Exposed()) != 1 {
-		t.Fatal("exposed")
+	var f struct {
+		Providers []map[string]any `json:"providers"`
+	}
+	json.Unmarshal(b, &f)
+	if len(f.Providers) != 1 || len(f.Providers[0]) != 2 {
+		t.Fatalf("config %s", b)
+	}
+	p, _ := Find("codex")
+	if p.Chat != "" || p.Name != "Codex" || len(p.Exposed()) != 2 {
+		t.Fatalf("%+v", p)
 	}
 	if err := Delete("codex"); err != nil {
 		t.Fatal(err)
 	}
-	q, err := Find("codex")
-	if err != nil || len(q.Models) != 0 {
-		t.Fatal("delete", err)
+	p, err = Find("codex")
+	if err != nil || len(p.Models) != 0 || len(p.Exposed()) != len(p.Available()) {
+		t.Fatalf("after delete %+v %v", p, err)
 	}
-	// logout with leftover record
-	Save(*q)
-	q.Models = []string{"gpt-5.5"}
-	Save(*q)
-	os.Remove(filepath.Join(home, ".codex", "auth.json"))
-	if _, err := Find("codex"); err == nil {
-		t.Fatal("still there")
+	if err := Delete("codex"); err != nil {
+		t.Fatal(err)
 	}
-	// api key mode
-	writeCodex(t, home, time.Now().Add(time.Hour), map[string]any{"auth_mode": "apikey"})
-	if _, err := Find("codex"); err == nil {
-		t.Fatal("apikey mode counted")
+}
+
+func TestUserProviderWinsOverAccount(t *testing.T) {
+	home := env(t)
+	writeCodex(t, home, codexAuth(time.Now().Add(time.Hour).Unix()))
+	if err := Save(Provider{ID: "codex", Name: "Mine", Key: "k", Chat: "https://my.example/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	// with no account to take the id, a url-less save still fails
+	all := All()
+	n := 0
+	for _, p := range all {
+		if p.ID == "codex" {
+			n++
+			if p.Account != nil || p.Name != "Mine" {
+				t.Fatalf("%+v", p)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("want one codex, got %d", n)
 	}
 }
 
 func TestPrepare(t *testing.T) {
-	envSetup(t)
-	p := Provider{Account: &Account{Agent: "codex"}}
-	out := string(p.Prepare([]byte(`{"model":"m","input":"hi","max_output_tokens":5,"temperature":1,"reasoning":{"effort":"low"}}`)))
+	p := Provider{ID: "codex", Account: &Account{Agent: "codex"}}
+	out := p.Prepare([]byte(`{"model":"m","input":"hello","max_output_tokens":9,"temperature":0.5,"top_p":1,"reasoning":{"effort":"high"}}`))
 	var m map[string]any
-	json.Unmarshal([]byte(out), &m)
-	if m["stream"] != true || m["store"] != false || m["max_output_tokens"] != nil || m["temperature"] != nil || m["reasoning"] == nil {
-		t.Fatal(out)
+	json.Unmarshal(out, &m)
+	if m["stream"] != true || m["store"] != false {
+		t.Fatalf("%s", out)
 	}
-	if _, ok := m["input"].([]any); !ok {
-		t.Fatal(out)
+	for _, k := range []string{"max_output_tokens", "temperature", "top_p"} {
+		if _, ok := m[k]; ok {
+			t.Fatalf("%s kept", k)
+		}
 	}
-	if string((Provider{}).Prepare([]byte("abc"))) != "abc" {
-		t.Fatal()
+	if m["reasoning"] == nil {
+		t.Fatal("reasoning dropped")
+	}
+	in := m["input"].([]any)
+	it := in[0].(map[string]any)
+	if it["role"] != "user" || it["content"].([]any)[0].(map[string]any)["text"] != "hello" {
+		t.Fatalf("%s", out)
+	}
+	plain := []byte(`{"a":1}`)
+	if string((Provider{}).Prepare(plain)) != string(plain) {
+		t.Fatal("plain changed")
+	}
+}
+
+func TestSignPlain(t *testing.T) {
+	req, _ := http.NewRequest("POST", "http://x/v1/messages", nil)
+	p := Provider{Key: "k", Anthropic: "https://proxy.example"}
+	if err := p.Sign(context.Background(), req, Anthropic, nil); err != nil {
+		t.Fatal(err)
+	}
+	if req.Header.Get("x-api-key") != "k" || req.Header.Get("Authorization") != "Bearer k" {
+		t.Fatal(req.Header)
+	}
+}
+
+func TestCodexSign(t *testing.T) {
+	home := env(t)
+	writeCodex(t, home, codexAuth(time.Now().Add(time.Hour).Unix()))
+	p := Accounts()[0]
+	req, _ := http.NewRequest("POST", CodexBase+"/responses", nil)
+	if err := p.Sign(context.Background(), req, Responses, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(req.Header.Get("Authorization"), "Bearer ") || req.Header.Get("chatgpt-account-id") != "acct-1" {
+		t.Fatal(req.Header)
 	}
 }
 
 func TestCodexRefresh(t *testing.T) {
-	home := envSetup(t)
-	writeCodex(t, home, time.Now().Add(time.Minute), nil)
-	newTok := jwt(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	home := env(t)
+	path := writeCodex(t, home, codexAuth(time.Now().Add(2*time.Minute).Unix()))
+	os.Chmod(path, 0o600)
+	newAccess := jwt(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"access_token": newTok, "refresh_token": "r2"})
+		calls++
+		var in map[string]string
+		json.NewDecoder(r.Body).Decode(&in)
+		if in["grant_type"] != "refresh_token" || in["refresh_token"] != "r1" || in["client_id"] == "" {
+			t.Errorf("bad refresh body %v", in)
+		}
+		fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"r2"}`, newAccess)
 	}))
 	defer srv.Close()
 	old := CodexRefreshURL
 	CodexRefreshURL = srv.URL
 	defer func() { CodexRefreshURL = old }()
-	req, _ := http.NewRequest("POST", "http://x", nil)
 	p := Accounts()[0]
+	req, _ := http.NewRequest("POST", "http://x/responses", nil)
 	if err := p.Sign(context.Background(), req, Responses, nil); err != nil {
 		t.Fatal(err)
 	}
-	if req.Header.Get("Authorization") != "Bearer "+newTok || req.Header.Get("chatgpt-account-id") != "acc1" {
-		t.Fatal(req.Header)
+	if req.Header.Get("Authorization") != "Bearer "+newAccess {
+		t.Fatal("old token used")
 	}
-	b, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
-	var m map[string]any
-	json.Unmarshal(b, &m)
-	if m["keep"] != "me" || m["last_refresh"] == nil || m["tokens"].(map[string]any)["refresh_token"] != "r2" {
-		t.Fatal(string(b))
+	// second sign: no more refresh
+	p.Sign(context.Background(), req, Responses, nil)
+	if calls != 1 {
+		t.Fatalf("refreshed %d times", calls)
 	}
-	if st, _ := os.Stat(filepath.Join(home, ".codex", "auth.json")); st.Mode().Perm() != 0o600 {
-		t.Fatal(st.Mode())
+	b, _ := os.ReadFile(path)
+	var f map[string]any
+	json.Unmarshal(b, &f)
+	tok := f["tokens"].(map[string]any)
+	if tok["access_token"] != newAccess || tok["refresh_token"] != "r2" || tok["account_id"] != "acct-1" || tok["id_token"] == "" {
+		t.Fatalf("tokens %v", tok)
 	}
-	// failure
-	writeCodex(t, home, time.Now().Add(time.Minute), nil)
-	CodexRefreshURL = "http://127.0.0.1:1"
-	err := p.Sign(context.Background(), req, Responses, nil)
-	if _, ok := err.(*SignedOutError); !ok || !strings.Contains(err.Error(), "codex login") {
-		t.Fatal(err)
+	if f["extra"] == nil || f["auth_mode"] != "chatgpt" || f["last_refresh"] == nil {
+		t.Fatalf("fields lost: %s", b)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", st.Mode())
 	}
 }
 
-func TestCodexRefreshViaBase(t *testing.T) {
-	home := envSetup(t)
-	writeCodex(t, home, time.Now().Add(time.Minute), nil)
-	newTok := jwt(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+func TestCodexRefreshFails(t *testing.T) {
+	home := env(t)
+	writeCodex(t, home, codexAuth(time.Now().Add(time.Minute).Unix()))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/oauth/token" {
-			w.WriteHeader(404)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"access_token": newTok, "refresh_token": "r2"})
+		w.WriteHeader(401)
+		w.Write([]byte(`{"error":"invalid_grant"}`))
 	}))
 	defer srv.Close()
-	old := CodexBase
-	CodexBase = srv.URL + "/backend-api/codex"
-	defer func() { CodexBase = old }()
-	req, _ := http.NewRequest("POST", "http://x", nil)
-	p := Accounts()[0]
-	if err := p.Sign(context.Background(), req, Responses, nil); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
-	var m map[string]any
-	json.Unmarshal(b, &m)
-	if m["keep"] != "me" || m["tokens"].(map[string]any)["access_token"] != newTok || m["tokens"].(map[string]any)["refresh_token"] != "r2" {
-		t.Fatal(string(b))
+	old := CodexRefreshURL
+	CodexRefreshURL = srv.URL
+	defer func() { CodexRefreshURL = old }()
+	req, _ := http.NewRequest("POST", "http://x/responses", nil)
+	err := Accounts()[0].Sign(context.Background(), req, Responses, nil)
+	if err == nil || !strings.Contains(err.Error(), "signed out") || !strings.Contains(err.Error(), "codex login") {
+		t.Fatalf("err %v", err)
 	}
 }
 
-func TestCopilot(t *testing.T) {
-	home := envSetup(t)
-	writeCopilot(t, home)
-	var api *httptest.Server
-	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/models" {
-			if r.Header.Get("Authorization") != "Bearer sess" {
-				w.WriteHeader(401)
+func copilotServer(t *testing.T, models string) (*httptest.Server, *int) {
+	exchanges := new(int)
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			*exchanges++
+			if r.Header.Get("Authorization") != "token gho_abc" {
+				t.Errorf("auth %q", r.Header.Get("Authorization"))
 			}
-			w.Write([]byte(`{"data":[{"id":"a","name":"A","model_picker_enabled":true,"capabilities":{"type":"chat","supports":{"reasoning_effort":["low","high"]}},"policy":{"state":"enabled"}},
-			{"id":"auto","capabilities":{"type":"chat"}},{"id":"emb","capabilities":{"type":"embeddings"}},
-			{"id":"hid","model_picker_enabled":false,"capabilities":{"type":"chat"}},{"id":"dis","capabilities":{"type":"chat"},"policy":{"state":"disabled"}}]}`))
+			fmt.Fprintf(w, `{"token":"sess","expires_at":%d,"endpoints":{"api":%q}}`, time.Now().Add(time.Hour).Unix(), srv.URL+"/api")
+		case "/api/models":
+			if r.Header.Get("Authorization") != "Bearer sess" || r.Header.Get("Copilot-Integration-Id") == "" {
+				t.Errorf("models headers %v", r.Header)
+			}
+			w.Write([]byte(models))
+		default:
+			http.NotFound(w, r)
 		}
 	}))
-	defer api.Close()
-	tok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "token gho_x" {
-			w.WriteHeader(401)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{"token": "sess", "expires_at": time.Now().Add(time.Hour).Unix(), "endpoints": map[string]string{"api": api.URL}})
-	}))
-	defer tok.Close()
+	t.Cleanup(srv.Close)
 	old := CopilotTokenURL
-	CopilotTokenURL = tok.URL
-	defer func() { CopilotTokenURL = old }()
-	p, _ := Find("copilot")
-	ms, err := p.Fetch(context.Background())
-	if err != nil || len(ms) != 1 || ms[0].ID != "a" || len(ms[0].Efforts) != 2 {
-		t.Fatal(ms, err)
-	}
-	if av := p.Available(); len(av) != 1 {
-		t.Fatal(av)
-	}
-	req, _ := http.NewRequest("POST", "https://api.githubcopilot.com/chat/completions", nil)
-	body := `{"messages":[{"role":"user","content":"x"},{"role":"tool","content":"y"}]}`
-	if err := p.Sign(context.Background(), req, Chat, []byte(body)); err != nil {
+	CopilotTokenURL = srv.URL + "/token"
+	t.Cleanup(func() { CopilotTokenURL = old })
+	return srv, exchanges
+}
+
+func TestCopilotModelsAndSign(t *testing.T) {
+	home := env(t)
+	writeCopilot(t, home)
+	_, exchanges := copilotServer(t, `{"data":[
+	 {"id":"gpt-5","name":"GPT 5","model_picker_enabled":true,"capabilities":{"type":"chat","supports":{"reasoning_effort":["low","high"]}}},
+	 {"id":"emb","model_picker_enabled":true,"capabilities":{"type":"embeddings"}},
+	 {"id":"gpt-5-secondary","model_picker_enabled":true,"capabilities":{"type":"chat"}},
+	 {"id":"copilot-search-x","model_picker_enabled":true,"capabilities":{"type":"chat"}},
+	 {"id":"dis","model_picker_enabled":false,"policy":{"state":"disabled"},"capabilities":{"type":"chat"}},
+	 {"id":"pol","model_picker_enabled":false,"policy":{"state":"enabled"},"capabilities":{"type":"chat"}}]}`)
+	p, err := Find("copilot")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if req.URL.Host != strings.TrimPrefix(api.URL, "http://") || req.Header.Get("X-Initiator") != "agent" || req.Header.Get("Editor-Version") == "" {
+	ms, err := p.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 2 || ms[0].ID != "gpt-5" || ms[1].ID != "pol" || len(ms[0].Efforts) != 2 {
+		t.Fatalf("%+v", ms)
+	}
+	av := p.Available()
+	if len(av) != 2 {
+		t.Fatalf("available %+v", av)
+	}
+	// signing
+	body := []byte(`{"messages":[{"role":"user","content":"a"},{"role":"tool","content":"x"}]}`)
+	req, _ := http.NewRequest("POST", "https://api.githubcopilot.com/chat/completions", nil)
+	if err := p.Sign(context.Background(), req, Chat, body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(req.URL.String(), "/api/chat/completions") || req.Header.Get("Authorization") != "Bearer sess" ||
+		req.Header.Get("X-Initiator") != "agent" || req.Header.Get("Copilot-Integration-Id") == "" {
 		t.Fatal(req.URL, req.Header)
 	}
+	req2, _ := http.NewRequest("POST", "https://api.githubcopilot.com/chat/completions", nil)
+	p.Sign(context.Background(), req2, Chat, []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}}]}]}`))
+	if req2.Header.Get("X-Initiator") != "user" || req2.Header.Get("Copilot-Vision-Request") != "true" {
+		t.Fatal(req2.Header)
+	}
+	if *exchanges != 1 {
+		t.Fatalf("token exchanged %d times", *exchanges)
+	}
 }
 
-func TestExcluded(t *testing.T) {
-	home := envSetup(t)
+func TestCopilotNoChatModels(t *testing.T) {
+	home := env(t)
+	writeCopilot(t, home)
+	copilotServer(t, `{"data":[{"id":"emb","model_picker_enabled":true,"capabilities":{"type":"embeddings"}}]}`)
+	p, _ := Find("copilot")
+	if _, err := p.Fetch(context.Background()); err == nil {
+		t.Fatal("want error")
+	}
+}
+
+func TestExcludedClaude(t *testing.T) {
+	home := env(t)
 	if len(Excluded()) != 0 {
-		t.Fatal()
+		t.Fatal("unexpected")
 	}
 	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
-	os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte("{}"), 0o600)
-	resetExcluded()
+	os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte(`{"secret":"TOPSECRET"}`), 0o600)
 	ex := Excluded()
-	if len(ex) != 1 || ex[0].Why == "" {
-		t.Fatal(ex)
+	if len(ex) != 1 || ex[0].Agent != "claude" || !strings.Contains(ex[0].Why, "Claude Code") || !strings.Contains(ex[0].Why, "API key") ||
+		strings.Contains(ex[0].Why, "TOPSECRET") {
+		t.Fatalf("%+v", ex)
 	}
-}
-
-func TestExcludedCacheInvalidatesOnFileChange(t *testing.T) {
-	home := envSetup(t)
-	cred := filepath.Join(home, ".claude", ".credentials.json")
-	if len(Excluded()) != 0 {
-		t.Fatal("unexpected exclusion")
-	}
-	os.MkdirAll(filepath.Dir(cred), 0o755)
-	os.WriteFile(cred, []byte("{}"), 0o600)
-	if len(Excluded()) != 1 { // no resetExcluded: existence change must bust the cache
-		t.Fatal("login appearing not noticed")
-	}
-	os.Remove(cred)
-	if len(Excluded()) != 0 {
-		t.Fatal("login vanishing not noticed")
-	}
-}
-
-func TestSaveBareAccountID(t *testing.T) {
-	home := envSetup(t)
-	writeCodex(t, home, time.Now().Add(time.Hour), nil)
-	if err := Save(Provider{ID: "codex", Chat: "http://x", Key: "sekrit", Models: []string{"gpt-5.5"}}); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(Path())
-	if strings.Contains(string(b), "sekrit") || strings.Contains(string(b), "http://x") {
-		t.Fatal(string(b))
-	}
-	// a user's own provider with a base URL wins
-	f := load()
-	f.Providers = []Provider{{ID: "codex", Name: "mine", Chat: "http://own", Key: "k"}}
-	store(f)
-	if p, err := Find("codex"); err != nil || p.Account != nil || p.Chat != "http://own" {
-		t.Fatal(p, err)
-	}
-}
-
-func TestPrepareDropsUnsupported(t *testing.T) {
-	p := Provider{Account: &Account{Agent: "codex"}}
-	out := string(p.Prepare([]byte(`{"model":"m","input":"x","previous_response_id":"r","metadata":{},"truncation":"auto","service_tier":"auto","user":"u","tools":[],"include":[],"text":{}}`)))
-	var m map[string]any
-	json.Unmarshal([]byte(out), &m)
-	for _, k := range []string{"previous_response_id", "metadata", "truncation", "service_tier", "user"} {
-		if _, ok := m[k]; ok {
-			t.Fatal(k, out)
+	for _, p := range All() {
+		if p.ID == "claude" {
+			t.Fatal("claude offered")
 		}
-	}
-	for _, k := range []string{"model", "input", "tools", "include", "text"} {
-		if _, ok := m[k]; !ok {
-			t.Fatal(k, out)
-		}
-	}
-}
-
-func TestSignCodexSignedOut(t *testing.T) {
-	envSetup(t)
-	p := Provider{Account: &Account{Agent: "codex"}}
-	req, _ := http.NewRequest("POST", "http://x", nil)
-	err := p.Sign(context.Background(), req, Responses, nil)
-	if _, ok := err.(*SignedOutError); !ok || !strings.Contains(err.Error(), "signed out") {
-		t.Fatal(err)
-	}
-}
-
-func TestCopilotLiveCacheKeyed(t *testing.T) {
-	home := envSetup(t)
-	writeCopilot(t, home)
-	p := Provider{ID: "copilot", Account: &Account{Agent: "copilot"}}
-	liveMu.Lock()
-	copilotM, copilotK = []catalog.Model{{ID: "zzz"}}, "http://other\x00gho_other"
-	liveMu.Unlock()
-	defer func() { liveMu.Lock(); copilotM, copilotK = nil, ""; liveMu.Unlock() }()
-	ids := ""
-	for _, m := range p.Available() {
-		ids += m.ID + " "
-	}
-	if strings.Contains(ids, "zzz") || !strings.Contains(ids, "claude-sonnet-4.5") || strings.Contains(ids, "auto") {
-		t.Fatal(ids)
 	}
 }

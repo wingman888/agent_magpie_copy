@@ -320,6 +320,8 @@ var builtin = map[string][]Model{
 		{ID: "gpt-5.6-terra", Name: "GPT-5.6-Terra", Efforts: []string{"low", "medium", "high", "xhigh"}},
 		{ID: "gpt-5.6-luna", Name: "GPT-5.6-Luna", Efforts: []string{"low", "medium", "high", "xhigh"}},
 		{ID: "gpt-5.5", Name: "GPT-5.5", Efforts: []string{"low", "medium", "high", "xhigh"}},
+		{ID: "gpt-5.4", Name: "GPT-5.4", Efforts: []string{"low", "medium", "high", "xhigh"}},
+		{ID: "gpt-5.3-codex", Name: "GPT-5.3-Codex", Efforts: []string{"low", "medium", "high", "xhigh"}},
 	},
 	"deepseek": {
 		{ID: "deepseek-flash", Name: "DeepSeek V4.1 Flash", Released: "2026-09-10", Efforts: []string{"low", "high", "max"}},

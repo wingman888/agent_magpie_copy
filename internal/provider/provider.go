@@ -32,14 +32,10 @@ var Protocols = []Protocol{Chat, Responses, Anthropic}
 // Provider is one configured vendor.
 type Provider struct {
 	ID     string `json:"id"`
-	Name   string `json:"name,omitempty"`
+	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key,omitempty"`    // API key, as typed by the user
-
-	// Account is set for providers that borrow another agent's login
-	// (Codex, Copilot). Never stored; derived from the agent's own files.
-	Account *Account `json:"account,omitempty"`
+	Key    string `json:"key"`              // API key, as typed by the user
 
 	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -55,6 +51,11 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// Account is set for providers that are an agent's signed-in account
+	// (Codex, Copilot). Such a provider is never stored: dial keeps only
+	// the models the user chose for it.
+	Account *Account `json:"account,omitempty"`
 }
 
 type file struct {
@@ -78,12 +79,35 @@ func load() file {
 	return f
 }
 
+// stub is how an account provider sits in the config file: its id and the
+// models the user picked, nothing else.
+type stub struct {
+	ID     string   `json:"id"`
+	Models []string `json:"models,omitempty"`
+}
+
+// isStub reports whether a stored record is an account's model selection
+// rather than a provider the user built.
+func isStub(p Provider) bool {
+	return isAccountID(p.ID) && p.Chat == "" && p.Responses == "" && p.Anthropic == ""
+}
+
 func store(f file) error {
 	p := Path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
+	recs := make([]any, 0, len(f.Providers))
+	for _, q := range f.Providers {
+		if isStub(q) {
+			recs = append(recs, stub{ID: q.ID, Models: q.Models})
+		} else {
+			recs = append(recs, q)
+		}
+	}
+	b, err := json.MarshalIndent(struct {
+		Providers []any `json:"providers"`
+	}{recs}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -93,39 +117,28 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-func hasBase(p Provider) bool { return p.Chat != "" || p.Responses != "" || p.Anthropic != "" }
-
-// All lists the configured providers in the order they were added, then
-// the signed-in account providers. A stored provider with an address wins
-// over an account of the same id; a stored record without one only holds
-// the model choice for that account.
+// All lists the configured providers in the order they were added, then the
+// signed-in agent accounts. A provider the user built with the same id wins
+// over an account; a stored selection with no account behind it is dropped.
 func All() []Provider {
-	stored := load().Providers
-	accounts := Accounts()
+	f := load()
 	var out []Provider
-	custom := map[string]bool{}
-	for _, p := range stored {
+	have := map[string]bool{}
+	picks := map[string][]string{}
+	for _, p := range f.Providers {
 		p = normalize(p)
-		if hasBase(p) {
-			custom[p.ID] = true
-		}
-	}
-	for _, p := range stored {
-		p = normalize(p)
-		if !hasBase(p) && IsAccountID(p.ID) {
-			continue // a model choice, not a provider
-		}
-		out = append(out, p)
-	}
-	for _, a := range accounts {
-		if custom[a.ID] {
+		if isStub(p) {
+			picks[p.ID] = p.Models
 			continue
 		}
-		for _, p := range stored {
-			if p.ID == a.ID && !hasBase(normalize(p)) {
-				a.Models = cleanList(p.Models)
-			}
+		out = append(out, p)
+		have[p.ID] = true
+	}
+	for _, a := range Accounts() {
+		if have[a.ID] {
+			continue
 		}
+		a.Models = cleanList(picks[a.ID])
 		out = append(out, a)
 	}
 	return out
@@ -155,11 +168,33 @@ func Save(p Provider) error {
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
+	if isAccountID(p.ID) {
+		// an agent account keeps only the model choice, whatever else came
+		// along; a provider the user built under that id is a different thing
+		f := load()
+		own := false
+		for _, q := range f.Providers {
+			if q.ID == p.ID && !isStub(q) {
+				own = true
+			}
+		}
+		if _, ok := accountFor(p.ID); ok && !own {
+			s := Provider{ID: p.ID, Models: p.Models}
+			keep := f.Providers[:0]
+			for _, q := range f.Providers {
+				if q.ID != p.ID {
+					keep = append(keep, q)
+				}
+			}
+			f.Providers = keep
+			if len(s.Models) > 0 {
+				f.Providers = append(f.Providers, s)
+			}
+			return store(f)
+		}
+	}
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
-	}
-	if p.Account != nil || (IsAccountID(p.ID) && !customStored(p.ID)) {
-		return saveChoice(p)
 	}
 	if p.ID == "dial" {
 		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
@@ -184,60 +219,9 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// customStored reports whether the user has their own provider (with a
-// base URL) under this id.
-func customStored(id string) bool {
-	for _, q := range load().Providers {
-		if q.ID == id && hasBase(normalize(q)) {
-			return true
-		}
-	}
-	return false
-}
-
-// saveChoice keeps only which models of an account provider to expose.
-func saveChoice(p Provider) error {
-	id := p.ID
-	if p.Account != nil && p.Account.Agent != "" {
-		id = p.Account.Agent
-	}
-	if !IsAccountID(id) {
-		return fmt.Errorf("%q is not an account provider", p.ID)
-	}
-	f := load()
-	keep := f.Providers[:0]
-	for _, q := range f.Providers {
-		if q.ID == id && !hasBase(normalize(q)) {
-			continue
-		}
-		keep = append(keep, q)
-	}
-	f.Providers = keep
-	if models := cleanList(p.Models); len(models) > 0 {
-		f.Providers = append(f.Providers, Provider{ID: id, Models: models})
-	}
-	return store(f)
-}
-
-// Delete removes a provider. For an account provider that only clears the
-// model choice: signing out is the agent's business.
+// Delete removes a provider.
 func Delete(id string) error {
 	f := load()
-	if IsAccountID(id) {
-		custom := false
-		for _, p := range f.Providers {
-			if p.ID == id && hasBase(normalize(p)) {
-				custom = true
-			}
-		}
-		if !custom {
-			for _, a := range Accounts() {
-				if a.ID == id {
-					return saveChoice(Provider{ID: id})
-				}
-			}
-		}
-	}
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -248,6 +232,9 @@ func Delete(id string) error {
 		keep = append(keep, p)
 	}
 	if !found {
+		if _, ok := accountFor(id); ok {
+			return nil // an account has no record to remove; signing out is the agent's business
+		}
 		return fmt.Errorf("no provider %q", id)
 	}
 	f.Providers = keep

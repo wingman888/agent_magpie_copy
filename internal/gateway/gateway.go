@@ -336,7 +336,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
-	body = p.Prepare(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -352,6 +351,10 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
+	body = p.Prepare(body)
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
@@ -359,148 +362,45 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err != nil {
 		return nil, err
 	}
-	fixContentType(res)
+	sniffContentType(res)
 	return res, nil
 }
 
-// fixContentType gives a reply without a Content-Type (ChatGPT's backend
-// sends none) the type its first bytes suggest.
-func fixContentType(res *http.Response) {
+// failStatus is the HTTP status for a request that could not be sent: a
+// login that needs renewing is the client's cue to fix it, anything else
+// is a bad gateway.
+func failStatus(err error) int {
+	if errors.Is(err, provider.ErrSignedOut) {
+		return 401
+	}
+	return 502
+}
+
+// sniffContentType gives a reply without a Content-Type its real one when
+// the body opens like an event stream (the ChatGPT backend does this).
+func sniffContentType(res *http.Response) {
 	if res.Header.Get("Content-Type") != "" {
 		return
 	}
-	br := bufio.NewReader(res.Body)
+	br := bufio.NewReaderSize(res.Body, 4096)
 	res.Body = struct {
 		io.Reader
 		io.Closer
 	}{br, res.Body}
-	if _, err := br.Peek(1); err != nil {
-		return
-	}
-	b, _ := br.Peek(br.Buffered())
-	b = bytes.TrimLeft(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), " \t\r\n")
-	for _, pre := range []string{"event:", "data:", "id:", "retry:", ":"} {
-		if bytes.HasPrefix(b, []byte(pre)) {
+	for n := 1; ; n++ {
+		b, err := br.Peek(n)
+		t := bytes.TrimLeft(b, " \t\r\n")
+		switch {
+		case bytes.HasPrefix(t, []byte("data:")) || bytes.HasPrefix(t, []byte("event:")):
 			res.Header.Set("Content-Type", "text/event-stream")
 			return
+		case len(t) > 0 && !bytes.HasPrefix([]byte("data:"), t) && !bytes.HasPrefix([]byte("event:"), t):
+			return
+		case err != nil:
+			return
 		}
+		n = len(b)
 	}
-}
-
-// forwardFailed answers a request that could not be sent: signed-out
-// accounts are 401 with a way forward, anything else a bad gateway.
-func forwardFailed(w http.ResponseWriter, proto provider.Protocol, p provider.Provider, err error) (int, string) {
-	var so *provider.SignedOutError
-	if errors.As(err, &so) {
-		return writeError(w, proto, 401, so.Msg), so.Msg
-	}
-	return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
-}
-
-// upstreamFailed answers an error status from the provider.
-func upstreamFailed(w http.ResponseWriter, proto provider.Protocol, p provider.Provider, res *http.Response) (int, string) {
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if res.StatusCode == 401 && p.Account != nil {
-		msg := p.SignedOutMessage()
-		return writeError(w, proto, 401, msg), msg
-	}
-	msg := p.Name + ": " + provider.APIError(b, res.Status)
-	return writeError(w, proto, res.StatusCode, msg), msg
-}
-
-func streamWanted(body []byte) bool {
-	var v struct {
-		Stream bool `json:"stream"`
-	}
-	json.Unmarshal(body, &v)
-	return v.Stream
-}
-
-// collectResponses turns a Responses event stream into the one JSON
-// object a non-streaming client expects.
-func collectResponses(w http.ResponseWriter, p provider.Provider, body io.Reader, u *Usage) (int, string) {
-	var completed json.RawMessage
-	var items []json.RawMessage
-	var text strings.Builder
-	var failed string
-	readSSE(body, func(_, data string) error {
-		var e struct {
-			Type     string          `json:"type"`
-			Response json.RawMessage `json:"response"`
-			Item     json.RawMessage `json:"item"`
-			Delta    string          `json:"delta"`
-			Message  string          `json:"message"`
-		}
-		if json.Unmarshal([]byte(data), &e) != nil {
-			return nil
-		}
-		switch e.Type {
-		case "response.completed", "response.incomplete":
-			completed = e.Response
-		case "response.output_item.done":
-			items = append(items, e.Item)
-		case "response.output_text.delta":
-			text.WriteString(e.Delta)
-		case "response.failed":
-			var f struct {
-				Error struct {
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			json.Unmarshal(e.Response, &f)
-			failed = f.Error.Message
-			if failed == "" {
-				failed = "the response failed"
-			}
-		case "error":
-			failed = e.Message
-			if failed == "" {
-				failed = "upstream error"
-			}
-		}
-		return nil
-	})
-	m := map[string]any{}
-	if len(completed) > 0 {
-		json.Unmarshal(completed, &m)
-	}
-	if len(completed) == 0 {
-		if failed != "" {
-			msg := p.Name + ": " + failed
-			return writeError(w, provider.Responses, 502, msg), msg
-		}
-		if len(items) == 0 && text.Len() == 0 {
-			msg := p.Name + " sent no response"
-			return writeError(w, provider.Responses, 502, msg), msg
-		}
-		m["id"], m["status"] = "resp_dial", "completed"
-	}
-	m["object"] = "response"
-	if out, _ := m["output"].([]any); len(out) == 0 {
-		var rebuilt []any
-		for _, it := range items {
-			var v any
-			if json.Unmarshal(it, &v) == nil {
-				rebuilt = append(rebuilt, v)
-			}
-		}
-		if len(rebuilt) == 0 && text.Len() > 0 {
-			rebuilt = []any{map[string]any{"type": "message", "role": "assistant", "status": "completed",
-				"content": []any{map[string]any{"type": "output_text", "text": text.String(), "annotations": []any{}}}}}
-		}
-		if rebuilt == nil {
-			rebuilt = []any{}
-		}
-		m["output"] = rebuilt
-	}
-	if raw, err := json.Marshal(m["usage"]); err == nil {
-		var ru rUsage
-		if json.Unmarshal(raw, &ru) == nil {
-			u.add(ru.usage())
-		}
-	}
-	writeJSON(w, 200, m)
-	return 200, failed
 }
 
 // passthrough relays a request the provider understands as-is, with the
@@ -509,15 +409,16 @@ func collectResponses(w http.ResponseWriter, p provider.Provider, body io.Reader
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), rewriteModel(body, model), r.Header)
 	if err != nil {
-		return forwardFailed(w, proto, p, err)
+		return writeError(w, proto, failStatus(err), p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		return upstreamFailed(w, proto, p, res)
+		return s.upstreamError(w, proto, p, res)
 	}
-	sse := strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
-	if p.Account != nil && proto == provider.Responses && !streamWanted(body) && sse {
-		return collectResponses(w, p, res.Body, u)
+	// a backend that only streams (ChatGPT's) answers a plain request in
+	// events; fold them into the one JSON reply the client asked for
+	if proto == provider.Responses && !wantsStream(body) && strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+		return s.foldResponses(w, p, res, u)
 	}
 	h := w.Header()
 	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
@@ -525,8 +426,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			h.Set(k, v)
 		}
 	}
-	if sse {
-		h.Set("Content-Type", "text/event-stream")
+	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Accel-Buffering", "no")
 	}
@@ -553,6 +453,25 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	return res.StatusCode, ""
 }
 
+// upstreamError relays a failed reply. An account that the backend no
+// longer accepts is told to sign in again.
+func (s *Server) upstreamError(w http.ResponseWriter, proto provider.Protocol, p provider.Provider, res *http.Response) (int, string) {
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	msg := p.Name + ": " + provider.APIError(b, res.Status)
+	if p.Account != nil && res.StatusCode == 401 {
+		msg += " — " + p.Name + " is signed out or its token was rejected; please sign in again"
+	}
+	return writeError(w, proto, res.StatusCode, msg), msg
+}
+
+func wantsStream(body []byte) bool {
+	var v struct {
+		Stream bool `json:"stream"`
+	}
+	json.Unmarshal(body, &v)
+	return v.Stream
+}
+
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
@@ -565,11 +484,11 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
 	if err != nil {
-		return forwardFailed(w, from, p, err)
+		return writeError(w, from, failStatus(err), p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		return upstreamFailed(w, from, p, res)
+		return s.upstreamError(w, from, p, res)
 	}
 	dec := decoder(to)
 	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {

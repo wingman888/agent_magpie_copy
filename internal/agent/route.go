@@ -18,17 +18,35 @@ import (
 const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
-func viaDial(prefix string) []Option { return viaDialExcept(prefix, "") }
+func viaDial(prefix string) []Option { return viaDialFor("", prefix) }
 
-// viaDialExcept is viaDial without the models of one account agent: Codex
-// has no use for its own ChatGPT login routed back through dial.
-func viaDialExcept(prefix, skipAgent string) []Option {
-	var out []Option
+// owner is who a catalog entry is credited to: the signed-in user for an
+// agent account, else the provider.
+func owner(p provider.Provider) string {
+	if p.Account != nil && p.Account.User != "" {
+		return p.Account.User
+	}
+	return p.Name
+}
+
+// entries is the catalog as one agent may use it: an agent never borrows
+// its own account back through dial.
+func entries(forAgent string) []provider.Entry {
+	var out []provider.Entry
 	for _, e := range provider.Catalog() {
-		if skipAgent != "" && e.Provider.Account != nil && e.Provider.Account.Agent == skipAgent {
+		if forAgent != "" && e.Provider.Account != nil && e.Provider.Account.Agent == forAgent {
 			continue
 		}
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Label() + " · via dial",
+		out = append(out, e)
+	}
+	return out
+}
+
+// viaDialFor is viaDial for one agent's picker.
+func viaDialFor(forAgent, prefix string) []Option {
+	var out []Option
+	for _, e := range entries(forAgent) {
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: owner(e.Provider) + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
@@ -42,15 +60,13 @@ func isDial(v string) bool {
 
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-func dialModels() []catalog.Model { return dialModelsExcept("") }
+func dialModels() []catalog.Model { return dialModelsFor("") }
 
-func dialModelsExcept(skipAgent string) []catalog.Model {
+// dialModelsFor is dialModels for one agent.
+func dialModelsFor(forAgent string) []catalog.Model {
 	var out []catalog.Model
-	for _, e := range provider.Catalog() {
-		if skipAgent != "" && e.Provider.Account != nil && e.Provider.Account.Agent == skipAgent {
-			continue
-		}
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Label(), Provider: e.Provider.Catalog, Efforts: e.Efforts})
+	for _, e := range entries(forAgent) {
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + owner(e.Provider), Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }
