@@ -7,6 +7,7 @@ import (
 
 	"github.com/yetone/dial/internal/catalog"
 	"github.com/yetone/dial/internal/edit"
+	"github.com/yetone/dial/internal/gateway"
 	"github.com/yetone/dial/internal/provider"
 )
 
@@ -31,7 +32,42 @@ func gemini(home string) *Agent {
 		return ""
 	}
 
+	model := jsonGet(path, "model.name")
+	// routed: Gemini CLI is pointed at dial's gateway (see route below).
+	routed := func() bool { return base() == gateway.URL() && envKey() == gateway.Token }
+
+	// setOrDel writes v, or removes the key when v is empty.
+	setEnv := func(k, v string) error {
+		if v == "" {
+			return edit.DelEnvFile(envPath, k)
+		}
+		return edit.SetEnvFile(envPath, edit.KV{Path: k, Value: v})
+	}
+	setJSON := func(k, v string) error {
+		if v == "" {
+			return edit.DelJSON(path, k)
+		}
+		return edit.SetJSON(path, edit.KV{Path: k, Value: v})
+	}
+	// unroute puts back what the config said before dial routed it, and
+	// drops the stash. Items that did not exist are removed.
+	unroute := func() error {
+		if err := setEnv("GOOGLE_GEMINI_BASE_URL", unstash("gemini.base_url")); err != nil {
+			return err
+		}
+		if err := setEnv("GEMINI_API_KEY", unstash("gemini.api_key")); err != nil {
+			return err
+		}
+		if err := setJSON("security.auth.selectedType", unstash("gemini.auth")); err != nil {
+			return err
+		}
+		return setJSON("model.name", unstash("gemini.model"))
+	}
+
 	current := func() string {
+		if routed() {
+			return dialID
+		}
 		if base() != "" {
 			return "custom"
 		}
@@ -44,6 +80,17 @@ func gemini(home string) *Agent {
 		return "google"
 	}
 	use := func(id string) error {
+		if id == dialID {
+			if routed() {
+				return nil
+			}
+			return fmt.Errorf("dial routing is enabled by choosing a dial model for Gemini CLI (dial gemini model <provider/model>), not by picking an auth type")
+		}
+		if routed() {
+			if err := unroute(); err != nil {
+				return err
+			}
+		}
 		switch id {
 		case "":
 			// back to the CLI's own first-run choice
@@ -107,6 +154,9 @@ func gemini(home string) *Agent {
 						key,
 						{Value: "vertex", Label: "Vertex AI", Icon: "googlecloud-color", Note: "Vertex AI · $GOOGLE_CLOUD_PROJECT"},
 					}
+					if routed() {
+						out = append(out, Option{Value: dialID, Label: dialID, Note: "local gateway · models from every provider"})
+					}
 					if current() == "custom" {
 						out = append(out, Option{Value: "custom", Note: hostOf(base()) + " (from .env)"})
 					}
@@ -115,8 +165,45 @@ func gemini(home string) *Agent {
 			},
 			{
 				Key: "model", Label: "model",
-				Get: jsonGet(path, "model.name"),
-				Set: jsonSet(path, "model.name"),
+				Get: model,
+				Set: func(v string) error {
+					if v == "" {
+						// Gemini CLI as installed: its own auth and model
+						if routed() {
+							unstash("gemini.model")
+							if err := unroute(); err != nil {
+								return err
+							}
+						}
+						return edit.DelJSON(path, "model.name")
+					}
+					if isDial(v) {
+						if !routed() {
+							stash(map[string]string{
+								"gemini.base_url": base(),
+								"gemini.api_key":  envKey(),
+								"gemini.auth":     auth(),
+								"gemini.model":    model(),
+							})
+						}
+						if err := edit.SetEnvFile(envPath,
+							edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: gateway.URL()},
+							edit.KV{Path: "GEMINI_API_KEY", Value: gateway.Token},
+						); err != nil {
+							return err
+						}
+						return edit.SetJSON(path,
+							edit.KV{Path: "security.auth.selectedType", Value: "gemini-api-key"},
+							edit.KV{Path: "model.name", Value: v},
+						)
+					}
+					if routed() {
+						if err := unroute(); err != nil {
+							return err
+						}
+					}
+					return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
+				},
 				Options: func(map[string]string) []Option {
 					var ms []catalog.Model
 					for _, m := range catalog.Provider("google") {
@@ -124,7 +211,7 @@ func gemini(home string) *Agent {
 							ms = append(ms, m)
 						}
 					}
-					return options(ms, "")
+					return append(group("Gemini CLI", options(ms, "")), viaDial("")...)
 				},
 			},
 		},

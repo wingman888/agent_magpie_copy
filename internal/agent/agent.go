@@ -85,6 +85,13 @@ func (a *Agent) Field(key string) *Field {
 			return &a.Fields[i]
 		}
 	}
+	// the label shown in the UI also names a field, ignoring case
+	key = strings.TrimSpace(key)
+	for i := range a.Fields {
+		if strings.EqualFold(a.Fields[i].Label, key) || strings.EqualFold(a.Fields[i].Key, key) {
+			return &a.Fields[i]
+		}
+	}
 	return nil
 }
 
