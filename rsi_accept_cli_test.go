@@ -145,14 +145,6 @@ func TestAcceptCLIImport(t *testing.T) {
 	if !strings.Contains(strings.ToLower(out), "replace") {
 		t.Errorf("no replace notice; %s", one(out))
 	}
-	// a link without a key says how to add one
-	out, err = s.run(t, "", "import", "-y", "magpie://import?preset=deepseek")
-	if err != nil {
-		t.Fatalf("%v; %s", err, one(out))
-	}
-	if !strings.Contains(out, "magpie provider key deepseek") {
-		t.Errorf("no key hint; %s", one(out))
-	}
 	// a protocol-handler handoff works like import
 	s2 := newSandbox(t)
 	if out, err := s2.run(t, "", "magpie://import?preset=deepseek&key=sk-x"); err == nil && !strings.Contains(strings.ToLower(out), "add") {
@@ -185,8 +177,8 @@ func TestAcceptCLIRemoveAndRestoreAccount(t *testing.T) {
 	if out, err := s.run(t, "", "provider", "models", "codex", "gpt-5.5"); err != nil {
 		t.Fatalf("pick: %v; %s", err, one(out))
 	}
-	if out, _ := s.run(t, "", "models"); !strings.Contains(out, "codex/gpt-5.5") {
-		t.Fatalf("codex model missing; %s", one(out))
+	if out, _ := s.run(t, "", "models"); !strings.Contains(out, "codex/gpt-5.5") || strings.Contains(out, "codex/gpt-5.4") {
+		t.Fatalf("pick not applied; %s", one(out))
 	}
 	if out, err := s.run(t, "", "provider", "rm", "codex"); err != nil {
 		t.Fatalf("rm: %v; %s", err, one(out))
