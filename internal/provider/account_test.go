@@ -154,6 +154,34 @@ func TestCodexRefresh(t *testing.T) {
 	}
 }
 
+func TestCodexRefreshViaBase(t *testing.T) {
+	home := envSetup(t)
+	writeCodex(t, home, time.Now().Add(time.Minute), nil)
+	newTok := jwt(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/token" {
+			w.WriteHeader(404)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"access_token": newTok, "refresh_token": "r2"})
+	}))
+	defer srv.Close()
+	old := CodexBase
+	CodexBase = srv.URL + "/backend-api/codex"
+	defer func() { CodexBase = old }()
+	req, _ := http.NewRequest("POST", "http://x", nil)
+	p := Accounts()[0]
+	if err := p.Sign(context.Background(), req, Responses, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
+	var m map[string]any
+	json.Unmarshal(b, &m)
+	if m["keep"] != "me" || m["tokens"].(map[string]any)["access_token"] != newTok || m["tokens"].(map[string]any)["refresh_token"] != "r2" {
+		t.Fatal(string(b))
+	}
+}
+
 func TestCopilot(t *testing.T) {
 	home := envSetup(t)
 	writeCopilot(t, home)

@@ -40,13 +40,15 @@ type Exclusion struct {
 
 // Endpoints dial talks to; variables so tests can point them elsewhere.
 var (
-	CodexBase         = "https://chatgpt.com/backend-api/codex"
-	CodexRefreshURL   = "https://auth.openai.com/oauth/token"
+	CodexBase         = codexDefaultBase
+	CodexRefreshURL   = codexDefaultRefresh
 	CopilotTokenURL   = "https://api.github.com/copilot_internal/v2/token"
 	copilotDefaultAPI = "https://api.githubcopilot.com"
 )
 
 const (
+	codexDefaultBase    = "https://chatgpt.com/backend-api/codex"
+	codexDefaultRefresh = "https://auth.openai.com/oauth/token"
 	codexClientID  = "app_EMoamEEZ73f0CkXaXp7hrann"
 	codexSignedOut = "Codex is signed out; run `codex login` again"
 	copilotOut     = "Copilot is signed out; sign in to GitHub Copilot again"
@@ -356,13 +358,25 @@ func codexToken(ctx context.Context) (codexLogin, error) {
 	return refreshCodex(ctx, m, l)
 }
 
+// codexRefreshEndpoint resolves the token refresh URL. If CodexRefreshURL is
+// untouched but CodexBase was redirected (test double), refresh goes to the
+// same scheme://host as CodexBase.
+func codexRefreshEndpoint() string {
+	if CodexRefreshURL == codexDefaultRefresh && CodexBase != codexDefaultBase {
+		if u, err := url.Parse(CodexBase); err == nil && u.Scheme != "" && u.Host != "" {
+			return u.Scheme + "://" + u.Host + "/oauth/token"
+		}
+	}
+	return CodexRefreshURL
+}
+
 func refreshCodex(ctx context.Context, m map[string]any, l codexLogin) (codexLogin, error) {
 	out := &SignedOutError{codexSignedOut}
 	payload, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
 		"refresh_token": l.Refresh, "scope": "openid profile email"})
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, CodexRefreshURL, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexRefreshEndpoint(), bytes.NewReader(payload))
 	if err != nil {
 		return l, out
 	}
