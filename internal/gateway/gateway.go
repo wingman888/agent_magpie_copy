@@ -359,8 +359,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
 		if !last && hw.failed() {
-			s.rest(c.rest)
-			skipped = append(skipped, c.label()+": "+call.Error)
+			s.rest(c.p.ID)
+			skipped = append(skipped, c.p.ID+": "+call.Error)
 			continue
 		}
 		hw.release()
