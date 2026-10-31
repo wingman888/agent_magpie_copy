@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -351,7 +353,14 @@ func TestCancelStopsEverything(t *testing.T) {
 	s := New()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
+	crash := make(chan string, 1)
 	go func() {
+		defer func() {
+			if e := recover(); e != nil {
+				crash <- fmt.Sprint(e, " ", strings.ReplaceAll(string(debug.Stack()), "\n", " | "))
+				done <- 0
+			}
+		}()
 		code, _ := send(s, ctx, "/v1/chat/completions", chatReq)
 		done <- code
 	}()
@@ -365,6 +374,11 @@ func TestCancelStopsEverything(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the request did not end")
+	}
+	select {
+	case c := <-crash:
+		t.Fatalf("PANIC %s", c)
+	default:
 	}
 	if b.count() != 0 {
 		t.Fatal("B was asked after the agent left")
