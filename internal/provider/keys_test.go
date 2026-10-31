@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func isolate(t *testing.T) {
+func isolateCfg(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
@@ -34,7 +34,7 @@ func get(t *testing.T) Provider {
 }
 
 func TestKeyLifecycle(t *testing.T) {
-	isolate(t)
+	isolateCfg(t)
 	custom(t, "k1")
 	if err := AddKey("relay", "team", "k2", Anthropic); err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestKeyLifecycle(t *testing.T) {
 }
 
 func TestSaveNormalizes(t *testing.T) {
-	isolate(t)
+	isolateCfg(t)
 	err := Save(Provider{ID: "relay", Key: "k", Chat: "r.example/v1", KeyProtocol: "nope"})
 	if err == nil {
 		t.Fatal("bad keyProtocol saved")
@@ -102,7 +102,7 @@ func TestSaveNormalizes(t *testing.T) {
 }
 
 func TestHeadersOnWire(t *testing.T) {
-	isolate(t)
+	isolateCfg(t)
 	var got http.Header
 	var raw []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +132,7 @@ func TestHeadersOnWire(t *testing.T) {
 var png = []byte("\x89PNG\r\n\x1a\n0000")
 
 func TestIcons(t *testing.T) {
-	isolate(t)
+	isolateCfg(t)
 	a, err := StoreIcon(png)
 	if err != nil || len(a) != len("file:")+16+4 {
 		t.Fatal(a, err)
