@@ -67,12 +67,12 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
+	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
-	Fallback          string            `json:"fallback,omitempty"` // providers that failed before this one answered
 }
 
 // Server is the gateway.
@@ -85,7 +85,6 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	rest         map[string]restEntry // provider id → end of its rest period
 }
 
 // New makes a gateway.
@@ -99,7 +98,6 @@ func New() *Server {
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
-		rest:         make(map[string]restEntry),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -351,72 +349,61 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	var failures []string
-	var finalModel string
-	noEndpoint := false
-	cands, resting := s.candidates(p, model)
-	primary := p.ID
-	tried := map[string]bool{}
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
+	cands := s.candidates(p, model)
+	var skipped []string
 	for i, c := range cands {
-		p, model := c.p, c.model
-		call.Provider, finalModel, noEndpoint = p.ID, model, false
-		tried[p.ID] = true
-		if i > 0 {
-			call.Model = p.ID + "/" + model
+		last := i == len(cands)-1 || r.Context().Err() != nil
+		hw := newHoldWriter(w, !last)
+		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+		if !last && hw.failed() {
+			s.rest(c.rest)
+			skipped = append(skipped, c.label+": "+call.Error)
+			continue
 		}
-		call.To, call.Usage = "", Usage{}
-		aw := newAttemptWriter(capture)
-		msg := ""
-		if p.Account != nil && p.Account.Agent == "claude" {
-			// A Claude Code subscription must run through the genuine binary. Direct
-			// OAuth HTTP requests are content-classified as third-party traffic when
-			// they carry another agent's harness (Pi, OpenCode, and others).
-			call.To = provider.Anthropic
-			call.Status, msg = s.serveClaudeSubscription(aw, r, from, model, body, &call.Usage)
-		} else if relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body)); relay {
-			// a backend that only streams gets a non-streaming request translated
-			// (the provider is always streamed on that path) rather than relayed
-			call.To = from
-			call.Status, msg = s.passthrough(aw, r, p, from, model, body, &call.Usage)
-		} else if to := p.Speaks(); len(to) == 0 {
-			noEndpoint = true
-			call.Status, msg = 502, p.Name+" has no endpoint configured"
-			writeError(aw, from, call.Status, msg)
-		} else {
-			call.To = to[0]
-			call.Status, msg = s.translate(aw, r, p, from, to[0], model, body, &call.Usage)
-		}
-		call.Error = msg
-		if aw.pending() && retryable(aw.status, aw.buf.Bytes()) {
-			s.markRest(p.ID, failureNote(p.ID, call.Status, msg)[len(p.ID)+2:])
-			if i < len(cands)-1 && r.Context().Err() == nil {
-				failures = append(failures, failureNote(p.ID, call.Status, msg))
-				continue
-			}
-		}
-		aw.release()
+		hw.release()
+		model = c.model
 		break
 	}
-	if call.Provider != primary || len(failures) > 0 {
-		// providers skipped because they were resting count as failed too
-		var skipped []string
-		for _, c := range cands {
-			if r, ok := resting[c.p.ID]; ok && !tried[c.p.ID] {
-				skipped = append(skipped, c.p.ID+": "+r)
-			}
-		}
-		failures = append(skipped, failures...)
+	if len(skipped) > 0 {
+		call.Fallback = strings.Join(skipped, "; ")
 	}
-	call.Fallback = strings.Join(failures, "; ")
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	if noEndpoint {
-		return // as before: nothing to account for
+	if call.To != "" {
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 	}
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: finalModel,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+}
+
+// attempt sends a request to one provider. call.To stays empty when the
+// provider has no endpoint to send it to.
+func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
+	// A Claude Code subscription must run through the genuine binary. Direct
+	// OAuth HTTP requests are content-classified as third-party traffic when
+	// they carry another agent's harness (Pi, OpenCode, and others).
+	if p.Account != nil && p.Account.Agent == "claude" {
+		call.To = provider.Anthropic
+		return s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+	}
+	// a backend that only streams gets a non-streaming request translated
+	// (the provider is always streamed on that path) rather than relayed
+	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
+	if relay {
+		call.To = from
+		return s.passthrough(w, r, p, from, model, body, &call.Usage)
+	}
+	to := p.Speaks()
+	if len(to) == 0 {
+		msg := p.Name + " has no endpoint configured"
+		return writeError(w, from, 502, msg), msg
+	}
+	call.To = to[0]
+	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 }
 
 // forward sends a request to the provider.
