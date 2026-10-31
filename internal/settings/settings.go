@@ -9,9 +9,9 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
+	"net/url"
 	"slices"
 	"strings"
 )
@@ -20,10 +20,9 @@ import (
 type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
-	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
-	// Proxy for magpie's own requests to vendors: "" follows the
-	// environment and then the system, "direct" uses none, anything else
-	// is the proxy (http://, https:// or socks5://; host:port means http).
+	Tray  string `json:"tray,omitempty"`  // panel | window: what a tray click opens
+	// Proxy for magpie's own requests: "" follows the environment, then the
+	// system; "direct" never proxies; else a proxy URL or host:port.
 	Proxy string `json:"proxy,omitempty"`
 }
 
@@ -67,17 +66,11 @@ func Save(s Settings) error {
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
 	}
-	s.Proxy = strings.TrimSpace(s.Proxy)
-	if s.Proxy != "" && s.Proxy != "direct" {
-		raw := s.Proxy
-		if !strings.Contains(raw, "://") {
-			raw = "http://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
-			return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", s.Proxy)
-		}
+	px, err := NormalProxy(s.Proxy)
+	if err != nil {
+		return err
 	}
+	s.Proxy = px
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
 	}
@@ -99,4 +92,34 @@ func (s Settings) normal() Settings {
 		s.Tray = "panel"
 	}
 	return s
+}
+
+// NormalProxy validates a proxy setting: "", "direct", a URL with an
+// http, https, socks5 or socks5h scheme, or a bare host:port (an http
+// proxy). It returns the value to store.
+func NormalProxy(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
+	}
+	if strings.EqualFold(v, "direct") {
+		return "direct", nil
+	}
+	bad := fmt.Errorf("proxy must be empty, direct, or an http://, https://, socks5:// or socks5h:// address, not %q", v)
+	if strings.Contains(v, "://") {
+		u, err := url.Parse(v)
+		if err != nil || u.Hostname() == "" {
+			return "", bad
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https", "socks5", "socks5h":
+			return v, nil
+		}
+		return "", bad
+	}
+	u, err := url.Parse("http://" + v)
+	if err != nil || u.Hostname() == "" || strings.ContainsAny(v, " /?#") {
+		return "", bad
+	}
+	return v, nil
 }
