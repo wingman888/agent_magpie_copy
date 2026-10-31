@@ -87,6 +87,10 @@ func firstOf(xs []string) string {
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
+		if e.Group != nil { // a routing group has no provider of its own
+			out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · routing group", Efforts: e.Efforts})
+			continue
+		}
 		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
 	}
 	return out

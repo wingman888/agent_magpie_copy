@@ -177,6 +177,10 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 }
 
 func modelObject(e provider.Entry) map[string]any {
+	if e.Group != nil { // a routing group belongs to magpie itself
+		return map[string]any{"id": e.ID, "object": "model", "type": "model", "created": 0, "created_at": "2025-01-01T00:00:00Z",
+			"owned_by": "magpie", "display_name": e.Name}
+	}
 	return map[string]any{"id": e.ID, "object": "model", "type": "model", "created": 0, "created_at": "2025-01-01T00:00:00Z",
 		"owned_by": e.Provider.ID, "display_name": e.Name}
 }
