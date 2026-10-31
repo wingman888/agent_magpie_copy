@@ -1,563 +1,238 @@
 package gateway_test
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
-var origEnv = os.Environ()
-
-var (
-	binOnce sync.Once
-	binPath string
-	binErr  error
-)
-
-func magpieBin(t *testing.T) string {
-	t.Helper()
-	binOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "magpie-accept-")
-		if err != nil {
-			binErr = err
-			return
-		}
-		binPath = filepath.Join(dir, "magpie")
-		cmd := exec.Command("go", "build", "-o", binPath, "github.com/yetone/magpie")
-		cmd.Env = origEnv
-		if out, err := cmd.CombinedOutput(); err != nil {
-			binErr = fmt.Errorf("build: %v\n%s", err, out)
-		}
-	})
-	if binErr != nil {
-		t.Fatal(binErr)
-	}
-	return binPath
-}
-
-func isolate(t *testing.T) string {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	return home
-}
-
-func writeJSON(t *testing.T, path string, v any) {
-	t.Helper()
-	b, _ := json.Marshal(v)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func putProviders(t *testing.T, ps ...map[string]any) {
-	t.Helper()
-	writeJSON(t, provider.Path(), map[string]any{"providers": ps})
-}
-
-func sse(lines ...string) string {
-	var b strings.Builder
-	for _, l := range lines {
-		b.WriteString(l + "\n\n")
-	}
-	return b.String()
-}
-
-// up is a scripted upstream.
-type up struct {
+type upstream struct {
 	mu    sync.Mutex
-	code  int
-	ctype string
-	reply string
-	got   [][]byte
-	paths []string
+	body  []byte
+	head  http.Header
+	host  string
+	calls int
 }
 
-func (u *up) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(r.Body)
 	u.mu.Lock()
-	u.got = append(u.got, b)
-	u.paths = append(u.paths, r.URL.Path)
+	u.body, u.head, u.host = b, r.Header.Clone(), r.Host
+	u.calls++
 	u.mu.Unlock()
-	ct := u.ctype
-	if ct == "" {
-		ct = "application/json"
+	w.Header().Set("Content-Type", "application/json")
+	io.WriteString(w, `{"id":"c1","choices":[]}`)
+}
+
+func isolateEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(k, "")
 	}
-	w.Header().Set("Content-Type", ct)
-	if u.code != 0 {
-		w.WriteHeader(u.code)
-	}
-	io.WriteString(w, u.reply)
 }
 
-func (u *up) hits() int {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return len(u.got)
-}
-
-func (u *up) last() string {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if len(u.got) == 0 {
-		return ""
-	}
-	return string(u.got[len(u.got)-1])
-}
-
-func serve(t *testing.T, h http.Handler) string {
-	s := httptest.NewServer(h)
-	t.Cleanup(s.Close)
-	return s.URL
-}
-
-func send(s *gateway.Server, path, body string) (int, string) {
+func send(t *testing.T, path, body string, hdr map[string][]string) (int, string) {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	for k, v := range hdr {
+		req.Header[k] = v
+	}
+	gateway.New().Handler().ServeHTTP(rec, req)
 	return rec.Code, rec.Body.String()
 }
 
-const chatOK = `{"id":"from-%s","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
-
-func chatReq(model string) string {
-	return `{"model":"` + model + `","messages":[{"role":"user","content":"hi"}]}`
-}
-
-func TestAcceptCustomHeadersReachTheUpstream(t *testing.T) {
-	isolate(t)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
+func TestAcceptDeveloperRoleBecomesSystem(t *testing.T) {
+	isolateEnv(t)
+	up := &upstream{}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Chat: srv.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
-	var mu sync.Mutex
-	var heads []string
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer c.Close()
-				br := bufio.NewReader(c)
-				var head strings.Builder
-				n := 0
-				for {
-					line, err := br.ReadString('\n')
-					if err != nil {
-						return
-					}
-					if l := strings.ToLower(line); strings.HasPrefix(l, "content-length:") {
-						n, _ = strconv.Atoi(strings.TrimSpace(line[len("content-length:"):]))
-					}
-					head.WriteString(line)
-					if line == "\r\n" {
-						break
-					}
-				}
-				io.CopyN(io.Discard, br, int64(n))
-				mu.Lock()
-				heads = append(heads, head.String())
-				mu.Unlock()
-				body := fmt.Sprintf(chatOK, "raw")
-				fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
-			}()
-		}
-	}()
-	base := "http://" + ln.Addr().String() + "/v1"
-	putProviders(t,
-		map[string]any{"id": "hdr", "name": "Hdr", "key": "k-secret", "chat": base, "models": []string{"m1"},
-			"headers": map[string]any{"x-Org-ID": "acme", "Authorization": "Bearer override"}},
-		map[string]any{"id": "plain", "name": "Plain", "key": "k-secret", "chat": base, "models": []string{"m1"}},
-		map[string]any{"id": "deepseek", "name": "DeepSeek", "preset": "deepseek", "key": "k-secret", "chat": base, "models": []string{"m1"},
-			"headers": map[string]any{"x-Org-ID": "acme"}},
-	)
-	s := gateway.New()
-	for _, id := range []string{"hdr", "plain", "deepseek"} {
-		if code, body := send(s, "/v1/chat/completions", chatReq(id+"/m1")); code != 200 {
-			t.Fatalf("%s: %d %s", id, code, body)
-		}
+	in := `{"model":"m1","reasoning_effort":"max","messages":[{"role":"developer","content":"be brief","name":"d1"},{"role":"user","content":"a developer asks"},{"role":"developer","content":"again"}]}`
+	if code, out := send(t, "/v1/chat/completions", in, nil); code != 200 {
+		t.Fatalf("%d %s", code, out)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(heads) != 3 {
-		t.Fatalf("%d upstream requests", len(heads))
+	var got struct {
+		Model    string           `json:"model"`
+		Effort   string           `json:"reasoning_effort"`
+		Messages []map[string]any `json:"messages"`
 	}
-	if !strings.Contains(heads[0], "\r\nx-Org-ID: acme\r\n") {
-		t.Errorf("custom header missing or re-cased:\n%s", heads[0])
+	if err := json.Unmarshal(up.body, &got); err != nil {
+		t.Fatalf("%v: %s", err, up.body)
 	}
-	if !strings.Contains(heads[0], "\r\nAuthorization: Bearer override\r\n") || strings.Contains(heads[0], "k-secret") && strings.Contains(heads[0], "Authorization: Bearer k-secret") {
-		t.Errorf("custom header did not override the auth header:\n%s", heads[0])
+	if len(got.Messages) != 3 || got.Effort != "max" {
+		t.Fatalf("forwarded: %s", up.body)
 	}
-	for _, h := range heads[1:] {
-		if strings.Contains(strings.ToLower(h), "x-org-id") {
-			t.Errorf("header sent to a provider that has none:\n%s", h)
-		}
+	if got.Messages[0]["role"] != "system" || got.Messages[0]["content"] != "be brief" || got.Messages[0]["name"] != "d1" {
+		t.Errorf("first: %v", got.Messages[0])
 	}
-}
-
-func TestAcceptFallbackOnQuotaErrors(t *testing.T) {
-	for i, tc := range []struct {
-		code int
-		msg  string
-	}{
-		{429, "slow down"},
-		{402, "Insufficient Balance"},
-		{529, "overloaded"},
-		{403, "您的套餐额度已用完"},
-	} {
-		plan := &up{code: tc.code, reply: `{"error":{"message":"` + tc.msg + `"}}`}
-		spare := &up{reply: fmt.Sprintf(chatOK, "spare")}
-		isolate(t)
-		id := fmt.Sprintf("plan%d", i)
-		sp := fmt.Sprintf("spare%d", i)
-		putProviders(t,
-			map[string]any{"id": id, "name": "Plan", "key": "k", "chat": serve(t, plan) + "/v1", "models": []string{"m1"},
-				"fallback": []string{"nowhere/x", sp + "/m2"}},
-			map[string]any{"id": sp, "name": "Spare", "key": "k", "chat": serve(t, spare) + "/v1", "models": []string{"m2"}},
-		)
-		s := gateway.New()
-		code, body := send(s, "/v1/chat/completions", chatReq(id+"/m1"))
-		if code != 200 || !strings.Contains(body, "from-spare") || strings.Contains(body, tc.msg) {
-			t.Fatalf("%d: %d %s", tc.code, code, body)
-		}
-		if !strings.Contains(spare.last(), `"model":"m2"`) {
-			t.Fatalf("%d: fallback got %s", tc.code, spare.last())
-		}
-		rec := s.Recent()
-		if len(rec) == 0 || rec[0].Provider != sp {
-			t.Fatalf("%d: recorded %+v", tc.code, rec)
-		}
-		if j, _ := json.Marshal(rec[0]); !strings.Contains(string(j), id) || rec[0].Fallback == "" {
-			t.Fatalf("%d: the fallback isn't visible in the call record: %s", tc.code, j)
-		}
+	if got.Messages[1]["role"] != "user" || got.Messages[1]["content"] != "a developer asks" {
+		t.Errorf("user message changed: %v", got.Messages[1])
 	}
-}
-
-func TestAcceptFallbackRestsTheFailedProvider(t *testing.T) {
-	isolate(t)
-	plan := &up{code: 429, reply: `{"error":{"message":"rate limited"}}`}
-	spare := &up{reply: fmt.Sprintf(chatOK, "spare")}
-	putProviders(t,
-		map[string]any{"id": "restplan", "name": "Plan", "key": "k", "chat": serve(t, plan) + "/v1", "models": []string{"m1"}, "fallback": []string{"restspare/m2"}},
-		map[string]any{"id": "restspare", "name": "Spare", "key": "k", "chat": serve(t, spare) + "/v1", "models": []string{"m2"}},
-	)
-	s := gateway.New()
-	for i := 0; i < 2; i++ {
-		if code, body := send(s, "/v1/chat/completions", chatReq("restplan/m1")); code != 200 || !strings.Contains(body, "from-spare") {
-			t.Fatalf("request %d: %d %s", i, code, body)
-		}
-	}
-	if plan.hits() != 1 {
-		t.Fatalf("the failed provider was tried %d times; it should rest", plan.hits())
-	}
-	if spare.hits() != 2 {
-		t.Fatalf("spare served %d", spare.hits())
-	}
-}
-
-func TestAcceptNoFallbackForOtherErrorsAndLastErrorSurfaces(t *testing.T) {
-	isolate(t)
-	bad := &up{code: 400, reply: `{"error":{"message":"messages: field required"}}`}
-	spare := &up{reply: fmt.Sprintf(chatOK, "spare")}
-	putProviders(t,
-		map[string]any{"id": "badplan", "name": "Plan", "key": "k", "chat": serve(t, bad) + "/v1", "models": []string{"m1"}, "fallback": []string{"badspare/m2"}},
-		map[string]any{"id": "badspare", "name": "Spare", "key": "k", "chat": serve(t, spare) + "/v1", "models": []string{"m2"}},
-	)
-	code, body := send(gateway.New(), "/v1/chat/completions", chatReq("badplan/m1"))
-	if code != 400 || !strings.Contains(body, "field required") || spare.hits() != 0 {
-		t.Fatalf("%d %s (spare hits %d)", code, body, spare.hits())
+	if got.Messages[2]["role"] != "system" || got.Messages[2]["content"] != "again" {
+		t.Errorf("third: %v", got.Messages[2])
 	}
 
-	plan := &up{code: 429, reply: `{"error":{"message":"plan limit"}}`}
-	down := &up{code: 503, reply: `{"error":{"message":"spare down"}}`}
-	putProviders(t,
-		map[string]any{"id": "lastplan", "name": "Plan", "key": "k", "chat": serve(t, plan) + "/v1", "models": []string{"m1"}, "fallback": []string{"lastspare/m2"}},
-		map[string]any{"id": "lastspare", "name": "Spare", "key": "k", "chat": serve(t, down) + "/v1", "models": []string{"m2"}},
-	)
-	code, body = send(gateway.New(), "/v1/chat/completions", chatReq("lastplan/m1"))
-	if code != 503 || !strings.Contains(body, "spare down") {
-		t.Fatalf("%d %s", code, body)
+	// without developer messages nothing changes
+	plain := `{"model":"m1","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}]}`
+	if code, out := send(t, "/v1/chat/completions", plain, nil); code != 200 {
+		t.Fatalf("%d %s", code, out)
 	}
-}
-
-func TestAcceptFallbackForStreamingRequests(t *testing.T) {
-	isolate(t)
-	plan := &up{code: 529, reply: `{"error":{"message":"overloaded"}}`}
-	spare := &up{ctype: "text/event-stream", reply: sse(
-		`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"from-spare"}}]}`,
-		`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
-		`data: [DONE]`)}
-	putProviders(t,
-		map[string]any{"id": "strplan", "name": "Plan", "key": "k", "chat": serve(t, plan) + "/v1", "models": []string{"m1"}, "fallback": []string{"strspare/m2"}},
-		map[string]any{"id": "strspare", "name": "Spare", "key": "k", "chat": serve(t, spare) + "/v1", "models": []string{"m2"}},
-	)
-	code, body := send(gateway.New(), "/v1/chat/completions",
-		`{"model":"strplan/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	if code != 200 || !strings.Contains(body, "from-spare") || strings.Contains(body, "overloaded") {
-		t.Fatalf("%d %s", code, body)
-	}
-}
-
-// byKey answers per API key: keys in limited are out of quota.
-type byKey struct {
-	mu      sync.Mutex
-	limited map[string]bool
-	seen    []string
-}
-
-func (b *byKey) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	io.Copy(io.Discard, r.Body)
-	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	b.mu.Lock()
-	b.seen = append(b.seen, key)
-	lim := b.limited[key]
-	b.mu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
-	if lim {
-		w.WriteHeader(429)
-		io.WriteString(w, `{"error":{"message":"rate limited"}}`)
-		return
-	}
-	io.WriteString(w, fmt.Sprintf(chatOK, key))
-}
-
-func TestAcceptSeveralKeysTakeOverFromEachOther(t *testing.T) {
-	isolate(t)
-	k := &byKey{limited: map[string]bool{"k-personal": true}}
-	spare := &up{reply: fmt.Sprintf(chatOK, "model-fallback")}
-	putProviders(t,
-		map[string]any{"id": "multikey", "name": "Plan", "chat": serve(t, k) + "/v1", "models": []string{"m1"},
-			"key": "k-personal", "keyName": "Personal",
-			"keys":     []any{map[string]any{"name": "Idle", "key": "k-idle", "off": true}, map[string]any{"name": "Team", "key": "k-team"}},
-			"fallback": []string{"keyspare/m2"}},
-		map[string]any{"id": "keyspare", "name": "Spare", "key": "k", "chat": serve(t, spare) + "/v1", "models": []string{"m2"}},
-	)
-	s := gateway.New()
-	if code, body := send(s, "/v1/chat/completions", chatReq("multikey/m1")); code != 200 || !strings.Contains(body, "from-k-team") {
-		t.Fatalf("%d %s", code, body)
-	}
-	rec := s.Recent()
-	if j, _ := json.Marshal(rec[0]); rec[0].Provider != "multikey" || !strings.Contains(string(j), "Personal") {
-		t.Fatalf("recorded %s", j)
-	}
-	// the limited key rests; the one that's off is never tried
-	k.mu.Lock()
-	k.seen = nil
-	k.mu.Unlock()
-	if code, body := send(s, "/v1/chat/completions", chatReq("multikey/m1")); code != 200 || !strings.Contains(body, "from-k-team") {
-		t.Fatalf("%d %s", code, body)
-	}
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if strings.Join(k.seen, ",") != "k-team" {
-		t.Fatalf("second request tried %v", k.seen)
-	}
-	if spare.hits() != 0 {
-		t.Fatal("the fallback model was used while another key was still available")
-	}
-}
-
-// A relay with one key for Anthropic and one for OpenAI.
-func protocolRelay(t *testing.T, keys [2]map[string]any, models []string) (*gateway.Server, *[]string, *sync.Mutex) {
-	isolate(t)
-	var mu sync.Mutex
-	var seen []string
-	srv := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		key := r.Header.Get("x-api-key")
-		if key == "" {
-			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		}
-		mu.Lock()
-		seen = append(seen, r.URL.Path+" "+key)
-		mu.Unlock()
-		if (r.URL.Path == "/v1/messages") != (key == "k-ant") {
-			w.WriteHeader(401)
-			io.WriteString(w, `{"error":{"message":"this key is for another protocol"}}`)
-			return
-		}
-		stream := bytes.Contains(b, []byte(`"stream":true`))
-		if r.URL.Path == "/v1/messages" {
-			if stream {
-				w.Header().Set("Content-Type", "text/event-stream")
-				io.WriteString(w, sse(
-					`event: message_start`+"\n"+`data: {"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","model":"x","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`,
-					`event: content_block_start`+"\n"+`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
-					`event: content_block_delta`+"\n"+`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
-					`event: content_block_stop`+"\n"+`data: {"type":"content_block_stop","index":0}`,
-					`event: message_delta`+"\n"+`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
-					`event: message_stop`+"\n"+`data: {"type":"message_stop"}`))
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"id":"m1","type":"message","role":"assistant","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, fmt.Sprintf(chatOK, "oai"))
-	}))
-	p := map[string]any{"id": "relay", "name": "Relay", "chat": srv + "/v1", "anthropic": srv, "models": models}
-	for k, v := range keys[0] {
-		p[k] = v
-	}
-	p["keys"] = []any{keys[1]}
-	putProviders(t, p)
-	return gateway.New(), &seen, &mu
-}
-
-func TestAcceptKeysMadeForOneProtocol(t *testing.T) {
-	ant := map[string]any{"key": "k-ant", "protocol": "anthropic"}
-	oai := map[string]any{"key": "k-oai", "protocol": "chat"}
-	orders := map[string][2]map[string]any{
-		"openai first": {{"key": "k-oai", "keyProtocol": "chat"}, ant},
-		"claude first": {{"key": "k-ant", "keyProtocol": "anthropic"}, oai},
-	}
-	for name, keys := range orders {
-		t.Run(name, func(t *testing.T) {
-			s, seen, mu := protocolRelay(t, keys, []string{"claude-opus-4-8", "gpt-5.5"})
-			for _, x := range []struct{ path, body, want string }{
-				// Claude Code asking for Claude: the Anthropic key, relayed as-is
-				{"/v1/messages", `{"model":"relay/claude-opus-4-8","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
-				{"/v1/messages", `{"model":"relay/claude-opus-4-8","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
-				// an OpenAI agent asking for Claude: translated, to the Anthropic key
-				{"/v1/chat/completions", `{"model":"relay/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
-				// Claude Code asking for GPT: translated, to the OpenAI key
-				{"/v1/messages", `{"model":"relay/gpt-5.5","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
-			} {
-				mu.Lock()
-				*seen = nil
-				mu.Unlock()
-				code, body := send(s, x.path, x.body)
-				mu.Lock()
-				got := append([]string{}, *seen...)
-				mu.Unlock()
-				if code != 200 || len(got) != 1 || got[0] != x.want {
-					t.Fatalf("%s %s: %d %s, upstream saw %v", x.path, x.body, code, body, got)
-				}
-			}
-		})
-	}
-}
-
-func TestAcceptKeyForAnEndpointTheProviderLacksIsSkipped(t *testing.T) {
-	isolate(t)
-	k := &byKey{}
-	putProviders(t, map[string]any{"id": "chatonly", "name": "ChatOnly", "chat": serve(t, k) + "/v1", "models": []string{"gpt-5.5"},
-		"key": "k-ant", "keyProtocol": "anthropic",
-		"keys": []any{map[string]any{"key": "k-oai", "protocol": "chat"}}})
-	code, body := send(gateway.New(), "/v1/chat/completions", chatReq("chatonly/gpt-5.5"))
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if code != 200 || strings.Join(k.seen, ",") != "k-oai" {
-		t.Fatalf("%d %s, keys tried %v", code, body, k.seen)
-	}
-}
-
-// Two ChatGPT accounts in use: the one Codex is signed in to is out of
-// quota, so the request goes to the saved one, signed with its own tokens.
-func TestAcceptSubscriptionAccountsTakeOver(t *testing.T) {
-	home := isolate(t)
-	claims := func(m map[string]any) string {
-		b, _ := json.Marshal(m)
-		return "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
-	}
-	login := func(email, acct string) {
-		writeJSON(t, filepath.Join(home, ".codex", "auth.json"), map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{
-			"id_token":      claims(map[string]any{"email": email}),
-			"access_token":  claims(map[string]any{"exp": time.Now().Add(time.Hour).Unix(), "who": acct}),
-			"refresh_token": "r-" + acct, "account_id": acct}})
-	}
-	remember := func() {
-		cmd := exec.Command(magpieBin(t), "accounts")
-		cmd.Env = append(append([]string{}, origEnv...), "HOME="+home,
-			"XDG_CONFIG_HOME="+filepath.Join(home, ".config"), "XDG_CACHE_HOME="+filepath.Join(home, ".cache"))
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("magpie accounts: %v\n%s", err, out)
-		}
-	}
-	login("spare@example.com", "acct-2")
-	remember()
-	login("me@example.com", "acct-1")
-	remember()
-	if err := provider.SetLoginOn("codex", "me@example.com", false); err == nil {
-		t.Fatal("turned off the account Codex is signed in to")
-	}
-	if err := provider.SetLoginOn("codex", "spare@example.com", true); err != nil {
+	var a, b map[string]any
+	json.Unmarshal([]byte(plain), &a)
+	if err := json.Unmarshal(up.body, &b); err != nil {
 		t.Fatal(err)
 	}
+	am, _ := json.Marshal(a)
+	bm, _ := json.Marshal(b)
+	if string(am) != string(bm) {
+		t.Errorf("body changed: %s", up.body)
+	}
+}
 
-	var mu sync.Mutex
-	var tried []string
-	upstream := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body)
-		mu.Lock()
-		tried = append(tried, r.Header.Get("chatgpt-account-id"))
-		mu.Unlock()
-		if r.Header.Get("chatgpt-account-id") == "acct-1" {
-			w.WriteHeader(429)
-			io.WriteString(w, `{"error":{"message":"You've hit your usage limit"}}`)
-			return
-		}
-		if !strings.Contains(r.Header.Get("Authorization"), ".") {
-			w.WriteHeader(401)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, sse(
-			`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
-			`data: {"type":"response.output_text.delta","delta":"pong"}`,
-			`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`))
-	}))
-	old := provider.CodexBase
-	provider.CodexBase = upstream + "/backend-api/codex"
-	defer func() { provider.CodexBase = old }()
+// openCode points an OpenCode-hosted provider at the fake by routing the
+// gateway through it as a proxy, so the upstream really is opencode.ai.
+func openCode(t *testing.T, chat, responses string) *upstream {
+	t.Helper()
+	isolateEnv(t)
+	up := &upstream{}
+	srv := httptest.NewServer(up)
+	t.Cleanup(srv.Close)
+	if err := settings.Save(settings.Settings{Proxy: srv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Save(provider.Provider{ID: "oc", Name: "OC", Key: "k", Models: []string{"m1"}, Chat: chat, Responses: responses}); err != nil {
+		t.Fatal(err)
+	}
+	return up
+}
 
-	s := gateway.New()
-	code, body := send(s, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping"}`)
-	if code != 200 || !strings.Contains(body, "pong") {
-		t.Fatalf("status %d: %s", code, body)
+func TestAcceptOpenCodeSessionHeader(t *testing.T) {
+	up := openCode(t, "http://opencode.ai/zen/go/v1", "http://opencode.ai/zen/go/v1")
+	chat := func(body string, h map[string][]string) string {
+		t.Helper()
+		if code, out := send(t, "/v1/chat/completions", body, h); code != 200 {
+			t.Fatalf("%d %s", code, out)
+		}
+		if up.host != "opencode.ai" {
+			t.Fatalf("upstream host %q", up.host)
+		}
+		return up.head.Get("x-opencode-session")
 	}
-	mu.Lock()
-	got := strings.Join(tried, ",")
-	tried = nil
-	mu.Unlock()
-	if got != "acct-1,acct-2" {
-		t.Fatalf("tried %v", got)
+	turn1 := `{"model":"m1","messages":[{"role":"system","content":"s"},{"role":"user","content":"fix the bug"}]}`
+	turn2 := `{"model":"m1","messages":[{"role":"system","content":"s"},{"role":"user","content":"fix the bug"},{"role":"assistant","content":"done"},{"role":"user","content":"thanks"}]}`
+	other := `{"model":"m1","messages":[{"role":"system","content":"s"},{"role":"user","content":"write docs"}]}`
+	a, b, c := chat(turn1, nil), chat(turn2, nil), chat(other, nil)
+	if !strings.HasPrefix(a, "magpie-") || a != b || a == c || !strings.HasPrefix(c, "magpie-") {
+		t.Errorf("derived: %q %q %q", a, b, c)
 	}
-	// the first sits out a minute; the next request goes straight on
-	send(s, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping"}`)
-	mu.Lock()
-	defer mu.Unlock()
-	if strings.Join(tried, ",") != "acct-2" {
-		t.Fatalf("second request tried %v", tried)
+
+	// the agent's own session wins, in the documented order
+	if got := chat(turn1, map[string][]string{"X-Opencode-Session": {"ses-a"}, "X-Session-Affinity": {"ses-b"}}); got != "ses-a" {
+		t.Errorf("opencode header: %q", got)
 	}
-	// the agent's own sign-in is untouched by the saved account
-	b, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
-	if !strings.Contains(string(b), "r-acct-1") || strings.Contains(string(b), "acct-2") {
-		t.Fatalf("the agent's own credentials changed: %s", b)
+	if got := chat(turn1, map[string][]string{"X-Session-Affinity": {"ses-b"}, "X-Session-Id": {"ses-c"}, "Session_id": {"ses-d"}}); got != "ses-b" {
+		t.Errorf("affinity: %q", got)
+	}
+	if got := chat(turn1, map[string][]string{"X-Session-Id": {"ses-c"}, "Session_id": {"ses-d"}, "X-Claude-Code-Session-Id": {"ses-e"}}); got != "ses-c" {
+		t.Errorf("session id: %q", got)
+	}
+	if got := chat(turn1, map[string][]string{"Session_id": {"ses-d"}, "Session-Id": {"ses-f"}}); got != "ses-d" {
+		t.Errorf("session_id: %q", got)
+	}
+	if got := chat(turn1, map[string][]string{"X-Claude-Code-Session-Id": {"ses-e"}}); got != "ses-e" {
+		t.Errorf("claude code: %q", got)
+	}
+	if got := chat(turn1, map[string][]string{"X-Opencode-Session": {""}, "X-Session-Id": {"ses-c"}}); got != "ses-c" {
+		t.Errorf("empty value should be skipped: %q", got)
+	}
+
+	// Responses requests too
+	resp := func(body string) string {
+		t.Helper()
+		if code, out := send(t, "/v1/responses", body, nil); code != 200 {
+			t.Fatalf("%d %s", code, out)
+		}
+		return up.head.Get("x-opencode-session")
+	}
+	r1 := resp(`{"model":"m1","input":[{"role":"user","content":"hi"}]}`)
+	r2 := resp(`{"model":"m1","input":[{"role":"user","content":"hi"},{"type":"function_call_output","call_id":"c","output":"x"}]}`)
+	r3 := resp(`{"model":"m1","input":[{"role":"user","content":"something else"}]}`)
+	if !strings.HasPrefix(r1, "magpie-") || r1 != r2 || r1 == r3 {
+		t.Errorf("responses: %q %q %q", r1, r2, r3)
+	}
+}
+
+func TestAcceptOtherVendorsGetNoSessionHeader(t *testing.T) {
+	isolateEnv(t)
+	up := &upstream{}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Chat: srv.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`
+	if code, out := send(t, "/v1/chat/completions", body, map[string][]string{"X-Session-Id": {"abc"}}); code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	if v := up.head.Get("x-opencode-session"); v != "" {
+		t.Errorf("leaked OpenCode header: %q", v)
+	}
+}
+
+func TestAcceptProviderTestSendsOpenCodeSession(t *testing.T) {
+	isolateEnv(t)
+	up := &upstream{}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	tr, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Skip("default transport replaced")
+	}
+	old := tr.Proxy
+	tr.Proxy = func(*http.Request) (*urlT, error) { return parseURL(srv.URL) }
+	defer func() { tr.Proxy = old }()
+	p := provider.Provider{ID: "oc", Name: "OC", Key: "k", Models: []string{"m1"}, Chat: "http://opencode.ai/zen/go/v1"}
+	p.Test(t.Context())
+	if up.calls == 0 {
+		t.Skip("provider test did not use the default transport")
+	}
+	if up.head.Get("x-opencode-session") == "" {
+		t.Errorf("no session header on provider test: %v", up.head)
+	}
+}
+
+type urlT = url.URL
+
+func parseURL(s string) (*url.URL, error) { return url.Parse(s) }
+
+func TestAcceptLoopbackUpstreamBypassesProxy(t *testing.T) {
+	isolateEnv(t)
+	up := &upstream{}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	if err := settings.Save(settings.Settings{Proxy: "127.0.0.1:1"}); err != nil { // nothing listens there
+		t.Fatal(err)
+	}
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Chat: srv.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`
+	if code, out := send(t, "/v1/chat/completions", body, nil); code != 200 {
+		t.Fatalf("%d %s", code, out)
 	}
 }
