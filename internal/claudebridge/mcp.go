@@ -6,6 +6,8 @@ package claudebridge
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,8 +42,13 @@ type callbackResponse struct {
 }
 
 // RunMCP runs the hidden stdio MCP subprocess. args are callback URL and tools
-// JSON path. It intentionally implements only the MCP methods Claude Code needs.
+// JSON path, or, for an agent whose MCP servers are set once for every run
+// (Grok), MAGPIE_MCP_CALLBACK and MAGPIE_MCP_TOOLS in the environment it
+// hands down. It intentionally implements only the MCP methods Claude Code needs.
 func RunMCP(args []string) error {
+	if len(args) == 0 && os.Getenv("MAGPIE_MCP_CALLBACK") != "" {
+		args = []string{os.Getenv("MAGPIE_MCP_CALLBACK"), os.Getenv("MAGPIE_MCP_TOOLS")}
+	}
 	if len(args) != 2 {
 		return errors.New("claude MCP helper expects callback URL and tools file")
 	}
@@ -97,10 +104,11 @@ func RunMCP(args []string) error {
 					rpcErr = map[string]any{"code": -32602, "message": err.Error()}
 					break
 				}
+				// Claude Code names the call it is making; an agent that does
+				// not (Cursor) gets an id of the helper's own.
 				id, _ := p.Meta["claudecode/toolUseId"].(string)
 				if id == "" {
-					rpcErr = map[string]any{"code": -32602, "message": "Claude Code omitted claudecode/toolUseId"}
-					break
+					id = newCallID()
 				}
 				payload, _ := json.Marshal(callbackRequest{ToolCallID: id, Name: p.Name, Arguments: p.Arguments})
 				httpReq, _ := http.NewRequest(http.MethodPost, callbackURL, bytes.NewReader(payload))
@@ -135,4 +143,10 @@ func RunMCP(args []string) error {
 		}(req)
 	}
 	return in.Err()
+}
+
+func newCallID() string {
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	return "call_" + hex.EncodeToString(b[:])
 }
