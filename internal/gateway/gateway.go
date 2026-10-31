@@ -14,8 +14,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -82,9 +82,9 @@ type Server struct {
 	client *http.Client
 	mu     sync.Mutex
 	recent []Call
-	// unfit remembers the endpoints each provider's models were turned away
-	// from, so every later turn goes straight to one that takes them.
-	unfit        map[string]bool
+	// refused remembers (provider, model, API) triples the upstream said
+	// do not serve the model, avoiding a known-failing probe on every turn.
+	refused      map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
 	trace        trace // what routing did with each request, for the Gateway view
@@ -100,7 +100,7 @@ func New() *Server {
 			IdleConnTimeout:       90 * time.Second,
 			ForceAttemptHTTP2:     true,
 		}},
-		unfit:        make(map[string]bool),
+		refused:      make(map[string]bool),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -238,7 +238,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		p = q
 	}
-	if ok && p.Anthropic != "" && slices.Contains(s.usable(p, model), provider.Anthropic) {
+	if ok && p.Anthropic != "" && s.anthropicServes(p, model) {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
@@ -256,6 +256,17 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
+}
+
+// anthropicServes: whether the model can be had on the provider's Anthropic
+// endpoint, as its list and what was refused say.
+func (s *Server) anthropicServes(p provider.Provider, model string) bool {
+	if apis := p.APIs(model); len(apis) > 0 && !slices.Contains(apis, provider.Anthropic) {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.refused[refusedKey(p.ID, model, provider.Anthropic)]
 }
 
 // handle is the request path of one client API.
@@ -401,47 +412,20 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Affinity: aff, Order: pl.order, Left: pl.left})
 	var skipped []string
-	again := 0 // times the last one left has been tried again
-	for i := 0; i < len(cands); i++ {
-		c := cands[i]
-		last := i == len(cands)-1
-		hw := newHoldWriter(w, !last || again < lastRetries)
+	for i, c := range cands {
+		last := i == len(cands)-1 || r.Context().Err() != nil
+		hw := newHoldWriter(w, !last)
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
 		began := time.Now()
 		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		if hw.failure != 0 { // the stream failed before any of it was sent
-			call.Status, call.Error = hw.failure, c.p.Name+": "+hw.failMsg
-		}
 		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
-		if r.Context().Err() != nil {
-			// the agent went away: nobody failed, and nobody else is asked
-			call.Status, call.Error = 499, "the agent canceled the request"
-			try.Status, try.Error, try.Fail = call.Status, call.Error, failCanceled
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			break
-		}
 		if !last && hw.failed() {
-			rest := s.restAfter(c, hw.code(), hw.header, hw.errBody())
+			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
 			try.Fail, try.Rest = rest.Why, &rest
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
-		}
-		if wait, ok := passing(hw.code(), hw.header, again); ok && again < lastRetries && hw.failed() {
-			// nobody else is left: the same one again, after a moment
-			try.Fail, try.Again = failure(hw.code(), hw.errBody()), wait.Milliseconds()
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			skipped = append(skipped, c.label()+": "+call.Error)
-			again++
-			select {
-			case <-time.After(wait):
-				i--
-				continue
-			case <-r.Context().Done():
-				call.Status, call.Error = 499, "the agent canceled the request"
-			}
-			break
 		}
 		hw.release()
 		model = c.model
@@ -501,24 +485,106 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
-	relay := slices.Contains(s.usable(p, model), from) && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		if status, msg, done := s.passthrough(w, r, p, from, model, body, &call.Usage); done {
-			return status, msg
-		}
-		// the model isn't served on the client's own API: speak another
-	}
-	to := s.usable(p, model)
-	if len(to) == 0 {
-		to = p.Speaks()
-	}
-	if len(to) == 0 {
+	relayable := p.Account == nil || !p.Account.Stream || streamOf(body)
+	order := s.endpoints(p, model, from, relayable)
+	if len(order) == 0 {
 		msg := p.Name + " has no endpoint configured"
 		return writeError(w, from, 502, msg), msg
 	}
-	call.To = to[0]
-	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+	for i, proto := range order {
+		more := i < len(order)-1
+		call.To = proto
+		var status int
+		var msg string
+		var wrong bool
+		if proto == from {
+			status, msg, wrong = s.passthrough(w, r, p, from, model, body, &call.Usage, more)
+		} else {
+			status, msg, wrong = s.translate(w, r, p, from, proto, model, body, &call.Usage, more)
+		}
+		if !wrong {
+			return status, msg
+		}
+		// the endpoint does not serve this model: remember, and try the
+		// provider's next API; nothing has been written to the agent
+		s.refuse(p.ID, model, proto)
+		call.Usage = Usage{}
+	}
+	return 502, "no endpoint"
+}
+
+// endpoints lists the APIs to try for a request, best first: the one the
+// agent speaks when the provider serves the model on it (no translation),
+// then the rest by preference. The vendor's own list of where a model is
+// served narrows them; APIs refused before are left out.
+func (s *Server) endpoints(p provider.Provider, model string, from provider.Protocol, relayable bool) []provider.Protocol {
+	speaks := p.Speaks()
+	use := speaks
+	if declared := p.APIs(model); len(declared) > 0 {
+		use = nil
+		for _, pr := range speaks {
+			if slices.Contains(declared, pr) {
+				use = append(use, pr)
+			}
+		}
+		if len(use) == 0 {
+			use = speaks // the list names none this provider has: ask anyway
+		}
+	}
+	var open []provider.Protocol
+	s.mu.Lock()
+	for _, pr := range use {
+		if !s.refused[refusedKey(p.ID, model, pr)] {
+			open = append(open, pr)
+		}
+	}
+	s.mu.Unlock()
+	if len(open) == 0 {
+		open = use // all refused: the memory may be stale, ask again
+	}
+	pref := []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}
+	if openAIFirst(p, model) {
+		pref = []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
+	}
+	var out []provider.Protocol
+	if relayable && slices.Contains(open, from) {
+		out = append(out, from)
+	}
+	for _, pr := range pref {
+		if slices.Contains(open, pr) && !slices.Contains(out, pr) {
+			out = append(out, pr)
+		}
+	}
+	return out
+}
+
+// openAIFirst: OpenAI's own API, and OpenAI's models on Copilot, are
+// translated to Responses before Chat.
+func openAIFirst(p provider.Provider, model string) bool {
+	for _, pr := range provider.Protocols {
+		if provider.HostOf(p.Base(pr)) == "api.openai.com" {
+			return true
+		}
+	}
+	if p.Account != nil && p.Account.Agent == "copilot" {
+		m := strings.ToLower(model)
+		if i := strings.LastIndex(m, "/"); i >= 0 {
+			m = m[i+1:]
+		}
+		return strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "codex") ||
+			len(m) > 1 && m[0] == 'o' && m[1] >= '0' && m[1] <= '9'
+	}
+	return false
+}
+
+func refusedKey(providerID, model string, proto provider.Protocol) string {
+	return providerID + "\x00" + model + "\x00" + string(proto)
+}
+
+func (s *Server) refuse(providerID, model string, proto provider.Protocol) {
+	s.mu.Lock()
+	s.refused[refusedKey(providerID, model, proto)] = true
+	s.mu.Unlock()
 }
 
 // forward sends a request to the provider.
@@ -549,30 +615,25 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
-// carries are read on the way past into u. done is false, with nothing
-// written, when the provider serves the model on another of its endpoints
-// but not this one.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (status int, msg string, done bool) {
+// carries are read on the way past into u.
+func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, more bool) (int, string, bool) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
 	}
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
 	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
+		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), false
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		if wrongEndpoint(res.StatusCode, b) {
-			s.markUnfit(p.ID, model, proto)
-			if len(s.usable(p, model)) > 0 {
-				return res.StatusCode, msg, false
-			}
+		if more && notChatModel(res.StatusCode, b) {
+			return res.StatusCode, msg, true
 		}
 		keepRetry(w.Header(), res.Header)
-		return writeError(w, proto, res.StatusCode, msg), msg, true
+		return writeError(w, proto, res.StatusCode, msg), msg, false
 	}
 	rd, sse := eventStream(res)
 	h := w.Header()
@@ -595,7 +656,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if n > 0 {
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return res.StatusCode, "", true
+				return res.StatusCode, "", false
 			}
 			if f != nil {
 				f.Flush()
@@ -605,7 +666,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			break
 		}
 	}
-	return res.StatusCode, "", true
+	return res.StatusCode, "", false
 }
 
 // eventStream reports whether a reply is server-sent events. The header
@@ -631,79 +692,12 @@ func eventStream(res *http.Response) (io.Reader, bool) {
 	return br, false
 }
 
-// fits reports whether the provider hasn't turned model away from proto.
-func (s *Server) fits(providerID, model string, proto provider.Protocol) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return !s.unfit[providerID+"\x00"+model+"\x00"+string(proto)]
-}
-
-func (s *Server) markUnfit(providerID, model string, proto provider.Protocol) {
-	s.mu.Lock()
-	s.unfit[providerID+"\x00"+model+"\x00"+string(proto)] = true
-	s.mu.Unlock()
-}
-
-// usable lists the protocols p speaks that model is served on, as far as
-// the provider says and hasn't turned it away, preferred first: Chat
-// Completions, which every OpenAI-compatible vendor serves alike, except
-// for OpenAI's own models where their makers serve them, whose newest are
-// Responses-first (and some Responses-only).
-func (s *Server) usable(p provider.Provider, model string) []provider.Protocol {
-	apis := p.APIs(model)
-	var out []provider.Protocol
-	for _, proto := range p.Speaks() {
-		if s.fits(p.ID, model, proto) && (apis == nil || slices.Contains(apis, proto)) {
-			out = append(out, proto)
-		}
-	}
-	if responsesFirst(p, model) {
-		sort.SliceStable(out, func(i, j int) bool { return out[i] == provider.Responses && out[j] != provider.Responses })
-	}
-	return out
-}
-
-// responsesFirst: an OpenAI model on OpenAI's API or Copilot's.
-func responsesFirst(p provider.Provider, model string) bool {
-	if p.Responses == "" || (p.ID != "copilot" && provider.HostOf(p.Responses) != "api.openai.com") {
-		return false
-	}
-	m := strings.ToLower(model[strings.LastIndex(model, "/")+1:])
-	return strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "codex") ||
-		len(m) > 1 && m[0] == 'o' && m[1] >= '0' && m[1] <= '9'
-}
-
-// forwardTranslated sends one translated, streaming request upstream. A
-// provider can serve a model on some of its endpoints and not others —
-// OpenAI's and Copilot's newest models answer only /responses, Copilot's
-// Claude models only /chat/completions — so when it says the model isn't
-// served on this one, the request is built again for the next endpoint it
-// speaks, and the model is remembered there.
-func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to provider.Protocol, req *Request, model string, in http.Header) (*http.Response, provider.Protocol, error) {
-	for {
-		body := build(to, req, model, p.Host(), p.RejectsTemperature(model))
-		res, err := s.forward(ctx, p, to, pathOf(to), p.Prepare(body), in)
-		if err != nil || res.StatusCode < 400 {
-			return res, to, err
-		}
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		res.Body.Close()
-		res.Body = io.NopCloser(bytes.NewReader(b))
-		if !wrongEndpoint(res.StatusCode, b) {
-			return res, to, nil
-		}
-		s.markUnfit(p.ID, model, to)
-		next := s.usable(p, model)
-		if len(next) == 0 {
-			return res, to, nil
-		}
-		to = next[0]
-	}
-}
-
-// wrongEndpoint recognizes the errors OpenAI-compatible servers give when a
-// model exists but isn't served on the endpoint asked.
-func wrongEndpoint(status int, body []byte) bool {
+// notChatModel recognizes the errors a server gives when it does not serve
+// the model on the endpoint asked: an OpenAI-compatible one holding a model
+// that only /responses (or only /chat/completions) takes, a Copilot model
+// of the other API. Only a 4xx counts; a 5xx is the server failing, not
+// the endpoint refusing.
+func notChatModel(status int, body []byte) bool {
 	if status < 400 || status >= 500 {
 		return false
 	}
@@ -714,53 +708,58 @@ func wrongEndpoint(status int, body []byte) bool {
 		"not supported in /v1/chat/completions",
 		"not supported in the v1/responses",
 		"not supported in /v1/responses",
-		"only supported in v1/responses",
-		"only supported in /v1/responses",
+		"not supported in the /responses",
+		"not supported in the /chat/completions",
+		"unsupported_api_for_model",
 		"use v1/completions",
 		"use /v1/completions",
 		"use v1/responses",
 		"use /v1/responses",
 		"use v1/chat/completions",
 		"use /v1/chat/completions",
-		"not accessible via the", // Copilot
-		"unsupported_api_for_model",
 	} {
 		if strings.Contains(msg, phrase) {
 			return true
 		}
 	}
-	return false
+	return notAccessibleVia.MatchString(msg)
 }
+
+var notAccessibleVia = regexp.MustCompile(`not accessible via the [^"\n]{0,80}endpoint`)
 
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, more bool) (int, string, bool) {
 	request, err := parse(from, body)
 	if err != nil {
-		return writeError(w, from, 400, err.Error()), err.Error()
+		return writeError(w, from, 400, err.Error()), err.Error(), false
 	}
 	stream := request.Stream
 	request.Stream = true
-	res, actual, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
+	upstream := build(to, request, model, p.Host(), p.RejectsTemperature(model))
+	res, err := s.forward(r.Context(), p, to, pathOf(to), p.Prepare(upstream), r.Header)
 	if err != nil {
-		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
+		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error(), false
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		if more && notChatModel(res.StatusCode, b) {
+			return res.StatusCode, msg, true
+		}
 		keepRetry(w.Header(), res.Header)
-		return writeError(w, from, res.StatusCode, msg), msg
+		return writeError(w, from, res.StatusCode, msg), msg, false
 	}
-	dec := decoder(actual)
+	dec := decoder(to)
 	rd, sse := eventStream(res)
 	if !sse {
 		// the provider ignored stream:true; read the whole reply as one
 		// event stream would be wrong, so give up cleanly
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
-		return writeError(w, from, 502, msg), msg
+		return writeError(w, from, 502, msg), msg, false
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), request.Model)
@@ -777,14 +776,14 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 			})
 		})
 		enc.finish()
-		return 200, failed
+		return 200, failed, false
 	}
 	var col collector
 	readSSE(rd, func(_, data string) error {
 		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {
-		return writeError(w, from, 502, p.Name+": "+col.err), col.err
+		return writeError(w, from, 502, p.Name+": "+col.err), col.err, false
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)
@@ -792,7 +791,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(out)
-	return 200, col.err
+	return 200, col.err, false
 }
 
 // ---- protocol tables --------------------------------------------------------

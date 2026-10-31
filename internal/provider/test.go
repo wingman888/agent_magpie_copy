@@ -81,14 +81,13 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		pools = append(pools, ms)
 	}
 	pools = append(pools, p.Available())
+	serves := func(id string) bool {
+		apis := p.APIs(id)
+		return len(apis) == 0 || slices.Contains(apis, proto)
+	}
 	for _, want := range []func(string) bool{
-		func(id string) bool {
-			if apis := p.APIs(id); apis != nil {
-				return slices.Contains(apis, proto)
-			}
-			return proto != Anthropic || isClaude(id)
-		},
-		func(string) bool { return true },
+		func(id string) bool { return serves(id) && (proto != Anthropic || isClaude(id)) },
+		serves,
 	} {
 		for _, pool := range pools {
 			for _, m := range pool {

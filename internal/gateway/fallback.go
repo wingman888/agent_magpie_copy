@@ -15,7 +15,6 @@ package gateway
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"regexp"
 	"sort"
@@ -317,59 +316,21 @@ func restOf(id string) (Rest, bool) {
 // status code doesn't: some answer 400 or 403 with it.
 var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
 
-// unservedWords are how a vendor says the model isn't one it serves this
-// key, or this way — words another provider, or key, may not answer with.
-var unservedWords = regexp.MustCompile(`(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|模型.{0,12}(不存在|不支持|无权|未开通)`)
-
 // retryable says whether another provider may do better with a request
-// that failed this way: the vendor was busy, out of quota or failing, or
-// this key or provider can't serve it — not the request itself at fault.
+// that failed this way.
 func retryable(status int, body []byte) bool {
 	switch {
-	case status == 401, status == 402, status == 403, status == 404, status == 408, status == 429, status >= 500:
+	case status == 402, status == 408, status == 429, status >= 500:
 		return true
-	case status == 400, status == 422:
-		return quotaWords.Match(body) || unservedWords.Match(body)
+	case status == 400, status == 401, status == 403:
+		return quotaWords.Match(body)
 	}
 	return false
 }
 
-const (
-	// lastRetries is how many times the last one left is tried again after
-	// a failure that passes — a busy vendor, a dropped connection.
-	lastRetries = 2
-	// longestPause is the longest the vendor's Retry-After is waited for
-	// before that; longer, and the agent gets the error.
-	longestPause = 8 * time.Second
-)
-
-// retryPause is the first pause before the last one left is tried again;
-// each pause after is twice the one before.
-var retryPause = time.Second
-
-// passing says whether a failure is one that may be gone a moment later,
-// and how long to wait before trying the same one again.
-func passing(status int, header http.Header, again int) (time.Duration, bool) {
-	wait := retryPause << again
-	if d := retryAfter(header, time.Now()); d > 0 {
-		wait = d
-	}
-	switch {
-	case wait > longestPause:
-		return 0, false
-	case status == 408, status == 500, status == 502, status == 503, status == 504, status == 529:
-		return wait, true
-	case status == 429:
-		return wait, retryAfter(header, time.Now()) > 0 // a rate limit says when
-	}
-	return 0, false
-}
-
 // holdWriter keeps an error reply back while another provider may still
 // answer: headers and body wait until release, or are dropped for the next
-// try. Anything else goes straight through — but for a stream, only once
-// its first content comes: an error before that is a failure another may
-// answer, as an error status is.
+// try. Anything else goes straight through.
 type holdWriter struct {
 	w       http.ResponseWriter
 	hold    bool
@@ -377,12 +338,6 @@ type holdWriter struct {
 	status  int
 	passing bool
 	held    bytes.Buffer
-
-	stream  bool      // a stream held until its first content
-	since   time.Time // when it began
-	scanned int       // how much of held has been read as events
-	failure int       // the status the stream's error stands for
-	failMsg string
 }
 
 func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
@@ -397,10 +352,6 @@ func (h *holdWriter) WriteHeader(code int) {
 	}
 	h.status = code
 	if h.hold && code >= 400 {
-		return
-	}
-	if h.hold && strings.HasPrefix(h.header.Get("Content-Type"), "text/event-stream") {
-		h.stream, h.since = true, time.Now()
 		return
 	}
 	h.pass()
@@ -419,54 +370,10 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	if h.status == 0 {
 		h.WriteHeader(http.StatusOK)
 	}
-	if h.passing {
-		return h.w.Write(b)
+	if !h.passing {
+		return h.held.Write(b)
 	}
-	n, err := h.held.Write(b)
-	if h.stream && h.failure == 0 {
-		h.scan()
-	}
-	return n, err
-}
-
-// holdLongest is the longest a stream is held waiting for its first
-// content, and holdMost the most of it.
-const (
-	holdLongest = 15 * time.Second
-	holdMost    = 1 << 20
-)
-
-// scan reads the held stream's events so far: an error before any content
-// fails it; content, or waiting too long for it, lets it through.
-func (h *holdWriter) scan() {
-	for {
-		rest := h.held.Bytes()[h.scanned:]
-		end := eventEnd(rest)
-		if end < 0 {
-			break
-		}
-		h.scanned += end
-		switch kind, status, msg := streamEvent(rest[:end]); kind {
-		case eventLead:
-			continue
-		case eventError:
-			h.failure, h.failMsg = status, msg
-			return
-		}
-		h.flow()
-		return
-	}
-	if h.held.Len() > holdMost || time.Since(h.since) > holdLongest {
-		h.flow()
-	}
-}
-
-// flow lets a held stream through, and what follows it.
-func (h *holdWriter) flow() {
-	h.pass()
-	h.w.Write(h.held.Bytes())
-	h.held.Reset()
-	h.Flush()
+	return h.w.Write(b)
 }
 
 func (h *holdWriter) Flush() {
@@ -475,26 +382,9 @@ func (h *holdWriter) Flush() {
 	}
 }
 
-// code is the status a try failed with: the reply's, or its stream's
-// error's.
-func (h *holdWriter) code() int {
-	if h.failure != 0 {
-		return h.failure
-	}
-	return h.status
-}
-
-// errBody is what the vendor said of the failure.
-func (h *holdWriter) errBody() []byte {
-	if h.failure != 0 {
-		return []byte(h.failMsg)
-	}
-	return h.held.Bytes()
-}
-
 // failed reports a held error another provider could answer instead.
 func (h *holdWriter) failed() bool {
-	return !h.passing && h.code() >= 400 && retryable(h.code(), h.errBody())
+	return !h.passing && h.status >= 400 && retryable(h.status, h.held.Bytes())
 }
 
 // release sends a held reply after all: nobody else is left to try.
@@ -504,118 +394,4 @@ func (h *holdWriter) release() {
 	}
 	h.pass()
 	h.w.Write(h.held.Bytes())
-	h.Flush()
-}
-
-// eventEnd is where the first whole event in b ends, or -1.
-func eventEnd(b []byte) int {
-	for i := 0; i+1 < len(b); i++ {
-		if b[i] != '\n' {
-			continue
-		}
-		if b[i+1] == '\n' {
-			return i + 2
-		}
-		if b[i+1] == '\r' && i+2 < len(b) && b[i+2] == '\n' {
-			return i + 3
-		}
-	}
-	return -1
-}
-
-const (
-	eventContent = iota
-	eventLead    // what comes before a reply's content: a start, a ping
-	eventError
-)
-
-// streamEvent says what one server-sent event of a reply is, in any of the
-// protocols an agent speaks: the start of a reply, its content, or an
-// error — with the status that error stands for.
-func streamEvent(ev []byte) (kind, status int, msg string) {
-	var name string
-	var data []byte
-	for _, ln := range bytes.Split(ev, []byte("\n")) {
-		ln = bytes.TrimRight(ln, "\r")
-		switch {
-		case bytes.HasPrefix(ln, []byte("event:")):
-			name = strings.TrimSpace(string(ln[6:]))
-		case bytes.HasPrefix(ln, []byte("data:")):
-			data = append(data, bytes.TrimSpace(ln[5:])...)
-		}
-	}
-	if name == "" && len(data) == 0 {
-		return eventLead, 0, "" // a comment, a keep-alive
-	}
-	var v struct {
-		Type     string          `json:"type"`
-		Error    json.RawMessage `json:"error"`
-		Message  json.RawMessage `json:"message"` // a Responses error's; an Anthropic start's is the message
-		Response struct {
-			Error json.RawMessage `json:"error"`
-		} `json:"response"`
-		Choices *[]struct {
-			Delta        map[string]any `json:"delta"`
-			FinishReason *string        `json:"finish_reason"`
-		} `json:"choices"`
-	}
-	if json.Unmarshal(data, &v) != nil {
-		return eventContent, 0, "" // [DONE], or what isn't ours to read
-	}
-	typ := v.Type
-	if typ == "" {
-		typ = name
-	}
-	errOf := func(raw json.RawMessage) (int, int, string) {
-		msg := string(raw)
-		var m string
-		if json.Unmarshal(v.Message, &m) == nil && m != "" {
-			msg += " " + m
-		}
-		return eventError, streamStatus(msg), msg
-	}
-	switch {
-	case typ == "error" || typ == "response.failed":
-		if len(v.Response.Error) > 0 && string(v.Response.Error) != "null" {
-			return errOf(v.Response.Error)
-		}
-		return errOf(v.Error)
-	case len(v.Error) > 0 && string(v.Error) != "null":
-		return errOf(v.Error)
-	case typ == "ping", typ == "message_start", typ == "response.created", typ == "response.in_progress", typ == "response.queued":
-		return eventLead, 0, ""
-	case typ == "" && v.Choices != nil:
-		// a Chat chunk: the first says only who speaks
-		for _, c := range *v.Choices {
-			if c.FinishReason != nil {
-				return eventContent, 0, ""
-			}
-			for k, x := range c.Delta {
-				if k != "role" && x != nil && x != "" {
-					return eventContent, 0, ""
-				}
-			}
-		}
-		return eventLead, 0, ""
-	}
-	return eventContent, 0, ""
-}
-
-// streamStatus is the status an error in a stream stands for, as a vendor
-// would have answered it before streaming.
-func streamStatus(msg string) int {
-	l := strings.ToLower(msg)
-	switch {
-	case strings.Contains(l, "overloaded"):
-		return 529
-	case creditWords.MatchString(msg) && !strings.Contains(l, "rate"):
-		return 402
-	case strings.Contains(l, "rate_limit"), strings.Contains(l, "rate limit"), strings.Contains(l, "too many"), quotaWords.MatchString(msg):
-		return 429
-	case unservedWords.MatchString(msg):
-		return 400
-	case strings.Contains(l, "invalid"), strings.Contains(l, "context_length"), strings.Contains(l, "too long"):
-		return 400
-	}
-	return 502
 }
