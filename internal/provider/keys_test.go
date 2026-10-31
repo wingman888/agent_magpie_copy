@@ -34,7 +34,7 @@ func TestSeveralKeys(t *testing.T) {
 		t.Fatalf("after use: %+v %q %+v", p.Key, p.KeyName, p.Keys)
 	}
 	// off: the next one on takes the lead; the last one on stays
-	if err := SetKeyOn("relay", keyID("sk-team-2222", ""), false); err != nil {
+	if err := SetKeyOn("relay", keyID("sk-team-2222"), false); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = Find("relay")
@@ -47,7 +47,7 @@ func TestSeveralKeys(t *testing.T) {
 	if err := RemoveKey("relay", keyID("sk-personal-1111")); err == nil {
 		t.Fatal("removed the last key in use")
 	}
-	if err := SetKeyOn("relay", keyID("sk-team-2222", ""), true); err != nil {
+	if err := SetKeyOn("relay", keyID("sk-team-2222"), true); err != nil {
 		t.Fatal(err)
 	}
 	if err := RemoveKey("relay", keyID("sk-personal-1111")); err != nil {
@@ -55,5 +55,33 @@ func TestSeveralKeys(t *testing.T) {
 	}
 	if p, _ = Find("relay"); len(p.Keys) != 0 || p.Key != "sk-team-2222" || p.KeyName != "Team" {
 		t.Fatalf("after remove: %+v", p)
+	}
+}
+
+func TestKeyProtocolFollowsKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := Save(Provider{ID: "relay", Name: "Relay", Key: "k-one", Chat: "http://c/v1", Anthropic: "http://a"}); err != nil {
+		t.Fatal(err)
+	}
+	if AddKey("relay", "", "k-bad", "carrier-pigeon") == nil {
+		t.Fatal("unknown protocol accepted")
+	}
+	if err := AddKey("relay", "", "k-two", Anthropic); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetKeyProtocol("relay", keyID("k-one"), Chat); err != nil {
+		t.Fatal(err)
+	}
+	if err := UseKey("relay", keyID("k-two")); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := Find("relay")
+	ks := p.KeyList()
+	if len(ks) != 2 || ks[0].Protocol != Anthropic || ks[1].Protocol != Chat {
+		t.Fatalf("%+v", ks)
+	}
+	if q := p.WithKey(p.Keys[0]); q.Anthropic != "" || q.Chat == "" || p.Anthropic == "" {
+		t.Fatalf("%+v", q)
 	}
 }
