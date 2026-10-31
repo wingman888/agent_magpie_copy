@@ -511,12 +511,6 @@ body.window .foot { padding-left: 18px; }
 .logins { display: grid; gap: 2px; }
 .logins .acct .grow { flex: 1; }
 .logins .none { color: var(--muted); font-size: 12.5px; min-height: 26px; display: flex; align-items: center; }
-.fallback { display: grid; gap: 6px; }
-.fallback .fbl { display: grid; gap: 2px; }
-.fbrow { display: flex; align-items: center; gap: 8px; min-height: 28px; font-size: 12.5px; }
-.fbrow .i { width: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.fbrow .grow { flex: 1; }
-.fallback .mchips:empty { display: none; }
 .after-list { display: flex; align-items: center; gap: 8px; padding: 8px 4px 0; flex: none; }
 .excluded { display: flex; align-items: flex-start; gap: 10px; padding: 10px 14px 2px; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
 .excluded .ic { width: 16px; height: 16px; margin-top: 1px; opacity: .7; }

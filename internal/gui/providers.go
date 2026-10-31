@@ -44,12 +44,11 @@ type providerJSON struct {
 		Optional bool   `json:"optional"`
 	} `json:"key"`
 	Ready     bool            `json:"ready"`
-	Chosen    []string        `json:"chosen"`   // the user's explicit picks, if any
-	Fallback  []string        `json:"fallback"` // where requests go when this one can't take them
-	Models    []modelJSON     `json:"models"`   // everything the vendor lists, exposed ones flagged
-	Exposed   int             `json:"exposed"`  // how many reach the agents
-	Fetched   string          `json:"fetched"`  // "3h ago" when the list came from the vendor
-	Agents    []providerAgent `json:"agents"`   // detected agents, current ones flagged
+	Chosen    []string        `json:"chosen"`  // the user's explicit picks, if any
+	Models    []modelJSON     `json:"models"`  // everything the vendor lists, exposed ones flagged
+	Exposed   int             `json:"exposed"` // how many reach the agents
+	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
+	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
 	Sponsored bool            `json:"sponsored"`
 	Account   *accountJSON    `json:"account,omitempty"` // a signed-in agent, see provider.Account
 }
@@ -118,10 +117,6 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Headers: p.Headers,
 		Ready:   p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
-		Fallback: p.Fallback,
-	}
-	if out.Fallback == nil {
-		out.Fallback = []string{}
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
@@ -251,7 +246,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			// a preset needs nothing but the key; a saved provider keeps
 			// its key when the form left it blank
 			if pr, err := provider.FromPreset(in.Preset); err == nil && in.Chat == "" && in.Responses == "" && in.Anthropic == "" {
-				pr.Key, pr.Models, pr.Fallback = in.Key, in.Models, in.Fallback
+				pr.Key, pr.Models = in.Key, in.Models
 				if in.Name != "" {
 					pr.Name = in.Name
 				}
