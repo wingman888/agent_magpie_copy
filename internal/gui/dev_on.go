@@ -4,32 +4,19 @@ package gui
 
 import (
 	"bytes"
-	"context"
-	"fmt"
-	"io"
 	"io/fs"
 	"log"
-	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 )
 
 // Development build (`make dev`): the UI is read from internal/gui/assets on
-// every request, and the page reloads itself when a file there changes.
-//
-// `make dev` also splits the app in two, so a Go change doesn't close the
-// windows: a shell (MAGPIE_DEV_ROLE=shell) has the windows and the tray and
-// passes every request on to a backend (MAGPIE_DEV_ROLE=backend) with the
-// API and the gateway. A Go change rebuilds and restarts only the backend;
-// the page, told so, refreshes what it shows in place. What the backend asks
-// of the windows goes back to the shell's control address.
+// every request, and the page reloads itself when a file there changes. Go
+// changes still need a rebuild; `make dev` restarts on those too.
 
 func assetsDir() string {
 	_, file, _, _ := runtime.Caller(0)
@@ -52,40 +39,28 @@ func stamp() string {
 	return strconv.FormatInt(newest.UnixNano(), 10)
 }
 
-// boot tells this process from the one before it.
-var boot = strconv.FormatInt(time.Now().UnixNano(), 36)
-
-// A new stamp reloads the page; a new boot (a restarted backend) only
-// refreshes what it shows, as coming back to the window does, so the tab
-// and anything open stay put.
 const reloadJS = `(async () => {
-  let seen = "", boot = "";
+  let seen = "";
   for (;;) {
     try {
-      const r = await fetch("/api/dev/wait?since=" + seen + "&boot=" + boot, { cache: "no-store" });
-      const j = await r.json();
-      if (seen && j.stamp !== seen) { location.reload(); return; }
-      if (boot && j.boot !== boot && typeof load === "function") load();
-      seen = j.stamp; boot = j.boot;
+      const r = await fetch("/api/dev/wait?since=" + seen, { cache: "no-store" });
+      const s = (await r.json()).stamp;
+      if (seen && s !== seen) { location.reload(); return; }
+      seen = s;
     } catch { await new Promise(r => setTimeout(r, 1000)); }
   }
 })();`
 
 func devRoutes(mux *http.ServeMux) {
-	// long-poll: answers as soon as the assets change, or after 20s, or at
-	// once from a backend the page hasn't seen
+	// long-poll: answers as soon as the assets change, or after 20s
 	mux.HandleFunc("GET /api/dev/wait", func(rw http.ResponseWriter, r *http.Request) {
-		since, was := r.URL.Query().Get("since"), r.URL.Query().Get("boot")
+		since := r.URL.Query().Get("since")
 		s := stamp()
-		for i := 0; i < 50 && since != "" && s == since && (was == "" || was == boot); i++ {
+		for i := 0; i < 50 && since != "" && s == since; i++ {
 			time.Sleep(400 * time.Millisecond)
 			s = stamp()
 		}
-		writeJSON(rw, map[string]string{"stamp": s, "boot": boot})
-	})
-	// the shell's import links, stashed where the page will ask for them
-	mux.HandleFunc("POST /api/dev/import", func(rw http.ResponseWriter, r *http.Request) {
-		io.WriteString(rw, stashImport(r.FormValue("link")))
+		writeJSON(rw, map[string]string{"stamp": s})
 	})
 	mux.HandleFunc("GET /dev.js", func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "text/javascript")
@@ -126,139 +101,4 @@ func devListen(h http.Handler) {
 			log.Println("dev ui:", err)
 		}
 	}()
-}
-
-// devRole is this process's half of `make dev`: "backend", "shell", or ""
-// for the whole app in one process.
-func devRole() string { return os.Getenv("MAGPIE_DEV_ROLE") }
-
-// devBackend serves the page and the API on MAGPIE_DEV_BACKEND for the shell.
-func devBackend(handler func(Windows) http.Handler) error {
-	addr := os.Getenv("MAGPIE_DEV_BACKEND")
-	h := handler(remoteWindows(os.Getenv("MAGPIE_DEV_CONTROL")))
-	log.Println("dev backend:", "http://"+addr)
-	return http.ListenAndServe(addr, h)
-}
-
-// remoteWindows are the shell's windows, seen from the backend.
-type remoteWindows string // the shell's control address
-
-func (c remoteWindows) do(op, arg string) { c.post(op, url.Values{"arg": {arg}}) }
-
-// post says what the shell answered; a shell from before an op answers nothing.
-func (c remoteWindows) post(op string, form url.Values) string {
-	res, err := backendClient.PostForm("http://"+string(c)+"/"+op, form)
-	if err != nil {
-		log.Println("dev shell:", err)
-		return ""
-	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 64))
-	return string(b)
-}
-
-func (c remoteWindows) HidePanel()             { c.do("hide", "") }
-func (c remoteWindows) ShowMain(view string)   { c.do("main", view) }
-func (c remoteWindows) Quit()                  { c.do("quit", "") }
-func (c remoteWindows) OpenURL(u string)       { c.do("open", u) }
-func (c remoteWindows) OpenFolder(path string) { c.do("reveal", path) }
-// The glide rides beside the height, so a shell from before it still sizes.
-func (c remoteWindows) FitPanel(height int, g Glide) {
-	c.post("fit", url.Values{"arg": {strconv.Itoa(height)}, "ms": {strconv.Itoa(g.MS)}, "ease": {g.ease()}})
-}
-func (c remoteWindows) TintPanel(rgba [4]uint8, ms int) bool {
-	q := url.Values{"c": {fmt.Sprintf("%d,%d,%d,%d", rgba[0], rgba[1], rgba[2], rgba[3])}, "ms": {strconv.Itoa(ms)}}
-	return c.post("tint", url.Values{"arg": {q.Encode()}}) == "ok"
-}
-
-// backendClient waits out a backend's restart: a request made while the old
-// one is gone connects to the new one once it listens.
-var backendClient = &http.Client{Transport: &http.Transport{
-	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-		var d net.Dialer
-		deadline := time.Now().Add(time.Minute)
-		for {
-			c, err := d.DialContext(ctx, network, addr)
-			if err == nil || time.Now().After(deadline) {
-				return c, err
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(200 * time.Millisecond):
-			}
-		}
-	},
-}}
-
-// devShell is the shell's handler, a proxy to the backend, and starts the
-// control address the backend drives the windows through. nil outside the
-// shell.
-func devShell(h *host) http.Handler {
-	if devRole() != "shell" {
-		return nil
-	}
-	control := http.NewServeMux()
-	control.HandleFunc("POST /{op}", func(rw http.ResponseWriter, r *http.Request) {
-		arg := r.FormValue("arg")
-		switch r.PathValue("op") {
-		case "hide":
-			h.HidePanel()
-		case "main":
-			h.ShowMain(arg)
-		case "quit":
-			h.Quit()
-		case "open":
-			h.OpenURL(arg)
-		case "reveal":
-			h.OpenFolder(arg)
-		case "fit":
-			q := url.Values{"h": {arg}, "ms": {r.FormValue("ms")}, "ease": {r.FormValue("ease")}}
-			if n, g, ok := parseFit(q); ok {
-				h.FitPanel(n, g)
-			}
-		case "tint":
-			q, _ := url.ParseQuery(arg)
-			if c, ms, ok := parseTint(q); ok && h.TintPanel(c, ms) {
-				rw.Write([]byte("ok"))
-				return
-			}
-		}
-		rw.WriteHeader(http.StatusNoContent)
-	})
-	go func() {
-		if err := http.ListenAndServe(os.Getenv("MAGPIE_DEV_CONTROL"), control); err != nil {
-			log.Println("dev control:", err)
-		}
-	}()
-	p := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: os.Getenv("MAGPIE_DEV_BACKEND")})
-	p.Transport = backendClient.Transport
-	// a restart cuts off whatever was in flight; the page asks again
-	p.ErrorHandler = func(rw http.ResponseWriter, r *http.Request, err error) {
-		rw.WriteHeader(http.StatusBadGateway)
-	}
-	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		// The webview's requests often come without a Content-Length, which
-		// Wails reads as 0, and a proxy drops a body of length 0: say it's
-		// unknown so a POST's body gets through.
-		if r.ContentLength == 0 && r.Body != nil && r.Body != http.NoBody && r.Method != http.MethodGet && r.Method != http.MethodHead {
-			r.ContentLength = -1
-		}
-		p.ServeHTTP(rw, r)
-	})
-}
-
-// stash keeps an import link for the page, in the backend under `make dev`.
-func stash(link string) string {
-	if devRole() != "shell" {
-		return stashImport(link)
-	}
-	res, err := backendClient.PostForm("http://"+os.Getenv("MAGPIE_DEV_BACKEND")+"/api/dev/import", url.Values{"link": {link}})
-	if err != nil {
-		log.Println("dev import:", err)
-		return ""
-	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(res.Body)
-	return strings.TrimSpace(string(b))
 }
