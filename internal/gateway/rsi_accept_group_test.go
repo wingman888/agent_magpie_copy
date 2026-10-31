@@ -415,8 +415,8 @@ func TestAcceptKeyPoolsByProtocol(t *testing.T) {
 	v := &keyed{}
 	up := httptest.NewServer(v)
 	t.Cleanup(up.Close)
-	p := provider.Provider{ID: "mix", Name: "MIX", Key: "k1", Models: []string{"m"}, Chat: up.URL + "/v1",
-		Keys:    []provider.KeyAccount{{Key: "k2", Protocol: provider.Responses}, {Key: "k3"}},
+	p := provider.Provider{ID: "mix", Name: "MIX", Key: "k1", KeyProtocol: provider.Chat, Models: []string{"m"}, Chat: up.URL + "/v1",
+		Keys:    []provider.KeyAccount{{Key: "k2"}, {Key: "k3", Protocol: provider.Chat}},
 		Routing: "rotate"}
 	if err := provider.Save(p); err != nil {
 		t.Fatal(err)
