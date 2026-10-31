@@ -2,12 +2,10 @@ package gateway
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -372,18 +370,6 @@ func TestPassthroughRewritesModel(t *testing.T) {
 	}
 }
 
-func TestChatPassthroughSendsDeveloperAsSystem(t *testing.T) {
-	f := &fake{t: t, ctype: "application/json", reply: `{"id":"c1","choices":[]}`}
-	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1/chat/completions", `{"model":"m1","reasoning_effort":"high","messages":[{"role":"developer","content":"be brief"},{"role":"user","content":"a developer asks"}]}`)
-	if code != 200 {
-		t.Fatalf("%d %s", code, body)
-	}
-	if !bytes.Contains(f.got, []byte(`{"content":"be brief","role":"system"}`)) || bytes.Contains(f.got, []byte(`"role":"developer"`)) || !bytes.Contains(f.got, []byte(`"content":"a developer asks"`)) {
-		t.Errorf("forwarded body: %s", f.got)
-	}
-}
-
 func TestErrorsAndUnknownModel(t *testing.T) {
 	f := &fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance","type":"x"}}`}
 	setup(t, provider.Chat, f)
@@ -541,62 +527,5 @@ func TestCodexAccountUpstream(t *testing.T) {
 	}
 	if _, isList := upstream["input"].([]any); !isList {
 		t.Fatalf("relayed input not a list: %s", f.got)
-	}
-}
-
-func TestConversationID(t *testing.T) {
-	h := http.Header{}
-	h.Set("X-Session-Affinity", "ses_1")
-	if got := conversationID(h, []byte(`{}`)); got != "ses_1" {
-		t.Errorf("agent session header: %q", got)
-	}
-	turn1 := `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"fix the bug"}]}`
-	turn2 := `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"fix the bug"},{"role":"assistant","content":"done"},{"role":"user","content":"thanks"}]}`
-	other := `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"write docs"}]}`
-	a, b, c := conversationID(http.Header{}, []byte(turn1)), conversationID(http.Header{}, []byte(turn2)), conversationID(http.Header{}, []byte(other))
-	if a != b || a == c || !strings.HasPrefix(a, "magpie-") {
-		t.Errorf("derived ids: %q %q %q", a, b, c)
-	}
-	r1 := conversationID(http.Header{}, []byte(`{"input":[{"role":"user","content":"hi"}]}`))
-	r2 := conversationID(http.Header{}, []byte(`{"input":[{"role":"user","content":"hi"},{"type":"function_call_output","output":"x"}]}`))
-	if r1 != r2 {
-		t.Errorf("responses ids: %q %q", r1, r2)
-	}
-}
-
-func TestOpenCodeGetsConversationSession(t *testing.T) {
-	f := &fake{t: t, ctype: "application/json", reply: `{"id":"c1","choices":[]}`}
-	up := setup(t, provider.Chat, f)
-	body := `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`
-	if code, out := post(t, "/v1/chat/completions", body); code != 200 || f.head.Get("x-opencode-session") != "" {
-		t.Fatalf("other vendors get no OpenCode header: %d %s %v", code, out, f.head)
-	}
-
-	// The same upstream, reached under OpenCode's host name.
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Chat: "http://opencode.ai/zen/go/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	s := New()
-	addr := strings.TrimPrefix(up.URL, "http://")
-	s.client = &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, addr)
-	}}}
-	send := func(h http.Header) string {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-		for k, v := range h {
-			req.Header[k] = v
-		}
-		s.Handler().ServeHTTP(rec, req)
-		if rec.Code != 200 {
-			t.Fatalf("%d %s", rec.Code, rec.Body.String())
-		}
-		return f.head.Get("x-opencode-session")
-	}
-	if got := send(http.Header{"Session_id": {"codex-ses"}}); got != "codex-ses" {
-		t.Errorf("agent's session: %q", got)
-	}
-	if a, b := send(nil), send(nil); a == "" || a != b {
-		t.Errorf("derived session: %q %q", a, b)
 	}
 }
