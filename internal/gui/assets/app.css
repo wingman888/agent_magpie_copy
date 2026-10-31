@@ -548,12 +548,6 @@ body.window .foot { padding-left: 18px; }
 .acc.adding .kb .grow { flex: 1; }
 .acc + .acc.adding { border-top: 1px solid var(--line-2); }
 @media (max-width: 520px) { .acc.adding .kf { grid-template-columns: 1fr; } }
-.acc .proto { position: relative; flex: none; display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; font-size: 11px; color: var(--muted); border-radius: 5px; background: var(--pill); white-space: nowrap; }
-.acc .proto select { position: absolute; inset: 0; width: 100%; opacity: 0; font: inherit; cursor: default; }
-.acc .proto:not(.set) { opacity: 0; transition: opacity .15s; }
-.acc:hover .proto, .acc .proto:focus-within, .acc.adding .proto { opacity: 1; }
-.acc .proto.set { color: var(--fg-2); }
-.acc .proto:hover { background: var(--pill-hover); }
 /* a subscription's allowance, under its name */
 .accts .acc:has(.aq) { flex-wrap: wrap; row-gap: 3px; padding-top: 7px; padding-bottom: 8px; }
 .acc .aq { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding-left: 25px; font-size: 10.5px; color: var(--muted); min-height: 14px; }

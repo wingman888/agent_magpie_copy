@@ -41,10 +41,6 @@ type Provider struct {
 	// accounts: keys saved to switch to (see keys.go).
 	KeyName string       `json:"keyName,omitempty"`
 	Keys    []KeyAccount `json:"keys,omitempty"`
-	// KeyProtocol, when set, is the one protocol the first key is good
-	// for: a relay that hands out one key for Anthropic and another for
-	// OpenAI (see KeyAccount.Protocol).
-	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),

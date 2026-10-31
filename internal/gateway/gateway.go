@@ -222,18 +222,6 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok {
-		// a relay's OpenAI-only key can't count Anthropic tokens
-		q := p
-		q.Anthropic = ""
-		for _, c := range perKey(p, model, provider.Anthropic) {
-			if c.p.Anthropic != "" {
-				q = c.p
-				break
-			}
-		}
-		p = q
-	}
 	if ok && p.Anthropic != "" {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
@@ -363,7 +351,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands := s.candidates(p, model, from)
+	cands := s.candidates(p, model)
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil

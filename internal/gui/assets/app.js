@@ -2050,8 +2050,6 @@ function renderKeyAccounts(p) {
     };
     row.append(dot, name);
     if (k.name) row.append(el("span", "plan mono", k.masked));
-    const proto = protoPicker(p, k.protocol, (v) => accountAction("keys/protocol", { id: p.id, ref: k.id, protocol: v }));
-    if (proto) row.append(proto);
     row.append(el("span", "grow"));
     if (!k.active || several) {
       const rm = el("button", "text quiet", t("Remove"));
@@ -2076,7 +2074,7 @@ function renderKeyAccounts(p) {
     const go = async () => {
       add.classList.add("busy");
       const id = await keyFingerprint(key.value.trim());
-      if (await accountAction("keys/add", { id: p.id, name: name.value, key: key.value, protocol: addingKey.protocol || "" }, t("Key added — it takes over when the ones before it run out"))) {
+      if (await accountAction("keys/add", { id: p.id, name: name.value, key: key.value }, t("Key added — it takes over when the ones before it run out"))) {
         addingKey = null; justAdded = id; renderProviders(); setTimeout(() => { justAdded = ""; }, 2000);
       }
     };
@@ -2086,10 +2084,8 @@ function renderKeyAccounts(p) {
     x.onclick = () => { addingKey = null; renderProviders(); };
     const fields = el("div", "kf");
     fields.append(name, key);
-    const proto = protoPicker(p, addingKey.protocol || "", (v) => { addingKey.protocol = v; });
     const bar = el("div", "kb");
     if (p.keysUrl) { const g = el("button", "link", t("Get a key ↗")); g.onclick = () => api("open", { url: p.keysUrl }); bar.append(g); }
-    if (proto) bar.append(proto);
     bar.append(el("span", "grow"), x, add);
     box.append(fields, bar);
     list.append(box);
@@ -2103,31 +2099,6 @@ function renderKeyAccounts(p) {
     list.append(add);
   }
   return list;
-}
-
-// protoPicker: which protocol a key works with. Some relays hand out one
-// key for Anthropic and another for OpenAI; a key set to one is used on
-// that endpoint only, and the gateway sends each request to the key that
-// suits it. Only offered when the provider has more than one endpoint.
-const PROTO_NAMES = { "": "Any protocol", anthropic: "Anthropic only", chat: "Chat Completions only", responses: "Responses only" };
-function protoPicker(p, value, onChange) {
-  const have = ["anthropic", "chat", "responses"].filter((x) => p[x]);
-  if (have.length < 2 && !value) return null;
-  // a pill as wide as its words, the native menu laid over it
-  const pill = el("label", "proto" + (value ? " set" : ""));
-  pill.title = t("Some relays give out a key per protocol. Set it here and the gateway sends each request to the key that fits: Claude models to the Anthropic key, GPT models to the OpenAI one.");
-  const text = el("span", "", t(PROTO_NAMES[value]));
-  const sel = el("select");
-  for (const v of Object.keys(PROTO_NAMES).filter((x) => !x || have.includes(x) || x === value)) {
-    const o = el("option", "", t(PROTO_NAMES[v]));
-    o.value = v;
-    o.selected = v === value;
-    sel.append(o);
-  }
-  sel.onchange = () => { text.textContent = t(PROTO_NAMES[sel.value]); pill.classList.toggle("set", !!sel.value); onChange(sel.value); };
-  sel.onclick = (e) => e.stopPropagation();
-  pill.append(text, svg(CHEV, 11, 1.6), sel);
-  return pill;
 }
 
 // keyPill is a key provider's row badge: the key in use, or how many are.
