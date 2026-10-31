@@ -65,7 +65,7 @@ func SaveLive(provider, base string, models []Model) error {
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool, headers ...map[string]string) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -92,7 +92,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool, headers ...map
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers...)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -109,7 +109,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool, headers ...map
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers ...map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -125,10 +125,10 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers ...m
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	for _, h := range headers {
-		for k, v := range h {
-			SetHeader(req.Header, k, v)
-		}
+	// The user's own headers, after the defaults so a private auth scheme
+	// wins. Written directly so the name keeps the exact case the user typed.
+	for k, v := range headers {
+		req.Header[k] = []string{v}
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -174,40 +174,18 @@ type liveModel struct {
 	DisplayName string `json:"display_name"`
 }
 
-// SetHeader sets a header with the name spelled exactly as given (net/http's
-// Set would canonicalize it), replacing any default of the same name.
-func SetHeader(h http.Header, name, value string) {
-	for k := range h {
-		if strings.EqualFold(k, name) {
-			delete(h, k)
-		}
-	}
-	h[name] = []string{value}
-}
-
-// lookupID is the catalog id for a model id: a "vendor/model" id is matched
-// by what follows its last slash.
-func lookupID(id string) string {
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		return id[i+1:]
-	}
-	return id
-}
-
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
-		if _, dup := byID[m.ID]; !dup { // earlier catalogs win
-			byID[m.ID] = m
-		}
+		byID[m.ID] = m
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
 		k, ok := byID[m.ID]
-		if !ok {
-			k, ok = byID[lookupID(m.ID)]
+		if i := strings.LastIndexByte(m.ID, '/'); !ok && i >= 0 {
+			k, ok = byID[m.ID[i+1:]] // a gateway's "deepseek/deepseek-chat"
 		}
 		if ok {
 			if m.Name == "" || m.Name == m.ID {
