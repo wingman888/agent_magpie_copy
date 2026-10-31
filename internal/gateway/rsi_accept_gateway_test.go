@@ -382,10 +382,13 @@ func TestAcceptSeveralKeysTakeOverFromEachOther(t *testing.T) {
 }
 
 // A relay with one key for Anthropic and one for OpenAI.
+var dbg []string
+
 func protocolRelay(t *testing.T, keys [2]map[string]any, models []string) (*gateway.Server, *[]string, *sync.Mutex) {
 	isolate(t)
 	var mu sync.Mutex
 	var seen []string
+	dbg = nil
 	srv := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		key := r.Header.Get("x-api-key")
@@ -393,6 +396,7 @@ func protocolRelay(t *testing.T, keys [2]map[string]any, models []string) (*gate
 			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		}
 		mu.Lock()
+		dbg = append(dbg, r.URL.Path+" "+key+" "+strings.ReplaceAll(string(b), `"`, "'"))
 		seen = append(seen, r.URL.Path+" "+key)
 		mu.Unlock()
 		if (r.URL.Path == "/v1/messages") != (key == "k-ant") {
@@ -456,7 +460,7 @@ func TestAcceptKeysMadeForOneProtocol(t *testing.T) {
 				got := append([]string{}, *seen...)
 				mu.Unlock()
 				if code != 200 || len(got) != 1 || got[0] != x.want {
-					t.Fatalf("%s %.60s want %s: %d %s, upstream saw %v", x.path, strings.ReplaceAll(x.body, `"`, "'"), x.want, code, strings.NewReplacer(`"`, "'").Replace(body), got)
+					t.Fatalf("%s %.60s want %s: %d %s, upstream saw %v DBG %v", x.path, strings.ReplaceAll(x.body, `"`, "'"), x.want, code, strings.NewReplacer(`"`, "'").Replace(body), got, dbg)
 				}
 			}
 		})
