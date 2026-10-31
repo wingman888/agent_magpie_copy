@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/yetone/dial/internal/agent"
-	"github.com/yetone/dial/internal/edit"
+	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/edit"
 )
 
 // Profile maps "agent.field" to a value.
@@ -20,10 +20,10 @@ type Profile map[string]string
 // Path is the profiles file.
 func Path() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "dial", "profiles.json")
+		return filepath.Join(x, "magpie", "profiles.json")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "dial", "profiles.json")
+	return filepath.Join(home, ".config", "magpie", "profiles.json")
 }
 
 // Load reads every profile.
