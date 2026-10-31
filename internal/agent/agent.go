@@ -13,13 +13,11 @@ import (
 
 // Option is one value the picker offers for a field.
 type Option struct {
-	Value string   `json:"value"`
-	Label string   `json:"label,omitempty"` // display name, when the value is an id
-	Note  string   `json:"note"`
-	Icon  string   `json:"icon,omitempty"`  // bundled icon name
-	Group string   `json:"group,omitempty"` // section header in the picker
-	Ref   string   `json:"ref,omitempty"`   // the catalog model, the same in every agent
-	Icons []string `json:"icons,omitempty"` // a routing group's member providers, stacked
+	Value string `json:"value"`
+	Label string `json:"label,omitempty"` // display name, when the value is an id
+	Note  string `json:"note"`
+	Icon  string `json:"icon,omitempty"`  // bundled icon name
+	Group string `json:"group,omitempty"` // section header in the picker
 }
 
 // Field is one tunable setting of an agent. Set with an empty value puts
