@@ -23,6 +23,10 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
+
+	// Gemini is a client-facing protocol only: the gateway serves it but
+	// no upstream is ever spoken to in it, so it is not in Protocols.
+	Gemini Protocol = "gemini"
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -50,10 +54,6 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
-
-	// Account is set for providers backed by an agent's login (codex,
-	// copilot). It is derived on every read and never stored.
-	Account *Account `json:"-"`
 }
 
 type file struct {
@@ -94,20 +94,11 @@ func store(f file) error {
 
 // All lists the configured providers in the order they were added.
 func All() []Provider {
-	var out []Provider
-	picks := map[string][]string{}
-	for _, p := range load().Providers {
-		p = normalize(p)
-		if isAccountID(p.ID) {
-			picks[p.ID] = p.Models
-			continue
-		}
-		if p.ID == idClaude {
-			continue
-		}
-		out = append(out, p)
+	out := load().Providers
+	for i := range out {
+		out[i] = normalize(out[i])
 	}
-	return append(out, accounts(picks)...)
+	return out
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -137,13 +128,6 @@ func Save(p Provider) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
-	if p.ID == idClaude {
-		return errors.New("Claude Code's login is never offered as a provider")
-	}
-	if isAccountID(p.ID) {
-		// only the user's model picks are kept; credentials stay with the agent
-		return saveRecord(Provider{ID: p.ID, Models: p.Models})
-	}
 	if p.ID == "dial" {
 		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
 	}
@@ -156,10 +140,6 @@ func Save(p Provider) error {
 	if p.Key == "" && !keyOptional(p) {
 		return fmt.Errorf("%s needs an API key", p.Name)
 	}
-	return saveRecord(p)
-}
-
-func saveRecord(p Provider) error {
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
@@ -173,29 +153,6 @@ func saveRecord(p Provider) error {
 
 // Delete removes a provider.
 func Delete(id string) error {
-	if isAccountID(id) {
-		// forget the model picks only; the agent stays signed in
-		f := load()
-		keep := f.Providers[:0]
-		found := false
-		for _, p := range f.Providers {
-			if p.ID == id {
-				found = true
-				continue
-			}
-			keep = append(keep, p)
-		}
-		f.Providers = keep
-		if found {
-			if err := store(f); err != nil {
-				return err
-			}
-		}
-		if !found && !signedIn(id) {
-			return fmt.Errorf("no provider %q", id)
-		}
-		return nil
-	}
 	f := load()
 	keep := f.Providers[:0]
 	found := false
@@ -324,16 +281,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
-
-func signedIn(id string) bool {
-	switch id {
-	case idCodex:
-		_, ok := codexProvider()
-		return ok
-	case idCopilot:
-		_, ok := copilotProvider()
-		return ok
-	}
-	return false
-}
+func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }

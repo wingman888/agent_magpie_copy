@@ -2,12 +2,10 @@ package gateway
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -281,61 +279,5 @@ func TestModelsList(t *testing.T) {
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
 	if !strings.Contains(rec.Body.String(), `"id":"fake/m1"`) || !strings.Contains(rec.Body.String(), `"display_name"`) {
 		t.Errorf("%s", rec.Body.String())
-	}
-}
-
-func TestCodexNonStreamAggregatesAndNoContentType(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	h := t.TempDir()
-	t.Setenv("HOME", h)
-	acc := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":4102444800}`)) + ".s"
-	id := "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"email":"me@x.com"}`)) + ".s"
-	os.MkdirAll(h+"/.codex", 0o755)
-	os.WriteFile(h+"/.codex/auth.json", []byte(`{"auth_mode":"chatgpt","tokens":{"id_token":"`+id+`","access_token":"`+acc+`","refresh_token":"r","account_id":"acc1"}}`), 0o600)
-
-	var got []byte
-	var head http.Header
-	var path string
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = io.ReadAll(r.Body)
-		head, path = r.Header, r.URL.Path
-		// no Content-Type on purpose
-		w.Header()["Content-Type"] = nil
-		io.WriteString(w, sse(
-			`event: response.output_text.delta`+"\n"+`data: {"type":"response.output_text.delta","delta":"hello"}`,
-			`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":3,"output_tokens":2}}}`))
-	}))
-	defer up.Close()
-	old := provider.CodexBase
-	provider.CodexBase = up.URL + "/codex"
-	defer func() { provider.CodexBase = old }()
-
-	gw := httptest.NewServer(New().Handler())
-	defer gw.Close()
-	res, err := http.Post(gw.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"codex/gpt-5.5","input":"hi","max_output_tokens":50,"temperature":0.5}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := io.ReadAll(res.Body)
-	if res.StatusCode != 200 || !strings.Contains(string(b), "hello") || !strings.HasPrefix(res.Header.Get("Content-Type"), "application/json") {
-		t.Fatalf("%d %s", res.StatusCode, b)
-	}
-	if path != "/codex/responses" || head.Get("Authorization") != "Bearer "+acc || head.Get("chatgpt-account-id") != "acc1" {
-		t.Fatalf("%s %v", path, head)
-	}
-	var m map[string]any
-	json.Unmarshal(got, &m)
-	if m["stream"] != true || m["store"] != false || m["max_output_tokens"] != nil || m["temperature"] != nil || m["model"] != "gpt-5.5" {
-		t.Fatalf("%s", got)
-	}
-	// streaming client: forwarded, sniffed as SSE
-	res, err = http.Post(gw.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"codex/gpt-5.5","input":"hi","stream":true}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ = io.ReadAll(res.Body)
-	if res.Header.Get("Content-Type") != "text/event-stream" || !strings.Contains(string(b), "hello") {
-		t.Fatalf("%v %s", res.Header, b)
 	}
 }

@@ -46,14 +46,6 @@ func (p Provider) Test(ctx context.Context) []Result {
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 			headers = AuthHeaders(p, Anthropic)
 		}
-		if p.Account != nil {
-			base, h, b, err := Prepare(ctx, p, proto, []byte(body))
-			if err != nil {
-				out = append(out, Result{Protocol: proto, Model: model, Error: err.Error()})
-				continue
-			}
-			url, headers, body = base+pathFor(proto), h, string(b)
-		}
 		out = append(out, probe(ctx, proto, url, body, model, headers))
 	}
 	return out
@@ -135,14 +127,4 @@ func APIError(b []byte, fallback string) string {
 		return fallback + ": " + s
 	}
 	return fallback
-}
-
-func pathFor(proto Protocol) string {
-	switch proto {
-	case Chat:
-		return "/chat/completions"
-	case Responses:
-		return "/responses"
-	}
-	return "/v1/messages"
 }

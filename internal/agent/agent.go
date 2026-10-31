@@ -85,12 +85,6 @@ func (a *Agent) Field(key string) *Field {
 			return &a.Fields[i]
 		}
 	}
-	// the label shown in the UI works too
-	for i := range a.Fields {
-		if strings.EqualFold(a.Fields[i].Label, key) {
-			return &a.Fields[i]
-		}
-	}
 	return nil
 }
 

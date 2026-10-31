@@ -33,12 +33,8 @@ const providerUsage = `usage:
 // providers: `dial providers`
 func providers() error {
 	all := provider.All()
-	note, claude := provider.ClaudeNote()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		if claude {
-			fmt.Println(muted.Render("  " + note))
-		}
 		return nil
 	}
 	uses := usesByProvider()
@@ -47,12 +43,10 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" && p.Account == nil {
+		if p.Preset == "" {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
-		case p.Account != nil:
-			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -76,9 +70,6 @@ func providers() error {
 	}
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
-	}
-	if claude {
-		fmt.Println(muted.Render("  claude  " + note))
 	}
 	return nil
 }
@@ -308,23 +299,14 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" && p.Account == nil {
+	if p.Preset == "" {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
-	if a := p.Account; a != nil {
-		acct := a.User
-		if a.Plan != "" {
-			acct += " · " + a.Plan
-		}
-		kv("account", acct+muted.Render(" · from "+a.Agent))
-	}
 	switch {
-	case p.Account != nil:
-		kv("key", muted.Render("the "+p.Account.Agent+" login; nothing stored by dial"))
 	case p.Key != "":
 		kv("key", muted.Render(provider.Mask(p.Key)))
 	case p.Ready():

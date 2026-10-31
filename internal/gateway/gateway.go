@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -146,11 +145,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
-	mux.HandleFunc("POST /v1beta/models/{rest...}", s.gemini)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
-	mux.HandleFunc("GET /v1beta/models/{rest...}", s.geminiModel)
+	mux.HandleFunc("GET /v1beta/models/{model...}", s.geminiModel)
+	mux.HandleFunc("POST /v1beta/models/{model...}", s.geminiPost)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models/{model}:generateContent")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models (Gemini)")
 	})
 	return mux
 }
@@ -234,8 +233,16 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			writeError(w, from, 400, err.Error())
 			return
 		}
+		s.serve(w, r, from, modelOf(body), body)
+	}
+}
+
+// serve resolves the model and sends the request through, as is or
+// translated, recording the call.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, name string, body []byte) {
+	{
 		start := time.Now()
-		call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
+		call := Call{Time: start, From: from, Model: name, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
 		p, model, ok := provider.Resolve(call.Model)
 		if !ok {
 			call.Status, call.Error = 404, "unknown model"
@@ -250,13 +257,9 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			return
 		}
 		call.Provider = p.ID
-		if p.Base(from) != "" && !(p.ID == "codex" && p.Account != nil && from == provider.Responses && !wantsStream(body)) {
+		if p.Base(from) != "" {
 			call.To = from
 			call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
-		} else if p.Base(from) != "" {
-			// ChatGPT's backend only streams: stream upstream, answer in JSON
-			call.To = from
-			call.Status, call.Error = s.translate(w, r, p, from, from, model, body, &call.Usage)
 		} else {
 			to := p.Speaks()
 			if len(to) == 0 {
@@ -276,11 +279,7 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
-	base, auth, body, err := provider.Prepare(ctx, p, to, body)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -295,38 +294,10 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	for k, v := range auth {
+	for k, v := range provider.AuthHeaders(p, to) {
 		req.Header.Set(k, v)
 	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	sniffContentType(res)
-	return res, nil
-}
-
-// sniffContentType gives a reply without a Content-Type the type its first
-// bytes show: ChatGPT's backend streams events without declaring them.
-func sniffContentType(res *http.Response) {
-	if res.Header.Get("Content-Type") != "" || res.StatusCode >= 400 {
-		return
-	}
-	br := bufio.NewReader(res.Body)
-	if _, err := br.Peek(1); err != nil {
-		return
-	}
-	b, _ := br.Peek(br.Buffered())
-	t := strings.TrimLeft(string(b), " \t\r\n")
-	for _, pre := range []string{"event:", "data:", ":"} {
-		if strings.HasPrefix(t, pre) {
-			res.Header.Set("Content-Type", "text/event-stream")
-		}
-	}
-	res.Body = struct {
-		io.Reader
-		io.Closer
-	}{br, res.Body}
+	return s.client.Do(req)
 }
 
 // passthrough relays a request the provider understands as-is, with the
@@ -384,11 +355,6 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
 	}
-	return s.translateReq(w, r, p, from, to, model, req, u)
-}
-
-// translateReq is translate for a request already parsed.
-func (s *Server) translateReq(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, req *Request, u *Usage) (int, string) {
 	stream := req.Stream
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
@@ -460,8 +426,8 @@ func parse(proto provider.Protocol, body []byte) (*Request, error) {
 		return parseChat(body)
 	case provider.Responses:
 		return parseResponses(body)
-	case geminiProto:
-		return parseGemini(body, "", false)
+	case provider.Gemini:
+		return parseGemini(body)
 	}
 	return parseAnthropic(body)
 }
@@ -499,7 +465,7 @@ func encoder(proto provider.Protocol, w *sseWriter, model string) streamEncoder 
 		return &chatEncoder{w: w, model: model}
 	case provider.Responses:
 		return &responsesEncoder{w: w, model: model}
-	case geminiProto:
+	case provider.Gemini:
 		return &geminiEncoder{w: w, model: model}
 	}
 	return &anthropicEncoder{w: w, model: model}
@@ -511,7 +477,7 @@ func render(proto provider.Protocol, res Result, model string) []byte {
 		return renderChat(res, model)
 	case provider.Responses:
 		return renderResponses(res, model)
-	case geminiProto:
+	case provider.Gemini:
 		return renderGemini(res, model)
 	}
 	return renderAnthropic(res, model)
@@ -551,6 +517,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // writeError answers in the client's own error shape.
 func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg string) int {
+	if proto == provider.Gemini {
+		writeJSON(w, status, map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}})
+		return status
+	}
 	typ := "api_error"
 	switch {
 	case status == 400:
@@ -567,21 +537,11 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 		typ = "overloaded_error"
 	}
 	var v any
-	if proto == geminiProto {
-		v = geminiError(status, msg)
-	} else if proto == provider.Anthropic {
+	if proto == provider.Anthropic {
 		v = map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
 	} else {
 		v = map[string]any{"error": map[string]any{"message": msg, "type": typ, "code": nil, "param": nil}}
 	}
 	writeJSON(w, status, v)
 	return status
-}
-
-func wantsStream(body []byte) bool {
-	var v struct {
-		Stream bool `json:"stream"`
-	}
-	json.Unmarshal(body, &v)
-	return v.Stream
 }
