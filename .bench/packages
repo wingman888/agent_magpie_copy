@@ -1,1 +1,1 @@
-./internal/backup ./internal/usage ./internal/profile ./internal/tui ./internal/codexcat ./internal/settings ./internal/catalog ./internal/edit ./internal/update ./internal/netproxy
+./. ./internal/agent ./internal/catalog ./internal/gateway ./internal/provider ./internal/usage
