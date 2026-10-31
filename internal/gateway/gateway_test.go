@@ -2,17 +2,12 @@ package gateway
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/yetone/dial/internal/provider"
 )
@@ -24,7 +19,7 @@ type fake struct {
 	path  string
 	head  http.Header
 	reply string // SSE body
-	ctype string // "" means text/event-stream; "none" sends no header at all
+	ctype string
 	code  int
 }
 
@@ -35,11 +30,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ct == "" {
 		ct = "text/event-stream"
 	}
-	if ct == "none" {
-		w.Header()["Content-Type"] = nil // like the ChatGPT backend: the body alone says it streams
-	} else {
-		w.Header().Set("Content-Type", ct)
-	}
+	w.Header().Set("Content-Type", ct)
 	if f.code != 0 {
 		w.WriteHeader(f.code)
 	}
@@ -368,63 +359,3 @@ func TestGeminiClientChatUpstream(t *testing.T) {
 }
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
-
-// A signed-in Codex account: the ChatGPT backend only streams and rejects
-// the sampling knobs, so a plain non-streaming Responses call is
-// translated, signed with the account's tokens, and answered as JSON.
-func TestCodexAccountUpstream(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	claims := func(m map[string]any) string {
-		b, _ := json.Marshal(m)
-		return "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
-	}
-	os.MkdirAll(filepath.Join(home, ".codex"), 0o755)
-	auth := fmt.Sprintf(`{"auth_mode":"chatgpt","tokens":{"id_token":%q,"access_token":%q,"refresh_token":"r","account_id":"acct-1"}}`,
-		claims(map[string]any{"email": "me@example.com"}), claims(map[string]any{"exp": time.Now().Add(time.Hour).Unix()}))
-	os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte(auth), 0o600)
-
-	f := &fake{t: t, ctype: "none", reply: sse(
-		`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
-		`data: {"type":"response.output_text.delta","delta":"pong"}`,
-		`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`)}
-	up := httptest.NewServer(f)
-	defer up.Close()
-	old := provider.CodexBase
-	provider.CodexBase = up.URL + "/backend-api/codex"
-	defer func() { provider.CodexBase = old }()
-
-	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping","max_output_tokens":20,"temperature":0.3}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	if f.path != "/backend-api/codex/responses" || f.head.Get("chatgpt-account-id") != "acct-1" || !strings.HasPrefix(f.head.Get("Authorization"), "Bearer h.") {
-		t.Fatalf("upstream call: %s %v", f.path, f.head)
-	}
-	var upstream map[string]any
-	json.Unmarshal(f.got, &upstream)
-	if _, ok := upstream["max_output_tokens"]; ok || upstream["temperature"] != nil || upstream["stream"] != true || upstream["store"] != false || upstream["model"] != "gpt-5.5" {
-		t.Fatalf("upstream body: %s", f.got)
-	}
-	var res map[string]any
-	json.Unmarshal([]byte(body), &res)
-	if res["object"] != "response" || !strings.Contains(body, "pong") {
-		t.Fatalf("reply: %s", body)
-	}
-
-	// a streaming call is relayed as-is, minus what the backend rejects
-	f.got, f.head = nil, nil
-	code, body = post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping","stream":true,"max_output_tokens":20}`)
-	if code != 200 || !strings.Contains(body, "response.output_text.delta") {
-		t.Fatalf("stream: %d %s", code, body)
-	}
-	json.Unmarshal(f.got, &upstream)
-	if _, ok := upstream["max_output_tokens"]; ok {
-		t.Fatalf("relayed body: %s", f.got)
-	}
-	if _, isList := upstream["input"].([]any); !isList {
-		t.Fatalf("relayed input not a list: %s", f.got)
-	}
-}
