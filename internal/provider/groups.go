@@ -249,7 +249,7 @@ func DeleteGroup(id string) error {
 		auto = auto || g.ID == id
 	}
 	i := slices.IndexFunc(f.Groups, func(g Group) bool { return g.ID == id })
-	if i < 0 && !auto {
+	if i < 0 && (!auto || hidden) {
 		return fmt.Errorf("no group %q", id)
 	}
 	if i >= 0 {
