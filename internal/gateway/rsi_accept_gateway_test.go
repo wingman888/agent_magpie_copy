@@ -456,7 +456,7 @@ func TestAcceptKeysMadeForOneProtocol(t *testing.T) {
 				got := append([]string{}, *seen...)
 				mu.Unlock()
 				if code != 200 || len(got) != 1 || got[0] != x.want {
-					t.Fatalf("%s: %d %s, upstream saw %v", x.path, code, strings.NewReplacer(`"`, "'").Replace(body), got)
+					t.Fatalf("%s %.60s want %s: %d %s, upstream saw %v", x.path, strings.ReplaceAll(x.body, `"`, "'"), x.want, code, strings.NewReplacer(`"`, "'").Replace(body), got)
 				}
 			}
 		})
