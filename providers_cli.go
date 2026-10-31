@@ -35,7 +35,6 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		printExcluded()
 		return nil
 	}
 	uses := usesByProvider()
@@ -44,16 +43,10 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" && p.Account == nil {
+		if p.Preset == "" {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
-		case p.Account != nil:
-			who := "signed in as " + p.Account.User
-			if p.Account.Plan != "" {
-				who += " · " + p.Account.Plan
-			}
-			r.key = green.Render("●") + " " + muted.Render(who)
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -78,19 +71,7 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	printExcluded()
 	return nil
-}
-
-// printExcluded notes the logins dial recognises but does not offer.
-func printExcluded() {
-	for _, x := range provider.Excluded() {
-		name := x.Agent
-		if name == "claude" {
-			name = "Claude Code"
-		}
-		fmt.Printf("  %s %s\n", amber.Render("!"), name+" is signed in but not offered: "+x.Why)
-	}
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -318,26 +299,14 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" && p.Account == nil {
+	if p.Preset == "" {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
-	if a := p.Account; a != nil {
-		via := map[string]string{"codex": "Codex", "copilot": "Copilot"}[a.Agent]
-		if via == "" {
-			via = a.Agent
-		}
-		desc := a.User
-		if a.Plan != "" {
-			desc += " · " + a.Plan
-		}
-		kv("account", desc+" · via "+via)
-	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
 	switch {
-	case p.Account != nil:
 	case p.Key != "":
 		kv("key", muted.Render(provider.Mask(p.Key)))
 	case p.Ready():

@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -132,7 +131,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	return nil
 }
 
-// Handler routes the client APIs.
+// Handler routes the three APIs.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.info)
@@ -147,16 +146,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
-	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
+	mux.HandleFunc("GET /v1beta/models/{rest...}", s.geminiModel)
+	mux.HandleFunc("POST /v1beta/models/{rest...}", s.geminiCall)
+	mux.HandleFunc("POST /v1/models/{rest...}", s.geminiCall)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models/*")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models/{model}:generateContent (Gemini)")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1beta/models/{model}:generateContent"}})
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages",
+			"/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:streamGenerateContent"}})
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -213,7 +215,16 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Anthropic, 400, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
+	n := len(req.System)
+	for _, m := range req.Messages {
+		for _, p := range m.Parts {
+			n += len(p.Text) + len(p.Args) + len(p.Name)
+		}
+	}
+	for _, t := range req.Tools {
+		n += len(t.Name) + len(t.Description) + len(t.Schema)
+	}
+	writeJSON(w, 200, map[string]any{"input_tokens": n / 4})
 }
 
 // handle is the request path of one client API.
@@ -228,115 +239,47 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 	}
 }
 
-// gemini serves /v1beta/models/{model}:{method}. The Gemini API keeps the
-// model and the streaming choice in the URL; they move into the body so
-// serve sees one shape.
-func (s *Server) gemini(w http.ResponseWriter, r *http.Request) {
-	call := r.PathValue("call")
-	i := strings.LastIndex(call, ":") // model ids may hold a colon (ollama tags), methods never do
-	if i < 0 {
-		writeError(w, provider.Gemini, 404, "expected /v1beta/models/{model}:generateContent")
-		return
-	}
-	model, method := call[:i], call[i+1:]
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
-	if err != nil {
-		writeError(w, provider.Gemini, 400, err.Error())
-		return
-	}
-	var stream bool
-	switch method {
-	case "generateContent":
-	case "streamGenerateContent":
-		stream = true
-	case "countTokens":
-		s.geminiCount(w, model, body)
-		return
-	default:
-		writeError(w, provider.Gemini, 404, "unknown method "+method)
-		return
-	}
-	s.serve(w, r, provider.Gemini, withFields(body, map[string]any{"model": model, "stream": stream}))
-}
-
-// geminiCount answers countTokens with a rough estimate.
-func (s *Server) geminiCount(w http.ResponseWriter, model string, body []byte) {
-	var wrap struct {
-		Inner json.RawMessage `json:"generateContentRequest"`
-	}
-	if json.Unmarshal(body, &wrap) == nil && len(wrap.Inner) > 0 {
-		body = wrap.Inner
-	}
-	req, err := parseGemini(body)
-	if err != nil {
-		writeError(w, provider.Gemini, 400, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]any{"totalTokens": estimate(req)})
-}
-
-func (s *Server) geminiModels(w http.ResponseWriter, r *http.Request) {
-	models := []map[string]any{}
-	for _, e := range provider.Catalog() {
-		models = append(models, geminiModel(e.ID, e.Name))
-	}
-	writeJSON(w, 200, map[string]any{"models": models})
-}
-
-// estimate is a token count from sizes, for clients that ask before sending.
-func estimate(req *Request) int {
-	n := len(req.System)
-	for _, m := range req.Messages {
-		for _, p := range m.Parts {
-			n += len(p.Text) + len(p.Args) + len(p.Name)
-		}
-	}
-	for _, t := range req.Tools {
-		n += len(t.Name) + len(t.Description) + len(t.Schema)
-	}
-	return n / 4
-}
-
-// serve routes one parsed-enough request to its provider.
+// serve answers one request already read, in the client's API.
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
-	start := time.Now()
-	call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
-	p, model, ok := provider.Resolve(call.Model)
-	if !ok {
-		call.Status, call.Error = 404, "unknown model"
-		s.record(call)
-		msg := fmt.Sprintf("dial knows no model %q", call.Model)
-		if ids := provider.IDs(); len(ids) > 0 {
-			msg += "; it has " + strings.Join(ids, ", ")
-		} else {
-			msg += "; add a provider in dial first"
-		}
-		writeError(w, from, 404, msg)
-		return
-	}
-	call.Provider = p.ID
-	if p.Base(from) != "" {
-		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
-	} else {
-		to := p.Speaks()
-		if len(to) == 0 {
-			writeError(w, from, 502, p.Name+" has no endpoint configured")
+	{
+		start := time.Now()
+		call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
+		p, model, ok := provider.Resolve(call.Model)
+		if !ok {
+			call.Status, call.Error = 404, "unknown model"
+			s.record(call)
+			msg := fmt.Sprintf("dial knows no model %q", call.Model)
+			if ids := provider.IDs(); len(ids) > 0 {
+				msg += "; it has " + strings.Join(ids, ", ")
+			} else {
+				msg += "; add a provider in dial first"
+			}
+			writeError(w, from, 404, msg)
 			return
 		}
-		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+		call.Provider = p.ID
+		if p.Base(from) != "" {
+			call.To = from
+			call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+		} else {
+			to := p.Speaks()
+			if len(to) == 0 {
+				writeError(w, from, 502, p.Name+" has no endpoint configured")
+				return
+			}
+			call.To = to[0]
+			call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+		}
+		call.Millis = time.Since(start).Milliseconds()
+		s.record(call)
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 	}
-	call.Millis = time.Since(start).Milliseconds()
-	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
-	body = p.Prepare(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -352,155 +295,10 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	if err := p.Sign(ctx, req, to, body); err != nil {
-		return nil, err
+	for k, v := range provider.AuthHeaders(p, to) {
+		req.Header.Set(k, v)
 	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	fixContentType(res)
-	return res, nil
-}
-
-// fixContentType gives a reply without a Content-Type (ChatGPT's backend
-// sends none) the type its first bytes suggest.
-func fixContentType(res *http.Response) {
-	if res.Header.Get("Content-Type") != "" {
-		return
-	}
-	br := bufio.NewReader(res.Body)
-	res.Body = struct {
-		io.Reader
-		io.Closer
-	}{br, res.Body}
-	if _, err := br.Peek(1); err != nil {
-		return
-	}
-	b, _ := br.Peek(br.Buffered())
-	b = bytes.TrimLeft(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), " \t\r\n")
-	for _, pre := range []string{"event:", "data:", "id:", "retry:", ":"} {
-		if bytes.HasPrefix(b, []byte(pre)) {
-			res.Header.Set("Content-Type", "text/event-stream")
-			return
-		}
-	}
-}
-
-// forwardFailed answers a request that could not be sent: signed-out
-// accounts are 401 with a way forward, anything else a bad gateway.
-func forwardFailed(w http.ResponseWriter, proto provider.Protocol, p provider.Provider, err error) (int, string) {
-	var so *provider.SignedOutError
-	if errors.As(err, &so) {
-		return writeError(w, proto, 401, so.Msg), so.Msg
-	}
-	return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
-}
-
-// upstreamFailed answers an error status from the provider.
-func upstreamFailed(w http.ResponseWriter, proto provider.Protocol, p provider.Provider, res *http.Response) (int, string) {
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if res.StatusCode == 401 && p.Account != nil {
-		msg := p.SignedOutMessage()
-		return writeError(w, proto, 401, msg), msg
-	}
-	msg := p.Name + ": " + provider.APIError(b, res.Status)
-	return writeError(w, proto, res.StatusCode, msg), msg
-}
-
-func streamWanted(body []byte) bool {
-	var v struct {
-		Stream bool `json:"stream"`
-	}
-	json.Unmarshal(body, &v)
-	return v.Stream
-}
-
-// collectResponses turns a Responses event stream into the one JSON
-// object a non-streaming client expects.
-func collectResponses(w http.ResponseWriter, p provider.Provider, body io.Reader, u *Usage) (int, string) {
-	var completed json.RawMessage
-	var items []json.RawMessage
-	var text strings.Builder
-	var failed string
-	readSSE(body, func(_, data string) error {
-		var e struct {
-			Type     string          `json:"type"`
-			Response json.RawMessage `json:"response"`
-			Item     json.RawMessage `json:"item"`
-			Delta    string          `json:"delta"`
-			Message  string          `json:"message"`
-		}
-		if json.Unmarshal([]byte(data), &e) != nil {
-			return nil
-		}
-		switch e.Type {
-		case "response.completed", "response.incomplete":
-			completed = e.Response
-		case "response.output_item.done":
-			items = append(items, e.Item)
-		case "response.output_text.delta":
-			text.WriteString(e.Delta)
-		case "response.failed":
-			var f struct {
-				Error struct {
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			json.Unmarshal(e.Response, &f)
-			failed = f.Error.Message
-			if failed == "" {
-				failed = "the response failed"
-			}
-		case "error":
-			failed = e.Message
-			if failed == "" {
-				failed = "upstream error"
-			}
-		}
-		return nil
-	})
-	m := map[string]any{}
-	if len(completed) > 0 {
-		json.Unmarshal(completed, &m)
-	}
-	if len(completed) == 0 {
-		if failed != "" {
-			msg := p.Name + ": " + failed
-			return writeError(w, provider.Responses, 502, msg), msg
-		}
-		if len(items) == 0 && text.Len() == 0 {
-			msg := p.Name + " sent no response"
-			return writeError(w, provider.Responses, 502, msg), msg
-		}
-		m["id"], m["status"] = "resp_dial", "completed"
-	}
-	m["object"] = "response"
-	if out, _ := m["output"].([]any); len(out) == 0 {
-		var rebuilt []any
-		for _, it := range items {
-			var v any
-			if json.Unmarshal(it, &v) == nil {
-				rebuilt = append(rebuilt, v)
-			}
-		}
-		if len(rebuilt) == 0 && text.Len() > 0 {
-			rebuilt = []any{map[string]any{"type": "message", "role": "assistant", "status": "completed",
-				"content": []any{map[string]any{"type": "output_text", "text": text.String(), "annotations": []any{}}}}}
-		}
-		if rebuilt == nil {
-			rebuilt = []any{}
-		}
-		m["output"] = rebuilt
-	}
-	if raw, err := json.Marshal(m["usage"]); err == nil {
-		var ru rUsage
-		if json.Unmarshal(raw, &ru) == nil {
-			u.add(ru.usage())
-		}
-	}
-	writeJSON(w, 200, m)
-	return 200, failed
+	return s.client.Do(req)
 }
 
 // passthrough relays a request the provider understands as-is, with the
@@ -509,15 +307,13 @@ func collectResponses(w http.ResponseWriter, p provider.Provider, body io.Reader
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), rewriteModel(body, model), r.Header)
 	if err != nil {
-		return forwardFailed(w, proto, p, err)
+		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		return upstreamFailed(w, proto, p, res)
-	}
-	sse := strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
-	if p.Account != nil && proto == provider.Responses && !streamWanted(body) && sse {
-		return collectResponses(w, p, res.Body, u)
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		return writeError(w, proto, res.StatusCode, msg), msg
 	}
 	h := w.Header()
 	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
@@ -525,8 +321,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			h.Set(k, v)
 		}
 	}
-	if sse {
-		h.Set("Content-Type", "text/event-stream")
+	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Accel-Buffering", "no")
 	}
@@ -565,11 +360,13 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
 	if err != nil {
-		return forwardFailed(w, from, p, err)
+		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		return upstreamFailed(w, from, p, res)
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(to)
 	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
@@ -699,20 +496,13 @@ func modelOf(body []byte) string {
 
 // rewriteModel swaps the model field, keeping every other field as it was.
 func rewriteModel(body []byte, model string) []byte {
-	return withFields(body, map[string]any{"model": model})
-}
-
-// withFields sets top-level fields, keeping every other field as it was.
-func withFields(body []byte, fields map[string]any) []byte {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var m map[string]any
 	if err := dec.Decode(&m); err != nil {
 		return body
 	}
-	for k, v := range fields {
-		m[k] = v
-	}
+	m["model"] = model
 	out, err := json.Marshal(m)
 	if err != nil {
 		return body
@@ -744,17 +534,11 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 		typ = "overloaded_error"
 	}
 	var v any
-	switch proto {
-	case provider.Anthropic:
+	if proto == provider.Gemini {
+		v = map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}}
+	} else if proto == provider.Anthropic {
 		v = map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
-	case provider.Gemini:
-		st := map[int]string{400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
-			429: "RESOURCE_EXHAUSTED", 500: "INTERNAL", 502: "UNAVAILABLE", 503: "UNAVAILABLE", 529: "UNAVAILABLE"}[status]
-		if st == "" {
-			st = "UNKNOWN"
-		}
-		v = map[string]any{"error": map[string]any{"code": status, "message": msg, "status": st}}
-	default:
+	} else {
 		v = map[string]any{"error": map[string]any{"message": msg, "type": typ, "code": nil, "param": nil}}
 	}
 	writeJSON(w, status, v)

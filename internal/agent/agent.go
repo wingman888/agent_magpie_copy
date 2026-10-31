@@ -78,7 +78,8 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key.
+// Field looks a field up by key, or else by the label shown for it
+// (case-insensitively).
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
@@ -86,7 +87,7 @@ func (a *Agent) Field(key string) *Field {
 		}
 	}
 	for i := range a.Fields {
-		if a.Fields[i].Label == key { // `dial gemini auth …`: the label as shown
+		if strings.EqualFold(a.Fields[i].Label, strings.TrimSpace(key)) {
 			return &a.Fields[i]
 		}
 	}
