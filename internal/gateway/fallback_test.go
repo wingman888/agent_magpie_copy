@@ -70,7 +70,7 @@ func TestFallbackSwitches(t *testing.T) {
 		a, b := &upstream{code: c.code, body: c.body}, &upstream{body: okChat}
 		s := twoProviders(t, a, b, "nowhere/x", " b/m2 ", "b/m2", "a/m1")
 		code, body := send(s, req)
-		if code != 200 || !strings.Contains(body, "from B") || strings.Contains(body, c.body[10:14]) {
+		if code != 200 || !strings.Contains(body, "from B") || strings.Contains(body, `"error"`) {
 			t.Fatalf("%d: %d %s", c.code, code, body)
 		}
 		if !strings.Contains(b.model.Load().(string), `"model":"m2"`) || a.calls.Load() != 1 || b.calls.Load() != 1 {

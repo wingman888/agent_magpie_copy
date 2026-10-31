@@ -125,30 +125,38 @@ func (a *attemptWriter) release() {
 // pending is true while an error response is held and unsent.
 func (a *attemptWriter) pending() bool { return a.held && !a.committed }
 
-func (s *Server) resting(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	t, ok := s.rest[id]
-	if ok && !time.Now().Before(t) {
-		delete(s.rest, id)
-		return false
-	}
-	return ok
+// restEntry remembers why and until when a provider rests.
+type restEntry struct {
+	until  time.Time
+	reason string
 }
 
-func (s *Server) markRest(id string) {
+// restReason returns the failure that put a provider to rest, if it still rests.
+func (s *Server) restReason(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.rest[id]
+	if ok && !time.Now().Before(e.until) {
+		delete(s.rest, id)
+		return "", false
+	}
+	return e.reason, ok
+}
+
+func (s *Server) markRest(id, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.rest == nil {
-		s.rest = map[string]time.Time{}
+		s.rest = map[string]restEntry{}
 	}
-	s.rest[id] = time.Now().Add(restPeriod)
+	s.rest[id] = restEntry{time.Now().Add(restPeriod), reason}
 }
 
 // candidates is the primary followed by its configured fallbacks, with
-// providers in their rest period moved behind the others.
-func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := []candidate{{p, model}}
+// providers in their rest period moved behind the others. resting maps the
+// ids that were moved to the failure they rest from.
+func (s *Server) candidates(p provider.Provider, model string) (out []candidate, resting map[string]string) {
+	out = []candidate{{p, model}}
 	seen := map[string]bool{p.ID + "\x00" + model: true}
 	for _, name := range p.Fallback {
 		fp, fm, ok := provider.Resolve(name)
@@ -163,17 +171,19 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 		out = append(out, candidate{fp, fm})
 	}
 	if len(out) == 1 {
-		return out
+		return out, nil
 	}
 	var fresh, tired []candidate
+	resting = map[string]string{}
 	for _, c := range out {
-		if s.resting(c.p.ID) {
+		if r, ok := s.restReason(c.p.ID); ok {
 			tired = append(tired, c)
+			resting[c.p.ID] = r
 		} else {
 			fresh = append(fresh, c)
 		}
 	}
-	return append(fresh, tired...)
+	return append(fresh, tired...), resting
 }
 
 // failureNote is one "<id>: <reason>" entry of Call.Fallback.

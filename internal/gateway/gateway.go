@@ -85,7 +85,7 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	rest         map[string]time.Time // provider id → end of its rest period
+	rest         map[string]restEntry // provider id → end of its rest period
 }
 
 // New makes a gateway.
@@ -99,7 +99,7 @@ func New() *Server {
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
-		rest:         make(map[string]time.Time),
+		rest:         make(map[string]restEntry),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -354,10 +354,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	var failures []string
 	var finalModel string
 	noEndpoint := false
-	cands := s.candidates(p, model)
+	cands, resting := s.candidates(p, model)
+	primary := p.ID
+	tried := map[string]bool{}
 	for i, c := range cands {
 		p, model := c.p, c.model
 		call.Provider, finalModel, noEndpoint = p.ID, model, false
+		tried[p.ID] = true
 		if i > 0 {
 			call.Model = p.ID + "/" + model
 		}
@@ -385,7 +388,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		call.Error = msg
 		if aw.pending() && retryable(aw.status, aw.buf.Bytes()) {
-			s.markRest(p.ID)
+			s.markRest(p.ID, failureNote(p.ID, call.Status, msg)[len(p.ID)+2:])
 			if i < len(cands)-1 && r.Context().Err() == nil {
 				failures = append(failures, failureNote(p.ID, call.Status, msg))
 				continue
@@ -393,6 +396,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		aw.release()
 		break
+	}
+	if call.Provider != primary || len(failures) > 0 {
+		// providers skipped because they were resting count as failed too
+		var skipped []string
+		for _, c := range cands {
+			if r, ok := resting[c.p.ID]; ok && !tried[c.p.ID] {
+				skipped = append(skipped, c.p.ID+": "+r)
+			}
+		}
+		failures = append(skipped, failures...)
 	}
 	call.Fallback = strings.Join(failures, "; ")
 	call.Millis = time.Since(start).Milliseconds()
