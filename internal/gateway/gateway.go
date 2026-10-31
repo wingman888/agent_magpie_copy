@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -72,7 +71,6 @@ type Call struct {
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
-	Fallback          string            `json:"fallback,omitempty"` // providers that failed before this one answered
 }
 
 // Server is the gateway.
@@ -85,21 +83,19 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	rest         map[string]restEntry // provider id → end of its rest period
 }
 
 // New makes a gateway.
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 netproxy.Func,
+			Proxy:                 http.ProxyFromEnvironment,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
-		rest:         make(map[string]restEntry),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -351,70 +347,44 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	var failures []string
-	var finalModel string
-	noEndpoint := false
-	cands, resting := s.candidates(p, model)
-	primary := p.ID
-	tried := map[string]bool{}
-	for i, c := range cands {
-		p, model := c.p, c.model
-		call.Provider, finalModel, noEndpoint = p.ID, model, false
-		tried[p.ID] = true
-		if i > 0 {
-			call.Model = p.ID + "/" + model
-		}
-		call.To, call.Usage = "", Usage{}
-		aw := newAttemptWriter(capture)
-		msg := ""
-		if p.Account != nil && p.Account.Agent == "claude" {
-			// A Claude Code subscription must run through the genuine binary. Direct
-			// OAuth HTTP requests are content-classified as third-party traffic when
-			// they carry another agent's harness (Pi, OpenCode, and others).
-			call.To = provider.Anthropic
-			call.Status, msg = s.serveClaudeSubscription(aw, r, from, model, body, &call.Usage)
-		} else if relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body)); relay {
-			// a backend that only streams gets a non-streaming request translated
-			// (the provider is always streamed on that path) rather than relayed
-			call.To = from
-			call.Status, msg = s.passthrough(aw, r, p, from, model, body, &call.Usage)
-		} else if to := p.Speaks(); len(to) == 0 {
-			noEndpoint = true
-			call.Status, msg = 502, p.Name+" has no endpoint configured"
-			writeError(aw, from, call.Status, msg)
-		} else {
-			call.To = to[0]
-			call.Status, msg = s.translate(aw, r, p, from, to[0], model, body, &call.Usage)
-		}
-		call.Error = msg
-		if aw.pending() && retryable(aw.status, aw.buf.Bytes()) {
-			s.markRest(p.ID, failureNote(p.ID, call.Status, msg)[len(p.ID)+2:])
-			if i < len(cands)-1 && r.Context().Err() == nil {
-				failures = append(failures, failureNote(p.ID, call.Status, msg))
-				continue
-			}
-		}
-		aw.release()
-		break
+	call.Provider = p.ID
+	// A Claude Code subscription must run through the genuine binary. Direct
+	// OAuth HTTP requests are content-classified as third-party traffic when
+	// they carry another agent's harness (Pi, OpenCode, and others).
+	if p.Account != nil && p.Account.Agent == "claude" {
+		call.To = provider.Anthropic
+		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
 	}
-	if call.Provider != primary || len(failures) > 0 {
-		// providers skipped because they were resting count as failed too
-		var skipped []string
-		for _, c := range cands {
-			if r, ok := resting[c.p.ID]; ok && !tried[c.p.ID] {
-				skipped = append(skipped, c.p.ID+": "+r)
-			}
+	// a backend that only streams gets a non-streaming request translated
+	// (the provider is always streamed on that path) rather than relayed
+	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
+	if relay {
+		call.To = from
+		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+	} else {
+		to := p.Speaks()
+		if len(to) == 0 {
+			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
+			writeError(w, from, call.Status, call.Error)
+			call.Millis = time.Since(start).Milliseconds()
+			finishCapture()
+			s.record(call)
+			return
 		}
-		failures = append(skipped, failures...)
+		call.To = to[0]
+		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 	}
-	call.Fallback = strings.Join(failures, "; ")
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	if noEndpoint {
-		return // as before: nothing to account for
-	}
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: finalModel,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
