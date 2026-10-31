@@ -45,11 +45,6 @@ type savedLogin struct {
 	// Profile is Claude Code's oauthAccount from .claude.json, which says
 	// whose credentials those are.
 	Profile json.RawMessage `json:"profile,omitempty"`
-	// Home is where a Grok account magpie signed in keeps its sign-in; the
-	// Grok CLI's own account has none (see grok_accounts.go). First puts a
-	// Grok or Copilot account ahead of the agent's own (side_logins.go).
-	Home  string `json:"home,omitempty"`
-	First bool   `json:"first,omitempty"`
 }
 
 var (
@@ -232,15 +227,6 @@ func rememberLogins(force bool) {
 // Logins lists the remembered accounts of an agent ("" for every one),
 // the active one flagged.
 func Logins(agent string) []Login {
-	var side []Login
-	switch agent {
-	case "grok":
-		return grokLoginList()
-	case "copilot":
-		return copilotLoginList()
-	case "":
-		side = append(grokLoginList(), copilotLoginList()...)
-	}
 	rememberLogins(false)
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
@@ -252,26 +238,20 @@ func Logins(agent string) []Login {
 	}
 	var out []Login
 	for _, l := range readLogins() {
-		if (agent != "" && l.Agent != agent) || l.Agent == "grok" || l.Agent == "copilot" {
+		if agent != "" && l.Agent != agent {
 			continue
 		}
 		using := strings.EqualFold(active[l.Agent], l.User)
 		out = append(out, Login{Agent: l.Agent, User: l.User, Plan: l.Plan, Seen: l.Seen,
 			Active: using, On: using || l.On})
 	}
-	return append(out, side...)
+	return out
 }
 
 // SwitchLogin signs an agent in to a remembered account. Sessions of the
 // agent that are already running keep the account they started with until
 // they restart.
 func SwitchLogin(agent, user string) error {
-	switch agent {
-	case "grok":
-		return switchGrokLogin(user)
-	case "copilot":
-		return switchCopilotLogin(user)
-	}
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
 	ls := readLogins()
@@ -367,12 +347,6 @@ func putClaudeLogin(l savedLogin) error {
 // ForgetLogin drops a remembered account. The one an agent is signed in to
 // now can't be forgotten; it would only be remembered again.
 func ForgetLogin(agent, user string) error {
-	switch agent {
-	case "grok":
-		return forgetGrokLogin(user)
-	case "copilot":
-		return forgetCopilotLogin(user)
-	}
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
 	if live, ok := liveLogin(agent); ok && strings.EqualFold(live.User, user) {
@@ -398,7 +372,6 @@ func ForgetLogin(agent, user string) error {
 func forgetAccountCaches() {
 	forgetClaudeCredential()
 	forgetClaudeStatus()
-	forgetCursorStatus()
 	subscriptionUsageCache.Lock()
 	subscriptionUsageCache.at = time.Time{}
 	subscriptionUsageCache.data = nil
