@@ -497,7 +497,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		var status int
 		var msg string
 		var wrong bool
-		if proto == from {
+		if proto == from && relayable {
 			status, msg, wrong = s.passthrough(w, r, p, from, model, body, &call.Usage, more)
 		} else {
 			status, msg, wrong = s.translate(w, r, p, from, proto, model, body, &call.Usage, more)

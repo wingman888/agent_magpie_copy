@@ -172,7 +172,7 @@ func TestServerErrorNeverSwitchesEndpoint(t *testing.T) {
 
 func TestNoEndpointLeftReturnsUpstreamError(t *testing.T) {
 	msg := `{"error":{"message":"use v1/responses"}}`
-	f := &multiFake{reject: map[string]string{"/v1/chat/completions": msg, "/v1/responses": msg}}
+	f := &multiFake{reject: map[string]string{"/v1/chat/completions": msg, "/v1/responses": msg, "/v1/messages": msg}}
 	_, h := multiSetup(t, f, "fake")
 	code, out := send(h, "/v1/chat/completions", strings.Replace(epChatReq, "%s", "fake/m", 1))
 	if code != 400 || !strings.Contains(out, "use v1/responses") {
