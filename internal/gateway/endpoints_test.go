@@ -165,7 +165,7 @@ func TestNonRejectionsDoNotSwitch(t *testing.T) {
 	for _, tc := range []struct {
 		code string
 		msg  string
-	}{{"500", "use v1/responses"}, {"429", "not a chat model"}} {
+	}{{"500", "use v1/responses"}, {"503", "not a chat model"}} {
 		f := &epFake{reject: map[string][2]string{"/v1/chat/completions": {tc.code, tc.msg}}}
 		h := epSetup(t, "fake", f, false)
 		code, _ := epPost(h, "/v1/chat/completions", with(chatBody, "m1"))
