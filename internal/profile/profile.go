@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/yetone/magpie/internal/agent"
-	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/dial/internal/agent"
+	"github.com/yetone/dial/internal/edit"
 )
 
 // Profile maps "agent.field" to a value.
@@ -20,10 +20,10 @@ type Profile map[string]string
 // Path is the profiles file.
 func Path() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "magpie", "profiles.json")
+		return filepath.Join(x, "dial", "profiles.json")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "magpie", "profiles.json")
+	return filepath.Join(home, ".config", "dial", "profiles.json")
 }
 
 // Load reads every profile.
@@ -111,20 +111,11 @@ func Apply(p Profile) (int, error) {
 	for k := range p {
 		keys = append(keys, k)
 	}
-	// providers first: switching one re-settles the model behind it; then
-	// models, which settle what the other fields (Claude Code's tiers) hang on
-	rank := func(k string) int {
-		switch {
-		case strings.HasSuffix(k, ".provider"):
-			return 0
-		case strings.HasSuffix(k, ".model"):
-			return 1
-		}
-		return 2
-	}
+	// providers first: switching one re-settles the model behind it
 	sort.Slice(keys, func(i, j int) bool {
-		if ri, rj := rank(keys[i]), rank(keys[j]); ri != rj {
-			return ri < rj
+		pi, pj := strings.HasSuffix(keys[i], ".provider"), strings.HasSuffix(keys[j], ".provider")
+		if pi != pj {
+			return pi
 		}
 		return keys[i] < keys[j]
 	})
