@@ -1,6 +1,6 @@
 // Package gateway is the local LLM endpoint agents talk to. It serves the
-// wire APIs coding agents speak — OpenAI Chat Completions, OpenAI
-// Responses, Anthropic Messages and Google Gemini — and forwards each call to whichever
+// three wire APIs coding agents speak — OpenAI Chat Completions, OpenAI
+// Responses and Anthropic Messages — and forwards each call to whichever
 // provider serves the requested model, translating between the APIs when
 // the provider does not speak the one the agent used.
 package gateway
@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// The APIs are close cousins; everything below is the shape they have
+// The three APIs are close cousins; everything below is the shape they have
 // in common. A request is parsed into it, and a reply is produced from it.
 
 // Kind is what a part of a message holds.
@@ -75,6 +75,26 @@ type Request struct {
 	Effort     string // low | medium | high | xhigh | max, when the client asked
 	Thinking   bool   // the client asked for visible reasoning
 	Parallel   *bool  // parallel tool calls allowed
+
+	JSON       bool            // the client wants a JSON document as the reply
+	JSONSchema json.RawMessage // ...of this shape, when it said so
+}
+
+// joinSystem appends a paragraph to a system prompt.
+func joinSystem(sys, more string) string {
+	if sys == "" {
+		return more
+	}
+	return sys + "\n\n" + more
+}
+
+// jsonPrompt asks in words for JSON, for upstreams with no such setting.
+func (r *Request) jsonPrompt() string {
+	s := "Respond with only a valid JSON document: no prose, no markdown code fences."
+	if len(r.JSONSchema) > 0 {
+		s += " The JSON must conform to this JSON Schema:\n" + string(r.JSONSchema)
+	}
+	return s
 }
 
 // EventKind is what a streamed event carries.
