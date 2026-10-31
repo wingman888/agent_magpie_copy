@@ -69,13 +69,10 @@ func TestDecorateCarriesTemperature(t *testing.T) {
 	}
 }
 
-func TestLiveKeepsAPIs(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	if err := SaveLive("p", "b", []Model{{ID: "a", APIs: []string{"chat", "responses"}}, {ID: "b"}}); err != nil {
-		t.Fatal(err)
-	}
-	ms, _, ok := Live("p")
-	if !ok || len(ms) != 2 || len(ms[0].APIs) != 2 || ms[0].APIs[1] != "responses" || ms[1].APIs != nil {
-		t.Fatalf("got %+v", ms)
+func TestDecorateStripsVendorPrefix(t *testing.T) {
+	known := []Model{{ID: "deepseek-chat", Name: "DeepSeek Chat", Efforts: []string{"high"}}, {ID: "gpt-5.5", Name: "GPT"}}
+	out := Decorate([]Model{{ID: "deepseek/deepseek-chat", Name: "deepseek/deepseek-chat"}, {ID: "x/unknown"}}, known)
+	if out[0].Name != "DeepSeek Chat" || len(out[0].Efforts) != 1 || out[1].Name != "" || out[1].ID != "x/unknown" {
+		t.Fatalf("%+v", out)
 	}
 }
