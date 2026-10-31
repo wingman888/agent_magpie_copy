@@ -129,9 +129,8 @@ func TestAccountsAppearAndVanish(t *testing.T) {
 func TestCustomWins(t *testing.T) {
 	home, _ := env(t)
 	writeCodex(t, home, codexFile("tok"))
-	if err := Save(Provider{ID: "codex", Name: "Mine", Key: "k", Chat: "http://x/v1"}); err != nil {
-		t.Fatal(err)
-	}
+	os.MkdirAll(filepath.Dir(Path()), 0o755)
+	os.WriteFile(Path(), []byte(`{"providers":[{"id":"codex","name":"Mine","key":"k","chat":"http://x/v1"}]}`), 0o600)
 	n := 0
 	for _, p := range All() {
 		if p.ID == "codex" {

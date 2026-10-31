@@ -260,27 +260,19 @@ func isStub(p Provider) bool {
 const claudeWhy = "Anthropic's terms only allow a Claude subscription to be used with Claude Code itself, so dial cannot lend it to other agents. Add an Anthropic API key as a provider instead (dial provider add anthropic <key>)."
 
 var (
-	exclMu    sync.Mutex
-	exclKey   string
-	exclAt    time.Time
-	exclValue []Exclusion
+	kcMu    sync.Mutex
+	kcAt    time.Time
+	kcValue bool
 )
 
 // Excluded lists the sign-ins dial found but does not offer, and why. The
-// answer is kept for about a minute.
+// credential file is a cheap stat, checked every time; the macOS keychain
+// probe runs a process, so its answer is kept for about a minute.
 func Excluded() []Exclusion {
-	key := claudeDir() + "|" + runtime.GOOS
-	exclMu.Lock()
-	defer exclMu.Unlock()
-	if exclKey == key && time.Since(exclAt) < time.Minute {
-		return append([]Exclusion(nil), exclValue...)
-	}
-	var out []Exclusion
 	if claudeSignedIn() {
-		out = append(out, Exclusion{Agent: "claude", Why: claudeWhy})
+		return []Exclusion{{Agent: "claude", Why: claudeWhy}}
 	}
-	exclKey, exclAt, exclValue = key, time.Now(), out
-	return append([]Exclusion(nil), out...)
+	return nil
 }
 
 // claudeSignedIn only asks whether a sign-in exists; it never reads one.
@@ -288,16 +280,22 @@ func claudeSignedIn() bool {
 	if st, err := os.Stat(filepath.Join(claudeDir(), ".credentials.json")); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
 		return true
 	}
-	if runtime.GOOS == "darwin" {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		// no -w / -g: this prints attributes only, never the secret, and
-		// never raises the keychain prompt
-		cmd := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials")
-		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-		return cmd.Run() == nil
+	if runtime.GOOS != "darwin" {
+		return false
 	}
-	return false
+	kcMu.Lock()
+	defer kcMu.Unlock()
+	if time.Since(kcAt) < time.Minute {
+		return kcValue
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// no -w / -g: this prints attributes only, never the secret, and
+	// never raises the keychain prompt
+	cmd := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	kcValue, kcAt = cmd.Run() == nil, time.Now()
+	return kcValue
 }
 
 // ---- signing ---------------------------------------------------------------
