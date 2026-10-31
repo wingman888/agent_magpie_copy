@@ -212,28 +212,21 @@ func accountFor(id string) (Provider, bool) {
 	return Provider{}, false
 }
 
-var excl struct {
+var keychain struct {
 	sync.Mutex
-	key  string
-	at   time.Time
-	list []Exclusion
+	key string
+	at  time.Time
+	ok  bool
 }
 
 // Excluded lists the logins dial recognises but does not offer, with the
-// reason. The answer is kept for about a minute.
+// reason. The credentials file is a cheap stat and always looked at afresh;
+// the macOS keychain probe is kept for about a minute.
 func Excluded() []Exclusion {
-	key := homeDir() + "\x00" + os.Getenv("CLAUDE_CONFIG_DIR")
-	excl.Lock()
-	defer excl.Unlock()
-	if excl.key == key && !excl.at.IsZero() && time.Since(excl.at) < time.Minute {
-		return append([]Exclusion(nil), excl.list...)
-	}
-	var list []Exclusion
 	if claudeSignedIn() {
-		list = append(list, Exclusion{Agent: "claude", Why: claudeWhy})
+		return []Exclusion{{Agent: "claude", Why: claudeWhy}}
 	}
-	excl.key, excl.at, excl.list = key, time.Now(), list
-	return append([]Exclusion(nil), list...)
+	return nil
 }
 
 // claudeSignedIn only asks whether a Claude Code login exists. The
@@ -248,9 +241,17 @@ func claudeSignedIn() bool {
 		return true
 	}
 	if runtime.GOOS == "darwin" {
+		key := homeDir() + "\x00" + os.Getenv("CLAUDE_CONFIG_DIR")
+		keychain.Lock()
+		defer keychain.Unlock()
+		if keychain.key == key && time.Since(keychain.at) < time.Minute {
+			return keychain.ok
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		return exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials").Run() == nil
+		ok := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials").Run() == nil
+		keychain.key, keychain.at, keychain.ok = key, time.Now(), ok
+		return ok
 	}
 	return false
 }

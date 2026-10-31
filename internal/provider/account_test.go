@@ -169,10 +169,8 @@ func TestSaveAndDeleteAccount(t *testing.T) {
 func TestUserProviderWinsOverAccount(t *testing.T) {
 	home := env(t)
 	writeCodex(t, home, codexAuth(time.Now().Add(time.Hour).Unix()))
-	if err := Save(Provider{ID: "codex", Name: "Mine", Key: "k", Chat: "https://my.example/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	// with no account to take the id, a url-less save still fails
+	os.MkdirAll(filepath.Dir(Path()), 0o755)
+	os.WriteFile(Path(), []byte(`{"providers":[{"id":"codex","name":"Mine","key":"k","chat":"https://my.example/v1"}]}`), 0o600)
 	all := All()
 	n := 0
 	for _, p := range all {
