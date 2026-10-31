@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -25,17 +26,18 @@ type modelJSON struct {
 }
 
 type providerJSON struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Icon      string `json:"icon"`
-	Preset    string `json:"preset"`
-	Host      string `json:"host"`
-	Chat      string `json:"chat"`
-	Responses string `json:"responses"`
-	Anthropic string `json:"anthropic"`
-	Catalog   string `json:"catalog"`
-	Website   string `json:"website"`
-	KeysURL   string `json:"keysUrl"`
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Icon      string            `json:"icon"`
+	Preset    string            `json:"preset"`
+	Host      string            `json:"host"`
+	Chat      string            `json:"chat"`
+	Responses string            `json:"responses"`
+	Anthropic string            `json:"anthropic"`
+	Catalog   string            `json:"catalog"`
+	Website   string            `json:"website"`
+	KeysURL   string            `json:"keysUrl"`
+	Headers   map[string]string `json:"headers,omitempty"`
 	Key       struct {
 		Set      bool   `json:"set"`
 		Masked   string `json:"masked"`
@@ -56,6 +58,8 @@ type accountJSON struct {
 	Agent string `json:"agent"`     // the agent's id
 	Name  string `json:"agentName"` // the agent's name, for "from Codex CLI's sign-in"
 	Icon  string `json:"agentIcon"`
+	// Logins are the agent's accounts magpie remembers, to switch between
+	Logins []provider.Login `json:"logins,omitempty"`
 }
 
 type providerAgent struct {
@@ -111,7 +115,8 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
-		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
+		Headers: p.Headers,
+		Ready:   p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
@@ -130,6 +135,7 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		if ag, err := agent.Find(a.Agent); err == nil {
 			out.Account.Name, out.Account.Icon = ag.Name, ag.Icon
 		}
+		out.Account.Logins = provider.Logins(a.Agent)
 	}
 	exposed := map[string]bool{}
 	for _, m := range p.Exposed() {
@@ -203,6 +209,32 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 	mux.HandleFunc("GET /api/providers", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, providersState(gw))
 	})
+	// a picture for a provider, picked in the editor: kept by content before
+	// the provider is saved, which then points at it
+	mux.HandleFunc("POST /api/icons", func(rw http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(io.LimitReader(r.Body, provider.MaxIcon+1))
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		icon, err := provider.StoreIcon(b)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, map[string]string{"icon": icon})
+	})
+	mux.HandleFunc("GET /api/icons/{name}", func(rw http.ResponseWriter, r *http.Request) {
+		f := provider.IconFile(r.PathValue("name"))
+		if f == "" {
+			http.NotFound(rw, r)
+			return
+		}
+		// an SVG is only ever drawn as an image, never run
+		rw.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+		rw.Header().Set("Cache-Control", "max-age=31536000, immutable")
+		http.ServeFile(rw, r, f)
+	})
 	mux.HandleFunc("POST /api/provider/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var in provider.Provider
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -226,6 +258,9 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			old, _ := provider.Find(in.ID)
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
+			}
+			if in.Icon == "" && old != nil && in.Preset == "" {
+				in.Icon = old.Icon
 			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
@@ -285,6 +320,30 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			return
 		default:
 			http.NotFound(rw, r)
+			return
+		}
+		writeJSON(rw, providersState(gw))
+	})
+	// Switching the account an agent is signed in to, among those magpie
+	// remembers, and forgetting one.
+	mux.HandleFunc("POST /api/login/{action}", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Agent, User string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		var err error
+		switch r.PathValue("action") {
+		case "switch":
+			err = provider.SwitchLogin(in.Agent, in.User)
+		case "forget":
+			err = provider.ForgetLogin(in.Agent, in.User)
+		default:
+			http.NotFound(rw, r)
+			return
+		}
+		if err != nil {
+			fail(rw, err)
 			return
 		}
 		writeJSON(rw, providersState(gw))

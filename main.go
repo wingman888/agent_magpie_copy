@@ -14,6 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudebridge"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
@@ -45,6 +46,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider key|models|test|rm <id>
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
+  magpie accounts [agent]         the Claude Code and Codex subscriptions magpie remembers
+  magpie accounts switch <agent> <email>   sign the agent in to another of them
 
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
@@ -64,6 +67,7 @@ var (
 
 func main() {
 	gateway.Version = version
+	netproxy.Install()
 	update.GUI = hasGUI
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
@@ -128,6 +132,8 @@ func run(args []string) error {
 		return models()
 	case "serve":
 		return serve()
+	case "accounts", "account":
+		return accountsCmd(args)
 	case "usage":
 		return usageCmd(args)
 	case "update":

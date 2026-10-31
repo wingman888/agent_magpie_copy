@@ -9,9 +9,11 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 )
 
 // Settings is what the user chose. "" and "system" both mean "follow the OS".
@@ -19,6 +21,10 @@ type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
 	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
+	// Proxy for magpie's own requests to vendors: "" follows the
+	// environment and then the system, "direct" uses none, anything else
+	// is the proxy (http://, https:// or socks5://; host:port means http).
+	Proxy string `json:"proxy,omitempty"`
 }
 
 // Themes and Langs are the accepted values, in the order the UI offers them.
@@ -60,6 +66,17 @@ func Save(s Settings) error {
 	}
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
+	}
+	s.Proxy = strings.TrimSpace(s.Proxy)
+	if s.Proxy != "" && s.Proxy != "direct" {
+		raw := s.Proxy
+		if !strings.Contains(raw, "://") {
+			raw = "http://" + raw
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
+			return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", s.Proxy)
+		}
 	}
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
