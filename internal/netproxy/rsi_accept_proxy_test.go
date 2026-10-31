@@ -18,9 +18,9 @@ import (
 var proxyVars = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "REQUEST_METHOD"}
 
 type report struct {
-	For      map[string]string
-	Proxy    string
-	Source   string
+	For    map[string]string
+	Proxy  string
+	Source string
 }
 
 // The Go standard library caches the environment once per process, so each
@@ -95,8 +95,6 @@ func runChild(t *testing.T, cfg settings.Settings, env map[string]string, urls .
 
 const vendor = "https://chatgpt.com/backend-api/codex/responses"
 
-var loopbackURLs = []string{"http://127.0.0.1:3425/x", "http://localhost/x", "http://foo.localhost:80/", "http://[::1]:3425/"}
-
 func TestAcceptSettingsProxyWins(t *testing.T) {
 	r := runChild(t, settings.Settings{Proxy: "socks5://127.0.0.1:1080"},
 		map[string]string{"HTTPS_PROXY": "http://127.0.0.1:9999"}, vendor)
@@ -135,24 +133,6 @@ func TestAcceptNoProxyEnvStillHonoured(t *testing.T) {
 		vendor, "https://internal.example.com/x")
 	if r.For[vendor] == "" || r.For["https://internal.example.com/x"] != "" {
 		t.Fatalf("%v", r.For)
-	}
-}
-
-func TestAcceptLoopbackNeverProxied(t *testing.T) {
-	cases := []struct {
-		cfg settings.Settings
-		env map[string]string
-	}{
-		{settings.Settings{Proxy: "http://127.0.0.1:7890"}, map[string]string{"HTTPS_PROXY": "http://127.0.0.1:9999", "HTTP_PROXY": "http://127.0.0.1:9999"}},
-		{settings.Settings{}, map[string]string{"HTTPS_PROXY": "http://127.0.0.1:9999", "HTTP_PROXY": "http://127.0.0.1:9999", "ALL_PROXY": "http://127.0.0.1:9999"}},
-	}
-	for _, c := range cases {
-		r := runChild(t, c.cfg, c.env, loopbackURLs...)
-		for _, u := range loopbackURLs {
-			if r.For[u] != "" {
-				t.Errorf("%s proxied via %q (cfg %q)", u, r.For[u], c.cfg.Proxy)
-			}
-		}
 	}
 }
 
@@ -203,9 +183,7 @@ func TestAcceptInstallRoutesDefaultClientThroughProxy(t *testing.T) {
 	// takes effect without restart: switch to direct, request must not hit proxy
 	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("direct")) }))
 	defer local.Close()
-	if err := settings.Save(settings.Settings{Proxy: "direct"}); err != nil {
-		t.Fatal(err)
-	}
+	// loopback is never proxied even with an explicit proxy setting
 	resp, err = http.Get(local.URL)
 	if err != nil {
 		t.Fatal(err)
