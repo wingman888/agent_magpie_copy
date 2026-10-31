@@ -18,10 +18,21 @@ import (
 const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
-func viaDial(prefix string) []Option {
+// Models of the providers named in skip are left out.
+func viaDial(prefix string, skip ...string) []Option {
 	var out []Option
+next:
 	for _, e := range provider.Catalog() {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
+		for _, s := range skip {
+			if e.Provider.ID == s {
+				continue next
+			}
+		}
+		who := e.Provider.Name
+		if e.Provider.Account != nil && e.Provider.Account.User != "" {
+			who = e.Provider.Account.User
+		}
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: who + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
