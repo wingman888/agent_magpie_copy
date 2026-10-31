@@ -47,7 +47,7 @@ var seq int
 func env(t *testing.T) (plan, spare, third, req string) {
 	seq++
 	n := strconv.Itoa(seq)
-	plan, spare, third = planID+n, spareID+n, thirdID+n
+	plan, spare, third = "plan"+n, "spare"+n, "third"+n
 	req = `{"model":"` + plan + `/m1","messages":[{"role":"user","content":"hi"}]}`
 	envDirs(t)
 	return
