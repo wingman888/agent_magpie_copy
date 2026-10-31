@@ -1,0 +1,438 @@
+// Package update keeps magpie current. Builds are published as GitHub
+// releases of yetone/magpie-releases; usemagpie.ai/api/latest describes the
+// newest one: its version, notes, and every file with its SHA-256.
+//
+// The macOS app replaces its own bundle: the new zip is downloaded, checked
+// against its hash, unpacked, and accepted only if it is signed by the same
+// team as the app already installed. A bare binary (the terminal build,
+// and the desktop app on Windows and Linux) replaces itself the same way,
+// minus the signature.
+package update
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Site is magpie's home; its /api/latest is the update feed.
+const Site = "https://usemagpie.ai"
+
+// Feed is where the newest release is described. MAGPIE_UPDATE_FEED points
+// it elsewhere, for testing an update against a local server.
+func Feed() string {
+	if f := os.Getenv("MAGPIE_UPDATE_FEED"); f != "" {
+		return f
+	}
+	return Site + "/api/latest"
+}
+
+// Release is one published version.
+type Release struct {
+	Version string           `json:"version"` // "0.2.0", no v
+	Notes   string           `json:"notes"`   // markdown
+	URL     string           `json:"url"`     // the release page
+	Assets  map[string]Asset `json:"assets"`  // by file name
+}
+
+// Asset is one downloadable file of a release.
+type Asset struct {
+	URL    string `json:"url"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+var client = &http.Client{Timeout: 10 * time.Minute}
+
+// Latest asks the feed for the newest release.
+func Latest(ctx context.Context) (*Release, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", Feed(), nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return nil, fmt.Errorf("update feed: %s", res.Status)
+	}
+	var r Release
+	if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
+		return nil, fmt.Errorf("update feed: %w", err)
+	}
+	if parse(r.Version) == nil {
+		return nil, fmt.Errorf("update feed: no version")
+	}
+	return &r, nil
+}
+
+// Released reports whether v is a release version rather than a build from
+// source ("dev", "0bcb2cc-dirty", git describe's "v0.1.0-3-g0bcb2cc");
+// only releases update themselves.
+func Released(v string) bool {
+	s := parse(v)
+	return s != nil && !describe.MatchString(s.pre) && !strings.Contains(s.pre, "dirty")
+}
+
+// describe matches what git describe adds after a tag: commits since, hash.
+var describe = regexp.MustCompile(`^\d+-g[0-9a-f]+`)
+
+// Newer reports whether version a comes after b. A pre-release comes before
+// the release it leads up to.
+func Newer(a, b string) bool {
+	x, y := parse(a), parse(b)
+	if x == nil || y == nil {
+		return false
+	}
+	for i := range 3 {
+		if x.n[i] != y.n[i] {
+			return x.n[i] > y.n[i]
+		}
+	}
+	switch {
+	case x.pre == y.pre:
+		return false
+	case x.pre == "":
+		return true
+	case y.pre == "":
+		return false
+	}
+	return x.pre > y.pre
+}
+
+type semver struct {
+	n   [3]int
+	pre string
+}
+
+func parse(v string) *semver {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	v, pre, _ := strings.Cut(v, "-")
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	var s semver
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return nil
+		}
+		s.n[i] = n
+	}
+	s.pre = pre
+	return &s
+}
+
+// GUI says this binary has the desktop app in it. Off the Mac that app is a
+// single binary too, and it updates from its own build, not the terminal
+// one.
+var GUI bool
+
+// AppAsset and BinaryAsset name the files this machine would install.
+func AppAsset() string { return "magpie-darwin-" + runtime.GOARCH + ".zip" }
+func BinaryAsset() string {
+	name := "magpie-cli-" + runtime.GOOS + "-" + runtime.GOARCH
+	if GUI && runtime.GOOS != "darwin" {
+		name = "magpie-" + runtime.GOOS + "-" + runtime.GOARCH
+	}
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return name
+}
+
+// Bundle is the .app the running binary lives in, or "" when it is not in
+// one.
+func Bundle() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	exe, err := Executable()
+	if err != nil {
+		return ""
+	}
+	// …/magpie.app/Contents/MacOS/magpie
+	app := filepath.Dir(filepath.Dir(filepath.Dir(exe)))
+	if filepath.Ext(app) != ".app" || filepath.Base(filepath.Dir(exe)) != "MacOS" {
+		return ""
+	}
+	return app
+}
+
+// Executable is the running binary, symlinks resolved.
+func Executable() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(exe)
+}
+
+// Writable reports whether magpie may replace what lives in dir.
+func Writable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".magpie-update-*")
+	if err != nil {
+		return false
+	}
+	f.Close()
+	os.Remove(f.Name())
+	return true
+}
+
+// Stage downloads the app in rel and unpacks it next to the installed
+// bundle, ready for Install. It returns the unpacked app.
+func Stage(ctx context.Context, rel *Release, bundle string) (string, error) {
+	a, ok := rel.Assets[AppAsset()]
+	if !ok {
+		return "", fmt.Errorf("release %s has no %s", rel.Version, AppAsset())
+	}
+	// Unpacked beside the bundle so Install is a rename on one volume.
+	dir := filepath.Join(filepath.Dir(bundle), ".magpie-update")
+	os.RemoveAll(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	zip := filepath.Join(dir, AppAsset())
+	if err := download(ctx, a, zip); err != nil {
+		os.RemoveAll(dir)
+		return "", err
+	}
+	out := filepath.Join(dir, "app")
+	if b, err := exec.CommandContext(ctx, "ditto", "-x", "-k", zip, out).CombinedOutput(); err != nil {
+		os.RemoveAll(dir)
+		return "", fmt.Errorf("unzip: %v: %s", err, b)
+	}
+	os.Remove(zip)
+	app := filepath.Join(out, "magpie.app")
+	if err := sameSigner(ctx, bundle, app); err != nil {
+		os.RemoveAll(dir)
+		return "", err
+	}
+	return app, nil
+}
+
+// sameSigner accepts app only if its signature is intact and made by the
+// team that signed the bundle it replaces.
+func sameSigner(ctx context.Context, bundle, app string) error {
+	if b, err := exec.CommandContext(ctx, "codesign", "--verify", "--deep", "--strict", app).CombinedOutput(); err != nil {
+		return fmt.Errorf("the downloaded app's signature is broken: %s", strings.TrimSpace(string(b)))
+	}
+	want, got := team(ctx, bundle), team(ctx, app)
+	if want != got {
+		return fmt.Errorf("the downloaded app is signed by %q, not %q", got, want)
+	}
+	return nil
+}
+
+func team(ctx context.Context, app string) string {
+	b, _ := exec.CommandContext(ctx, "codesign", "-dv", app).CombinedOutput()
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "TeamIdentifier="); ok && v != "not set" {
+			return v
+		}
+	}
+	return ""
+}
+
+// Install swaps the staged app in for bundle. The running copy keeps going
+// until it quits; the next launch is the new one.
+func Install(staged, bundle string) error {
+	old := filepath.Join(filepath.Dir(staged), "old.app")
+	os.RemoveAll(old)
+	if err := os.Rename(bundle, old); err != nil {
+		return err
+	}
+	if err := os.Rename(staged, bundle); err != nil {
+		os.Rename(old, bundle) // put it back
+		return err
+	}
+	os.RemoveAll(filepath.Dir(filepath.Dir(staged))) // .magpie-update
+	return nil
+}
+
+// Relaunch opens bundle again once this process (pid) has exited.
+func Relaunch(bundle string) error {
+	script := fmt.Sprintf(`while kill -0 %d 2>/dev/null; do sleep 0.2; done; open %q`, os.Getpid(), bundle)
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	return cmd.Start()
+}
+
+// ReplaceBinary puts the release's build for this binary where the
+// running one is.
+func ReplaceBinary(ctx context.Context, rel *Release) error {
+	staged, err := StageBinary(ctx, rel)
+	if err != nil {
+		return err
+	}
+	return InstallBinary(staged)
+}
+
+// StageBinary downloads the release's build for this binary next to it,
+// ready for InstallBinary.
+func StageBinary(ctx context.Context, rel *Release) (string, error) {
+	a, ok := rel.Assets[BinaryAsset()]
+	if !ok {
+		return "", fmt.Errorf("release %s has no %s", rel.Version, BinaryAsset())
+	}
+	exe, err := Executable()
+	if err != nil {
+		return "", err
+	}
+	tmp := exe + ".new"
+	if err := download(ctx, a, tmp); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	return tmp, nil
+}
+
+// InstallBinary swaps a staged binary in for the running one, which keeps
+// going until it exits.
+func InstallBinary(staged string) error {
+	exe := strings.TrimSuffix(staged, ".new")
+	if runtime.GOOS == "windows" {
+		// A running .exe cannot be overwritten, but it can be moved aside.
+		os.Remove(exe + ".old")
+		if err := os.Rename(exe, exe+".old"); err != nil {
+			os.Remove(staged)
+			return err
+		}
+	}
+	if err := os.Rename(staged, exe); err != nil {
+		os.Remove(staged)
+		return err
+	}
+	return nil
+}
+
+// RelaunchBinary starts exe again as the tray app. The new process waits
+// for this one to exit before it takes the gateway's port; see
+// AwaitPredecessor.
+func RelaunchBinary(exe string) error {
+	cmd := exec.Command(exe, "tray")
+	cmd.Env = append(os.Environ(), "MAGPIE_REPLACES="+strconv.Itoa(os.Getpid()))
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	detach(cmd)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
+// AwaitPredecessor blocks, for a while at most, until the magpie that
+// relaunched this one has exited.
+func AwaitPredecessor() {
+	pid, err := strconv.Atoi(os.Getenv("MAGPIE_REPLACES"))
+	os.Unsetenv("MAGPIE_REPLACES")
+	if err != nil || pid <= 0 {
+		return
+	}
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline) && alive(pid); {
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+type progressKey struct{}
+
+// WithProgress has downloads made under ctx report how far along they are;
+// total is 0 while the size is unknown.
+func WithProgress(ctx context.Context, f func(done, total int64)) context.Context {
+	return context.WithValue(ctx, progressKey{}, f)
+}
+
+// download fetches a to path and checks its hash. A connection that drops
+// part way — GitHub from some networks — gets two more tries.
+func download(ctx context.Context, a Asset, path string) error {
+	if a.SHA256 == "" {
+		return errors.New("the release lists no checksum for " + filepath.Base(path))
+	}
+	var err error
+	for try := 0; try < 3; try++ {
+		if try > 0 {
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(time.Duration(try) * 2 * time.Second):
+			}
+		}
+		if err = fetch(ctx, a, path); err == nil || ctx.Err() != nil {
+			break
+		}
+	}
+	return err
+}
+
+func fetch(ctx context.Context, a Asset, path string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", a.URL, nil)
+	if err != nil {
+		return err
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return fmt.Errorf("download %s: %s", filepath.Base(path), res.Status)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	var body io.Reader = res.Body
+	if report, ok := ctx.Value(progressKey{}).(func(done, total int64)); ok {
+		total := res.ContentLength
+		if total <= 0 {
+			total = a.Size
+		}
+		body = &counter{r: res.Body, total: max(total, 0), report: report}
+		report(0, max(total, 0))
+	}
+	_, err = io.Copy(io.MultiWriter(f, h), body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), a.SHA256) {
+		err = fmt.Errorf("%s does not match its checksum", filepath.Base(path))
+	}
+	if err != nil {
+		os.Remove(path)
+	}
+	return err
+}
+
+// counter reports bytes as they are read.
+type counter struct {
+	r      io.Reader
+	done   int64
+	total  int64
+	report func(done, total int64)
+}
+
+func (c *counter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.done += int64(n)
+	c.report(c.done, c.total)
+	return n, err
+}

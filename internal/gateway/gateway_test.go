@@ -2,14 +2,21 @@ package gateway
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // fake is an upstream that records what it got and replies with a script.
@@ -19,7 +26,7 @@ type fake struct {
 	path  string
 	head  http.Header
 	reply string // SSE body
-	ctype string
+	ctype string // "" means text/event-stream; "none" sends no header at all
 	code  int
 }
 
@@ -30,7 +37,11 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ct == "" {
 		ct = "text/event-stream"
 	}
-	w.Header().Set("Content-Type", ct)
+	if ct == "none" {
+		w.Header()["Content-Type"] = nil // like the ChatGPT backend: the body alone says it streams
+	} else {
+		w.Header().Set("Content-Type", ct)
+	}
 	if f.code != 0 {
 		w.WriteHeader(f.code)
 	}
@@ -45,7 +56,7 @@ func sse(lines ...string) string {
 	return b.String()
 }
 
-// setup points dial's provider file at a temp dir and adds one provider
+// setup points magpie's provider file at a temp dir and adds one provider
 // speaking only the given protocol, backed by the fake.
 func setup(t *testing.T, proto provider.Protocol, f *fake) *httptest.Server {
 	t.Helper()
@@ -86,6 +97,107 @@ func events(body string) []map[string]any {
 		return nil
 	})
 	return out
+}
+
+type fallbackFake struct {
+	chatBody      []byte
+	responsesBody []byte
+	chatCalls     int
+	responseCalls int
+}
+
+func (f *fallbackFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	switch r.URL.Path {
+	case "/v1/chat/completions":
+		f.chatCalls++
+		f.chatBody = body
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":{"message":"This model is not supported in the v1/chat/completions endpoint. Use v1/responses."}}`)
+	case "/v1/responses":
+		f.responseCalls++
+		f.responsesBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(
+			`event: response.created`+"\n"+`data: {"type":"response.created","response":{"id":"r1","model":"m1","usage":{"input_tokens":0,"output_tokens":0}}}`,
+			`event: response.output_text.delta`+"\n"+`data: {"type":"response.output_text.delta","delta":"fallback ok"}`,
+			`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"id":"r1","model":"m1","status":"completed","usage":{"input_tokens":4,"output_tokens":2}}}`,
+		))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func TestAnthropicClientFallsBackFromChatToResponses(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	f := &fallbackFake{}
+	up := httptest.NewServer(f)
+	t.Cleanup(up.Close)
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"},
+		Chat: up.URL + "/v1", Responses: up.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := New().Handler()
+	call := func(body string) (int, string) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+		handler.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+	code, body := call(`{"model":"m1","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+	if code != 200 {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	if f.chatCalls != 1 || f.responseCalls != 1 {
+		t.Fatalf("calls: chat=%d responses=%d", f.chatCalls, f.responseCalls)
+	}
+	var chat, responses map[string]any
+	if json.Unmarshal(f.chatBody, &chat) != nil || json.Unmarshal(f.responsesBody, &responses) != nil {
+		t.Fatalf("bad translated requests: chat=%s responses=%s", f.chatBody, f.responsesBody)
+	}
+	if chat["stream"] != true || responses["stream"] != true || responses["model"] != "m1" {
+		t.Errorf("requests: chat=%v responses=%v", chat, responses)
+	}
+	var out struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Usage aUsage `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Content) != 1 || out.Content[0].Text != "fallback ok" || out.Usage.InputTokens != 4 || out.Usage.OutputTokens != 2 {
+		t.Errorf("reply: %s", body)
+	}
+	code, body = call(`{"model":"m1","max_tokens":100,"messages":[{"role":"user","content":"again"}]}`)
+	if code != 200 {
+		t.Fatalf("second status %d: %s", code, body)
+	}
+	if f.chatCalls != 1 || f.responseCalls != 2 {
+		t.Fatalf("cached calls: chat=%d responses=%d", f.chatCalls, f.responseCalls)
+	}
+}
+
+func TestNotChatModel(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{400, `{"error":{"message":"not a chat model; use /v1/responses"}}`, true},
+		{404, `use v1/completions`, true},
+		{429, `rate limit`, false},
+		{200, `use v1/responses`, false},
+	} {
+		if got := notChatModel(tc.status, []byte(tc.body)); got != tc.want {
+			t.Errorf("notChatModel(%d, %q) = %v, want %v", tc.status, tc.body, got, tc.want)
+		}
+	}
 }
 
 func TestAnthropicClientChatUpstream(t *testing.T) {
@@ -260,6 +372,18 @@ func TestPassthroughRewritesModel(t *testing.T) {
 	}
 }
 
+func TestChatPassthroughSendsDeveloperAsSystem(t *testing.T) {
+	f := &fake{t: t, ctype: "application/json", reply: `{"id":"c1","choices":[]}`}
+	setup(t, provider.Chat, f)
+	code, body := post(t, "/v1/chat/completions", `{"model":"m1","reasoning_effort":"high","messages":[{"role":"developer","content":"be brief"},{"role":"user","content":"a developer asks"}]}`)
+	if code != 200 {
+		t.Fatalf("%d %s", code, body)
+	}
+	if !bytes.Contains(f.got, []byte(`{"content":"be brief","role":"system"}`)) || bytes.Contains(f.got, []byte(`"role":"developer"`)) || !bytes.Contains(f.got, []byte(`"content":"a developer asks"`)) {
+		t.Errorf("forwarded body: %s", f.got)
+	}
+}
+
 func TestErrorsAndUnknownModel(t *testing.T) {
 	f := &fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance","type":"x"}}`}
 	setup(t, provider.Chat, f)
@@ -359,3 +483,181 @@ func TestGeminiClientChatUpstream(t *testing.T) {
 }
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
+
+// A signed-in Codex account: the ChatGPT backend only streams and rejects
+// the sampling knobs, so a plain non-streaming Responses call is
+// translated, signed with the account's tokens, and answered as JSON.
+func TestCodexAccountUpstream(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	claims := func(m map[string]any) string {
+		b, _ := json.Marshal(m)
+		return "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
+	}
+	os.MkdirAll(filepath.Join(home, ".codex"), 0o755)
+	auth := fmt.Sprintf(`{"auth_mode":"chatgpt","tokens":{"id_token":%q,"access_token":%q,"refresh_token":"r","account_id":"acct-1"}}`,
+		claims(map[string]any{"email": "me@example.com"}), claims(map[string]any{"exp": time.Now().Add(time.Hour).Unix()}))
+	os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte(auth), 0o600)
+
+	f := &fake{t: t, ctype: "none", reply: sse(
+		`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
+		`data: {"type":"response.output_text.delta","delta":"pong"}`,
+		`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`)}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var request struct {
+			Input []struct {
+				Role string `json:"role"`
+			} `json:"input"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, item := range request.Input {
+			if item.Role == "system" {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, `{"detail":"System messages are not allowed"}`)
+				return
+			}
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		f.ServeHTTP(w, r)
+	}))
+	defer up.Close()
+	old := provider.CodexBase
+	provider.CodexBase = up.URL + "/backend-api/codex"
+	defer func() { provider.CodexBase = old }()
+
+	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping","max_output_tokens":20,"temperature":0.3}`)
+	if code != 200 {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	if f.path != "/backend-api/codex/responses" || f.head.Get("chatgpt-account-id") != "acct-1" || !strings.HasPrefix(f.head.Get("Authorization"), "Bearer h.") {
+		t.Fatalf("upstream call: %s %v", f.path, f.head)
+	}
+	var upstream map[string]any
+	json.Unmarshal(f.got, &upstream)
+	if _, ok := upstream["max_output_tokens"]; ok || upstream["temperature"] != nil || upstream["stream"] != true || upstream["store"] != false || upstream["model"] != "gpt-5.5" {
+		t.Fatalf("upstream body: %s", f.got)
+	}
+	var res map[string]any
+	json.Unmarshal([]byte(body), &res)
+	if res["object"] != "response" || !strings.Contains(body, "pong") {
+		t.Fatalf("reply: %s", body)
+	}
+
+	// a streaming call is relayed as-is, minus what the backend rejects
+	f.got, f.head = nil, nil
+	code, body = post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping","stream":true,"max_output_tokens":20}`)
+	if code != 200 || !strings.Contains(body, "response.output_text.delta") {
+		t.Fatalf("stream: %d %s", code, body)
+	}
+	json.Unmarshal(f.got, &upstream)
+	if _, ok := upstream["max_output_tokens"]; ok {
+		t.Fatalf("relayed body: %s", f.got)
+	}
+	if _, isList := upstream["input"].([]any); !isList {
+		t.Fatalf("relayed input not a list: %s", f.got)
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{"anthropic", "/v1/messages", `{"model":"codex/gpt-5.5","max_tokens":20,"system":"Top-level instructions","messages":[{"role":"system","content":"First instruction"},{"role":"user","content":"ping"},{"role":"system","content":"Later instruction"}]}`},
+		{"responses passthrough", "/v1/responses", `{"model":"codex/gpt-5.5","stream":true,"instructions":"Top-level instructions","input":[{"type":"message","role":"system","content":[{"type":"input_text","text":"First instruction"}]},{"role":"user","content":"ping"},{"role":"system","content":"Later instruction"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := post(t, tc.path, tc.body)
+			if code != http.StatusOK || !strings.Contains(body, "pong") {
+				t.Fatalf("system instructions rejected: %d %s", code, body)
+			}
+			var request struct {
+				Instructions string `json:"instructions"`
+				Input        []struct {
+					Role    string          `json:"role"`
+					Content json.RawMessage `json:"content"`
+				} `json:"input"`
+			}
+			if err := json.Unmarshal(f.got, &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Instructions != "Top-level instructions" || len(request.Input) != 3 {
+				t.Fatalf("instructions lost or reordered: %s", f.got)
+			}
+			for i, want := range []struct{ role, text string }{{"developer", "First instruction"}, {"user", "ping"}, {"developer", "Later instruction"}} {
+				item := request.Input[i]
+				if item.Role != want.role || stringOrText(item.Content) != want.text {
+					t.Errorf("input[%d]: role=%q content=%s, want %s %q", i, item.Role, item.Content, want.role, want.text)
+				}
+			}
+		})
+	}
+}
+
+func TestConversationID(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-Session-Affinity", "ses_1")
+	if got := conversationID(h, []byte(`{}`)); got != "ses_1" {
+		t.Errorf("agent session header: %q", got)
+	}
+	turn1 := `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"fix the bug"}]}`
+	turn2 := `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"fix the bug"},{"role":"assistant","content":"done"},{"role":"user","content":"thanks"}]}`
+	other := `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"write docs"}]}`
+	a, b, c := conversationID(http.Header{}, []byte(turn1)), conversationID(http.Header{}, []byte(turn2)), conversationID(http.Header{}, []byte(other))
+	if a != b || a == c || !strings.HasPrefix(a, "magpie-") {
+		t.Errorf("derived ids: %q %q %q", a, b, c)
+	}
+	r1 := conversationID(http.Header{}, []byte(`{"input":[{"role":"user","content":"hi"}]}`))
+	r2 := conversationID(http.Header{}, []byte(`{"input":[{"role":"user","content":"hi"},{"type":"function_call_output","output":"x"}]}`))
+	if r1 != r2 {
+		t.Errorf("responses ids: %q %q", r1, r2)
+	}
+}
+
+func TestOpenCodeGetsConversationSession(t *testing.T) {
+	f := &fake{t: t, ctype: "application/json", reply: `{"id":"c1","choices":[]}`}
+	up := setup(t, provider.Chat, f)
+	body := `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`
+	if code, out := post(t, "/v1/chat/completions", body); code != 200 || f.head.Get("x-opencode-session") != "" {
+		t.Fatalf("other vendors get no OpenCode header: %d %s %v", code, out, f.head)
+	}
+
+	// The same upstream, reached under OpenCode's host name.
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Chat: "http://opencode.ai/zen/go/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	addr := strings.TrimPrefix(up.URL, "http://")
+	s.client = &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}}}
+	send := func(h http.Header) string {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+		for k, v := range h {
+			req.Header[k] = v
+		}
+		s.Handler().ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%d %s", rec.Code, rec.Body.String())
+		}
+		return f.head.Get("x-opencode-session")
+	}
+	if got := send(http.Header{"Session_id": {"codex-ses"}}); got != "codex-ses" {
+		t.Errorf("agent's session: %q", got)
+	}
+	if a, b := send(nil), send(nil); a == "" || a != b {
+		t.Errorf("derived session: %q %q", a, b)
+	}
+}
