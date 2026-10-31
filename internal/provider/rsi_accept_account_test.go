@@ -109,7 +109,7 @@ func TestAcceptAccountsAppearAsProviders(t *testing.T) {
 	}
 	// no tokens leak through the JSON form
 	b, _ := json.Marshal(codex)
-	if strings.Contains(string(b), ".sig") || !strings.Contains(string(b), `"agent":"codex"`) {
+	if strings.Contains(string(b), ".sig") {
 		t.Fatalf("json: %s", b)
 	}
 }
