@@ -820,7 +820,7 @@ var (
 type copilotApp struct {
 	User  string `json:"user"`
 	Token string `json:"oauth_token"`
-	cli   bool // the standalone Copilot CLI's sign-in
+	cli   bool   // the standalone Copilot CLI's sign-in
 }
 
 // copilotLogin finds the GitHub token Copilot's editors and CLI keep.
@@ -1044,7 +1044,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 			ID           string   `json:"id"`
 			Name         string   `json:"name"`
 			Endpoints    []string `json:"supported_endpoints"`
-			Picker       bool   `json:"model_picker_enabled"`
+			Picker       bool     `json:"model_picker_enabled"`
 			Capabilities struct {
 				Type     string `json:"type"`
 				Supports struct {

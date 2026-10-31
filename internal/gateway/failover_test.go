@@ -3,10 +3,10 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"runtime/debug"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
