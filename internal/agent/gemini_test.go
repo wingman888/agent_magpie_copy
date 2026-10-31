@@ -113,7 +113,7 @@ func TestGeminiDefaultUnroutes(t *testing.T) {
 	if _, ok := gEnv(envP, "GOOGLE_GEMINI_BASE_URL"); ok {
 		t.Fatal("base should be gone")
 	}
-	if gJSON(setP, "security.auth.selectedType") != "gemini-api-key" || gJSON(setP, "model.name") != "" {
+	if gJSON(setP, "security.auth.selectedType") != "gemini-api-key" || gJSON(setP, "model.name") != "gemini-2.5-pro" {
 		t.Fatal("settings wrong")
 	}
 	if a.Field("auth").Get() == "dial" {

@@ -123,6 +123,9 @@ func run(args []string) error {
 		return list([]*agent.Agent{a}, true)
 	case 2:
 		if args[1] == "default" {
+			if a.ID == "gemini" {
+				return set(a, "model", "")
+			}
 			return set(a, a.Fields[0].Key, "")
 		}
 		// `dial codex xhigh`: a bare value that belongs to a non-model field

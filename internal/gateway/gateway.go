@@ -150,7 +150,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1beta/models/{rest...}", s.geminiPost)
 	mux.HandleFunc("POST /v1/models/{rest...}", s.geminiPost)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models/{model}:generateContent")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models/{model}:generateContent, :streamGenerateContent, :countTokens and GET /v1beta/models")
 	})
 	return mux
 }

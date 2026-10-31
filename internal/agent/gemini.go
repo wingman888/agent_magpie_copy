@@ -88,6 +88,7 @@ func gemini(home string) *Agent {
 			}
 			return nil
 		}
+		wasRouted := routed()
 		if err := unroute(); err != nil {
 			return err
 		}
@@ -121,6 +122,10 @@ func gemini(home string) *Agent {
 			}
 		default:
 			return fmt.Errorf("unknown provider %q", id)
+		}
+		if wasRouted {
+			// unroute already restored (or removed) the base URL
+			return nil
 		}
 		return edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL")
 	}
@@ -168,8 +173,9 @@ func gemini(home string) *Agent {
 				Get: jsonGet(path, "model.name"),
 				Set: func(v string) error {
 					if v == "" {
-						if err := unroute(); err != nil {
-							return err
+						if routed() {
+							// unroute restores the original model.name (or removes it)
+							return unroute()
 						}
 						return edit.DelJSON(path, "model.name")
 					}

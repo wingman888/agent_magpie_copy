@@ -352,7 +352,7 @@ func parseGemini(body []byte) (*Request, error) {
 				if len(bytes.TrimSpace(args)) == 0 || string(bytes.TrimSpace(args)) == "null" {
 					args = json.RawMessage("{}")
 				}
-				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: id, Name: p.FunctionCall.Name, Args: args})
+				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: id, Name: p.FunctionCall.Name, Args: args, Signature: p.ThoughtSignature})
 			case p.FunctionResponse != nil:
 				fr := p.FunctionResponse
 				id := fr.ID
@@ -385,7 +385,7 @@ func parseGemini(body []byte) (*Request, error) {
 					msg.Parts = append(msg.Parts, Part{Kind: Text, Text: fmt.Sprintf("[attachment omitted: %s %s]", p.FileData.MimeType, p.FileData.FileURI)})
 				}
 			case p.Text != nil && p.Thought:
-				if role == "assistant" && *p.Text != "" {
+				if role == "assistant" && (*p.Text != "" || p.ThoughtSignature != "") {
 					msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: *p.Text, Signature: p.ThoughtSignature})
 				}
 			case p.Text != nil:
@@ -525,7 +525,11 @@ func geminiPartOf(p Part) map[string]any {
 		if id == "" {
 			id = "call_" + newID()
 		}
-		return map[string]any{"functionCall": map[string]any{"id": id, "name": p.Name, "args": argsOf(p)}}
+		m := map[string]any{"functionCall": map[string]any{"id": id, "name": p.Name, "args": argsOf(p)}}
+		if p.Signature != "" {
+			m["thoughtSignature"] = p.Signature
+		}
+		return m
 	}
 	return map[string]any{"text": p.Text}
 }
