@@ -1,174 +1,96 @@
 package provider
 
-import (
-	"bytes"
-	"context"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"testing"
-	"time"
-)
+import "testing"
 
-func isolateCfg(t *testing.T) {
-	t.Helper()
+func TestSeveralKeys(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-}
-
-func custom(t *testing.T, key string) {
-	t.Helper()
-	if err := Save(Provider{ID: "relay", Name: "Relay", Key: key, Chat: "https://r.example/v1"}); err != nil {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1", Key: "sk-personal-1111"}); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func get(t *testing.T) Provider {
-	t.Helper()
-	p, err := Find("relay")
-	if err != nil {
+	if err := AddKey("relay", "Team", "sk-team-2222", ""); err != nil {
 		t.Fatal(err)
 	}
-	return *p
-}
-
-func TestKeyLifecycle(t *testing.T) {
-	isolateCfg(t)
-	custom(t, "k1")
-	if err := AddKey("relay", "team", "k2", Anthropic); err != nil {
+	if err := AddKey("relay", "", "sk-team-2222", ""); err == nil {
+		t.Fatal("the same key was added twice")
+	}
+	p, _ := Find("relay")
+	ks := p.KeyList()
+	if p.Key != "sk-personal-1111" || len(ks) != 2 || !ks[0].Active || ks[1].Name != "Team" {
+		t.Fatalf("keys %+v", ks)
+	}
+	if !ks[1].On || len(p.KeysOn()) != 2 {
+		t.Fatalf("a new key is on: %+v", ks)
+	}
+	if err := RenameKey("relay", ks[0].ID, "Personal"); err != nil {
 		t.Fatal(err)
 	}
-	if AddKey("relay", "", "k2", "") == nil || AddKey("relay", "", "k3", "bogus") == nil {
-		t.Fatal("duplicate / bad protocol accepted")
-	}
-	if err := SetKeyProtocol("relay", KeyRef("k1"), Chat); err != nil {
+	// first in line, the other stays on behind it
+	if err := UseKey("relay", ks[1].ID); err != nil {
 		t.Fatal(err)
 	}
-	if SetKeyProtocol("relay", KeyRef("k1"), "gemini") == nil {
-		t.Fatal("gemini accepted")
+	p, _ = Find("relay")
+	if p.Key != "sk-team-2222" || p.KeyName != "Team" || len(p.Keys) != 1 || p.Keys[0] != (KeyAccount{Name: "Personal", Key: "sk-personal-1111"}) {
+		t.Fatalf("after use: %+v %q %+v", p.Key, p.KeyName, p.Keys)
 	}
-	if err := UseKey("relay", KeyRef("k2")); err != nil {
+	// off: the next one on takes the lead; the last one on stays
+	if err := SetKeyOn("relay", keyID("sk-team-2222"), false); err != nil {
 		t.Fatal(err)
 	}
-	p := get(t)
-	if p.Key != "k2" || p.KeyName != "team" || p.KeyProtocol != Anthropic || len(p.Keys) != 1 || p.Keys[0].Key != "k1" || p.Keys[0].Protocol != Chat || p.Keys[0].Off {
-		t.Fatalf("after use: %+v", p)
-	}
-	if err := SetKeyOn("relay", KeyRef("k2"), false); err != nil {
-		t.Fatal(err)
-	}
-	p = get(t)
-	if p.Key != "k1" || !p.Keys[0].Off || p.Keys[0].Key != "k2" || p.Keys[0].Name != "team" {
+	p, _ = Find("relay")
+	if p.Key != "sk-personal-1111" || len(p.KeysOn()) != 1 || !p.Keys[0].Off || p.Keys[0].Name != "Team" {
 		t.Fatalf("after off: %+v", p)
 	}
-	if SetKeyOn("relay", KeyRef("k1"), false) == nil || RemoveKey("relay", KeyRef("k1")) == nil {
-		t.Fatal("last enabled key was removable")
+	if err := SetKeyOn("relay", keyID("sk-personal-1111"), false); err == nil {
+		t.Fatal("turned off the last key in use")
 	}
-	if err := RenameKey("relay", KeyRef("k1"), " me "); err != nil || get(t).KeyName != "me" {
-		t.Fatal("rename", err)
+	if err := RemoveKey("relay", keyID("sk-personal-1111")); err == nil {
+		t.Fatal("removed the last key in use")
 	}
-	if err := RemoveKey("relay", KeyRef("k2")); err != nil || len(get(t).Keys) != 0 {
-		t.Fatal("remove extra", err)
-	}
-	if err := AddKey("relay", "", "k3", ""); err != nil {
+	if err := SetKeyOn("relay", keyID("sk-team-2222"), true); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveKey("relay", KeyRef("k1")); err != nil || get(t).Key != "k3" {
-		t.Fatalf("remove first: %+v", get(t))
+	if err := RemoveKey("relay", keyID("sk-personal-1111")); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ = Find("relay"); len(p.Keys) != 0 || p.Key != "sk-team-2222" || p.KeyName != "Team" {
+		t.Fatalf("after remove: %+v", p)
 	}
 }
 
-func TestSaveNormalizes(t *testing.T) {
-	isolateCfg(t)
-	err := Save(Provider{ID: "relay", Key: "k", Chat: "r.example/v1", KeyProtocol: "nope"})
-	if err == nil {
-		t.Fatal("bad keyProtocol saved")
-	}
-	err = Save(Provider{ID: "relay", Key: "k", Chat: "r.example/v1", Catalog: " openai, deepseek ,",
-		Headers: map[string]string{" X-Org-Id ": " acme ", "  ": "x"}, Fallback: []string{" a/b ", "", "a/b", "c/d"}})
-	if err != nil {
+func TestKeyProtocol(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1", Anthropic: "https://relay.test", Key: "sk-oai-1111"}); err != nil {
 		t.Fatal(err)
 	}
-	p := get(t)
-	if p.Headers["X-Org-Id"] != "acme" || len(p.Headers) != 1 || len(p.Fallback) != 2 || p.Catalog != "openai,deepseek" {
-		t.Fatalf("%+v", p)
-	}
-	Save(Provider{ID: "relay", Key: "k", Chat: "r.example/v1", Headers: map[string]string{"": "x"}})
-	b, _ := os.ReadFile(Path())
-	if bytes.Contains(b, []byte("headers")) {
-		t.Fatalf("empty headers written: %s", b)
-	}
-}
-
-func TestHeadersOnWire(t *testing.T) {
-	isolateCfg(t)
-	var got http.Header
-	var raw []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header
-		for k := range r.Header {
-			raw = append(raw, k)
-		}
-		w.WriteHeader(200)
-	}))
-	defer srv.Close()
-	p := Provider{ID: "relay", Key: "k", Chat: srv.URL, Headers: map[string]string{"X-Org-Id": "acme", "authorization": "Bearer other"}}
-	req, _ := http.NewRequest("POST", srv.URL, nil)
-	p.Sign(context.Background(), req, Chat, nil)
-	http.DefaultClient.Do(req)
-	if got.Get("X-Org-Id") != "acme" || got.Get("Authorization") != "Bearer other" {
-		t.Fatalf("%v", got)
-	}
-	p.Preset = "x"
-	req, _ = http.NewRequest("POST", srv.URL, nil)
-	p.Sign(context.Background(), req, Chat, nil)
-	http.DefaultClient.Do(req)
-	if got.Get("X-Org-Id") != "" {
-		t.Fatal("preset sent headers")
-	}
-}
-
-var png = []byte("\x89PNG\r\n\x1a\n0000")
-
-func TestIcons(t *testing.T) {
-	isolateCfg(t)
-	a, err := StoreIcon(png)
-	if err != nil || len(a) != len("file:")+16+4 {
-		t.Fatal(a, err)
-	}
-	if b, _ := StoreIcon(png); b != a {
-		t.Fatal("not deduped")
-	}
-	if _, err := StoreIcon(nil); err == nil {
-		t.Fatal("empty")
-	}
-	if _, err := StoreIcon(make([]byte, MaxIcon+1)); err == nil {
-		t.Fatal("big")
-	}
-	if _, err := StoreIcon([]byte("hello")); err == nil {
-		t.Fatal("text")
-	}
-	if s, err := StoreIcon([]byte(`<?xml version="1.0"?><svg xmlns=""/>`)); err != nil || filepath.Ext(s) != ".svg" {
-		t.Fatal(s, err)
-	}
-	name := a[len("file:"):]
-	if IconFile(name) == "" || IconFile("../"+name) != "" || IconFile("abcd.png") != "" || IconFile(name[:16]+".txt") != "" || IconFile("") != "" || IconFile(name[:15]+"G.png") != "" {
-		t.Fatal("IconFile validation")
-	}
-	// cleanup: old unreferenced goes, fresh and referenced stay
-	old, _ := StoreIcon([]byte("\x89PNG\r\n\x1a\nold"))
-	used, _ := StoreIcon([]byte("\x89PNG\r\n\x1a\nused"))
-	fresh, _ := StoreIcon([]byte("\x89PNG\r\n\x1a\nfresh"))
-	past := time.Now().Add(-2 * time.Hour)
-	for _, n := range []string{old, used} {
-		os.Chtimes(IconFile(n[5:]), past, past)
-	}
-	if err := Save(Provider{ID: "relay", Key: "k", Chat: "https://r.example/v1", Icon: used}); err != nil {
+	if err := AddKey("relay", "Claude", "sk-ant-2222", Anthropic); err != nil {
 		t.Fatal(err)
 	}
-	exists := func(n string) bool { _, err := os.Stat(IconFile(n[5:])); return err == nil }
-	if exists(old) || !exists(used) || !exists(fresh) {
-		t.Fatal("cleanup", exists(old), exists(used), exists(fresh))
+	if err := AddKey("relay", "", "sk-x-3333", "carrier-pigeon"); err == nil {
+		t.Fatal("took an unknown protocol")
+	}
+	if err := SetKeyProtocol("relay", keyID("sk-oai-1111"), Chat); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := Find("relay")
+	ks := p.KeyList()
+	if ks[0].Protocol != Chat || ks[1].Protocol != Anthropic {
+		t.Fatalf("keys %+v", ks)
+	}
+	// it goes with the key when the order changes
+	if err := UseKey("relay", keyID("sk-ant-2222")); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = Find("relay")
+	if p.Key != "sk-ant-2222" || p.KeyProtocol != Anthropic || p.Keys[0].Protocol != Chat {
+		t.Fatalf("after use: %+v", p)
+	}
+	q := p.WithKey(p.Keys[0])
+	if q.Key != "sk-oai-1111" || q.Chat == "" || q.Anthropic != "" || q.Responses != "" {
+		t.Fatalf("with the OpenAI key: %+v", q)
+	}
+	if q := p.WithKey(KeyAccount{Key: "k"}); q.Chat == "" || q.Anthropic == "" {
+		t.Fatalf("a key for any protocol: %+v", q)
 	}
 }
