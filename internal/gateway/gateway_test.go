@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -279,5 +281,133 @@ func TestModelsList(t *testing.T) {
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
 	if !strings.Contains(rec.Body.String(), `"id":"fake/m1"`) || !strings.Contains(rec.Body.String(), `"display_name"`) {
 		t.Errorf("%s", rec.Body.String())
+	}
+}
+
+func TestGeminiClientChatUpstream(t *testing.T) {
+	f := &fake{t: t, reply: sse(
+		`data: {"id":"c1","model":"m1","choices":[{"delta":{"role":"assistant","reasoning_content":"think"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{"content":"Sure"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.go\"}"}}]}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}}`,
+		`data: [DONE]`)}
+	setup(t, provider.Chat, f)
+	req := `{"systemInstruction":{"parts":[{"text":"be brief"}]},
+	  "contents":[{"role":"user","parts":[{"text":"read a.go"}]},
+	    {"role":"model","parts":[{"functionCall":{"id":"fc0","name":"read_file","args":{"path":"x"}}}]},
+	    {"role":"user","parts":[{"functionResponse":{"id":"fc0","name":"read_file","response":{"output":"package x"}}}]}],
+	  "tools":[{"functionDeclarations":[{"name":"read_file","description":"read","parameters":{"type":"OBJECT","properties":{"path":{"type":"STRING"}}}}]}],
+	  "generationConfig":{"maxOutputTokens":100,"thinkingConfig":{"thinkingBudget":-1,"includeThoughts":true}}}`
+	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", req)
+	if code != 200 {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	var up map[string]any
+	json.Unmarshal(f.got, &up)
+	if up["model"] != "m1" || up["stream"] != true || up["reasoning_effort"] != "medium" || up["max_tokens"] != float64(100) {
+		t.Errorf("upstream: %s", f.got)
+	}
+	msgs := up["messages"].([]any)
+	if len(msgs) != 4 || msgs[0].(map[string]any)["content"] != "be brief" || msgs[3].(map[string]any)["tool_call_id"] != "fc0" {
+		t.Errorf("messages: %v", msgs)
+	}
+	if fn := up["tools"].([]any)[0].(map[string]any)["function"].(map[string]any); !strings.Contains(string(mustJSON(fn["parameters"])), `"type":"object"`) {
+		t.Errorf("schema not lowercased: %v", fn)
+	}
+	evs := events(body)
+	var parts []map[string]any
+	var finish string
+	for _, e := range evs {
+		c := e["candidates"].([]any)[0].(map[string]any)
+		for _, p := range c["content"].(map[string]any)["parts"].([]any) {
+			parts = append(parts, p.(map[string]any))
+		}
+		if fr, ok := c["finishReason"]; ok {
+			finish = fr.(string)
+		}
+	}
+	if len(parts) != 3 || parts[0]["thought"] != true || parts[1]["text"] != "Sure" {
+		t.Errorf("parts: %v", parts)
+	}
+	fc, _ := parts[2]["functionCall"].(map[string]any)
+	if fc == nil || fc["name"] != "read_file" || fc["id"] != "call_1" || fc["args"].(map[string]any)["path"] != "a.go" {
+		t.Errorf("function call: %v", parts[2])
+	}
+	last := evs[len(evs)-1]
+	um := last["usageMetadata"].(map[string]any)
+	if finish != "STOP" || um["promptTokenCount"] != float64(10) || um["candidatesTokenCount"] != float64(3) || um["thoughtsTokenCount"] != float64(2) {
+		t.Errorf("finish/usage: %s %v", finish, um)
+	}
+	// non-streaming, error shape, countTokens, model list
+	code, body = post(t, "/v1beta/models/fake/m1:generateContent", req)
+	if code != 200 || !strings.Contains(body, `"finishReason":"STOP"`) || !strings.Contains(body, `"name":"read_file"`) {
+		t.Errorf("generateContent: %d %s", code, body)
+	}
+	code, body = post(t, "/v1beta/models/nope:generateContent", `{"contents":[]}`)
+	if code != 404 || !strings.Contains(body, `"status":"NOT_FOUND"`) {
+		t.Errorf("unknown model: %d %s", code, body)
+	}
+	code, body = post(t, "/v1beta/models/fake/m1:countTokens", req)
+	if code != 200 || !strings.Contains(body, `"totalTokens":`) {
+		t.Errorf("countTokens: %d %s", code, body)
+	}
+	rec := httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1beta/models", nil))
+	if !strings.Contains(rec.Body.String(), `"name":"models/fake/m1"`) {
+		t.Errorf("models: %s", rec.Body.String())
+	}
+}
+
+func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
+
+func TestCodexAccountGateway(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	os.MkdirAll(filepath.Join(home, ".codex"), 0o755)
+	os.WriteFile(filepath.Join(home, ".codex", "auth.json"),
+		[]byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"tok","account_id":"acc","id_token":"a.e30.c"}}`), 0o600)
+	var got []byte
+	var head http.Header
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		head = r.Header
+		w.Header()["Content-Type"] = nil // none at all
+		io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n"+
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n")
+	}))
+	defer up.Close()
+	old := provider.CodexBase
+	provider.CodexBase = up.URL
+	defer func() { provider.CodexBase = old }()
+	gw := httptest.NewServer(New().Handler())
+	defer gw.Close()
+	res, err := http.Post(gw.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"codex/gpt-5.5","input":"hi","max_output_tokens":9,"temperature":0.2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(res.Body)
+	var out map[string]any
+	json.Unmarshal(b, &out)
+	if out["object"] != "response" || !strings.Contains(string(b), "hel") {
+		t.Fatal(string(b))
+	}
+	var sent map[string]any
+	json.Unmarshal(got, &sent)
+	if sent["stream"] != true || sent["store"] != false || sent["model"] != "gpt-5.5" || sent["temperature"] != nil || sent["max_output_tokens"] != nil {
+		t.Fatal(string(got))
+	}
+	if head.Get("Authorization") != "Bearer tok" || head.Get("Chatgpt-Account-Id") != "acc" {
+		t.Fatal(head)
+	}
+	// streaming passes through
+	res, _ = http.Post(gw.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"codex/gpt-5.5","input":"hi","stream":true}`))
+	b, _ = io.ReadAll(res.Body)
+	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") || !strings.Contains(string(b), "response.completed") {
+		t.Fatal(res.Header, string(b))
 	}
 }
