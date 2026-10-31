@@ -3,6 +3,7 @@ package settings
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,39 @@ func TestMigrate(t *testing.T) {
 	Migrate()
 	if b, _ := os.ReadFile(filepath.Join(cfg, "magpie", "providers.json")); string(b) != "new" {
 		t.Fatal("existing folder overwritten")
+	}
+}
+
+func TestProxySetting(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := Save(Settings{Proxy: "socks5://127.0.0.1:1080"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(Path())
+	err := Save(Settings{Proxy: "ftp://x"})
+	if err == nil || !strings.Contains(err.Error(), "http://127.0.0.1:7890") {
+		t.Fatalf("ftp accepted or no example: %v", err)
+	}
+	for _, bad := range []string{"http://", "://x", "not a proxy", "ftp://x:1", "http://x/path"} {
+		if Save(Settings{Proxy: bad}) == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+	after, _ := os.ReadFile(Path())
+	if string(before) != string(after) {
+		t.Fatal("file changed by failed save")
+	}
+	if err := Save(Settings{Proxy: "  127.0.0.1:7890 "}); err != nil {
+		t.Fatal(err)
+	}
+	if Load().Proxy != "127.0.0.1:7890" {
+		t.Fatal(Load().Proxy)
+	}
+	u, err := ParseProxy("127.0.0.1:7890")
+	if err != nil || u.String() != "http://127.0.0.1:7890" {
+		t.Fatal(u, err)
+	}
+	if Save(Settings{Proxy: "direct"}) != nil || Save(Settings{}) != nil {
+		t.Fatal("direct/empty rejected")
 	}
 }

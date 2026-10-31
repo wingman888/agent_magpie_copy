@@ -1,1 +1,1 @@
-./internal/catalog ./internal/gateway ./internal/provider . ./internal/agent ./internal/backup ./internal/codexcat
+./. ./internal/gateway ./internal/netproxy ./internal/settings

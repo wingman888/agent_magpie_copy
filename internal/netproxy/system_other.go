@@ -1,6 +1,5 @@
-//go:build !darwin && !windows
+//go:build !windows
 
 package netproxy
 
-// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
-func system() Proxy { return Proxy{} }
+func readWindowsRegistry() (server, override string, enabled bool) { return "", "", false }
