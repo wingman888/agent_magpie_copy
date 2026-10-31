@@ -109,7 +109,7 @@ func binary(t *testing.T) string {
 			return
 		}
 		binPath = filepath.Join(dir, "magpie")
-		out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput()
+		out, err := exec.Command("go", "build", "-tags", "nogui", "-o", binPath, ".").CombinedOutput()
 		if err != nil {
 			buildErr = string(out)
 		}
