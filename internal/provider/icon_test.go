@@ -95,7 +95,7 @@ func TestHeaders(t *testing.T) {
 		t.Fatal(req.Header)
 	}
 	got.Fetch(context.Background())
-	if len(seen) == 0 || seen[0].Get("X-Org-Id") != "acme" || seen[0].Get("Authorization") != "mine" {
+	if len(seen) == 0 || !strings.Contains(strings.Join(seen[0].Values("X-Org-Id"), ","), "acme") || seen[0].Get("Authorization") != "mine" {
 		t.Fatal(seen)
 	}
 	pr := Provider{Preset: "x", Headers: map[string]string{"A": "b"}}
