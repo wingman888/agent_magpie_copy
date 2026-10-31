@@ -86,12 +86,12 @@ func send(h http.Handler, path, body string) (int, string) {
 	return rec.Code, rec.Body.String()
 }
 
-const chatReq = `{"model":"%s","messages":[{"role":"user","content":"hi"}]}`
+const epChatReq = `{"model":"%s","messages":[{"role":"user","content":"hi"}]}`
 
 func TestChatRejectedSwitchesToResponsesAndRemembers(t *testing.T) {
 	f := &multiFake{reject: map[string]string{"/v1/chat/completions": `{"error":{"message":"model gpt-x is not accessible via the /chat/completions endpoint"}}`}}
 	_, h := multiSetup(t, f, "fake")
-	body := strings.Replace(chatReq, "%s", "fake/gpt-x", 1)
+	body := strings.Replace(epChatReq, "%s", "fake/gpt-x", 1)
 	for i := 0; i < 2; i++ {
 		code, out := send(h, "/v1/chat/completions", body)
 		if code != 200 || !strings.Contains(out, "from responses") {
@@ -102,7 +102,7 @@ func TestChatRejectedSwitchesToResponsesAndRemembers(t *testing.T) {
 		t.Fatalf("chat=%d responses=%d", f.count("/v1/chat/completions"), f.count("/v1/responses"))
 	}
 	// another model of the same provider is not affected
-	send(h, "/v1/chat/completions", strings.Replace(chatReq, "%s", "fake/other", 1))
+	send(h, "/v1/chat/completions", strings.Replace(epChatReq, "%s", "fake/other", 1))
 	if f.count("/v1/chat/completions") != 2 {
 		t.Fatalf("other model should still try chat: %d", f.count("/v1/chat/completions"))
 	}
@@ -164,7 +164,7 @@ func TestServerErrorNeverSwitchesEndpoint(t *testing.T) {
 		status: map[string]int{"/v1/chat/completions": 500},
 	}
 	_, h := multiSetup(t, f, "fake")
-	code, _ := send(h, "/v1/chat/completions", strings.Replace(chatReq, "%s", "fake/m", 1))
+	code, _ := send(h, "/v1/chat/completions", strings.Replace(epChatReq, "%s", "fake/m", 1))
 	if code != 500 || f.count("/v1/responses") != 0 {
 		t.Fatalf("code %d responses %d", code, f.count("/v1/responses"))
 	}
@@ -174,7 +174,7 @@ func TestNoEndpointLeftReturnsUpstreamError(t *testing.T) {
 	msg := `{"error":{"message":"use v1/responses"}}`
 	f := &multiFake{reject: map[string]string{"/v1/chat/completions": msg, "/v1/responses": msg}}
 	_, h := multiSetup(t, f, "fake")
-	code, out := send(h, "/v1/chat/completions", strings.Replace(chatReq, "%s", "fake/m", 1))
+	code, out := send(h, "/v1/chat/completions", strings.Replace(epChatReq, "%s", "fake/m", 1))
 	if code != 400 || !strings.Contains(out, "use v1/responses") {
 		t.Fatalf("%d %s", code, out)
 	}
