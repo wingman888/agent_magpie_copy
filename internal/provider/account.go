@@ -69,14 +69,20 @@ func (p Provider) Prepare(body []byte) []byte {
 
 // Exclusion is a sign-in magpie found but will not offer as a provider.
 type Exclusion struct {
-	Agent string `json:"agent"`
-	Why   string `json:"why"`
+	Agent    string `json:"agent"`
+	Provider string `json:"provider,omitempty"` // set when the user removed it; saving it brings it back
+	Why      string `json:"why"`
 }
 
-// Excluded lists sign-ins magpie detects but cannot expose. It is currently
-// empty, but remains part of the API so the CLI and GUI can explain future
-// account types that are detectable but not usable.
-func Excluded() []Exclusion { return nil }
+// Excluded lists sign-ins magpie detects but leaves out: the accounts the
+// user removed from magpie.
+func Excluded() []Exclusion {
+	var out []Exclusion
+	for _, a := range Hidden() {
+		out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID, Why: "You removed it from magpie."})
+	}
+	return out
+}
 
 const (
 	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -111,6 +117,7 @@ var (
 	claudeStatusAt   time.Time
 	claudeStatusUser string
 	claudeStatusPlan string
+	claudeStatusOut  bool // Claude Code says nobody is signed in
 
 	claudeCacheMu  sync.Mutex
 	claudeCacheAt  time.Time
@@ -265,7 +272,8 @@ func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) err
 	return nil
 }
 
-func claudeExecutable() string {
+// claudeExecutable finds the claude CLI; a var so tests can fake it.
+var claudeExecutable = func() string {
 	if p, err := exec.LookPath("claude"); err == nil {
 		return p
 	}
@@ -282,33 +290,40 @@ func claudeExecutable() string {
 // blob intentionally contains tokens and plan metadata but no display identity;
 // `claude auth status --json` is the authoritative, non-secret view shown by the
 // CLI. Cache it briefly because the providers screen refreshes often.
-func claudeIdentity() (string, string) {
+//
+// It also says when Claude Code is signed out even though credentials are
+// still lying around (a keychain item logout left behind), so a signed-out
+// account stops showing up as a provider.
+func claudeIdentity() (user, plan string, signedOut bool) {
 	claudeStatusMu.Lock()
 	defer claudeStatusMu.Unlock()
 	if time.Since(claudeStatusAt) < 30*time.Second {
-		return claudeStatusUser, claudeStatusPlan
+		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 	}
 	claudeStatusAt = time.Now()
 	path := claudeExecutable()
 	if path == "" {
-		return claudeStatusUser, claudeStatusPlan
+		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
-	if err != nil {
-		return claudeStatusUser, claudeStatusPlan
-	}
+	// signed out, `claude auth status` exits 1 but still prints the JSON
+	out, _ := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
 	var status struct {
-		LoggedIn         bool   `json:"loggedIn"`
+		LoggedIn         *bool  `json:"loggedIn"`
 		Email            string `json:"email"`
 		SubscriptionType string `json:"subscriptionType"`
 	}
-	if json.Unmarshal(out, &status) == nil && status.LoggedIn {
+	if json.Unmarshal(out, &status) != nil || status.LoggedIn == nil {
+		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+	}
+	claudeStatusOut = !*status.LoggedIn
+	claudeStatusUser, claudeStatusPlan = "", ""
+	if *status.LoggedIn {
 		claudeStatusUser = strings.TrimSpace(status.Email)
 		claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
 	}
-	return claudeStatusUser, claudeStatusPlan
+	return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 }
 
 func claudeAccount() (Provider, bool) {
@@ -316,7 +331,10 @@ func claudeAccount() (Provider, bool) {
 	if !ok {
 		return Provider{}, false
 	}
-	user, statusPlan := claudeIdentity()
+	user, statusPlan, signedOut := claudeIdentity()
+	if signedOut {
+		return Provider{}, false
+	}
 	plan := c.OAuth.SubscriptionType
 	if statusPlan != "" {
 		plan = statusPlan
@@ -888,4 +906,11 @@ func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) 
 		return nil, errors.New("Copilot lists no chat model for this account")
 	}
 	return out, nil
+}
+
+// forgetClaudeStatus drops what `claude auth status` said; tests use it.
+func forgetClaudeStatus() {
+	claudeStatusMu.Lock()
+	claudeStatusAt, claudeStatusUser, claudeStatusPlan, claudeStatusOut = time.Time{}, "", "", false
+	claudeStatusMu.Unlock()
 }

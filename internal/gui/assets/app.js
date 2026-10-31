@@ -18,6 +18,7 @@ let pick = null; // { agent, field, options, items, cursor, anchor }
 let editing = null; // provider id being edited; { preset } or { custom: true } for a new one
 let draft = null; // the editor's working copy
 let adding = false; // the preset sheet is open
+let importing = null; // a magpie://import link waiting for a yes: { provider, error, replaces }
 // the gateway tab's choices, kept per machine
 let flavor = params.get("flavor") || localStorage.getItem("magpie.flavor") || "openai"; // which API the snippets speak
 let lang = params.get("lang") || localStorage.getItem("magpie.lang") || "shell";        // which snippet
@@ -120,18 +121,23 @@ function renderAgents() {
     // so the controls line up down the list
     const fields = el("div", "fields");
     const wide = (f) => f.label === "model" || f.label === "large";
-    const sorted = [...a.fields].sort((x, y) => wide(y) - wide(x));
+    const shownFields = a.fields.filter((f) => !TIERS.includes(f.label));
+    const tiers = tierMenu(a);
+    if (tiers) shownFields.push(tiers);
+    const sorted = shownFields.sort((x, y) => wide(y) - wide(x));
     for (const f of sorted) {
       const b = el("button", "field " + (sorted.length === 1 ? "solo" : wide(f) ? "main" : "side"));
       const opt = optionFor(f, f.value);
       b.title = t("{label}: {value}", { label: t(f.label), value: f.value || t("agent default") }) + (opt?.note ? ` · ${opt.note}` : "");
       if (opt?.icon) b.append(icon(opt.icon));
       else if (!wide(f) || !f.value) b.append(el("span", "k", t(f.label)));
-      const shown = (f.key === "effort" || f.label === "effort" || f.label === "thinking") ? effortName(opt || { value: f.value }) : (opt?.label || f.value || t("default"));
-      b.append(el("span", "v" + (f.value ? "" : " empty"), shown));
+      const shown = f.menu ? f.summary : (f.key === "effort" || f.label === "effort" || f.label === "thinking") ? effortName(opt || { value: f.value }) : (opt?.label || f.value || t("default"));
+      if (f.menu) b.title = f.options.map((o) => `${o.label}: ${o.note}`).join("\n");
+      b.append(el("span", "v" + (f.value || f.custom ? "" : " empty"), shown));
       const c = el("span", "chev");
       c.append(svg(CHEV, 11, 1.7));
       b.append(c);
+      b.dataset.key = f.key;
       b.onclick = (ev) => openPicker(a, f, b, ev);
       fields.append(b);
     }
@@ -154,6 +160,28 @@ function renderAgents() {
     chips.append(c);
   }
   fit();
+}
+
+// Claude Code's opus/sonnet/haiku/fable can each have a model of their own
+// once it runs through magpie. They share one button, which lists the four;
+// picking one opens the model picker for it.
+const TIERS = ["opus", "sonnet", "haiku", "fable"];
+
+function tierMenu(a) {
+  const tiers = a.fields.filter((f) => TIERS.includes(f.label));
+  if (!tiers.length || !tiers.some((f) => f.options.length)) return null;
+  const main = a.fields.find((f) => f.key === "model");
+  const mainName = optionFor(main, main.value)?.label || main.value;
+  const custom = tiers.filter((f) => f.value);
+  const name = (f) => optionFor(f, f.value)?.label || f.value;
+  return {
+    key: "tiers", label: "tiers", value: "", menu: true, custom: custom.length > 0,
+    summary: custom.length ? custom.map((f) => f.label).join(", ") : t("same as model"),
+    options: tiers.map((f) => ({
+      value: f.key, label: f.label, icon: optionFor(f, f.value)?.icon || optionFor(main, main.value)?.icon,
+      note: f.value ? name(f) : t("same as model ({model})", { model: mainName }),
+    })),
+  };
 }
 
 // The tray panel has no scrollbars to speak of, so it grows to fit instead.
@@ -215,12 +243,15 @@ function openPicker(agent, field, anchor, ev, only) {
   // Current model first, then the rest in catalog order. Effort levels keep
   // their natural low → high order because their position is meaningful.
   const i = options.findIndex((o) => o.value === cur);
-  if (!effortPicker && i > 0) { const [c] = options.splice(i, 1); options.unshift({ ...c, group: "" }); }
+  if (!effortPicker && !field.menu && i > 0) { const [c] = options.splice(i, 1); options.unshift({ ...c, group: "" }); }
   else if (i < 0 && cur && !only) options.unshift({ value: cur, note: t("current value") });
   // the agent's own default: magpie's wiring comes out and the key is removed
-  if (!only) options.unshift({ value: "", label: t("Default"), note: t("what {agent} ships with", { agent: agent.name }), icon: agent.icon, reset: true });
-  const modelPicker = ["model", "small", "large"].includes(field.label) && !only;
-  pick = { agent, field, options, anchor, cursor: 0, free: !only, modelPicker, effortPicker, groupFilter: "all" };
+  if (TIERS.includes(field.label)) {
+    const main = agent.fields.find((f) => f.key === "model");
+    options.unshift({ value: "", label: t("Same as model"), note: optionFor(main, main.value)?.label || main.value, icon: optionFor(main, main.value)?.icon, reset: true });
+  } else if (!only && !field.menu) options.unshift({ value: "", label: t("Default"), note: t("what {agent} ships with", { agent: agent.name }), icon: agent.icon, reset: true });
+  const modelPicker = ["model", "small", "large", ...TIERS].includes(field.label) && !only;
+  pick = { agent, field, options, anchor, cursor: 0, free: !only && !field.menu, modelPicker, effortPicker, groupFilter: "all" };
   anchor.classList.add("open");
   const pop = $("#pop");
   pop.classList.toggle("model-picker", modelPicker);
@@ -299,7 +330,7 @@ function filter() {
   if (q) scored.sort((a, b) => b.s - a.s || a.i - b.i);
   pick.items = scored.map((x) => x.o);
   const typed = $("#q").value.trim();
-  if (typed && pick.free && ["model", "small", "large"].includes(pick.field.label) && !pick.items.some((o) => o.value === typed)) {
+  if (typed && pick.free && ["model", "small", "large", ...TIERS].includes(pick.field.label) && !pick.items.some((o) => o.value === typed)) {
     pick.items.push({ value: typed, note: t("use as typed"), custom: true });
   }
   pick.cursor = 0;
@@ -431,14 +462,20 @@ function move(d) {
 
 async function commit(value) {
   if (!pick || value == null) return;
-  const { agent, field } = pick;
+  const { agent, field, anchor } = pick;
   const opt = pick.options.find((o) => o.value === value);
   closePicker();
+  if (field.menu) {
+    // a tier chosen from the tiers menu: now its model
+    const tier = agent.fields.find((f) => f.key === value);
+    if (tier) openPicker(agent, tier, anchor, { stopPropagation() {} });
+    return;
+  }
   if (value === field.value) return;
   try {
     state = await api("set", { agent: agent.id, field: field.key, value });
     renderAgents();
-    const b = document.querySelector(`.agent[data-id="${agent.id}"] .field:nth-child(${agent.fields.indexOf(field) + 1})`);
+    const b = document.querySelector(`.agent[data-id="${agent.id}"] .field[data-key="${TIERS.includes(field.label) ? "tiers" : field.key}"]`);
     b?.classList.add("flash");
     const shown = opt?.label || value;
     if (state.notice) status(`${agent.name} → ${shown}. ${state.notice}`, "warn", 9000);
@@ -563,18 +600,24 @@ function renderProviders() {
   }
   renderExcluded();
   dialog = renderAdd() || dialog;
+  if (importing) dialog = renderImport(importing);
   if (dialog) openModal(dialog); else closeModal();
 }
 
 // Sign-ins magpie found but leaves alone, so nobody wonders why an agent that
-// is clearly logged in is not in the list. Empty today.
+// is clearly logged in is not in the list: the ones the user removed.
 function renderExcluded() {
   const box = $("#excluded");
   box.replaceChildren();
   for (const x of providers.excluded) {
     const r = el("div", "excluded");
     r.append(icon(x.agentIcon), el("span", "", ""));
-    r.lastChild.append(el("b", "", t("{agent} is signed in, but stays out of this list. ", { agent: x.agentName })), x.why);
+    r.lastChild.append(el("b", "", t("{agent} is signed in, but stays out of this list. ", { agent: x.agentName })), t(x.why));
+    if (x.provider) {
+      const back = el("button", "link", t("Add it back"));
+      back.onclick = () => providerAction("save", { id: x.provider }, t("{name} added back", { name: x.agentName }));
+      r.lastChild.append(" ", back);
+    }
     box.append(r);
   }
 }
@@ -1091,7 +1134,7 @@ function input(value, placeholder, type = "text") {
   i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") cancelEdit(); };
   return i;
 }
-function cancelEdit() { editing = null; draft = null; renderProviders(); }
+function cancelEdit() { editing = null; draft = null; importing = null; renderProviders(); }
 
 // ---------- modal ----------
 // The provider editor opens as a dialog over the page; Escape, the backdrop
@@ -1208,7 +1251,11 @@ function renderEditor(p, presetID) {
     ed.append(...field(t("Models"), renderModels(p), ""));
     ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
     const bar = el("div", "bar");
-    bar.append(el("span", "grow"));
+    // removing only hides it from magpie; the agent stays signed in
+    const del = el("button", "text danger", t("Remove"));
+    del.title = t("{agent} stays signed in; magpie just stops offering it", { agent: a.agentName });
+    del.onclick = () => providerAction("delete", { id: p.id }, t("{name} removed", { name: p.name }));
+    bar.append(del, el("span", "grow"));
     const cancel = el("button", "text", t("Cancel"));
     cancel.onclick = cancelEdit;
     const saveBtn = el("button", "text primary", t("Save"));
@@ -1324,6 +1371,68 @@ function renderEditor(p, presetID) {
   return ed;
 }
 
+// renderImport: what a magpie://import link would add, for the user to
+// check. Nothing is saved until they press Add; the key stays hidden unless
+// they ask to see it.
+function renderImport(im) {
+  const ed = el("div", "editor new import");
+  ed.onclick = (e) => e.stopPropagation();
+  const p = im.provider || {};
+  const h = el("div", "ehead");
+  h.append(icon(p.icon || "generic"), el("b", "", im.error ? t("Import link") : p.name));
+  if (!im.error) h.append(el("span", "note", t("from a link")));
+  ed.append(h);
+  const bar = el("div", "bar");
+  bar.append(el("span", "grow"));
+  const cancel = el("button", "text", t(im.error ? "Close" : "Cancel"));
+  cancel.onclick = cancelEdit;
+  bar.append(cancel);
+  if (im.error) {
+    ed.append(el("div", "warnbox", t("This link can't be imported: {e}", { e: im.error })), bar);
+    return ed;
+  }
+
+  const hosts = [...new Set([p.chat, p.responses, p.anthropic].filter(Boolean).map(hostOf))];
+  ed.append(el("div", "warnbox", t("Added from a link. Your prompts and this key will go to {hosts}; add it only if you trust the site that sent you here.", { hosts: hosts.join(", ") })));
+
+  const name = input(im.name ?? p.name, t("e.g. My Relay"));
+  name.oninput = () => { im.name = name.value; };
+  ed.append(...field(t("Name"), name));
+
+  const key = input(im.key ?? p.key ?? "", t(p.key ? "" : "paste an API key"), "password");
+  key.oninput = () => { im.key = key.value; };
+  key.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") add(); else if (e.key === "Escape") cancelEdit(); };
+  const side = el("div", "side");
+  const eye = el("button", "text", t("Show"));
+  eye.onclick = () => { const on = key.type === "password"; key.type = on ? "text" : "password"; eye.textContent = t(on ? "Hide" : "Show"); };
+  side.append(eye);
+  if (p.keysUrl && !p.key) { const b = el("button", "link", t("Get a key ↗")); b.onclick = () => api("open", { url: p.keysUrl }); side.append(b); }
+  const keyWrap = el("div", "pair");
+  keyWrap.append(key, side);
+  ed.append(...field(t("API key"), keyWrap, p.key ? t("From the link. Kept in ~/.config/magpie/providers.json, readable by you alone.") : ""));
+
+  ed.append(...field(t("Endpoints"), renderEndpoints(null, p), ""));
+  if (p.models?.length) {
+    const chips = el("div", "mchips");
+    for (const m of p.models) chips.append(el("span", "mchip on", m));
+    ed.append(...field(t("Models"), chips, ""));
+  }
+  if (im.replaces) ed.append(el("div", "warnbox soft", t("Replaces your {name}, key and all.", { name: im.replaces })));
+
+  const addBtn = el("button", "text primary", t(im.replaces ? "Replace" : "Add"));
+  const add = () => {
+    const n = (im.name ?? p.name).trim();
+    if (!n) { name.focus(); return status(t("Give it a name"), "warn"); }
+    addBtn.classList.add("busy");
+    providerAction("save", { ...p, name: n, key: (im.key ?? p.key ?? "").trim() }, t("{name} added", { name: n }));
+  };
+  addBtn.onclick = add;
+  bar.append(addBtn);
+  ed.append(bar);
+  setTimeout(() => (p.key ? addBtn : key).focus(), 0);
+  return ed;
+}
+
 // Which of the vendor's models the agents get to see: click to toggle, type
 // to add one the vendor's list lacks, Refresh to ask the vendor again.
 // The endpoints a provider serves, with a Test that reports against each one.
@@ -1428,6 +1537,7 @@ async function providerAction(action, body, okMsg) {
     providers = await api("provider/" + action, body);
     editing = null;
     draft = null;
+    importing = null;
     adding = false;
     presetQuery = "";
     renderProviders();
@@ -1449,10 +1559,24 @@ $("#addProvider").onclick = () => { adding = true; editing = null; draft = null;
 
 const PERIODS = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All"]];
 
+// The subscriptions' quotas come from the vendors and can take a while (or
+// never come without a proxy), so they load on their own and the local log
+// never waits for them. They don't depend on the period either.
+let quotas = null;
 async function loadUsage() {
   renderUsageLoading();
+  loadQuotas();
   usage = await api("usage?period=" + period);
   renderUsage();
+}
+
+let quotasLoading = null;
+function loadQuotas() {
+  if (quotasLoading) return quotasLoading;
+  quotasLoading = api("usage/quotas")
+    .then((q) => { quotas = q || []; }, () => { quotas = quotas || []; })
+    .finally(() => { quotasLoading = null; renderQuotas(); });
+  return quotasLoading;
 }
 
 function renderUsageLoading() {
@@ -1468,14 +1592,7 @@ function renderUsageLoading() {
   }
   slide(seg, "period");
   $("#usageCost").replaceChildren(el("span", "skeleton sk-cost"));
-  const subscriptions = $("#subscriptionUsage");
-  subscriptions.hidden = false;
-  subscriptions.replaceChildren();
-  for (let i = 0; i < 2; i++) {
-    const card = el("div", "subscription-card skeleton-card");
-    card.append(el("span", "skeleton sk-title"), el("span", "skeleton sk-line"), el("span", "skeleton sk-line short"));
-    subscriptions.append(card);
-  }
+  renderQuotas();
   const stats = $("#stats");
   stats.classList.remove("empty");
   stats.replaceChildren();
@@ -1506,33 +1623,20 @@ function fmtCost(t) {
 }
 const tokensOf = (t) => t.input + t.output;
 
-function renderUsage() {
-  const u = usage;
-  const view = $("#view-usage");
-  view.classList.remove("loading");
-  view.removeAttribute("aria-busy");
-  const seg = $("#period");
-  seg.replaceChildren();
-  for (const [id, name] of PERIODS) {
-    const b = el("button", "opt" + (id === period ? " on" : ""), t(name));
-    b.onclick = () => { for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b); slide(seg, "period"); period = id; loadUsage().catch((e) => status(e.message, "err")); };
-    seg.append(b);
-  }
-  slide(seg, "period");
-  const cost = $("#usageCost");
-  cost.replaceChildren();
-  const c = fmtCost(u);
-  if (c) {
-    cost.append(el("b", "", "≈" + c), el("span", "", t("list price")));
-    cost.title = u.unpriced ? t(u.unpriced === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n: u.unpriced }) : t("At each model's list price on models.dev");
-  } else if (u.calls) {
-    cost.append(el("span", "", t("no price for these models")));
-  }
-
+function renderQuotas() {
   const subscriptions = $("#subscriptionUsage");
   subscriptions.replaceChildren();
-  subscriptions.hidden = !u.subscriptions?.length;
-  for (const sub of u.subscriptions || []) {
+  if (!quotas) {
+    subscriptions.hidden = false;
+    for (let i = 0; i < 2; i++) {
+      const card = el("div", "subscription-card skeleton-card");
+      card.append(el("span", "skeleton sk-title"), el("span", "skeleton sk-line"), el("span", "skeleton sk-line short"));
+      subscriptions.append(card);
+    }
+    return;
+  }
+  subscriptions.hidden = !quotas.length;
+  for (const sub of quotas) {
     const card = el("div", "subscription-card");
     const head = el("div", "subscription-head");
     head.append(icon(sub.icon), el("b", "", sub.name));
@@ -1558,6 +1662,30 @@ function renderUsage() {
       card.append(windows);
     }
     subscriptions.append(card);
+  }
+}
+
+function renderUsage() {
+  const u = usage;
+  const view = $("#view-usage");
+  view.classList.remove("loading");
+  view.removeAttribute("aria-busy");
+  const seg = $("#period");
+  seg.replaceChildren();
+  for (const [id, name] of PERIODS) {
+    const b = el("button", "opt" + (id === period ? " on" : ""), t(name));
+    b.onclick = () => { for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b); slide(seg, "period"); period = id; loadUsage().catch((e) => status(e.message, "err")); };
+    seg.append(b);
+  }
+  slide(seg, "period");
+  const cost = $("#usageCost");
+  cost.replaceChildren();
+  const c = fmtCost(u);
+  if (c) {
+    cost.append(el("b", "", "≈" + c), el("span", "", t("list price")));
+    cost.title = u.unpriced ? t(u.unpriced === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n: u.unpriced }) : t("At each model's list price on models.dev");
+  } else if (u.calls) {
+    cost.append(el("span", "", t("no price for these models")));
   }
 
   const stats = $("#stats");
@@ -1649,11 +1777,13 @@ function renderUsage() {
 
 // ---------- settings ----------
 //
-// Two choices (palette, language) and the facts people come looking for:
+// Three choices (palette, language, what the tray icon opens) and the facts
+// people come looking for:
 // the version, where magpie keeps its files, the gateway's address.
 
 const THEMES = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
 const LOCALES = [["system", "System"], ["en", "English"], ["zh", "中文"]];
+const TRAYS = [["panel", "Quick panel"], ["window", "Main window"]];
 
 // applyPrefs paints and speaks as the saved settings say. A ?theme= or
 // ?locale= in the URL wins, so a forced look stays forced.
@@ -1685,8 +1815,11 @@ async function loadSettings() {
 
 function renderSettings() {
   const s = prefs;
-  $("#themeSegs").replaceChildren(segs(THEMES.map(([id, name]) => [id, t(name)]), s.theme, (theme) => savePrefs({ theme, lang: s.lang })));
-  $("#langSegs").replaceChildren(segs(LOCALES.map(([id, name]) => [id, t(name)]), s.lang, (lang) => savePrefs({ theme: s.theme, lang })));
+  const keep = { theme: s.theme, lang: s.lang, tray: s.tray, proxy: s.proxy || "" };
+  $("#themeSegs").replaceChildren(segs(THEMES.map(([id, name]) => [id, t(name)]), s.theme, (theme) => savePrefs({ ...keep, theme })));
+  $("#langSegs").replaceChildren(segs(LOCALES.map(([id, name]) => [id, t(name)]), s.lang, (lang) => savePrefs({ ...keep, lang })));
+  $("#traySegs").replaceChildren(segs(TRAYS.map(([id, name]) => [id, t(name)]), s.tray || "panel", (tray) => savePrefs({ ...keep, tray })));
+  renderProxy(s, keep);
 
   const about = $("#about");
   about.replaceChildren();
@@ -1706,6 +1839,45 @@ function renderSettings() {
   open.onclick = () => api("open", { url: "file://" + s.path });
   row(t("Config folder"), t("providers, profiles and these settings"), s.dir, copyBtn(s.dir, t("Path")), open);
   row(t("Gateway URL"), t("the address every agent is pointed at"), s.gateway, copyBtn(s.gateway, t("Gateway URL")));
+}
+
+// renderProxy: magpie's own requests to vendors follow the system proxy on
+// their own; this row says which one, and lets it be turned off or set.
+let proxyCustom = false; // Custom picked, nothing typed yet
+function renderProxy(s, keep) {
+  const cur = !s.proxy ? "auto" : s.proxy === "direct" ? "off" : "custom";
+  const mode = proxyCustom ? "custom" : cur;
+  const sub = $("#proxySub");
+  sub.textContent = {
+    settings: t("Requests to vendors go through {proxy}", { proxy: s.proxyNow }),
+    system: t("Following the system proxy, {proxy}", { proxy: s.proxyNow }),
+    environment: t("Following HTTPS_PROXY, {proxy}", { proxy: s.proxyNow }),
+    off: t("Off: requests to vendors go direct"),
+    none: t("No system proxy found; requests to vendors go direct"),
+  }[s.proxySource] || "";
+  const box = $("#proxySegs");
+  box.replaceChildren();
+  const pick = (id) => {
+    proxyCustom = id === "custom";
+    if (id === "auto") savePrefs({ ...keep, proxy: "" });
+    else if (id === "off") savePrefs({ ...keep, proxy: "direct" });
+    else renderProxy(s, keep);
+  };
+  if (mode === "custom") {
+    const i = input(cur === "custom" ? s.proxy : "", "http://127.0.0.1:7890");
+    i.className = "proxy";
+    const save = () => {
+      const v = i.value.trim();
+      if (!v || v === s.proxy) return;
+      proxyCustom = false;
+      savePrefs({ ...keep, proxy: v });
+    };
+    i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") save(); else if (e.key === "Escape") { proxyCustom = false; renderProxy(s, keep); } };
+    i.onblur = save;
+    box.append(i);
+    if (proxyCustom) queueMicrotask(() => i.focus());
+  }
+  box.append(segs([["auto", t("Auto")], ["off", t("Off")], ["custom", t("Custom")]], mode, pick));
 }
 
 // renderUpdate fills in the version row: whether a newer magpie is out.
@@ -1807,6 +1979,17 @@ else { $("#nav").remove(); }
 // the panel comes back into view.
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 window.addEventListener("focus", load);
+// Opened on a magpie://import link: fetch what it describes (once — the
+// id is spent) and ask before adding it.
+if (mode === "window" && params.get("import")) {
+  const id = params.get("import");
+  params.delete("import");
+  history.replaceState(null, "", "?" + params);
+  api("import/" + encodeURIComponent(id)).then((im) => {
+    importing = im;
+    if (providers && view === "providers") renderProviders();
+  }).catch(() => {});
+}
 if (mode === "window" && ["providers", "gateway", "usage", "settings"].includes(params.get("view"))) show(params.get("view"));
 else if (mode === "window") slide($("#nav"), "nav");
 load();

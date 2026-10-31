@@ -514,6 +514,9 @@ func (m model) viewList() string {
 		line := pad + marker + name + "  "
 		for j, f := range a.Fields {
 			v := m.values[i][f.Key]
+			if v == "" && f.Quiet && !(sel && j == m.col) {
+				continue
+			}
 			var cell string
 			switch {
 			case sel && j == m.col:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -33,7 +34,7 @@ const providerUsage = `usage:
 // providers: `magpie providers`
 func providers() error {
 	all := provider.All()
-	if len(all) == 0 {
+	if len(all) == 0 && len(provider.Excluded()) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
 		return nil
 	}
@@ -79,7 +80,11 @@ func providers() error {
 			name = a.Name
 		}
 		fmt.Println()
-		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why))
+		back := ""
+		if x.Provider != "" {
+			back = " · magpie provider add " + x.Provider + " brings it back"
+		}
+		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why+back))
 	}
 	return nil
 }
@@ -277,6 +282,12 @@ func addProvider(rest []string) error {
 	if err := applyPairs(&p, rest); err != nil {
 		return err
 	}
+	return saveNew(p)
+}
+
+// saveNew saves a provider the user just added, then asks the vendor for
+// its models.
+func saveNew(p provider.Provider) error {
 	if err := provider.Save(p); err != nil {
 		return err
 	}
@@ -440,4 +451,47 @@ func serve() error {
 		fmt.Printf("  %d models · %s\n", n, muted.Render("magpie models"))
 	}
 	return s.ListenAndServe(context.Background())
+}
+
+// importCmd adds the provider a magpie://import link describes, after
+// showing it: magpie import [-y] <link>.
+func importCmd(args []string) error {
+	yes := false
+	var link string
+	for _, a := range args {
+		switch a {
+		case "-y", "--yes":
+			yes = true
+		default:
+			link = a
+		}
+	}
+	if link == "" {
+		return errors.New("magpie import [-y] 'magpie://import?…'")
+	}
+	p, err := provider.ParseImport(link)
+	if err != nil {
+		return err
+	}
+	if err := showProvider(p); err != nil {
+		return err
+	}
+	if old, err := provider.Find(p.ID); err == nil {
+		fmt.Println(amber.Render("!"), "replaces your", old.Name)
+	}
+	if !yes {
+		if st, err := os.Stdin.Stat(); err != nil || st.Mode()&os.ModeCharDevice == 0 {
+			return errors.New("not a terminal: add -y to import without asking")
+		}
+		fmt.Print("Add it? [y/N] ")
+		var answer string
+		_, _ = fmt.Scanln(&answer)
+		if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+			return errors.New("nothing added")
+		}
+	}
+	if p.Key == "" && !p.Ready() {
+		fmt.Println(amber.Render("!"), "the link has no key · magpie provider key", p.ID, "<key>")
+	}
+	return saveNew(p)
 }
