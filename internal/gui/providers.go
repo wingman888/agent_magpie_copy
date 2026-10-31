@@ -40,13 +40,13 @@ type providerJSON struct {
 		Masked   string `json:"masked"`
 		Optional bool   `json:"optional"`
 	} `json:"key"`
-	Ready     bool            `json:"ready"`
-	Chosen    []string        `json:"chosen"`  // the user's explicit picks, if any
-	Models    []modelJSON     `json:"models"`  // everything the vendor lists, exposed ones flagged
-	Exposed   int             `json:"exposed"` // how many reach the agents
-	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
-	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
-	Sponsored bool            `json:"sponsored"`
+	Ready     bool              `json:"ready"`
+	Chosen    []string          `json:"chosen"`  // the user's explicit picks, if any
+	Models    []modelJSON       `json:"models"`  // everything the vendor lists, exposed ones flagged
+	Exposed   int               `json:"exposed"` // how many reach the agents
+	Fetched   string            `json:"fetched"` // "3h ago" when the list came from the vendor
+	Agents    []providerAgent   `json:"agents"`  // detected agents, current ones flagged
+	Sponsored bool              `json:"sponsored"`
 	Account   *provider.Account `json:"account,omitempty"` // signed-in agent backing this provider
 }
 
@@ -98,7 +98,7 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Account: p.Account,
-		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
+		Ready:   p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}

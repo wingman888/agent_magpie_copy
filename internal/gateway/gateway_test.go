@@ -3,11 +3,11 @@ package gateway
 import (
 	"bytes"
 	"encoding/base64"
-	"os"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
