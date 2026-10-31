@@ -425,7 +425,7 @@ candidates:
 			hw.close()
 			try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
 			failed := hw.failed()
-			if r.Context().Err() != nil && (failed || call.Status >= 400) {
+			if r.Context().Err() != nil && (failed || call.Status >= 400 || hw.holding()) {
 				// the agent went away: no provider is to blame, and none is asked
 				call.Status, call.Error = 499, "canceled"
 				try.Status, try.Error, try.Fail, try.Kind = 499, "canceled", failCanceled, KindCanceled
@@ -463,7 +463,7 @@ candidates:
 						call.Status, call.Error = 499, "canceled"
 						try.Status, try.Error, try.Fail, try.Kind, try.WaitMs = 499, "canceled", failCanceled, KindCanceled, 0
 						s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-								break candidates
+						break candidates
 					}
 				}
 			}
@@ -492,7 +492,7 @@ candidates:
 		t.Tokens = call.Usage.Input + call.Usage.Output + call.Usage.CacheRead + call.Usage.CacheWrite
 	})
 	s.record(call)
-	if call.To != "" {
+	if call.To != "" && call.Status != 499 {
 		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
 			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})

@@ -193,12 +193,21 @@ func (t *trace) update(r *Route, f func(r *Route)) {
 	f(r)
 	if r.Done && !done {
 		t.totals.Requests++
+		canceled := false
 		for _, try := range r.Tries {
 			if try.Rest != nil {
 				t.totals.Rerouted++
 			}
+			if try.Kind == KindRetry {
+				t.totals.Retried++
+			}
+			if try.Kind == KindCanceled {
+				canceled = true
+			}
 		}
-		if r.Status >= 400 {
+		if canceled {
+			t.totals.Canceled++
+		} else if r.Status >= 400 {
 			t.totals.Errors++
 		}
 	}

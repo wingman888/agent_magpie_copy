@@ -393,3 +393,13 @@ func TestOpenAIFirstSkipsGptOss(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotedModelNotAccessibleFailsOver(t *testing.T) {
+	plan := &script{steps: []step{{code: 400, body: `{"error":{"message":"model \"m1\" is not accessible via the /chat/completions endpoint"}}`}}}
+	spare := &script{steps: []step{{body: okChat}}}
+	chain(t, provider.Chat, plan, spare)
+	code, body := post(t, "/v1/chat/completions", chatReq)
+	if code != 200 || !strings.Contains(body, "from-ok") || spare.count() != 1 {
+		t.Fatalf("%d %s spare=%d", code, body, spare.count())
+	}
+}

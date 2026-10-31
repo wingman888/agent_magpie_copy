@@ -336,6 +336,10 @@ func retryable(status int, body []byte) bool {
 	case status == 401, status == 402, status == 403, status == 404, status == 408, status == 429, status >= 500:
 		return true
 	case status == 400, status == 422:
+		body = bytes.ReplaceAll(body, []byte(`\"`), []byte(`"`))
+		if notChatModel(status, body) {
+			return true
+		}
 		if contextWords.Match(body) && !hardQuotaWords.Match(body) {
 			return false
 		}
@@ -483,9 +487,9 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	if h.streaming && !h.errSeen {
 		h.scan = append(h.scan, b...)
 		h.consume()
-		if !h.passing && !h.errSeen && h.held.Len() > streamHoldMax {
-			h.flushHeld()
-		}
+	}
+	if h.streaming && !h.passing && h.held.Len() > streamHoldMax {
+		h.flushHeld()
 	}
 	return len(b), nil
 }
@@ -531,6 +535,13 @@ func (h *holdWriter) failed() bool {
 		return retryable(h.errStatus, h.errBody)
 	}
 	return h.status >= 400 && retryable(h.status, h.held.Bytes())
+}
+
+// holding reports whether the reply is still held back, nothing sent on.
+func (h *holdWriter) holding() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !h.passing && h.streaming
 }
 
 // result is what the held reply was: its status, and what it said.
