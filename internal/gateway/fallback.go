@@ -443,10 +443,11 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	}
 	if h.sniffing {
 		h.held.Write(b)
-		h.scan()
-		if h.sniffing && h.held.Len() > holdSize {
-			h.flushSniffed()
+		if h.held.Len() > holdSize {
+			h.flushSniffed() // too much held back: let it through, errors included
+			return len(b), nil
 		}
+		h.scan()
 		return len(b), nil
 	}
 	if !h.passing {
