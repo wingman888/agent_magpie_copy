@@ -28,7 +28,7 @@ func dialBin(t *testing.T) string {
 			return
 		}
 		binPath = filepath.Join(dir, "dial")
-		out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput()
+		out, err := exec.Command("go", "build", "-tags", "nogui", "-o", binPath, ".").CombinedOutput()
 		if err != nil {
 			buildErr = fmt.Errorf("%v: %s", err, out)
 		}

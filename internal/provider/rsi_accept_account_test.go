@@ -54,9 +54,11 @@ func codexLogin(t *testing.T, home string) {
 	})
 }
 
-func copilotLogin(t *testing.T, home string) {
+func copilotLogin(t *testing.T, home string) { copilotLoginTok(t, home, "gho_x") }
+
+func copilotLoginTok(t *testing.T, home, tok string) {
 	writeJSON(t, filepath.Join(home, ".config", "github-copilot", "apps.json"), map[string]any{
-		"github.com:Iv1.x": map[string]any{"user": "octocat", "oauth_token": "gho_x"},
+		"github.com:Iv1.x": map[string]any{"user": "octocat", "oauth_token": tok},
 	})
 }
 
@@ -107,7 +109,7 @@ func TestAcceptAccountsAppearAsProviders(t *testing.T) {
 	}
 	// no tokens leak through the JSON form
 	b, _ := json.Marshal(codex)
-	if strings.Contains(string(b), "h.") && strings.Contains(string(b), ".sig") || !strings.Contains(string(b), `"agent":"codex"`) {
+	if strings.Contains(string(b), ".sig") || !strings.Contains(string(b), `"agent":"codex"`) {
 		t.Fatalf("json: %s", b)
 	}
 }
@@ -189,9 +191,9 @@ func TestAcceptSignedOutAndAPIKeyMode(t *testing.T) {
 func TestAcceptUserProviderWinsOverAccount(t *testing.T) {
 	home := isolate(t)
 	codexLogin(t, home)
-	if err := provider.Save(provider.Provider{ID: "codex", Name: "Mine", Chat: "https://my.example/v1", Key: "k", Models: []string{"m"}}); err != nil {
-		t.Fatal(err)
-	}
+	writeJSON(t, provider.Path(), map[string]any{"providers": []map[string]any{
+		{"id": "codex", "name": "Mine", "key": "k", "chat": "https://my.example/v1", "models": []string{"m"}},
+	}})
 	n := 0
 	for _, p := range provider.All() {
 		if p.ID == "codex" {
@@ -262,7 +264,7 @@ func TestAcceptCodexSignAndPrepare(t *testing.T) {
 
 func TestAcceptCopilotModelsAndSign(t *testing.T) {
 	home := isolate(t)
-	copilotLogin(t, home)
+	copilotLoginTok(t, home, "gho_models")
 	var api *httptest.Server
 	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer sess" || r.Header.Get("Copilot-Integration-Id") == "" {
@@ -282,7 +284,7 @@ func TestAcceptCopilotModelsAndSign(t *testing.T) {
 	}))
 	defer api.Close()
 	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "token gho_x" {
+		if r.Header.Get("Authorization") != "token gho_models" {
 			w.WriteHeader(401)
 			return
 		}
@@ -339,7 +341,7 @@ func TestAcceptCopilotModelsAndSign(t *testing.T) {
 
 func TestAcceptCopilotNoChatModelsIsError(t *testing.T) {
 	home := isolate(t)
-	copilotLogin(t, home)
+	copilotLoginTok(t, home, "gho_nochat")
 	var api *httptest.Server
 	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"data":[{"id":"emb","model_picker_enabled":true,"capabilities":{"type":"embeddings"}}]}`))
