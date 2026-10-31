@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -45,7 +44,7 @@ func (p Provider) Test(ctx context.Context) []Result {
 			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		}
-		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
+		out = append(out, probe(ctx, p, proto, url, body, model))
 	}
 	return out
 }
@@ -65,7 +64,7 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
-func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string) Result {
+func probe(ctx context.Context, p Provider, proto Protocol, url, body, model string) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -73,17 +72,17 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if proto == Responses {
+		body = string(p.Prepare([]byte(body)))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		r.Error = err.Error()
 		return r
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	if p.IsOpenCode() {
-		req.Header.Set("x-opencode-session", "magpie-test-"+randomUUID())
-	}
-	if err := p.Sign(ctx, req, proto, body); err != nil {
+	if err := p.Sign(ctx, req, proto, []byte(body)); err != nil {
 		r.Error = err.Error()
 		return r
 	}
