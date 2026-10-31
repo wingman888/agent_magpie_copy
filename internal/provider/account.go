@@ -514,6 +514,7 @@ func claudeToken(ctx context.Context) (string, error) {
 
 // Accounts lists the signed-in agents as providers.
 func Accounts() []Provider {
+	rememberLogins(false)
 	home, _ := os.UserHomeDir()
 	cfg := os.Getenv("XDG_CONFIG_HOME")
 	if cfg == "" {
