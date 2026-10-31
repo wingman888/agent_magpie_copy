@@ -6,16 +6,11 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"sync"
-	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 
-	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/update"
+	"github.com/yetone/dial/internal/gateway"
 )
 
 //go:embed tray.png
@@ -31,15 +26,11 @@ type host struct {
 	tray  *application.SystemTray
 
 	panelHeight int
-	query       string // what the windows' URLs carry (a forced theme)
 }
 
 func (h *host) HidePanel() { h.panel.Hide() }
-func (h *host) ShowMain(view string) {
+func (h *host) ShowMain() {
 	h.panel.Hide()
-	if view != "" {
-		h.main.SetURL("/?view=" + view + h.query)
-	}
 	h.main.Show()
 	h.main.Focus()
 }
@@ -66,10 +57,7 @@ func (h *host) FitPanel(height int) {
 // panel, plus a regular window for when you want it to stay around.
 // showMain opens the window immediately; otherwise only the tray icon appears.
 func Run(version string, showMain bool) error {
-	// After an update off the Mac, the old process starts this one and then
-	// quits; let it go before looking for the gateway.
-	update.AwaitPredecessor()
-	// The gateway runs inside the app. If another magpie already has the
+	// The gateway runs inside the app. If another dial already has the
 	// port, that one serves and this one only shows its status.
 	var gw *gateway.Server
 	if !gateway.Running() {
@@ -80,57 +68,24 @@ func Run(version string, showMain bool) error {
 			}
 		}()
 	}
-	// Model lists are fetched, never compiled in: whatever the agents can see
-	// comes from the models.dev catalog plus each vendor's own /models answer.
-	// Keep both halves warm without making the user click anything.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if catalog.Stale() {
-			if err := catalog.Sync(ctx); err != nil {
-				log.Println("catalog:", err)
-			}
-		}
-		cancel()
-		// A signed-in agent's list exists only at the vendor; fill it in the
-		// first time so the picker never shows a stale snapshot.
-		for _, p := range provider.All() {
-			if p.Account == nil || !p.Ready() {
-				continue
-			}
-			if _, ok := p.Fetched(); ok {
-				continue
-			}
-			c, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			if _, err := p.Fetch(c); err != nil {
-				log.Println(p.ID + ": " + err.Error())
-			}
-			cancel()
-		}
-	}()
-	// MAGPIE_THEME=light|dark forces the palette; handy for screenshots.
+	// DIAL_THEME=light|dark forces the palette; handy for screenshots.
 	theme := ""
-	if t := os.Getenv("MAGPIE_THEME"); t != "" {
+	if t := os.Getenv("DIAL_THEME"); t != "" {
 		theme = "&theme=" + t
 	}
-	Version = version
-	h := &host{query: theme}
+	h := &host{}
 	h.app = application.New(application.Options{
-		Name:        "magpie",
-		Description: "one place to pick every agent's model",
+		Name:        "dial",
+		Description: "one dial for every coding agent's model",
 		Icon:        appIcon,
 		Assets:      application.AssetOptions{Handler: Handler(h, gw)},
 		Mac:         application.MacOptions{ActivationPolicy: application.ActivationPolicyAccessory},
 		Windows:     application.WindowsOptions{DisableQuitOnLastWindowClosed: true},
-		// A version downloaded but not restarted into is installed on the
-		// way out, so the next launch is the new one.
-		OnShutdown: func() { updates.install() },
-		// Wails exits on some webview errors; say why before it does.
-		ErrorHandler: func(err error) { log.Println("magpie:", err) },
 	})
 
 	h.panel = h.app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:            "panel",
-		Title:           "magpie",
+		Title:           "dial",
 		URL:             "/?mode=panel" + theme,
 		Width:           panelWidth,
 		Height:          520,
@@ -150,7 +105,7 @@ func Run(version string, showMain bool) error {
 
 	h.main = h.app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:      "main",
-		Title:     "magpie",
+		Title:     "dial",
 		URL:       "/?" + theme,
 		Width:     660,
 		Height:    600,
@@ -169,26 +124,13 @@ func Run(version string, showMain bool) error {
 	})
 
 	menu := h.app.NewMenu()
-	menu.Add("Open magpie").OnClick(func(*application.Context) { h.ShowMain("") })
+	menu.Add("Open dial").OnClick(func(*application.Context) { h.ShowMain() })
 	menu.AddSeparator()
 	menu.Add("Version " + version).SetEnabled(false)
-	restart := menu.Add("Restart to Update").SetHidden(true)
-	restart.OnClick(func(*application.Context) {
-		if restartToUpdate() {
-			h.app.Quit()
-		}
-	})
-	menu.Add("Quit magpie").OnClick(func(*application.Context) { h.app.Quit() })
-	updates.onReady = func(v string) {
-		application.InvokeSync(func() {
-			restart.SetLabel("Restart to Update to " + v).SetHidden(false)
-			menu.Update()
-		})
-	}
-	updates.start()
+	menu.Add("Quit dial").OnClick(func(*application.Context) { h.app.Quit() })
 
 	h.tray = h.app.SystemTray.New()
-	h.tray.SetTooltip("magpie")
+	h.tray.SetTooltip("dial")
 	if runtime.GOOS == "darwin" {
 		h.tray.SetTemplateIcon(trayIcon)
 	} else {
@@ -198,17 +140,7 @@ func Run(version string, showMain bool) error {
 	h.tray.AttachWindow(h.panel).WindowOffset(6)
 
 	if showMain {
-		if runtime.GOOS == "windows" {
-			// Wails shows a Windows webview 3s after Show whether or not
-			// WebView2 has made its controller yet, and a slow first start
-			// then crashes on the nil controller; wait for the first page.
-			var once sync.Once
-			h.main.OnWindowEvent(events.Windows.WebViewNavigationCompleted, func(*application.WindowEvent) {
-				once.Do(func() { h.ShowMain("") })
-			})
-		} else {
-			h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { h.ShowMain("") })
-		}
+		h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { h.ShowMain() })
 	}
 	return h.app.Run()
 }

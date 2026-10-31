@@ -1,4 +1,4 @@
-module github.com/yetone/magpie
+module github.com/yetone/dial
 
 go 1.26.3
 
