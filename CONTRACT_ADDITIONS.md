@@ -1,1 +1,0 @@
-- `internal/provider`: `var CodexBase string` — base URL of the ChatGPT Codex backend (default `https://chatgpt.com/backend-api/codex`); requests for `codex/<model>` go to `CodexBase + "/responses"`. Tests override it to point at a local fake server.
