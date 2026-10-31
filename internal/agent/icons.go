@@ -3,7 +3,7 @@ package agent
 import (
 	"strings"
 
-	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/dial/internal/provider"
 )
 
 // Every model in a picker carries its vendor's real logo. A models.dev
@@ -23,19 +23,6 @@ var byFamily = []struct{ prefix, icon string }{
 	{"qwen", "qwen-color"}, {"qwq", "qwen-color"},
 	{"mistral", "mistral-color"}, {"codestral", "mistral-color"}, {"devstral", "mistral-color"}, {"magistral", "mistral-color"},
 	{"minimax", "minimax-color"},
-}
-
-// providerIcon is the logo of a models.dev provider itself, which for one
-// serving other vendors' models (GitHub Copilot) is none of theirs.
-func providerIcon(catalogID string) string {
-	if ic := provider.IconForCatalog(catalogID); ic != "" {
-		return ic
-	}
-	switch catalogID {
-	case "github-copilot":
-		return "githubcopilot"
-	}
-	return ""
 }
 
 // modelIcon names the bundled logo for a model, given the models.dev
