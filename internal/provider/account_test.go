@@ -223,7 +223,9 @@ func TestSaveBareAccountID(t *testing.T) {
 		t.Fatal(string(b))
 	}
 	// a user's own provider with a base URL wins
-	Save(Provider{ID: "codex", Name: "mine", Chat: "http://own", Key: "k"})
+	f := load()
+	f.Providers = []Provider{{ID: "codex", Name: "mine", Chat: "http://own", Key: "k"}}
+	store(f)
 	if p, err := Find("codex"); err != nil || p.Account != nil || p.Chat != "http://own" {
 		t.Fatal(p, err)
 	}
