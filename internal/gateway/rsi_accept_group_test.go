@@ -397,7 +397,7 @@ func TestAcceptSameModelAutoGroup(t *testing.T) {
 	if !ok || len(ms) != 4 {
 		t.Fatalf("members: %+v", ms)
 	}
-	for i, p := range []string{"orx", "cpx", "claude", "dated"} {
+	for i, p := range []string{"orx", "cpx", "clx", "dated"} {
 		if ms[i].Provider.ID != p {
 			t.Fatalf("member order: %+v", ms)
 		}
