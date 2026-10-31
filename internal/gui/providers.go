@@ -3,15 +3,14 @@ package gui
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/yetone/magpie/internal/agent"
-	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/dial/internal/agent"
+	"github.com/yetone/dial/internal/catalog"
+	"github.com/yetone/dial/internal/gateway"
+	"github.com/yetone/dial/internal/provider"
 )
 
 // The providers page: the vendors the user added, the presets they can add
@@ -25,17 +24,18 @@ type modelJSON struct {
 }
 
 type providerJSON struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Icon      string `json:"icon"`
-	Preset    string `json:"preset"`
-	Host      string `json:"host"`
-	Chat      string `json:"chat"`
-	Responses string `json:"responses"`
-	Anthropic string `json:"anthropic"`
-	Catalog   string `json:"catalog"`
-	Website   string `json:"website"`
-	KeysURL   string `json:"keysUrl"`
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Account   *provider.Account `json:"account,omitempty"`
+	Icon      string            `json:"icon"`
+	Preset    string            `json:"preset"`
+	Host      string            `json:"host"`
+	Chat      string            `json:"chat"`
+	Responses string            `json:"responses"`
+	Anthropic string            `json:"anthropic"`
+	Catalog   string            `json:"catalog"`
+	Website   string            `json:"website"`
+	KeysURL   string            `json:"keysUrl"`
 	Key       struct {
 		Set      bool   `json:"set"`
 		Masked   string `json:"masked"`
@@ -48,14 +48,6 @@ type providerJSON struct {
 	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
 	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
 	Sponsored bool            `json:"sponsored"`
-	Account   *accountJSON    `json:"account,omitempty"` // a signed-in agent, see provider.Account
-}
-
-type accountJSON struct {
-	provider.Account
-	Agent string `json:"agent"`     // the agent's id
-	Name  string `json:"agentName"` // the agent's name, for "from Codex CLI's sign-in"
-	Icon  string `json:"agentIcon"`
 }
 
 type providerAgent struct {
@@ -79,17 +71,11 @@ type gatewayJSON struct {
 	Calls   []gateway.Call `json:"calls"`
 }
 
-type excludedJSON struct {
-	provider.Exclusion
-	Name string `json:"agentName"`
-	Icon string `json:"agentIcon"`
-}
-
 type providersJSON struct {
-	Providers []providerJSON `json:"providers"`
-	Presets   []presetJSON   `json:"presets"`
-	Excluded  []excludedJSON `json:"excluded"` // sign-ins magpie found but will not share
-	Gateway   gatewayJSON    `json:"gateway"`
+	Providers []providerJSON       `json:"providers"`
+	Presets   []presetJSON         `json:"presets"`
+	Gateway   gatewayJSON          `json:"gateway"`
+	Excluded  []provider.Exclusion `json:"excluded"`
 }
 
 // currentProvider reads which provider (and model) an agent is routed to now.
@@ -97,7 +83,7 @@ func currentProvider(a *agent.Agent) (string, string) {
 	if len(a.Fields) == 0 {
 		return "", ""
 	}
-	v := strings.TrimPrefix(a.Fields[0].Get(), "magpie/")
+	v := strings.TrimPrefix(a.Fields[0].Get(), "dial/")
 	if pid, model, ok := strings.Cut(v, "/"); ok {
 		if _, err := provider.Find(pid); err == nil {
 			return pid, model
@@ -108,7 +94,7 @@ func currentProvider(a *agent.Agent) (string, string) {
 
 func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 	out := providerJSON{
-		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
+		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(), Account: p.Account,
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
@@ -124,12 +110,6 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 	out.Key.Masked = provider.Mask(p.Key)
 	if !out.Key.Set && p.Ready() {
 		out.Key.Optional = true
-	}
-	if a := p.Account; a != nil {
-		out.Account = &accountJSON{Account: *a, Agent: a.Agent, Name: a.Agent, Icon: "generic"}
-		if ag, err := agent.Find(a.Agent); err == nil {
-			out.Account.Name, out.Account.Icon = ag.Name, ag.Icon
-		}
 	}
 	exposed := map[string]bool{}
 	for _, m := range p.Exposed() {
@@ -159,13 +139,9 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 
 func providersState(gw *gateway.Server) providersJSON {
 	agents := agent.Detected()
-	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Excluded: []excludedJSON{}}
-	for _, x := range provider.Excluded() {
-		e := excludedJSON{Exclusion: x, Name: x.Agent, Icon: "generic"}
-		if a, err := agent.Find(x.Agent); err == nil {
-			e.Name, e.Icon = a.Name, a.Icon
-		}
-		s.Excluded = append(s.Excluded, e)
+	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Excluded: provider.Excluded()}
+	if s.Excluded == nil {
+		s.Excluded = []provider.Exclusion{}
 	}
 	have := map[string]bool{}
 	for _, p := range provider.All() {
@@ -191,9 +167,9 @@ func ago(t time.Time) string {
 	case d < time.Minute:
 		return "just now"
 	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Round(time.Minute).Minutes()))
+		return strings.TrimSuffix(d.Round(time.Minute).String(), "0s") + " ago"
 	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Round(time.Hour).Hours()))
+		return d.Round(time.Hour).String() + " ago"
 	default:
 		return t.Format("Jan 2")
 	}
