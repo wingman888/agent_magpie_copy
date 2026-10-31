@@ -13,11 +13,13 @@ import (
 
 // Option is one value the picker offers for a field.
 type Option struct {
-	Value string `json:"value"`
-	Label string `json:"label,omitempty"` // display name, when the value is an id
-	Note  string `json:"note"`
-	Icon  string `json:"icon,omitempty"`  // bundled icon name
-	Group string `json:"group,omitempty"` // section header in the picker
+	Value string   `json:"value"`
+	Label string   `json:"label,omitempty"` // display name, when the value is an id
+	Note  string   `json:"note"`
+	Icon  string   `json:"icon,omitempty"`  // bundled icon name
+	Icons []string `json:"icons,omitempty"` // a routing group: its members' providers' icons, each once
+	Group string   `json:"group,omitempty"` // section header in the picker
+	Ref   string   `json:"ref,omitempty"`   // the catalog model, the same in every agent
 }
 
 // Field is one tunable setting of an agent. Set with an empty value puts
@@ -29,6 +31,9 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
+	// Quiet fields are left out of listings while empty: they follow
+	// another field until set (Claude Code's per-tier models).
+	Quiet bool
 }
 
 // Agent is one supported coding agent.
