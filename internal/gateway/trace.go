@@ -116,7 +116,7 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 		if w.Who == "" {
 			w.Who = provider.Mask(c.p.Key)
 		}
-		w.Fit, w.Speaks = keyFit(c.p, c.model, from), c.p.KeyProtocol
+		w.Fit, w.Speaks = c.fit, c.p.KeyProtocol
 	default:
 		w.Kind = "provider"
 	}

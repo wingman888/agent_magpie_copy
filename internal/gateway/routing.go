@@ -353,7 +353,7 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 		return cs, wg
 	}
 	if p.Account == nil && !strings.HasPrefix(p.ID, groupPrefix) {
-		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, model, from) < keyFit(cs[j].p, model, from) })
+		sort.SliceStable(cs, func(i, j int) bool { return cs[i].fit < cs[j].fit })
 	}
 	return cs, wg
 }

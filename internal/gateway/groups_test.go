@@ -324,3 +324,20 @@ func TestKeysByProtocolPools(t *testing.T) {
 		t.Fatalf("%d %s %+v", code, u.last(), r.Tries)
 	}
 }
+
+// A model named for another family doesn't change the tiers when the
+// provider has no key made for that family: the request's own protocol
+// (Chat here) decides.
+func TestKeyTiersFollowRequestProtocol(t *testing.T) {
+	groupSetup(t)
+	u := &keyed{fail: map[string]int{}}
+	addKeyed(t, u, "tiers", []string{"claude-x"}, k("u1"), k("u2"), provider.KeyAccount{Key: "c1", Protocol: provider.Chat})
+	provider.SetRouting("tiers", provider.Rotate)
+	s := New()
+	for range 3 {
+		_, r := ask(t, s, "tiers/claude-x", "", hi)
+		if u.last() != "c1" || len(r.Order) != 3 || r.Order[0].Aside || !r.Order[1].Aside || !r.Order[2].Aside || r.Order[0].Fit != 0 || r.Order[1].Fit != 1 {
+			t.Fatalf("answered by %s: %+v", u.last(), r.Order)
+		}
+	}
+}

@@ -79,6 +79,7 @@ var codexCLI struct {
 	sync.Mutex
 	v  string
 	at time.Time
+	on string // the PATH it was asked under
 }
 
 // codexCLIFor is how long the CLI's answer is kept.
@@ -87,10 +88,11 @@ const codexCLIFor = 10 * time.Minute
 func cachedCodexCLIVersion() string {
 	codexCLI.Lock()
 	defer codexCLI.Unlock()
-	if !codexCLI.at.IsZero() && time.Since(codexCLI.at) < codexCLIFor {
+	on := os.Getenv("PATH")
+	if !codexCLI.at.IsZero() && codexCLI.on == on && time.Since(codexCLI.at) < codexCLIFor {
 		return codexCLI.v
 	}
-	codexCLI.v, codexCLI.at = runCodexVersion(), time.Now()
+	codexCLI.v, codexCLI.at, codexCLI.on = runCodexVersion(), time.Now(), on
 	return codexCLI.v
 }
 

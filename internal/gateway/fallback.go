@@ -35,6 +35,8 @@ type candidate struct {
 	aside bool
 	// scope names what rotates it: the provider's model, or the group.
 	scope string
+	// fit is how well the key's own protocol suits the request (see keyFit).
+	fit int
 }
 
 // id tells a candidate apart from the others of its group: the same key
@@ -125,13 +127,15 @@ func poolsOf(p provider.Provider, model string, from provider.Protocol) (primary
 	if len(out) == 0 {
 		return []candidate{{p: p, model: model, rest: p.ID}}, nil, nil
 	}
+	want := requestProtocol(out, model, from)
 	best := 3
-	for _, c := range out {
-		best = min(best, keyFit(c.p, model, from))
+	for i := range out {
+		out[i].fit = keyFit(out[i].p, want)
+		best = min(best, out[i].fit)
 	}
 	for tier := best; tier <= 2; tier++ {
 		for _, c := range out {
-			if keyFit(c.p, model, from) != tier {
+			if c.fit != tier {
 				continue
 			}
 			if tier == best {
@@ -145,27 +149,34 @@ func poolsOf(p provider.Provider, model string, from provider.Protocol) (primary
 	return primary, aside, unlisted
 }
 
-// keyFit ranks how well a key suits a request, best first: 0 a key made for
-// the protocol the request needs — the one its model is at home in (Anthropic
-// for a Claude model, OpenAI's for a GPT one), else the one the agent spoke —
-// 1 a key made for none in particular, 2 a key made for another protocol.
-func keyFit(q provider.Provider, model string, from provider.Protocol) int {
-	if q.KeyProtocol == "" {
+// requestProtocol is the protocol a request needs of a key: the one it came
+// in on (from) — except when its model is at home in another protocol (a
+// Claude model in Anthropic's, a GPT one in OpenAI's) and the provider has a
+// key made for exactly that one, which then serves it with nothing
+// translated, whichever endpoint the agent used.
+func requestProtocol(cs []candidate, model string, from provider.Protocol) provider.Protocol {
+	fam := modelFamily(model)
+	if fam == "" || fam == from {
+		return from
+	}
+	for _, c := range cs {
+		kp := c.p.KeyProtocol
+		if kp == fam {
+			return fam
+		}
+	}
+	return from
+}
+
+// keyFit ranks how well a key suits a request needing protocol want, best
+// first: 0 a key made for that protocol, 1 a key made for none in
+// particular, 2 a key made for another protocol. The key's protocol is its
+// own, or for the main key the provider's KeyProtocol.
+func keyFit(q provider.Provider, want provider.Protocol) int {
+	switch {
+	case q.KeyProtocol == "":
 		return 1
-	}
-	switch modelFamily(model) {
-	case provider.Anthropic:
-		if q.KeyProtocol == provider.Anthropic {
-			return 0
-		}
-		return 2
-	case provider.Chat:
-		if q.KeyProtocol != provider.Anthropic {
-			return 0
-		}
-		return 2
-	}
-	if q.KeyProtocol == from {
+	case q.KeyProtocol == want:
 		return 0
 	}
 	return 2
