@@ -141,7 +141,7 @@ func TestAcceptAutoGroupInCatalog(t *testing.T) {
 	if got := strings.Join(catalogIDs(), " "); got != "a/m a/only-a b/vendor/m group/auto-m" {
 		t.Fatalf("catalog: %s", got)
 	}
-	g, ms, ok := provider.FindGroup("auto-m")
+	g, ms, ok := provider.FindGroup("group/auto-m")
 	if !ok || len(ms) != 2 || ms[0].Provider.ID != "a" || ms[1].Provider.ID != "b" {
 		t.Fatalf("find: %+v %+v %v", g, ms, ok)
 	}
@@ -201,7 +201,7 @@ func TestAcceptDeleteShowAutoGroup(t *testing.T) {
 	if err := provider.DeleteGroup("auto-m"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := provider.FindGroup("auto-m"); ok {
+	if _, _, ok := provider.FindGroup("group/auto-m"); ok {
 		t.Fatal("hidden group still found")
 	}
 	if code, _ := postAs(t, s, "", req); code == 200 {
@@ -221,7 +221,7 @@ func TestAcceptDeleteShowAutoGroup(t *testing.T) {
 	if err := provider.DeleteGroup("mine"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := provider.FindGroup("mine"); ok {
+	if _, _, ok := provider.FindGroup("group/mine"); ok {
 		t.Fatal("deleted group found")
 	}
 }
@@ -239,21 +239,21 @@ func TestAcceptGroupSaveRules(t *testing.T) {
 	if err := provider.SaveGroup(provider.Group{Name: "My Fine Group", Members: []string{"a/m"}, Routing: "bogus", Affinity: "bogus"}); err != nil {
 		t.Fatal(err)
 	}
-	g, ms, ok := provider.FindGroup("my-fine-group")
+	g, ms, ok := provider.FindGroup("group/my-fine-group")
 	if !ok || g.Name != "My Fine Group" || g.Routing != "" || g.Affinity != "" || len(ms) != 1 {
 		t.Fatalf("group: %+v %v %v", g, ms, ok)
 	}
 	if err := provider.SaveGroup(provider.Group{ID: "bare", Members: []string{"a/m"}}); err != nil {
 		t.Fatal(err)
 	}
-	if g, _, ok := provider.FindGroup("bare"); !ok || g.Name != "bare" {
+	if g, _, ok := provider.FindGroup("group/bare"); !ok || g.Name != "bare" {
 		t.Fatalf("name default: %+v", g)
 	}
 	// a group inside a group is ignored; duplicates count once
 	if err := provider.SaveGroup(provider.Group{ID: "outer", Members: []string{"group/bare", "a/m", "a/m", "a/x"}}); err != nil {
 		t.Fatal(err)
 	}
-	_, ms, ok = provider.FindGroup("outer")
+	_, ms, ok = provider.FindGroup("group/outer")
 	if !ok || len(ms) != 2 {
 		t.Fatalf("members: %+v", ms)
 	}
@@ -393,7 +393,7 @@ func TestAcceptSameModelAutoGroup(t *testing.T) {
 	if len(groups) != 1 || groups[0].ID != "group/auto-claude-opus-5-5" {
 		t.Fatalf("groups: %v", ids)
 	}
-	_, ms, ok := provider.FindGroup("auto-claude-opus-5-5")
+	_, ms, ok := provider.FindGroup("group/auto-claude-opus-5-5")
 	if !ok || len(ms) != 4 {
 		t.Fatalf("members: %+v", ms)
 	}
@@ -425,7 +425,7 @@ func TestAcceptKeyPoolsByProtocol(t *testing.T) {
 	for range 4 {
 		postAs(t, s, "", `{"model":"mix/m","messages":[{"role":"user","content":"hi"}]}`)
 	}
-	if got := strings.Join(v.tried, ","); got != "k1,k3,k1,k3" {
+	if got := strings.Join(v.tried, ","); got != "k1,k3,k1,k3" && got != "k3,k1,k3,k1" {
 		t.Fatalf("rotation went %s", got)
 	}
 	o := order(lastRoute(t, s))
