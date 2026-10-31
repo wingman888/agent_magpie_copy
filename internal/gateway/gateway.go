@@ -145,15 +145,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
+	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
+	mux.HandleFunc("GET /v1beta/models/{rest...}", s.geminiModel)
+	mux.HandleFunc("POST /v1beta/models/{rest...}", s.geminiPost)
+	mux.HandleFunc("POST /v1/models/{rest...}", s.geminiPost)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses and /v1/messages")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models/{model}:generateContent")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"}})
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages",
+			"/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:streamGenerateContent", "/v1beta/models/{model}:countTokens"}})
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -230,6 +235,13 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			writeError(w, from, 400, err.Error())
 			return
 		}
+		s.serve(w, r, from, body)
+	}
+}
+
+// serve handles one request body of a client API.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
+	{
 		start := time.Now()
 		call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
 		p, model, ok := provider.Resolve(call.Model)
@@ -416,6 +428,9 @@ func parse(proto provider.Protocol, body []byte) (*Request, error) {
 	case provider.Responses:
 		return parseResponses(body)
 	}
+	if proto == provider.Gemini {
+		return parseGemini(body)
+	}
 	return parseAnthropic(body)
 }
 
@@ -453,6 +468,9 @@ func encoder(proto provider.Protocol, w *sseWriter, model string) streamEncoder 
 	case provider.Responses:
 		return &responsesEncoder{w: w, model: model}
 	}
+	if proto == provider.Gemini {
+		return &geminiEncoder{w: w, model: model}
+	}
 	return &anthropicEncoder{w: w, model: model}
 }
 
@@ -462,6 +480,9 @@ func render(proto provider.Protocol, res Result, model string) []byte {
 		return renderChat(res, model)
 	case provider.Responses:
 		return renderResponses(res, model)
+	}
+	if proto == provider.Gemini {
+		return renderGemini(res, model)
 	}
 	return renderAnthropic(res, model)
 }
@@ -500,6 +521,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // writeError answers in the client's own error shape.
 func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg string) int {
+	if proto == provider.Gemini {
+		writeJSON(w, status, map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}})
+		return status
+	}
 	typ := "api_error"
 	switch {
 	case status == 400:

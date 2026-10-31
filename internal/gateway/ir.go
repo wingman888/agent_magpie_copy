@@ -75,6 +75,7 @@ type Request struct {
 	Effort     string // low | medium | high | xhigh | max, when the client asked
 	Thinking   bool   // the client asked for visible reasoning
 	Parallel   *bool  // parallel tool calls allowed
+	JSON       bool   // the client wants a JSON document as the reply
 }
 
 // EventKind is what a streamed event carries.

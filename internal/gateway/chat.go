@@ -263,6 +263,9 @@ func buildChat(r *Request, model, host string) []byte {
 	if r.Effort != "" {
 		out["reasoning_effort"] = r.Effort
 	}
+	if r.JSON {
+		out["response_format"] = map[string]any{"type": "json_object"}
+	}
 	if len(r.Tools) > 0 {
 		var tools []map[string]any
 		for _, t := range r.Tools {

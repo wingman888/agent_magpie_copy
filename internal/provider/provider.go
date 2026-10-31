@@ -23,6 +23,10 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
+
+	// Gemini is a client-facing protocol only: the gateway serves it but
+	// no upstream is ever spoken to in it, so it is not in Protocols.
+	Gemini Protocol = "gemini" // Google Gemini API
 )
 
 // Protocols in the order dial prefers them when it has to translate.
