@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -90,7 +87,7 @@ type Server struct {
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 netproxy.Func,
+			Proxy:                 http.ProxyFromEnvironment,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,
@@ -407,9 +404,6 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	if p.IsOpenCode() {
-		req.Header.Set("x-opencode-session", conversationID(in, body))
-	}
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
@@ -420,11 +414,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
-	body = rewriteModel(body, model)
-	if proto == provider.Chat {
-		body = developerAsSystem(body)
-	}
-	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
+	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(rewriteModel(body, model)), r.Header)
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}
@@ -714,85 +704,6 @@ func modelOf(body []byte) string {
 // rewriteModel swaps the model field, keeping every other field as it was.
 func rewriteModel(body []byte, model string) []byte {
 	return withFields(body, map[string]any{"model": model})
-}
-
-// developerAsSystem turns "developer" messages into "system" ones. Agents
-// such as Pi send the developer role to reasoning models, which OpenAI
-// accepts, but other Chat Completions backends (DeepSeek among them) reject
-// the whole request; every backend accepts system, OpenAI included.
-func developerAsSystem(body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"developer"`)) {
-		return body
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var m map[string]any
-	if err := dec.Decode(&m); err != nil {
-		return body
-	}
-	msgs, _ := m["messages"].([]any)
-	changed := false
-	for _, v := range msgs {
-		if msg, ok := v.(map[string]any); ok && msg["role"] == "developer" {
-			msg["role"] = "system"
-			changed = true
-		}
-	}
-	if !changed {
-		return body
-	}
-	out, err := json.Marshal(m)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
-// sessionHeaders are where agents already name their conversation: OpenCode
-// (to its own gateway, and to everyone else), Pi, Codex and Claude Code.
-var sessionHeaders = []string{
-	"x-opencode-session", "x-session-affinity", "x-session-id",
-	"session_id", "session-id", "x-claude-code-session-id",
-}
-
-// conversationID is a stable id for the conversation a request belongs to.
-// It is the agent's own session id when it sends one; otherwise it is derived
-// from the conversation's first user message, which every later turn repeats.
-func conversationID(in http.Header, body []byte) string {
-	for _, h := range sessionHeaders {
-		if v := strings.TrimSpace(in.Get(h)); v != "" {
-			return v
-		}
-	}
-	var m struct {
-		Messages []json.RawMessage `json:"messages"`
-		Input    json.RawMessage   `json:"input"`
-	}
-	// An undecodable body still gets an id: the hash of the whole body.
-	_ = json.Unmarshal(body, &m)
-	items := m.Messages
-	if len(items) == 0 && len(m.Input) > 0 && m.Input[0] == '[' {
-		// A malformed input array leaves items empty, and the whole body is hashed.
-		_ = json.Unmarshal(m.Input, &items)
-	}
-	first := []byte(m.Input)
-	if len(items) > 0 {
-		first = items[0]
-	}
-	for _, it := range items {
-		var r struct {
-			Role string `json:"role"`
-		}
-		if json.Unmarshal(it, &r) == nil && r.Role == "user" {
-			first = it
-			break
-		}
-	}
-	if len(first) == 0 {
-		first = body
-	}
-	sum := sha256.Sum256(first)
-	return "magpie-" + hex.EncodeToString(sum[:12])
 }
 
 // withFields sets top-level fields, keeping every other field as it was.
