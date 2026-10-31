@@ -158,8 +158,19 @@ func dataURL(p Part) string {
 	return "data:" + p.MediaType + ";base64," + p.Data
 }
 
+// reasoningModel is a model that rejects temperature and top_p.
+func reasoningModel(model string) bool {
+	m := strings.ToLower(model)
+	for _, pre := range []string{"gpt-5", "o1", "o3", "o4", "codex"} {
+		if strings.HasPrefix(m, pre) || strings.Contains(m, "/"+pre) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildChat renders a request for a Chat Completions upstream.
-func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
+func buildChat(r *Request, model, host string) []byte {
 	var msgs []map[string]any
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
@@ -238,7 +249,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			out["max_tokens"] = r.MaxTokens
 		}
 	}
-	if !rejectTemp {
+	if !reasoningModel(model) {
 		if r.Temp != nil {
 			out["temperature"] = *r.Temp
 		}
@@ -248,6 +259,14 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	}
 	if len(r.Stop) > 0 {
 		out["stop"] = r.Stop
+	}
+	if r.JSON {
+		if len(r.JSONSchema) > 0 {
+			out["response_format"] = map[string]any{"type": "json_schema",
+				"json_schema": map[string]any{"name": "response", "schema": r.JSONSchema}}
+		} else {
+			out["response_format"] = map[string]any{"type": "json_object"}
+		}
 	}
 	if r.Effort != "" {
 		out["reasoning_effort"] = r.Effort
