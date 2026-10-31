@@ -382,13 +382,10 @@ func TestAcceptSeveralKeysTakeOverFromEachOther(t *testing.T) {
 }
 
 // A relay with one key for Anthropic and one for OpenAI.
-var dbg []string
-
-func protocolRelay(t *testing.T, keys [2]map[string]any, models []string) (*gateway.Server, *[]string, *sync.Mutex) {
+func protocolRelay(t *testing.T, id string, keys [2]map[string]any, models []string) (*gateway.Server, *[]string, *sync.Mutex) {
 	isolate(t)
 	var mu sync.Mutex
 	var seen []string
-	dbg = nil
 	srv := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		key := r.Header.Get("x-api-key")
@@ -396,7 +393,6 @@ func protocolRelay(t *testing.T, keys [2]map[string]any, models []string) (*gate
 			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		}
 		mu.Lock()
-		dbg = append(dbg, r.URL.Path+" "+key+" "+strings.ReplaceAll(string(b), `"`, "'"))
 		seen = append(seen, r.URL.Path+" "+key)
 		mu.Unlock()
 		if (r.URL.Path == "/v1/messages") != (key == "k-ant") {
@@ -421,10 +417,18 @@ func protocolRelay(t *testing.T, keys [2]map[string]any, models []string) (*gate
 			io.WriteString(w, `{"id":"m1","type":"message","role":"assistant","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
 			return
 		}
+		if stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, sse(
+				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}`,
+				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+				`data: [DONE]`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, fmt.Sprintf(chatOK, "oai"))
 	}))
-	p := map[string]any{"id": "relay", "name": "Relay", "chat": srv + "/v1", "anthropic": srv, "models": models}
+	p := map[string]any{"id": id, "name": "Relay", "chat": srv + "/v1", "anthropic": srv, "models": models}
 	for k, v := range keys[0] {
 		p[k] = v
 	}
@@ -442,15 +446,16 @@ func TestAcceptKeysMadeForOneProtocol(t *testing.T) {
 	}
 	for name, keys := range orders {
 		t.Run(name, func(t *testing.T) {
-			s, seen, mu := protocolRelay(t, keys, []string{"claude-opus-4-8", "gpt-5.5"})
+			id := "relay-" + strings.ReplaceAll(name, " ", "-")
+			s, seen, mu := protocolRelay(t, id, keys, []string{"claude-opus-4-8", "gpt-5.5"})
 			for _, x := range []struct{ path, body, want string }{
 				// Claude Code asking for Claude: the Anthropic key, relayed as-is
-				{"/v1/messages", `{"model":"relay/claude-opus-4-8","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
-				{"/v1/messages", `{"model":"relay/claude-opus-4-8","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
+				{"/v1/messages", `{"model":"`+id+`/claude-opus-4-8","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
+				{"/v1/messages", `{"model":"`+id+`/claude-opus-4-8","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
 				// an OpenAI agent asking for Claude: translated, to the Anthropic key
-				{"/v1/chat/completions", `{"model":"relay/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
+				{"/v1/chat/completions", `{"model":"`+id+`/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
 				// Claude Code asking for GPT: translated, to the OpenAI key
-				{"/v1/messages", `{"model":"relay/gpt-5.5","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
+				{"/v1/messages", `{"model":"`+id+`/gpt-5.5","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
 			} {
 				mu.Lock()
 				*seen = nil
@@ -460,7 +465,7 @@ func TestAcceptKeysMadeForOneProtocol(t *testing.T) {
 				got := append([]string{}, *seen...)
 				mu.Unlock()
 				if code != 200 || len(got) != 1 || got[0] != x.want {
-					t.Fatalf("%s %.60s want %s: %d %s, upstream saw %v DBG %v", x.path, strings.ReplaceAll(x.body, `"`, "'"), x.want, code, strings.NewReplacer(`"`, "'").Replace(body), got, dbg)
+					t.Fatalf("%s %.60s want %s: %d %s, upstream saw %v", x.path, strings.ReplaceAll(x.body, `"`, "'"), x.want, code, strings.NewReplacer(`"`, "'").Replace(body), got)
 				}
 			}
 		})
