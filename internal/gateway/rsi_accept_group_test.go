@@ -70,7 +70,7 @@ func serveOn(t *testing.T, id, key string, models []string, v http.Handler, keys
 		p.Keys = append(p.Keys, provider.KeyAccount{Key: k})
 	}
 	if err := provider.Save(p); err != nil {
-		t.Fatal(err)
+		t.Fatalf("save %s: %q", id, err.Error())
 	}
 }
 
