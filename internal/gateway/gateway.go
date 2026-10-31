@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -315,10 +314,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
+	if p.Base(from) != "" {
 		call.To = from
 		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
 	} else {
@@ -354,8 +350,8 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	if err := p.Sign(ctx, req, to, body); err != nil {
-		return nil, err
+	for k, v := range provider.AuthHeaders(p, to) {
+		req.Header.Set(k, v)
 	}
 	return s.client.Do(req)
 }
@@ -364,7 +360,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
-	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(rewriteModel(body, model)), r.Header)
+	res, err := s.forward(r.Context(), p, proto, pathOf(proto), rewriteModel(body, model), r.Header)
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}
@@ -374,14 +370,13 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
-	rd, sse := eventStream(res)
 	h := w.Header()
 	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
 		if v := res.Header.Get(k); v != "" {
 			h.Set(k, v)
 		}
 	}
-	if sse {
+	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Accel-Buffering", "no")
 	}
@@ -391,7 +386,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	defer func() { u.add(sniff.usage()) }()
 	buf := make([]byte, 32<<10)
 	for {
-		n, err := rd.Read(buf)
+		n, err := res.Body.Read(buf)
 		if n > 0 {
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
@@ -408,29 +403,6 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	return res.StatusCode, ""
 }
 
-// eventStream reports whether a reply is server-sent events. The header
-// says so for most vendors; the ChatGPT backend sends none, so the body's
-// first bytes decide, and the header is filled in for whoever reads it.
-func eventStream(res *http.Response) (io.Reader, bool) {
-	ct := res.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "text/event-stream") {
-		return res.Body, true
-	}
-	if ct != "" && !strings.HasPrefix(ct, "text/plain") {
-		return res.Body, false
-	}
-	br := bufio.NewReaderSize(res.Body, 4<<10)
-	head, _ := br.Peek(16)
-	head = bytes.TrimLeft(head, " \t\r\n")
-	for _, pfx := range []string{"event:", "data:", ":"} {
-		if bytes.HasPrefix(head, []byte(pfx)) {
-			res.Header.Set("Content-Type", "text/event-stream")
-			return br, true
-		}
-	}
-	return br, false
-}
-
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
@@ -441,7 +413,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	stream := req.Stream
 	req.Stream = true
-	res, err := s.forward(r.Context(), p, to, pathOf(to), p.Prepare(build(to, req, model, p.Host())), r.Header)
+	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
 	if err != nil {
 		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
 	}
@@ -452,18 +424,17 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(to)
-	rd, sse := eventStream(res)
-	if !sse {
+	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
 		// the provider ignored stream:true; read the whole reply as one
 		// event stream would be wrong, so give up cleanly
-		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), req.Model)
 		var failed string
-		readSSE(rd, func(_, data string) error {
+		readSSE(res.Body, func(_, data string) error {
 			return dec(data, func(ev Event) {
 				switch ev.Kind {
 				case KError:
@@ -478,7 +449,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return 200, failed
 	}
 	var col collector
-	readSSE(rd, func(_, data string) error {
+	readSSE(res.Body, func(_, data string) error {
 		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {
@@ -569,14 +540,6 @@ func render(proto provider.Protocol, res Result, model string) []byte {
 }
 
 // ---- small helpers ------------------------------------------------------------
-
-func streamOf(body []byte) bool {
-	var v struct {
-		Stream bool `json:"stream"`
-	}
-	json.Unmarshal(body, &v)
-	return v.Stream
-}
 
 func modelOf(body []byte) string {
 	var v struct {
