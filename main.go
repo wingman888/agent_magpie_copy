@@ -16,6 +16,7 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
@@ -78,6 +79,11 @@ func main() {
 }
 
 func run(args []string) error {
+	// internal: the auth provider of a Grok run behind the gateway, asked
+	// for a token often; nothing else of magpie's needs to start for it
+	if len(args) == 3 && args[0] == "grok-token" {
+		return provider.GrokToken(os.Stdout, args[1], args[2], os.Getenv("GROK_AUTH_EXPIRED") == "1")
+	}
 	settings.Migrate()
 	agent.RenameLegacy()
 	if len(args) == 0 {
