@@ -74,8 +74,11 @@ func TestCodexSideAccountTakesOverOnQuota(t *testing.T) {
 	provider.CodexBase = up.URL + "/backend-api/codex"
 	defer func() { provider.CodexBase = old }()
 
+	h := New().Handler() // one server, so the resting account is remembered
 	for i := 0; i < 2; i++ {
-		code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping"}`)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"codex/gpt-5.5","input":"ping"}`)))
+		code, body := rec.Code, rec.Body.String()
 		if code != 200 || !strings.Contains(body, "pong") {
 			t.Fatalf("request %d: %d %s", i, code, body)
 		}
