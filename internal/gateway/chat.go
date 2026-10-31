@@ -172,17 +172,10 @@ func reasoningModel(model string) bool {
 // buildChat renders a request for a Chat Completions upstream.
 func buildChat(r *Request, model, host string) []byte {
 	var msgs []map[string]any
+	if r.System != "" {
+		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
+	}
 	deepseek := strings.Contains(host, "deepseek")
-	// JSON output: a schema goes in response_format where the vendor takes
-	// one; otherwise the system prompt has to ask for it.
-	schemaFmt := r.JSON && len(r.JSONSchema) > 0 && !deepseek
-	sys := r.System
-	if r.JSON && !schemaFmt {
-		sys = joinSystem(sys, r.jsonPrompt())
-	}
-	if sys != "" {
-		msgs = append(msgs, map[string]any{"role": "system", "content": sys})
-	}
 	for _, m := range r.Messages {
 		if m.Role == "assistant" {
 			am := map[string]any{"role": "assistant"}
@@ -269,12 +262,6 @@ func buildChat(r *Request, model, host string) []byte {
 	}
 	if r.Effort != "" {
 		out["reasoning_effort"] = r.Effort
-	}
-	if schemaFmt {
-		out["response_format"] = map[string]any{"type": "json_schema",
-			"json_schema": map[string]any{"name": "response", "schema": r.JSONSchema}}
-	} else if r.JSON {
-		out["response_format"] = map[string]any{"type": "json_object"}
 	}
 	if len(r.Tools) > 0 {
 		var tools []map[string]any
