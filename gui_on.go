@@ -2,7 +2,7 @@
 
 package main
 
-import "github.com/yetone/dial/internal/gui"
+import "github.com/yetone/magpie/internal/gui"
 
 const hasGUI = true
 
