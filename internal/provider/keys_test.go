@@ -84,7 +84,7 @@ func TestKeysUseOnRemove(t *testing.T) {
 		t.Fatal(err, names(get(t)))
 	}
 	UseKey("relay", a)
-	if err := SetKeyOn("relay", c, false); err != nil || names(get(t)) != "个人,团队,免费!" {
+	if err := SetKeyOn("relay", c, false); err != nil || names(get(t)) != "个人,免费!,团队" {
 		t.Fatal(err, names(get(t)))
 	}
 	if ks := get(t).KeysOn(); len(ks) != 2 {
