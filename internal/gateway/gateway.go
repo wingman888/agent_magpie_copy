@@ -62,12 +62,12 @@ type Call struct {
 	Agent             string            `json:"agent"` // who called, from the client's User-Agent
 	Model             string            `json:"model"`
 	Provider          string            `json:"provider"`
+	Fallback          string            `json:"fallback,omitempty"` // candidates that failed before this one answered
 	From              provider.Protocol `json:"from"`
 	To                provider.Protocol `json:"to"`
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
-	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
@@ -85,7 +85,7 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	trace        trace // what routing did with each request, for the Gateway view
+	rest         map[string]time.Time // failed candidates and when they may be tried first again
 }
 
 // New makes a gateway.
@@ -99,6 +99,7 @@ func New() *Server {
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
+		rest:         make(map[string]time.Time),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -162,7 +163,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("POST /_magpie/claude-mcp/{token}", s.subscription.mcpCall)
-	mux.HandleFunc(CodexPath+"/", s.codexBackend)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
 	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -177,10 +177,6 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 }
 
 func modelObject(e provider.Entry) map[string]any {
-	if e.Group != nil { // a routing group belongs to magpie itself
-		return map[string]any{"id": e.ID, "object": "model", "type": "model", "created": 0, "created_at": "2025-01-01T00:00:00Z",
-			"owned_by": "magpie", "display_name": e.Name}
-	}
 	return map[string]any{"id": e.ID, "object": "model", "type": "model", "created": 0, "created_at": "2025-01-01T00:00:00Z",
 		"owned_by": e.Provider.ID, "display_name": e.Name}
 }
@@ -219,7 +215,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	p, model, ok := provider.Resolve(modelOf(body))
 	// Claude Subscription generations run through the Claude Code binary. Its
 	// OAuth token must not take a direct HTTP side path just for token counting.
-	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok") {
+	if ok && p.Account != nil && p.Account.Agent == "claude" {
 		req, err := parseAnthropic(body)
 		if err != nil {
 			writeError(w, provider.Anthropic, 400, err.Error())
@@ -228,28 +224,20 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok {
-		// a relay's OpenAI-only key can't count Anthropic tokens
-		q := p
-		q.Anthropic = ""
-		for _, c := range perKey(p, model, provider.Anthropic) {
-			if c.p.Anthropic != "" {
-				q = c.p
-				break
-			}
-		}
-		p = q
-	}
 	if ok && p.Anthropic != "" {
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-		if err == nil {
-			defer res.Body.Close()
+		for _, kp := range anthropicKeys(p) { // never a key limited to OpenAI
+			res, err := s.forward(r.Context(), kp, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+			if err != nil {
+				continue
+			}
 			if res.StatusCode < 400 {
+				defer res.Body.Close()
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(res.StatusCode)
 				io.Copy(w, res.Body)
 				return
 			}
+			res.Body.Close()
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -353,128 +341,77 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	rq := newReqInfo(r.Header, body, from, call.Model)
-	var (
-		model    string
-		cands    []candidate
-		pl       planned
-		gt       *GroupTrace
-		routedTo string // what the model resolved to, for the trace
-	)
-	if gid, isGroup := provider.GroupID(call.Model); isGroup {
-		if g, ms, found := provider.FindGroup(gid); found {
-			if len(ms) == 0 {
-				call.Status, call.Error = 404, "routing group has no model ready"
-				writeError(w, from, 404, fmt.Sprintf("routing group %q has no model ready; check that its providers are added and ready in magpie", g.ID))
-				finishCapture()
-				s.record(call)
-				return
-			}
-			cands, pl = s.planGroup(rq, g, ms, from)
-			gt = &GroupTrace{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto, Members: []string{}}
-			for _, m := range ms {
-				gt.Members = append(gt.Members, m.Ref())
-			}
-			routedTo = groupPrefix + g.ID
+	p, model, ok := provider.Resolve(call.Model)
+	if !ok {
+		call.Status, call.Error = 404, "unknown model"
+		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
+		if ids := provider.IDs(); len(ids) > 0 {
+			msg += "; it has " + strings.Join(ids, ", ")
+		} else {
+			msg += "; add a provider in magpie first"
 		}
+		writeError(w, from, 404, msg)
+		finishCapture()
+		s.record(call)
+		return
 	}
-	if cands == nil {
-		p, m, ok := provider.Resolve(call.Model)
-		if !ok {
-			call.Status, call.Error = 404, "unknown model"
-			msg := fmt.Sprintf("magpie knows no model %q", call.Model)
-			if ids := provider.IDs(); len(ids) > 0 {
-				msg += "; it has " + strings.Join(ids, ", ")
-			} else {
-				msg += "; add a provider in magpie first"
-			}
-			writeError(w, from, 404, msg)
-			finishCapture()
-			s.record(call)
-			return
-		}
-		model, routedTo = m, p.ID
-		// the primary, then its fallbacks while it can't take the request and
-		// nothing has been sent yet
-		cands, pl = s.planFor(rq, p, m, from)
+	call.Provider = p.ID
+	cands := s.candidates(p, model, from)
+	if len(cands) == 0 {
+		call.Status, call.Error = 502, p.Name+" has no key usable for this request"
+		writeError(w, from, call.Status, call.Error)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		return
 	}
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: routedTo, Group: gt, Affinity: rq.affinity, Order: pl.order, Left: pl.left})
-	var skipped []string
-	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		began := time.Now()
-		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
-		if !last && hw.failed() {
-			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
-			try.Fail, try.Rest = rest.Why, &rest
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			skipped = append(skipped, c.label()+": "+call.Error)
+	var failed []string
+	var final attempt
+	for i, a := range cands {
+		final = a
+		g := newGate(w)
+		var u Usage
+		call.Provider = a.p.ID
+		status, msg := s.attempt(g, r, from, a, body, &u, &call)
+		if g.held && i < len(cands)-1 && r.Context().Err() == nil && retryable(g.status, g.buf.Bytes()) {
+			s.rested(a.cool)
+			failed = append(failed, a.label)
 			continue
 		}
-		hw.release()
-		model = c.model
-		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			rq.remember(c, call.Usage.CacheRead)
-		} else {
-			try.Fail = failure(call.Status, []byte(call.Error))
+		if g.held {
+			if retryable(g.status, g.buf.Bytes()) {
+				s.rested(a.cool)
+			}
+			g.release()
 		}
-		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+		call.Status, call.Error = status, msg
+		call.Usage = u
 		break
 	}
-	if len(skipped) > 0 {
-		call.Fallback = strings.Join(skipped, "; ")
-	}
+	call.Fallback = strings.Join(failed, " → ")
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
-	s.trace.update(tr, func(t *Route) {
-		t.Done, t.Status, t.Error, t.Millis = true, call.Status, call.Error, call.Millis
-		t.Tokens = call.Usage.Input + call.Usage.Output + call.Usage.CacheRead + call.Usage.CacheWrite
-	})
 	s.record(call)
-	if call.To != "" {
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-	}
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: final.p.ID, Model: final.model,
+		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
-// attempt sends a request to one provider. call.To stays empty when the
-// provider has no endpoint to send it to.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
+// attempt answers the request through one candidate.
+func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, a attempt, body []byte, u *Usage, call *Call) (int, string) {
+	p, model := a.p, a.model
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
-	}
-	// Cursor's API belongs to its own clients: its CLI does the talking
-	if p.Account != nil && p.Account.Agent == "cursor" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startCursor(ctx, req, model)
-		}
-		return s.serveSubscription(w, r, from, "Cursor", model, body, &call.Usage, start)
-	}
-	// and so does Grok's
-	if p.Account != nil && p.Account.Agent == "grok" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startGrok(ctx, req, model, p.Account.Home)
-		}
-		return s.serveSubscription(w, r, from, "Grok", model, body, &call.Usage, start)
+		return s.serveClaudeSubscription(w, r, from, model, body, u)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
+	if p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body)) {
 		call.To = from
-		return s.passthrough(w, r, p, from, model, body, &call.Usage)
+		return s.passthrough(w, r, p, from, model, body, u)
 	}
 	to := p.Speaks()
 	if len(to) == 0 {
@@ -482,7 +419,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		return writeError(w, from, 502, msg), msg
 	}
 	call.To = to[0]
-	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+	return s.translate(w, r, p, from, to[0], model, body, u)
 }
 
 // forward sends a request to the provider.
@@ -527,7 +464,6 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
 	rd, sse := eventStream(res)
@@ -670,7 +606,6 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(actual)
