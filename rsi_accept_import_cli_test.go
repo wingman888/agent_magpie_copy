@@ -11,7 +11,8 @@ import (
 func buildBin(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "magpie-bin")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd := exec.Command("go", "build", "-tags", "nogui", "-o", bin, ".")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("cannot build: %v\n%s", err, out)
 	}
