@@ -1,16 +1,17 @@
-// Package netproxy decides which proxy magpie's own outbound requests use.
+// Package netproxy decides which proxy magpie's own requests to vendors go
+// through. An app started from the Dock or the Start menu has no
+// HTTPS_PROXY in its environment, so without this every call to a vendor
+// that is only reachable through a proxy hangs until the agent gives up.
 //
-// The order is: the proxy setting in magpie's settings file, then the
-// HTTPS_PROXY family of environment variables (with NO_PROXY), then the
-// system proxy (macOS network settings, Windows Internet Options). Linux has
-// no system proxy beyond the environment. Loopback is never proxied.
+// In order: the proxy set in magpie's settings (or "direct" for none), the
+// usual *_PROXY variables, then the system's proxy (macOS network
+// settings, Windows Internet Options). Loopback is never proxied.
 package netproxy
 
 import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,275 +19,121 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-func init() {
-	// everything that uses http.DefaultClient follows the same rules
+// Install routes http.DefaultTransport (and so http.DefaultClient) through
+// Func.
+func Install() {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
 		t.Proxy = Func
 	}
 }
 
-// Func is an http.Transport.Proxy.
-func Func(r *http.Request) (*url.URL, error) { return For(r.URL) }
+// Func is an http.Transport Proxy function.
+func Func(req *http.Request) (*url.URL, error) {
+	if loopback(req.URL.Hostname()) {
+		return nil, nil
+	}
+	return For(req.URL)
+}
 
-// Setting returns the proxy value from the settings; tests replace it.
-var Setting = func() string { return settings.Load().Proxy }
-
-// System returns the system proxy configuration; tests replace it.
-var System = cachedSystem
-
-// For returns the proxy a request to u should use; nil means direct.
+// For is the proxy a request to u goes through; nil means direct.
 func For(u *url.URL) (*url.URL, error) {
-	if u == nil {
+	switch s := strings.TrimSpace(settings.Load().Proxy); s {
+	case "direct":
+		return nil, nil
+	case "":
+	default:
+		return Parse(s)
+	}
+	if p, err := fromEnv(u); p != nil || err != nil {
+		return p, err
+	}
+	sys := System()
+	if sys.URL == "" || bypassed(u.Hostname(), sys.Bypass) {
 		return nil, nil
 	}
-	host := u.Hostname()
-	if isLoopback(host) {
-		return nil, nil
-	}
-	switch s := strings.TrimSpace(Setting()); {
-	case strings.EqualFold(s, "direct"):
-		return nil, nil
-	case s != "":
-		return parseProxy(s)
-	}
-	if px, used, err := fromEnv(u); used {
-		return px, err
-	}
-	if cfg := System(); cfg != nil {
-		return cfg.proxyFor(u)
-	}
-	return nil, nil
+	return Parse(sys.URL)
 }
 
-func isLoopback(host string) bool {
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
-}
-
-// parseProxy accepts a proxy URL or a bare host:port (an http proxy).
-func parseProxy(s string) (*url.URL, error) {
+// Parse reads a proxy address; a bare host:port is an HTTP proxy.
+func Parse(s string) (*url.URL, error) {
+	s = strings.TrimSpace(s)
 	if !strings.Contains(s, "://") {
 		s = "http://" + s
 	}
-	p, err := url.Parse(s)
-	if err != nil || p.Hostname() == "" {
-		return nil, errBad(s)
-	}
-	switch strings.ToLower(p.Scheme) {
-	case "http", "https", "socks5", "socks5h":
-		return p, nil
-	}
-	return nil, errBad(s)
+	return url.Parse(s)
 }
 
-type errBad string
-
-func (e errBad) Error() string { return "invalid proxy " + string(e) }
-
-// ---- environment --------------------------------------------------------
-
-func env(names ...string) string {
-	for _, n := range names {
-		if v := strings.TrimSpace(os.Getenv(n)); v != "" {
-			return v
-		}
+// Describe says, for the settings page, what a request to u would use.
+func Describe() (proxy, source string) {
+	switch s := strings.TrimSpace(settings.Load().Proxy); s {
+	case "direct":
+		return "", "off"
+	case "":
+	default:
+		return s, "settings"
 	}
-	return ""
+	u, _ := url.Parse("https://chatgpt.com")
+	if p, _ := fromEnv(u); p != nil {
+		return p.String(), "environment"
+	}
+	if sys := System(); sys.URL != "" {
+		return sys.URL, "system"
+	}
+	return "", "none"
 }
 
-// fromEnv reports the proxy the environment names for u, and whether the
-// environment configures a proxy at all (otherwise the system gets a say).
-func fromEnv(u *url.URL) (*url.URL, bool, error) {
-	https := env("HTTPS_PROXY", "https_proxy")
-	http_ := env("HTTP_PROXY", "http_proxy")
-	all := env("ALL_PROXY", "all_proxy")
-	if https == "" && http_ == "" && all == "" {
-		return nil, false, nil
-	}
-	var v string
-	if strings.EqualFold(u.Scheme, "https") {
-		v = https
-	} else {
-		v = http_
-	}
-	if v == "" {
-		v = all
-	}
-	if v == "" {
-		return nil, true, nil
-	}
-	if matchExceptions(u, splitList(env("NO_PROXY", "no_proxy"), ","), false) {
-		return nil, true, nil
-	}
-	p, err := parseProxy(v)
-	if err != nil {
-		return nil, true, err
-	}
-	return p, true, nil
+func fromEnv(u *url.URL) (*url.URL, error) { return http.ProxyFromEnvironment(&http.Request{URL: u}) }
+
+// Proxy is the system's proxy: one address, and the hosts that skip it.
+type Proxy struct {
+	URL    string
+	Bypass []string
 }
 
-func splitList(s, sep string) []string {
-	var out []string
-	for _, f := range strings.Split(s, sep) {
-		if f = strings.TrimSpace(f); f != "" {
-			out = append(out, f)
-		}
-	}
-	return out
+var sysCache struct {
+	sync.Mutex
+	at time.Time
+	p  Proxy
 }
 
-// ---- exceptions ---------------------------------------------------------
+// System reads the system proxy, at most every 15 seconds.
+func System() Proxy {
+	sysCache.Lock()
+	defer sysCache.Unlock()
+	if time.Since(sysCache.at) > 15*time.Second {
+		sysCache.p, sysCache.at = system(), time.Now()
+	}
+	return sysCache.p
+}
 
-// matchExceptions reports whether u's host is on a no-proxy list. sys turns
-// on the system-list extras: "<local>" and wildcard patterns.
-func matchExceptions(u *url.URL, list []string, sys bool) bool {
-	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
-	port := u.Port()
-	if port == "" {
-		if strings.EqualFold(u.Scheme, "https") {
-			port = "443"
-		} else {
-			port = "80"
-		}
+func loopback(host string) bool {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
 	}
 	ip := net.ParseIP(host)
-	for _, e := range list {
-		e = strings.ToLower(strings.TrimSpace(e))
-		if e == "" {
-			continue
-		}
-		if e == "*" {
-			return true
-		}
-		if e == "<local>" {
-			if sys && !strings.Contains(host, ".") && ip == nil {
+	return ip != nil && ip.IsLoopback()
+}
+
+// bypassed matches the system's exception list: exact hosts, "*.example.com"
+// or ".example.com" suffixes, and "<local>" for dotless names.
+func bypassed(host string, list []string) bool {
+	host = strings.ToLower(host)
+	for _, b := range list {
+		b = strings.ToLower(strings.TrimSpace(b))
+		switch {
+		case b == "":
+		case b == "<local>":
+			if !strings.Contains(host, ".") {
 				return true
 			}
-			continue
-		}
-		if strings.Contains(e, "://") {
-			if x, err := url.Parse(e); err == nil {
-				e = x.Host
+		case strings.HasPrefix(b, "*."), strings.HasPrefix(b, "."):
+			suf := strings.TrimPrefix(b, "*")
+			if strings.HasSuffix(host, suf) || host == suf[1:] {
+				return true
 			}
-		}
-		// CIDR, including the short macOS form "169.254/16"
-		if i := strings.Index(e, "/"); i > 0 {
-			if ip != nil {
-				if _, n, err := net.ParseCIDR(padCIDR(e)); err == nil && n.Contains(ip) {
-					return true
-				}
-			}
-			continue
-		}
-		pat, pport := e, ""
-		if h, p, err := net.SplitHostPort(e); err == nil {
-			pat, pport = h, p
-		} else if strings.HasPrefix(e, "[") && strings.HasSuffix(e, "]") {
-			pat = e[1 : len(e)-1]
-		}
-		if pport != "" && pport != port {
-			continue
-		}
-		if matchHost(host, ip, pat, sys) {
+		case host == b:
 			return true
 		}
 	}
 	return false
-}
-
-func padCIDR(c string) string {
-	i := strings.Index(c, "/")
-	addr, bits := c[:i], c[i:]
-	if !strings.Contains(addr, ":") {
-		for strings.Count(addr, ".") < 3 {
-			addr += ".0"
-		}
-	}
-	return addr + bits
-}
-
-func matchHost(host string, ip net.IP, pat string, sys bool) bool {
-	if pat == host {
-		return true
-	}
-	if strings.Contains(pat, "*") {
-		return wildcard(pat, host)
-	}
-	if ip != nil {
-		if pip := net.ParseIP(pat); pip != nil {
-			return pip.Equal(ip)
-		}
-		return false
-	}
-	pat = strings.TrimPrefix(pat, ".")
-	return host == pat || strings.HasSuffix(host, "."+pat)
-}
-
-// wildcard matches pat, where * stands for any run of characters.
-func wildcard(pat, s string) bool {
-	parts := strings.Split(pat, "*")
-	if len(parts) == 1 {
-		return pat == s
-	}
-	if !strings.HasPrefix(s, parts[0]) {
-		return false
-	}
-	s = s[len(parts[0]):]
-	last := parts[len(parts)-1]
-	for _, p := range parts[1 : len(parts)-1] {
-		i := strings.Index(s, p)
-		if i < 0 {
-			return false
-		}
-		s = s[i+len(p):]
-	}
-	return strings.HasSuffix(s, last)
-}
-
-// ---- system -------------------------------------------------------------
-
-// SystemConfig is the proxy configuration of the operating system.
-type SystemConfig struct {
-	HTTPS, HTTP, SOCKS *url.URL
-	Exceptions         []string
-	ExcludeSimple      bool // host names without a dot go direct
-}
-
-func (c *SystemConfig) proxyFor(u *url.URL) (*url.URL, error) {
-	if c.ExcludeSimple && !strings.Contains(u.Hostname(), ".") && net.ParseIP(u.Hostname()) == nil {
-		return nil, nil
-	}
-	if matchExceptions(u, c.Exceptions, true) {
-		return nil, nil
-	}
-	switch {
-	case c.HTTPS != nil:
-		return c.HTTPS, nil
-	case c.HTTP != nil:
-		return c.HTTP, nil
-	case c.SOCKS != nil:
-		return c.SOCKS, nil
-	}
-	return nil, nil
-}
-
-var (
-	sysMu   sync.Mutex
-	sysAt   time.Time
-	sysConf *SystemConfig
-)
-
-func cachedSystem() *SystemConfig {
-	sysMu.Lock()
-	defer sysMu.Unlock()
-	if sysAt.IsZero() || time.Since(sysAt) > 30*time.Second {
-		sysConf, sysAt = readSystem(), time.Now()
-	}
-	return sysConf
 }
