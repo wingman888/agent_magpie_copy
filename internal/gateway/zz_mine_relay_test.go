@@ -32,7 +32,7 @@ func (u *mineUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.mu.Lock()
 	u.hits = append(u.hits, h)
 	u.mu.Unlock()
-	u.reply(h, w)
+	u.mineReply(h, w)
 }
 
 func (u *mineUpstream) list() []mineHit {
