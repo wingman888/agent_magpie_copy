@@ -26,7 +26,7 @@ func viaMagpie(prefix string) []Option {
 			note = a.User + " · via magpie"
 		}
 		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
-			Icon: e.Provider.Icon, Group: e.Provider.Name})
+			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
 	}
 	return out
 }
@@ -49,12 +49,19 @@ func isMagpie(v string) bool {
 	return ok && strings.Contains(v, "/")
 }
 
+func firstOf(xs []string) string {
+	if len(xs) > 0 {
+		return xs[0]
+	}
+	return ""
+}
+
 // magpieModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
 	}
 	return out
 }
