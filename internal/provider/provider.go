@@ -310,17 +310,19 @@ func (p Provider) ApplyHeaders(h http.Header) {
 
 // SetRawHeaders writes headers into h with their names verbatim.
 func SetRawHeaders(h http.Header, extra map[string]string) {
-	for k, v := range extra {
-		k = strings.TrimSpace(k)
-		if k == "" {
-			continue
-		}
+	// first clear what the request already carries under these names, then
+	// write all of them, so names differing only in case both survive
+	for k := range extra {
 		for have := range h {
-			if strings.EqualFold(have, k) {
+			if strings.EqualFold(have, strings.TrimSpace(k)) {
 				delete(h, have)
 			}
 		}
-		h[k] = []string{strings.TrimSpace(v)}
+	}
+	for k, v := range extra {
+		if k = strings.TrimSpace(k); k != "" {
+			h[k] = []string{strings.TrimSpace(v)}
+		}
 	}
 }
 

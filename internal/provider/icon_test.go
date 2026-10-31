@@ -91,7 +91,7 @@ func TestHeaders(t *testing.T) {
 	}
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	got.Sign(context.Background(), req, Chat, nil)
-	if _, ok := req.Header["X-ORG-id"]; !ok || req.Header["Authorization"][0] != "mine" || len(req.Header["Authorization"]) != 1 {
+	if _, ok := req.Header["X-ORG-id"]; !ok || req.Header["X-Org-Id"][0] != "acme" || req.Header["Authorization"][0] != "mine" || len(req.Header["Authorization"]) != 1 {
 		t.Fatal(req.Header)
 	}
 	got.Fetch(context.Background())
