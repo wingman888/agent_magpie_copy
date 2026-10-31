@@ -351,10 +351,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	rq := newReqInfo(r.Header, body, from, call.Model)
 	var (
-		model  string
-		cands  []candidate
-		pl     planned
-		gt     *GroupTrace
+		model    string
+		cands    []candidate
+		pl       planned
+		gt       *GroupTrace
 		routedTo string // what the model resolved to, for the trace
 	)
 	if gid, isGroup := provider.GroupID(call.Model); isGroup {

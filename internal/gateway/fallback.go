@@ -17,7 +17,6 @@ import (
 	"bytes"
 	"net/http"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
