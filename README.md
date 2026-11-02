@@ -129,6 +129,19 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 `auth` to API key with the gateway token, and names the model in
 `settings.json`; a native model puts the previous auth back.
 
+**Signed-in accounts as providers.** If Codex is signed in with ChatGPT
+(`~/.codex/auth.json`) or Copilot with GitHub
+(`$XDG_CONFIG_HOME/github-copilot/apps.json` or `hosts.json`), dial lists that
+account as a provider (`codex`, `copilot`), and other agents can use its
+models as `codex/<model>` and `copilot/<model>`. dial reads the agent's own
+credential file every time it is used and never copies it. Sign out in the
+agent and the provider goes away. dial stores only which models you chose
+to expose, and `dial provider rm` just clears that choice. When an expiring
+Codex token is refreshed, the new token goes back into Codex's own file.
+A Claude Code sign-in is detected but not offered, because Anthropic's
+terms only allow a Claude subscription in Claude Code itself. Add an
+Anthropic API key instead.
+
 ## Install
 
 ```sh
