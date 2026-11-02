@@ -35,7 +35,14 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key"`              // API key, as typed by the user (the first, "in use" one)
+
+	// KeyName and KeyProtocol describe Key: a label, and the one protocol it
+	// may be used for ("" = any). Keys holds the further keys; they are
+	// tried in order after Key, each only while it is not switched off.
+	KeyName     string     `json:"keyName,omitempty"`
+	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
+	Keys        []ExtraKey `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -173,6 +180,9 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
+	if err := checkKeyProtocols(p); err != nil {
+		return err
+	}
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -264,6 +274,7 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
+	p = normalizeKeys(p)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
