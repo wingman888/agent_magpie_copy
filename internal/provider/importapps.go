@@ -1,11 +1,11 @@
 package provider
 
-// Providers another app has already set up — CC Switch, Alma — offered for
-// the user to bring over: each source is read (never written), every entry
-// turned into the provider magpie would add, and matched against what is
-// already here, so the picker can say which are new, which are already in,
-// and which would take an id that is in use. Nothing is added until the
-// user picks.
+// Providers another app has already set up — CC Switch, Alma, Claude Code's
+// own settings — offered for the user to bring over: each source is read
+// (never written), every entry turned into the provider magpie would add,
+// and matched against what is already here, so the picker can say which are
+// new, which are already in, and which would take an id that is in use.
+// Nothing is added until the user picks.
 
 import (
 	"database/sql"
@@ -65,6 +65,7 @@ var appReaders = []struct {
 }{
 	{"alma", "Alma", almaPath, readAlma},
 	{"cc-switch", "CC Switch", ccSwitchPath, readCCSwitch},
+	{"claude-code", "Claude Code", claudeSettingsPath, readClaudeSettings},
 }
 
 // ImportSources reads every app magpie can import from.
@@ -80,7 +81,7 @@ func ImportSources() []AppSource {
 			if err != nil {
 				s.Error = err.Error()
 			}
-			s.Items = settle(items, have, used)
+			s.Items = append(s.Items, settle(items, have, used)...) // [] rather than null when there is nothing
 		}
 		out = append(out, s)
 	}
@@ -141,6 +142,9 @@ func ImportFromApps(picks []AppPick) ([]string, error) {
 // freeID is id, or id-2, id-3… whichever no provider has.
 func freeID(id string) string {
 	taken := map[string]bool{"magpie": true}
+	for _, id := range accountIDs {
+		taken[id] = true
+	}
 	for _, p := range All() {
 		taken[p.ID] = true
 	}
@@ -344,6 +348,51 @@ func ccSwitchPath() string {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+func claudeSettingsPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", "settings.json")
+}
+
+// readClaudeSettings is the relay Claude Code was pointed at in its own
+// settings.json, before magpie: its base URL and token under env. While
+// Claude Code goes through magpie those are in magpie's stash, to be put
+// back when it leaves; the stash is read then.
+func readClaudeSettings(path string) ([]AppImport, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var s map[string]any
+	if err := json.Unmarshal(jsonc.ToJSON(raw), &s); err != nil {
+		return nil, errors.New("Claude Code's settings.json: " + err.Error())
+	}
+	env := mapOf(s["env"])
+	if base, _ := env["ANTHROPIC_BASE_URL"].(string); base != "" {
+		if u, err := url.Parse(cleanBase(base)); err == nil && gatewayURL(u) {
+			var st map[string]string
+			if b, err := os.ReadFile(filepath.Join(filepath.Dir(Path()), "stash.json")); err == nil {
+				json.Unmarshal(b, &st)
+			}
+			env = map[string]any{"ANTHROPIC_BASE_URL": st["claude.base_url"], "ANTHROPIC_AUTH_TOKEN": st["claude.auth_token"], "ANTHROPIC_MODEL": st["claude.model"]}
+		}
+	}
+	base, _ := env["ANTHROPIC_BASE_URL"].(string)
+	if strings.TrimSpace(base) == "" {
+		return nil, nil // Anthropic's own endpoint, the agent's sign-in
+	}
+	e := ccEntry{id: "settings", app: "claude", name: hostOf(cleanBase(base)), settings: map[string]any{"env": env}}
+	it := AppImport{Ref: "settings", From: "settings.json"}
+	name, key, eps, models, skip := ccSwitchEntry(e)
+	if skip == "" {
+		it.Provider, skip = imported(name, key, eps, models)
+	}
+	if skip != "" {
+		it.Provider = Provider{Name: e.name}
+		it.Skip = skip
+	}
+	return []AppImport{it}, nil
 }
 
 // ccSwitchApps names CC Switch's app types as the picker shows them.
