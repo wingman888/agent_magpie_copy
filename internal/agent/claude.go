@@ -149,7 +149,7 @@ func claude(home string) *Agent {
 				if err := edit.SetJSON(path, tierKVs(main, tiers)...); err != nil {
 					return err
 				}
-				if len(tiers) == 0 {
+				if len(tiers) > 0 {
 					return edit.DelJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL")
 				}
 				return nil
