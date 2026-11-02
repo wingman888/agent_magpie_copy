@@ -1005,6 +1005,7 @@ func copilotToken(ctx context.Context, github string) (copilotSession, error) {
 	}
 	copilotSessions[github] = s
 	return s, nil
+}
 
 // internal is a Copilot model id nobody picks by hand.
 var copilotInternal = regexp.MustCompile(`^(copilot-search|exec-agent|trajectory)|-(secondary|tertiary|4th|free-auto)$`)
