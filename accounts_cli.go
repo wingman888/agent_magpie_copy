@@ -1,253 +1,163 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
-	"runtime"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// accountsCmd: `magpie accounts [agent] [--json]`, `magpie accounts add <agent>`,
-// `magpie accounts switch|forget <agent> <email>`
-// — the subscriptions magpie remembers, how much of each one's allowance is
-// used, and switching the agent between them.
+const accountsUsage = `usage:
+  magpie accounts [claude|codex]               list the remembered subscription accounts (agent: claude, alias cc, or codex)
+  magpie accounts switch <agent> <email>       sign the agent in to a remembered account
+  magpie accounts forget <agent> <email>       forget a remembered account (not the one signed in)
+  magpie accounts add <agent>                  sign in to one more account and remember it
+  magpie accounts live <agent> <email> [on|off]  let an account work alongside the signed-in one (it takes over when that one runs out)`
+
+// loginCommand is what signs an agent in; a var so tests do not open browsers.
+var loginCommand = func(agent string) *exec.Cmd {
+	if agent == "claude" {
+		return exec.Command("claude", "auth", "login")
+	}
+	return exec.Command("codex", "login")
+}
+
 func accountsCmd(args []string) error {
-	const usage = "usage: magpie accounts [claude|codex|grok|copilot] [--json] | magpie accounts add <claude|codex> | magpie accounts switch|forget <claude|codex> <email>"
-	agentID := func(s string) (string, error) {
-		switch strings.ToLower(s) {
-		case "claude", "cc":
-			return "claude", nil
-		case "codex":
-			return "codex", nil
-		}
-		return "", fmt.Errorf("%q: only Claude Code and Codex accounts can be switched\n%s", s, usage)
+	rest := args[1:]
+	if len(rest) == 0 {
+		return listAccounts("claude", "codex")
 	}
-	if len(args) > 1 && args[1] == "add" {
-		if len(args) != 3 {
-			return fmt.Errorf("%s", usage)
+	verb := strings.ToLower(rest[0])
+	switch verb {
+	case "switch", "forget", "add", "live":
+		if len(rest) < 2 {
+			return fmt.Errorf("%s", accountsUsage)
 		}
-		id, err := agentID(args[2])
-		if err != nil {
+		agent, ok := provider.LoginAgent(rest[1])
+		if !ok {
+			return fmt.Errorf("unknown agent %q\n\n%s", rest[1], accountsUsage)
+		}
+		return accountsVerb(verb, agent, rest[2:])
+	}
+	agent, ok := provider.LoginAgent(rest[0])
+	if !ok || len(rest) > 1 {
+		return fmt.Errorf("unknown agent or command %q\n\n%s", rest[0], accountsUsage)
+	}
+	return listAccounts(agent)
+}
+
+func accountsVerb(verb, agent string, rest []string) error {
+	switch verb {
+	case "switch":
+		if len(rest) != 1 {
+			return fmt.Errorf("%s", accountsUsage)
+		}
+		if err := provider.SwitchLogin(agent, rest[0]); err != nil {
 			return err
 		}
-		return addAccount(id)
-	}
-	if len(args) > 1 && (args[1] == "switch" || args[1] == "forget") {
-		if len(args) != 4 {
-			return fmt.Errorf("%s", usage)
+		fmt.Println(green.Render("✓"), agent, "is now signed in as", bold.Render(canonicalUser(agent, rest[0])))
+		fmt.Println(muted.Render("  sessions that are already running keep the previous account until you restart them"))
+		return nil
+	case "forget":
+		if len(rest) != 1 {
+			return fmt.Errorf("%s", accountsUsage)
 		}
-		id, err := agentID(args[2])
-		if err != nil {
+		if err := provider.ForgetLogin(agent, rest[0]); err != nil {
 			return err
 		}
-		if args[1] == "forget" {
-			if err := provider.ForgetLogin(id, args[3]); err != nil {
-				return err
+		fmt.Println(green.Render("✓"), "forgot", bold.Render(rest[0]))
+		return nil
+	case "live":
+		if len(rest) < 1 || len(rest) > 2 {
+			return fmt.Errorf("%s", accountsUsage)
+		}
+		on := true
+		if len(rest) == 2 {
+			switch strings.ToLower(rest[1]) {
+			case "on":
+			case "off":
+				on = false
+			default:
+				return fmt.Errorf("%s", accountsUsage)
 			}
-			fmt.Println(green.Render("✓"), "forgot", args[3])
+		}
+		if err := provider.SetLoginOn(agent, rest[0], on); err != nil {
+			return err
+		}
+		state := "works alongside the signed-in account"
+		if !on {
+			state = "no longer works alongside the signed-in account"
+		}
+		fmt.Println(green.Render("✓"), bold.Render(canonicalUser(agent, rest[0])), state)
+		return nil
+	case "add":
+		if len(rest) != 0 {
+			return fmt.Errorf("%s", accountsUsage)
+		}
+		fmt.Println(muted.Render("opening the " + agent + " sign-in page — sign in to the account to add, then come back"))
+		_, err := provider.AddLogin(agent, func() error {
+			cmd := loginCommand(agent)
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("%s sign-in failed: %v", agent, err)
+			}
 			return nil
-		}
-		if err := provider.SwitchLogin(id, args[3]); err != nil {
+		})
+		if err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), id, "is now signed in as", args[3], muted.Render("· sessions already running keep their account until restarted"))
-		return nil
+		fmt.Println(green.Render("✓"), "account remembered")
+		return listAccounts(agent)
 	}
-	which, asJSON := "", false
-	for _, a := range args[1:] {
-		switch strings.ToLower(a) {
-		case "--json":
-			asJSON = true
-		case "grok", "copilot":
-			which = strings.ToLower(a)
-		default:
-			id, err := agentID(a)
-			if err != nil {
-				return err
+	return fmt.Errorf("%s", accountsUsage)
+}
+
+// canonicalUser spells an account as it was remembered.
+func canonicalUser(agent, user string) string {
+	if list, err := provider.Logins(agent); err == nil {
+		for _, l := range list {
+			if strings.EqualFold(l.User, user) {
+				return l.User
 			}
-			which = id
 		}
 	}
-	ls := provider.Logins(which)
-	rows := accountRows(ls, time.Now())
-	if asJSON {
-		b, _ := json.MarshalIndent(rows, "", "  ")
-		fmt.Println(string(b))
-		return nil
-	}
-	if len(ls) == 0 {
-		fmt.Println(muted.Render("no accounts yet ·"), "add one: magpie accounts add <claude|codex>")
-		return nil
-	}
-	width := 0
-	for _, r := range rows {
-		width = max(width, len(r.User))
-	}
-	for _, r := range rows {
-		mark := "  "
-		switch {
-		case r.Active:
-			mark = green.Render("● ")
-		case r.On:
-			mark = muted.Render("○ ")
-		}
-		plan := ""
-		if r.Plan != "" {
-			plan = " · " + r.Plan
-		}
-		line := fmt.Sprintf("%s%-7s %-*s %s", mark, r.Agent, width, r.User, muted.Render(fmt.Sprintf("%-8s", plan)))
-		for _, w := range r.Windows {
-			line += "  " + quotaCell(w)
-		}
-		if r.Error != "" {
-			line += "  " + muted.Render(r.Error)
-		}
-		fmt.Println(line)
-	}
-	fmt.Println(faint.Render("  ● signed in · ○ takes over when it runs out · add one: magpie accounts add <agent> · switch: magpie accounts switch <agent> <email>"))
-	return nil
+	return user
 }
 
-// accountRow is one account and its allowance, as `magpie accounts` shows it.
-type accountRow struct {
-	Agent   string      `json:"agent"`
-	User    string      `json:"user"`
-	Plan    string      `json:"plan,omitempty"`
-	Active  bool        `json:"active"` // the agent is signed in to it
-	On      bool        `json:"on"`     // in use: the active one, or next in line
-	Windows []quotaSpan `json:"windows"`
-	Error   string      `json:"error,omitempty"`
-}
-
-type quotaSpan struct {
-	Name      string     `json:"name"`
-	Used      float64    `json:"used"`      // percent
-	Remaining float64    `json:"remaining"` // percent
-	ResetsAt  *time.Time `json:"resetsAt,omitempty"`
-	Display   string     `json:"display,omitempty"`
-}
-
-// accountRows asks each agent's accounts for their allowance at once; what
-// was asked less than a minute ago comes from magpie's cache.
-func accountRows(ls []provider.Login, now time.Time) []accountRow {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	usage := map[string]map[string]provider.SubscriptionQuota{}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for _, l := range ls {
-		if _, ok := usage[l.Agent]; ok {
+func listAccounts(agents ...string) error {
+	shown := false
+	for _, agent := range agents {
+		list, err := provider.Logins(agent)
+		if err != nil {
+			return err
+		}
+		if len(list) == 0 {
+			if len(agents) == 1 {
+				fmt.Println(muted.Render("no " + agent + " accounts yet · sign in with the agent, or magpie accounts add " + agent))
+			}
 			continue
 		}
-		usage[l.Agent] = nil
-		wg.Add(1)
-		go func(agent string) {
-			defer wg.Done()
-			u := provider.LoginUsage(ctx, agent)
-			mu.Lock()
-			usage[agent] = u
-			mu.Unlock()
-		}(l.Agent)
-	}
-	wg.Wait()
-	rows := []accountRow{}
-	for _, l := range ls {
-		r := accountRow{Agent: l.Agent, User: l.User, Plan: l.Plan, Active: l.Active, On: l.On, Windows: []quotaSpan{}}
-		for user, q := range usage[l.Agent] {
-			if !strings.EqualFold(user, l.User) {
-				continue
+		shown = true
+		fmt.Println(bold.Render(agent))
+		for _, l := range list {
+			mark, tag := "  ", ""
+			switch {
+			case l.Current:
+				mark, tag = green.Render("● "), "signed in"
+			case l.Live:
+				tag = "also on"
 			}
-			if r.Plan == "" {
-				r.Plan = q.Plan
+			plan := ""
+			if l.Plan != "" {
+				plan = "  " + l.Plan
 			}
-			r.Error = q.Error
-			for _, w := range q.Windows {
-				s := quotaSpan{Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display}
-				if s.ResetsAt == nil && w.ResetSecs > 0 {
-					t := now.Add(time.Duration(w.ResetSecs) * time.Second)
-					s.ResetsAt = &t
-				}
-				r.Windows = append(r.Windows, s)
-			}
+			fmt.Println(" ", mark+l.User+muted.Render(plan), muted.Render(tag))
 		}
-		rows = append(rows, r)
 	}
-	return rows
-}
-
-// quotaCell is one window in a line: "5h 42% ↻2h13m".
-func quotaCell(w quotaSpan) string {
-	name := strings.NewReplacer(" hours", "h", " hour", "h", " days", "d", " day", "d", " · ", " ").Replace(w.Name)
-	cell := fmt.Sprintf("%s %.0f%%", name, w.Used)
-	if w.Display != "" {
-		cell += " (" + w.Display + ")"
+	if !shown && len(agents) > 1 {
+		fmt.Println(muted.Render("no subscription accounts yet · sign in to claude or codex, or magpie accounts add <agent>"))
 	}
-	if w.ResetsAt != nil {
-		cell += muted.Render(" ↻" + untilShort(time.Until(*w.ResetsAt)))
-	}
-	return cell
-}
-
-// untilShort is a time left as "45m", "2h13m" or "3d4h".
-func untilShort(d time.Duration) string {
-	switch {
-	case d <= 0:
-		return "now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
-	}
-	return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
-}
-
-// addAccount signs in to one more subscription in the browser, the way the
-// window's "Add account" does.
-func addAccount(agentID string) error {
-	st, err := provider.StartSignIn(agentID)
-	if err != nil {
-		return err
-	}
-	fmt.Println("Finish signing in in your browser. If it didn't open, go to:")
-	fmt.Println(faint.Render(st.URL))
-	openInBrowser(st.URL)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	st, err = provider.WaitSignIn(ctx, st.ID)
-	if err != nil {
-		return err
-	}
-	switch st.State {
-	case "done":
-		if st.Using {
-			fmt.Println(green.Render("✓"), agentID, "is signed in as", st.User)
-		} else {
-			fmt.Println(green.Render("✓"), "added", st.User, muted.Render("· use it: magpie accounts switch "+agentID+" "+st.User))
-		}
-		return nil
-	case "failed":
-		return fmt.Errorf("sign-in didn't finish: %s", st.Error)
-	}
-	return fmt.Errorf("sign-in canceled")
-}
-
-func openInBrowser(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
-	_ = cmd.Start()
+	return nil
 }
