@@ -187,6 +187,9 @@ func gemini(home string) *Agent {
 						key,
 						{Value: "vertex", Label: "Vertex AI", Icon: "googlecloud-color", Note: "Vertex AI · $GOOGLE_CLOUD_PROJECT"},
 					}
+					if current() == "dial" {
+						out = append(out, Option{Value: "dial", Note: "via dial's gateway — pick a catalog model"})
+					}
 					if current() == "custom" {
 						out = append(out, Option{Value: "custom", Note: hostOf(base()) + " (from .env)"})
 					}
@@ -204,7 +207,7 @@ func gemini(home string) *Agent {
 							ms = append(ms, m)
 						}
 					}
-					return options(ms, "")
+					return append(options(ms, ""), viaDial("")...)
 				},
 			},
 		},
