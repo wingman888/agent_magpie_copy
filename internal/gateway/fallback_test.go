@@ -1,11 +1,11 @@
 package gateway
 
 import (
+	"bytes"
 	"io"
 	"net/http"
-	"slices"
-	"bytes"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
