@@ -52,10 +52,6 @@ type Provider struct {
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
-	// Headers are extra HTTP headers sent with every request to a custom
-	// vendor, after the key, names exactly as the user typed them.
-	Headers map[string]string `json:"headers,omitempty"`
-
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
 	Hidden bool `json:"hidden,omitempty"`
@@ -98,11 +94,7 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := os.Chmod(p, 0o600); err != nil {
-		return err
-	}
-	cleanIcons(f)
-	return nil
+	return os.Chmod(p, 0o600)
 }
 
 // All lists the configured providers in the order they were added, then
@@ -259,15 +251,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Icon = strings.TrimSpace(p.Icon)
-	p.Headers = cleanHeaders(p.Headers)
-	if p.Preset != "" {
-		// a preset vendor is reached the way magpie knows; it wears its own icon
-		p.Headers = nil
-		if iconRef(p.Icon) != "" || strings.HasPrefix(p.Icon, IconPrefix) {
-			p.Icon = ""
-		}
-	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -283,36 +266,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
-}
-
-// cleanHeaders trims header names and values and drops nameless ones.
-// Names keep their case: "X-Org-Id" and "X-ORG-id" are two entries.
-func cleanHeaders(h map[string]string) map[string]string {
-	var out map[string]string
-	for k, v := range h {
-		k = strings.TrimSpace(k)
-		if k == "" {
-			continue
-		}
-		if out == nil {
-			out = map[string]string{}
-		}
-		out[k] = strings.TrimSpace(v)
-	}
-	return out
-}
-
-// Custom reports whether the provider is a plain key-and-URL endpoint the
-// user entered: neither a preset vendor nor a signed-in agent.
-func (p Provider) Custom() bool { return p.Preset == "" && p.Account == nil }
-
-// CustomHeaders are the extra headers sent to the provider; only a custom
-// provider has any.
-func (p Provider) CustomHeaders() map[string]string {
-	if !p.Custom() {
-		return nil
-	}
-	return cleanHeaders(p.Headers)
 }
 
 func cleanList(xs []string) []string {

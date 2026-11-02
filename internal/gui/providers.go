@@ -203,18 +203,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 	mux.HandleFunc("GET /api/providers", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, providersState(gw))
 	})
-	mux.HandleFunc("GET /api/icon/{name}", func(rw http.ResponseWriter, r *http.Request) {
-		// a custom provider's own picture (see provider.StoreIcon)
-		f := provider.IconFile(r.PathValue("name"))
-		if f == "" {
-			http.NotFound(rw, r)
-			return
-		}
-		rw.Header().Set("X-Content-Type-Options", "nosniff")
-		rw.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:")
-		rw.Header().Set("Cache-Control", "max-age=31536000, immutable")
-		http.ServeFile(rw, r, f)
-	})
 	mux.HandleFunc("POST /api/provider/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var in provider.Provider
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -238,15 +226,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			old, _ := provider.Find(in.ID)
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
-			}
-			// the form does not edit headers or a picture icon yet; keep them
-			if old != nil && old.Custom() {
-				if in.Headers == nil {
-					in.Headers = old.Headers
-				}
-				if in.Icon == "" || in.Icon == "generic" {
-					in.Icon = old.Icon
-				}
 			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
