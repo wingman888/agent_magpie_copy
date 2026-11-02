@@ -3,58 +3,52 @@ package agent
 import (
 	"strings"
 
-	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/dial/internal/catalog"
+	"github.com/yetone/dial/internal/gateway"
+	"github.com/yetone/dial/internal/provider"
 )
 
 // Every agent's model picker has two halves: the models the agent reaches
-// on its own (its sign-in, its own keys), and magpie's catalog — every model
+// on its own (its sign-in, its own keys), and dial's catalog — every model
 // of every provider the user added, reached through the local gateway.
 // A catalog model is spelled "provider/model"; an agent that sends that to
 // the gateway gets the vendor's reply in whichever API the agent speaks.
 
-// magpieID is the provider id agents know the gateway by.
-const magpieID = "magpie"
+// dialID is the provider id agents know the gateway by.
+const dialID = "dial"
 
-// viaMagpie lists the catalog for a picker, one group per provider.
-func viaMagpie(prefix string) []Option {
+// viaDial lists the catalog for a picker, one group per provider.
+func viaDial(prefix string) []Option { return viaDialExcept(prefix, "") }
+
+// viaDialExcept is viaDial without the models of one agent's own account:
+// sending Codex through dial back to its own ChatGPT sign-in is a detour.
+func viaDialExcept(prefix, agentID string) []Option {
 	var out []Option
-	for _, e := range provider.Catalog() {
-		note := e.Provider.Name + " · via magpie"
+	for _, e := range catalogExcept(agentID) {
+		note := e.Provider.Name
 		if a := e.Provider.Account; a != nil {
-			note = a.User + " · via magpie"
+			note = a.User
 		}
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
 }
 
-// viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going
-// through magpie to its own ChatGPT login would only add a hop.
-func viaMagpieFor(agentID, prefix string) []Option {
-	var out []Option
-	for _, o := range viaMagpie(prefix) {
-		if !strings.HasPrefix(o.Value, prefix+agentID+"/") {
-			out = append(out, o)
-		}
-	}
-	return out
-}
-
-// isMagpie reports whether a model value is a catalog reference.
-func isMagpie(v string) bool {
+// isDial reports whether a model value is a catalog reference.
+func isDial(v string) bool {
 	_, _, ok := provider.Resolve(v)
 	return ok && strings.Contains(v, "/")
 }
 
-// magpieModels is the catalog as catalog.Models, for agents that keep their
+// dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-func magpieModels() []catalog.Model {
+func dialModels() []catalog.Model { return dialModelsExcept("") }
+
+func dialModelsExcept(agentID string) []catalog.Model {
 	var out []catalog.Model
-	for _, e := range provider.Catalog() {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstCatalog(e.Provider), Efforts: e.Efforts})
+	for _, e := range catalogExcept(agentID) {
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }
@@ -69,10 +63,18 @@ func group(name string, opts []Option) []Option {
 
 func gatewayV1() string { return gateway.URL() + "/v1" }
 
-// firstCatalog is the first models.dev id a provider names.
-func firstCatalog(p provider.Provider) string {
-	if c := p.Catalogs(); len(c) > 0 {
-		return c[0]
+// catalogExcept is the catalog minus the models of the account an agent is signed in with.
+func catalogExcept(agentID string) []provider.Entry {
+	all := provider.Catalog()
+	if agentID == "" {
+		return all
 	}
-	return ""
+	var out []provider.Entry
+	for _, e := range all {
+		if a := e.Provider.Account; a != nil && a.Agent == agentID {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
