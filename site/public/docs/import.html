@@ -110,6 +110,7 @@
       <tr><td><code>catalog</code></td><td>A <a href="https://models.dev">models.dev</a> provider id whose metadata applies (display names, context sizes, reasoning levels), e.g. <code>openai</code> for a relay of OpenAI models.</td></tr>
       <tr><td><code>website</code></td><td>Your site (https). Shown on the provider’s page.</td></tr>
       <tr><td><code>keys</code></td><td>The page where users make keys (https). The dialog links to it when the link has no key.</td></tr>
+      <tr><td><code>icon</code></td><td>A picture of your own (https): PNG, JPEG, GIF, WebP, ICO or SVG, at most 1&nbsp;MB. magpie downloads it once, after the user confirms the import, and keeps it beside the provider. Without one, magpie shows the <code>catalog</code> vendor’s logo or a plain mark.</td></tr>
       <tr><td><code>preset</code><span class="req">or name</span></td><td>A preset id; its endpoints, catalog and pages are used, and <code>name</code> may rename it.</td></tr>
       <tr><td><code>region</code></td><td>With a preset that has regions, which one.</td></tr>
     </table></div>
@@ -139,6 +140,7 @@
         <label>Models <i>comma separated</i><input name="models" class="mono" placeholder="gpt-5.5, claude-sonnet-5" value="gpt-5.5, claude-sonnet-5"></label>
         <label class="m-custom">Website <i>optional</i><input name="website" placeholder="https://acme.example"></label>
         <label class="m-custom">Key page <i>optional</i><input name="keys" placeholder="https://acme.example/keys"></label>
+        <label class="m-custom">Icon <i>optional, https</i><input name="icon" placeholder="https://acme.example/logo.svg"></label>
       </form>
       <div class="out">
         <div class="row"><span>Web link</span><code id="o-web"></code><button class="copy" data-copy="o-web">Copy</button></div>
@@ -181,6 +183,7 @@
   anthropic: <span class="s">"https://api.acme.example"</span>,
   key: apiKey,
   models: [<span class="s">"gpt-5.5"</span>, <span class="s">"claude-sonnet-5"</span>].join(<span class="s">","</span>),
+  icon: <span class="s">"https://acme.example/logo.svg"</span>,
 });
 <span class="k">const</span> href = <span class="s">"https://usemagpie.ai/import#"</span> + params;</pre>
     </div>
@@ -195,6 +198,7 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     <span class="s">"anthropic"</span>: <span class="s">"https://api.acme.example"</span>,
     <span class="s">"key"</span>: api_key,
     <span class="s">"models"</span>: <span class="s">"gpt-5.5,claude-sonnet-5"</span>,
+    <span class="s">"icon"</span>: <span class="s">"https://acme.example/logo.svg"</span>,
 })</pre>
     </div>
     <div class="code">
@@ -210,6 +214,7 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
       <li><b>No silent overwrites.</b> When the id is already taken, the dialog says so and the button reads <em>Replace</em>.</li>
       <li><b>https only.</b> Plain http is refused except to this machine or the local network; <code>file:</code>, credentials in URLs and other schemes are refused outright.</li>
       <li><b>Read once.</b> Inside the app, the link’s contents are handed to the window a single time; a reload doesn’t bring the dialog back.</li>
+      <li><b>Icons are fetched, not embedded.</b> An <code>icon=</code> URL is downloaded by magpie itself, only after the user confirms the import, only over https, and only into its own icons folder — at most 1&nbsp;MB, and the type is checked. The host is resolved at connection time and magpie refuses to connect when it lands on loopback, private, link-local or reserved addresses, so a name that points back at the user’s own machine (or a DNS-rebinding trick) is refused. The page and the dialog never load a remote picture directly.</li>
       <li><b>Keys stay out of servers.</b> The web link keeps parameters in the fragment. The key ends up only in <code>~/.config/magpie/providers.json</code>, readable by the user alone.</li>
     </ul>
     <div class="note"><b>Keys in links are secrets.</b> Put a key in a link only on a page that user alone sees, and prefer a key minted for magpie that they can revoke. Never put a shared key in a public link.</div>
@@ -322,6 +327,13 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
         const ok = !v || /^https:\/\/[^/@\s]+/.test(v);
         el(k).classList.toggle("bad", !ok);
         if (!ok) errs.push(`${k}= must be an https page; magpie drops it otherwise.`);
+      }
+      {
+        const v = put("icon");
+        if (v && !/^https:\/\/[^/@\s?#]+\/[^\s#]*$/.test(v)) {
+          el("icon").classList.add("bad");
+          errs.push("icon= must be an https picture URL; magpie drops it otherwise.");
+        }
       }
     }
     put("key");
