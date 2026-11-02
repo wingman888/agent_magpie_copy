@@ -674,7 +674,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 						break
 					}
 					scan = scan[used:]
-					kind, status, msg := classify(proto, eventOf(block))
+					kind, status, msg := classifyBlock(proto, block)
 					switch kind {
 					case evError:
 						// nothing of it was sent: hand it on as an error
@@ -710,7 +710,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if hold {
 		// it ended without content or failure: pass on what it said
 		if block, _ := nextBlock(append(scan, '\n', '\n')); len(bytes.TrimSpace(block)) > 0 {
-			if kind, status, msg := classify(proto, eventOf(block)); kind == evError {
+			if kind, status, msg := classifyBlock(proto, block); kind == evError {
 				msg = p.Name + ": " + msg
 				return writeError(w, proto, status, msg), msg, false
 			}

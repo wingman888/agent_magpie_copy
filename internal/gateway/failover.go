@@ -346,3 +346,9 @@ func nextBlock(buf []byte) ([]byte, int) {
 	}
 	return nil, 0
 }
+
+// classifyBlock is classify, of one raw SSE event.
+func classifyBlock(proto provider.Protocol, block []byte) (kind, status int, msg string) {
+	event, data := eventOf(block)
+	return classify(proto, event, data)
+}
