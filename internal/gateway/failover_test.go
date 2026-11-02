@@ -226,7 +226,7 @@ func TestStreamErrorBeforeContentFailsOver(t *testing.T) {
 	if code != 200 || !strings.Contains(body, "from-b") || strings.Contains(body, "Overloaded") || strings.Contains(body, "msg_from_a") {
 		t.Fatalf("%d %s", code, body)
 	}
-	if strings.Count(body, "message_start") != 1 {
+	if strings.Count(body, "event: message_start") != 1 {
 		t.Fatalf("two starts: %s", body)
 	}
 	r := lastRoute(s)
