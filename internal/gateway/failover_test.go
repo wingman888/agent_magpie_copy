@@ -104,7 +104,7 @@ func TestFailoverByStatusAndMessage(t *testing.T) {
 		{"balance", 400, "Insufficient balance", true},
 		{"missing field", 400, "messages: field required", false},
 		{"context too long", 400, "This model's maximum context length is 8192 tokens, your request exceeded it", false},
-		{"prompt too long", 400, "prompt is too long: 250000 tokens > 200000 maximum", false},
+		{"prompt too long", 400, "prompt is too long: 250000 tokens, over the 200000 maximum", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &upstream{reply: jsonErr(tc.code, tc.msg)}
