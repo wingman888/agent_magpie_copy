@@ -1,12 +1,11 @@
-// Package netproxy decides which proxy, if any, magpie's own outgoing
-// requests use. The order is: the proxy in magpie's settings ("direct"
-// turning it off), then the usual proxy environment variables, then the
-// operating system's proxy settings, then none. Loopback hosts are never
-// proxied, whatever is configured.
+// Package netproxy decides which proxy magpie's own requests to vendors go
+// through. An app started from the Dock or the Start menu has no
+// HTTPS_PROXY in its environment, so without this every call to a vendor
+// that is only reachable through a proxy hangs until the agent gives up.
 //
-// Apps started from the macOS Dock or the Windows Start menu don't inherit
-// a shell's HTTPS_PROXY, so reading the OS settings is what lets those
-// launches reach vendors that are only reachable through a proxy.
+// In order: the proxy set in magpie's settings (or "direct" for none), the
+// usual *_PROXY variables, then the system's proxy (macOS network
+// settings, Windows Internet Options). Loopback is never proxied.
 package netproxy
 
 import (
@@ -14,173 +13,127 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// Sources reported by Describe.
-const (
-	SourceSettings    = "settings"
-	SourceOff         = "off"
-	SourceEnvironment = "environment"
-	SourceSystem      = "system"
-	SourceNone        = "none"
-)
-
-// Install makes http.DefaultTransport (and so http.DefaultClient and every
-// client without its own transport) follow the same rules as For.
+// Install routes http.DefaultTransport (and so http.DefaultClient) through
+// Func.
 func Install() {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		t.Proxy = ProxyFunc
+		t.Proxy = Func
 	}
 }
 
-// ProxyFunc is For in the shape http.Transport.Proxy wants.
-func ProxyFunc(r *http.Request) (*url.URL, error) {
-	if r == nil || r.URL == nil {
+// Func is an http.Transport Proxy function.
+func Func(req *http.Request) (*url.URL, error) {
+	if loopback(req.URL.Hostname()) {
 		return nil, nil
 	}
-	return For(r.URL)
+	return For(req.URL)
 }
 
-// For returns the proxy to use for u; nil means connect directly. The
-// settings are read on every call, so a change applies to the next request.
+// For is the proxy a request to u goes through; nil means direct.
 func For(u *url.URL) (*url.URL, error) {
-	if u == nil || isLoopback(u.Hostname()) {
+	switch s := strings.TrimSpace(settings.Load().Proxy); s {
+	case "direct":
+		return nil, nil
+	case "":
+	default:
+		return Parse(s)
+	}
+	if p, err := fromEnv(u); p != nil || err != nil {
+		return p, err
+	}
+	sys := System()
+	if sys.URL == "" || bypassed(u.Hostname(), sys.Bypass) {
 		return nil, nil
 	}
-	if p := settings.Load().Proxy; p != "" {
-		if settings.IsDirect(p) {
-			return nil, nil
-		}
-		return settings.ParseProxy(p)
-	}
-	if env := fromEnvironment(); env.has(u.Scheme) {
-		return env.proxyFor(u)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, nil
-	}
-	sp := system()
-	if sp == nil || sp.proxy == nil || matchException(u.Hostname(), sp.exceptions) {
-		return nil, nil
-	}
-	c := *sp.proxy
-	return &c, nil
+	return Parse(sys.URL)
 }
 
-// describeURL stands in for "a vendor" when Describe reports what applies.
-var describeURL = &url.URL{Scheme: "https", Host: "api.openai.com"}
+// Parse reads a proxy address; a bare host:port is an HTTP proxy.
+func Parse(s string) (*url.URL, error) {
+	s = strings.TrimSpace(s)
+	if !strings.Contains(s, "://") {
+		s = "http://" + s
+	}
+	return url.Parse(s)
+}
 
-// Describe reports the proxy vendor requests currently use and where it
-// comes from: settings, off, environment, system or none. The proxy is ""
-// for off and none.
+// Describe says, for the settings page, what a request to u would use.
 func Describe() (proxy, source string) {
-	if p := settings.Load().Proxy; p != "" {
-		if settings.IsDirect(p) {
-			return "", SourceOff
-		}
-		if u, err := settings.ParseProxy(p); err == nil {
-			return u.String(), SourceSettings
-		}
-		return p, SourceSettings
+	switch s := strings.TrimSpace(settings.Load().Proxy); s {
+	case "direct":
+		return "", "off"
+	case "":
+	default:
+		return s, "settings"
 	}
-	if env := fromEnvironment(); env.has(describeURL.Scheme) {
-		raw := env.raw(describeURL.Scheme)
-		if u, err := parseEnvProxy(raw); err == nil {
-			return u.String(), SourceEnvironment
-		}
-		return raw, SourceEnvironment
+	u, _ := url.Parse("https://chatgpt.com")
+	if p, _ := fromEnv(u); p != nil {
+		return p.String(), "environment"
 	}
-	if sp := system(); sp != nil && sp.proxy != nil {
-		return sp.proxy.String(), SourceSystem
+	if sys := System(); sys.URL != "" {
+		return sys.URL, "system"
 	}
-	return "", SourceNone
+	return "", "none"
 }
 
-// isLoopback reports whether host is localhost, *.localhost or a loopback IP.
-func isLoopback(host string) bool {
-	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
-	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+func fromEnv(u *url.URL) (*url.URL, error) { return http.ProxyFromEnvironment(&http.Request{URL: u}) }
+
+// Proxy is the system's proxy: one address, and the hosts that skip it.
+type Proxy struct {
+	URL    string
+	Bypass []string
+}
+
+var sysCache struct {
+	sync.Mutex
+	at time.Time
+	p  Proxy
+}
+
+// System reads the system proxy, at most every 15 seconds.
+func System() Proxy {
+	sysCache.Lock()
+	defer sysCache.Unlock()
+	if time.Since(sysCache.at) > 15*time.Second {
+		sysCache.p, sysCache.at = system(), time.Now()
+	}
+	return sysCache.p
+}
+
+func loopback(host string) bool {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return true
 	}
-	if i := strings.IndexByte(h, '%'); i >= 0 { // fe80::1%lo0 style zones
-		h = h[:i]
-	}
-	ip := net.ParseIP(h)
+	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
 
-// matchException reports whether host is in an OS proxy exception list:
-// exact names (case-insensitive), "*.example.com" or ".example.com" for the
-// domain and its subdomains, and "<local>" for names without a dot.
-func matchException(host string, list []string) bool {
-	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
-	if h == "" {
-		return false
-	}
-	for _, e := range list {
-		e = strings.ToLower(strings.TrimSpace(e))
-		if e == "" {
-			continue
-		}
-		if e == "<local>" {
-			if !strings.Contains(h, ".") && net.ParseIP(h) == nil {
-				return true
-			}
-			continue
-		}
-		if e == "*" {
-			return true
-		}
-		if hh, _, err := net.SplitHostPort(e); err == nil && !strings.HasPrefix(e, "[") && strings.Count(e, ":") == 1 {
-			e = hh
-		}
-		e = strings.TrimSuffix(strings.TrimPrefix(e, "["), "]")
-		e = strings.TrimSuffix(e, ".")
+// bypassed matches the system's exception list: exact hosts, "*.example.com"
+// or ".example.com" suffixes, and "<local>" for dotless names.
+func bypassed(host string, list []string) bool {
+	host = strings.ToLower(host)
+	for _, b := range list {
+		b = strings.ToLower(strings.TrimSpace(b))
 		switch {
-		case strings.HasPrefix(e, "*."):
-			d := e[2:]
-			if d != "" && (h == d || strings.HasSuffix(h, "."+d)) {
+		case b == "":
+		case b == "<local>":
+			if !strings.Contains(host, ".") {
 				return true
 			}
-		case strings.HasPrefix(e, "."):
-			d := e[1:]
-			if d != "" && (h == d || strings.HasSuffix(h, "."+d)) {
+		case strings.HasPrefix(b, "*."), strings.HasPrefix(b, "."):
+			suf := strings.TrimPrefix(b, "*")
+			if strings.HasSuffix(host, suf) || host == suf[1:] {
 				return true
 			}
-		case strings.Contains(e, "*"):
-			if wildcard(e, h) {
-				return true
-			}
-		default:
-			if h == e {
-				return true
-			}
+		case host == b:
+			return true
 		}
 	}
 	return false
-}
-
-// wildcard matches s against a pattern where * stands for any run of
-// characters, as OS exception lists such as "192.168.*" use.
-func wildcard(pattern, s string) bool {
-	parts := strings.Split(pattern, "*")
-	if !strings.HasPrefix(s, parts[0]) {
-		return false
-	}
-	s = s[len(parts[0]):]
-	for i, p := range parts[1:] {
-		if i == len(parts)-2 {
-			return strings.HasSuffix(s, p)
-		}
-		j := strings.Index(s, p)
-		if j < 0 {
-			return false
-		}
-		s = s[j+len(p):]
-	}
-	return true
 }
