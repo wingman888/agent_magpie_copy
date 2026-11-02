@@ -20,10 +20,9 @@ import (
 type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
-	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
-	// Proxy for magpie's own requests to vendors: "" follows the
-	// environment and then the system, "direct" uses none, anything else
-	// is the proxy (http://, https:// or socks5://; host:port means http).
+	Tray  string `json:"tray,omitempty"`  // panel | window: what clicking the tray icon opens
+	// Proxy is "" (follow the environment, then the system), "direct", or a
+	// proxy address: http://, https://, socks5://, socks5h:// or host:port.
 	Proxy string `json:"proxy,omitempty"`
 }
 
@@ -33,6 +32,32 @@ var (
 	Langs  = []string{"system", "en", "zh"}
 	Trays  = []string{"panel", "window"}
 )
+
+// ParseProxy turns a proxy setting into a URL. "" and "direct" are not
+// addresses and give (nil, nil); a bare host:port is an http proxy.
+func ParseProxy(v string) (*url.URL, error) {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "direct" {
+		return nil, nil
+	}
+	raw := v
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("proxy %q is not a valid address", v)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, fmt.Errorf("proxy scheme must be http, https, socks5 or socks5h, not %q", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return nil, fmt.Errorf("proxy %q has no host", v)
+	}
+	return u, nil
+}
 
 // Path is the settings file.
 func Path() string {
@@ -67,16 +92,8 @@ func Save(s Settings) error {
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
 	}
-	s.Proxy = strings.TrimSpace(s.Proxy)
-	if s.Proxy != "" && s.Proxy != "direct" {
-		raw := s.Proxy
-		if !strings.Contains(raw, "://") {
-			raw = "http://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
-			return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", s.Proxy)
-		}
+	if _, err := ParseProxy(s.Proxy); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
@@ -98,5 +115,6 @@ func (s Settings) normal() Settings {
 	if s.Tray == "" {
 		s.Tray = "panel"
 	}
+	s.Proxy = strings.TrimSpace(s.Proxy)
 	return s
 }

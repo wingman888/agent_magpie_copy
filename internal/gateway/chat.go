@@ -347,12 +347,7 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStart, MsgID: ch.ID, Model: ch.Model})
 	}
 	for _, c := range ch.Choices {
-		// Some relays send the same thought under both names; one is enough.
-		t := c.Delta.ReasoningContent
-		if t == "" {
-			t = c.Delta.Reasoning
-		}
-		if t != "" {
+		if t := c.Delta.ReasoningContent + c.Delta.Reasoning; t != "" {
 			emit(Event{Kind: KThink, Text: t})
 		}
 		if c.Delta.Content != nil && *c.Delta.Content != "" {
@@ -536,4 +531,38 @@ func renderChat(res Result, model string) []byte {
 		"choices": []map[string]any{{"index": 0, "message": msg, "finish_reason": stopToChat(res.Stop)}},
 		"usage":   res.Usage.chat()})
 	return b
+}
+
+// developerToSystem rewrites role "developer" messages to "system" for
+// backends that only know the older role. A body without any is returned
+// untouched.
+func developerToSystem(body []byte) []byte {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(body, &top) != nil {
+		return body
+	}
+	var msgs []map[string]json.RawMessage
+	if json.Unmarshal(top["messages"], &msgs) != nil {
+		return body
+	}
+	changed := false
+	for _, m := range msgs {
+		if string(m["role"]) == `"developer"` {
+			m["role"] = json.RawMessage(`"system"`)
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	raw, err := json.Marshal(msgs)
+	if err != nil {
+		return body
+	}
+	top["messages"] = raw
+	out, err := json.Marshal(top)
+	if err != nil {
+		return body
+	}
+	return out
 }
