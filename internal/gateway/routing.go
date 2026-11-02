@@ -53,7 +53,7 @@ func served(rest string, tokens int) {
 	routed.used[rest] = tokenUse{routed.used[rest].now(now) + float64(tokens), now}
 	delete(routed.failures, rest)
 	routed.Unlock()
-	// one that answered — tried all the same, or again — rests no longer
+	// it answered: whatever made it rest is over
 	restingUntil.Lock()
 	delete(restingUntil.m, rest)
 	delete(restingUntil.note, rest)
@@ -83,8 +83,6 @@ const (
 	failQuota  = "quota"
 	failRate   = "rate"
 	failOther  = "other"
-	// failCanceled: the agent went away before the answer came
-	failCanceled = "canceled"
 )
 
 // failure says why a reply failed.

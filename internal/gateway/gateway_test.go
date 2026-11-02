@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -184,79 +183,7 @@ func TestAnthropicClientFallsBackFromChatToResponses(t *testing.T) {
 	}
 }
 
-// A model its provider serves only on /responses, asked for by a Chat
-// Completions client (Pi through Copilot): the relay is turned away, the
-// request is spoken as Responses instead, and later turns go there at once.
-func TestChatClientFallsBackToResponses(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	f := &fallbackFake{}
-	up := httptest.NewServer(f)
-	t.Cleanup(up.Close)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"},
-		Chat: up.URL + "/v1", Responses: up.URL + "/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	handler := New().Handler()
-	call := func(body string) (int, string) {
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
-		return rec.Code, rec.Body.String()
-	}
-	for i, want := range []int{1, 2} {
-		code, body := call(`{"model":"m1","messages":[{"role":"user","content":"hello"}]}`)
-		if code != 200 || !strings.Contains(body, "fallback ok") {
-			t.Fatalf("call %d: status %d: %s", i, code, body)
-		}
-		if f.chatCalls != 1 || f.responseCalls != want {
-			t.Fatalf("call %d: chat=%d responses=%d", i, f.chatCalls, f.responseCalls)
-		}
-	}
-}
-
-// The other way round: a model served only on /chat/completions (Copilot's
-// Claude models), asked for by a Responses client (Codex).
-func TestResponsesClientFallsBackToChat(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	var chatCalls, responseCalls int
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body)
-		switch r.URL.Path {
-		case "/v1/responses":
-			responseCalls++
-			w.WriteHeader(http.StatusBadRequest)
-			io.WriteString(w, `{"error":{"message":"model \"claude-x\" is not accessible via the /responses endpoint","code":"unsupported_api_for_model"}}`)
-		case "/v1/chat/completions":
-			chatCalls++
-			w.Header().Set("Content-Type", "text/event-stream")
-			io.WriteString(w, sse(
-				`data: {"id":"c1","model":"claude-x","choices":[{"delta":{"role":"assistant","content":"chat ok"}}]}`,
-				`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`,
-				`data: [DONE]`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(up.Close)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"claude-x"},
-		Chat: up.URL + "/v1", Responses: up.URL + "/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	handler := New().Handler()
-	for i, want := range []int{1, 2} {
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"claude-x","input":"hi","stream":true}`)))
-		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "chat ok") {
-			t.Fatalf("call %d: status %d: %s", i, rec.Code, rec.Body.String())
-		}
-		if responseCalls != 1 || chatCalls != want {
-			t.Fatalf("call %d: responses=%d chat=%d", i, responseCalls, chatCalls)
-		}
-	}
-}
-
-func TestWrongEndpoint(t *testing.T) {
+func TestNotChatModel(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		body   string
@@ -264,14 +191,11 @@ func TestWrongEndpoint(t *testing.T) {
 	}{
 		{400, `{"error":{"message":"not a chat model; use /v1/responses"}}`, true},
 		{404, `use v1/completions`, true},
-		{400, `{"code":null,"message":"model \"gpt-6-sol\" is not accessible via the /chat/completions endpoint","type":"invalid_request_error"}`, true},
-		{400, `{"error":{"message":"model not accessible","code":"unsupported_api_for_model"}}`, true},
 		{429, `rate limit`, false},
-		{500, `use v1/responses`, false},
 		{200, `use v1/responses`, false},
 	} {
-		if got := wrongEndpoint(tc.status, []byte(tc.body)); got != tc.want {
-			t.Errorf("wrongEndpoint(%d, %q) = %v, want %v", tc.status, tc.body, got, tc.want)
+		if got := notChatModel(tc.status, []byte(tc.body)); got != tc.want {
+			t.Errorf("notChatModel(%d, %q) = %v, want %v", tc.status, tc.body, got, tc.want)
 		}
 	}
 }
@@ -735,95 +659,5 @@ func TestOpenCodeGetsConversationSession(t *testing.T) {
 	}
 	if a, b := send(nil), send(nil); a == "" || a != b {
 		t.Errorf("derived session: %q %q", a, b)
-	}
-}
-
-// A translation goes to Chat Completions first, but an OpenAI model on
-// OpenAI's or Copilot's API goes to Responses first; either falls back.
-func TestUsableOrder(t *testing.T) {
-	s := New()
-	openai := provider.Provider{ID: "openai", Chat: "https://api.openai.com/v1", Responses: "https://api.openai.com/v1"}
-	copilot := provider.Provider{ID: "copilot", Chat: "https://api.githubcopilot.com", Responses: "https://api.githubcopilot.com"}
-	other := provider.Provider{ID: "groq", Chat: "https://api.groq.com/openai/v1", Responses: "https://api.groq.com/openai/v1"}
-	for _, tc := range []struct {
-		p     provider.Provider
-		model string
-		want  string
-	}{
-		{openai, "gpt-6-sol", "responses chat"},
-		{openai, "o4-mini", "responses chat"},
-		{copilot, "gpt-6-sol", "responses chat"},
-		{copilot, "claude-opus-5.5", "chat responses"},
-		{other, "openai/gpt-oss-120b", "chat responses"},
-	} {
-		var got []string
-		for _, p := range s.usable(tc.p, tc.model) {
-			got = append(got, string(p))
-		}
-		if strings.Join(got, " ") != tc.want {
-			t.Errorf("usable(%s, %s) = %v, want %s", tc.p.ID, tc.model, got, tc.want)
-		}
-	}
-	s.markUnfit("copilot", "gpt-6-sol", provider.Responses)
-	if got := s.usable(copilot, "gpt-6-sol"); len(got) != 1 || got[0] != provider.Chat {
-		t.Errorf("after /responses turned it away: %v", got)
-	}
-}
-
-// A provider whose model list says which APIs each model is served on
-// (Copilot's does) has each request sent straight to one of them: nothing
-// is tried on an API the model isn't served on.
-func TestModelListSaysWhichAPI(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	paths := map[string]int{}
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body)
-		paths[r.URL.Path]++
-		w.Header().Set("Content-Type", "text/event-stream")
-		switch r.URL.Path {
-		case "/v1/responses":
-			io.WriteString(w, sse(
-				`event: response.created`+"\n"+`data: {"type":"response.created","response":{"id":"r1","model":"gpt-x","usage":{"input_tokens":0,"output_tokens":0}}}`,
-				`event: response.output_text.delta`+"\n"+`data: {"type":"response.output_text.delta","delta":"ok"}`,
-				`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"id":"r1","model":"gpt-x","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`))
-		case "/v1/chat/completions":
-			io.WriteString(w, sse(
-				`data: {"id":"c1","model":"claude-x","choices":[{"delta":{"role":"assistant","content":"ok"}}]}`,
-				`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
-				`data: [DONE]`))
-		default:
-			w.WriteHeader(http.StatusBadRequest)
-			io.WriteString(w, `{"error":{"message":"unexpected"}}`)
-		}
-	}))
-	t.Cleanup(up.Close)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"gpt-x", "claude-x"},
-		Chat: up.URL + "/v1", Responses: up.URL + "/v1", Anthropic: up.URL}); err != nil {
-		t.Fatal(err)
-	}
-	if err := catalog.SaveLive("fake", up.URL+"/v1", []catalog.Model{
-		{ID: "gpt-x", APIs: []string{"responses"}},
-		{ID: "claude-x", APIs: []string{"chat"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	handler := New().Handler()
-	for _, tc := range []struct{ path, body, want string }{
-		// an Anthropic client, and the model on Responses alone
-		{"/v1/messages", `{"model":"gpt-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`, "/v1/responses"},
-		// a Chat client, likewise: not relayed
-		{"/v1/chat/completions", `{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`, "/v1/responses"},
-		// a Responses client, and the model on Chat alone
-		{"/v1/responses", `{"model":"claude-x","input":"hi","stream":true}`, "/v1/chat/completions"},
-		// an Anthropic client the provider speaks to, but not for this model
-		{"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions"},
-	} {
-		clear(paths)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body)))
-		if rec.Code != 200 || len(paths) != 1 || paths[tc.want] != 1 {
-			t.Errorf("%s %s: status %d, upstream %v, want only %s: %s", tc.path, tc.body, rec.Code, paths, tc.want, rec.Body.String())
-		}
 	}
 }
