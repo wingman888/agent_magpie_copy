@@ -35,7 +35,13 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key"`              // API key, as typed by the user: the one tried first
+
+	// KeyName names Key ("personal", "team"); Keys are the provider's other
+	// API keys (accounts), tried in order after Key when it can't take a
+	// request. See keys.go.
+	KeyName string     `json:"keyName,omitempty"`
+	Keys    []ExtraKey `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -43,6 +49,12 @@ type Provider struct {
 	Chat      string `json:"chat,omitempty"`
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
+
+	// Fallback is where a request goes when this provider can't take it —
+	// out of quota, rate limited, overloaded or down — before any of the
+	// reply has been sent: models as agents pick them (provider/model),
+	// tried in order.
+	Fallback []string `json:"fallback,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
@@ -55,11 +67,6 @@ type Provider struct {
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
-
-	// Fallback lists, in order, the models ("provider/model", as an agent
-	// picks them) the gateway turns to when this provider cannot take a
-	// request: out of quota, rate limited, overloaded or down.
-	Fallback []string `json:"fallback,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
@@ -130,8 +137,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
+		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -194,8 +200,7 @@ func Save(p Provider) error {
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in, plus its fallbacks. Saving it again brings a
-		// removed one back.
+		// agent's own sign-in. Saving it again brings a removed one back.
 		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
@@ -208,6 +213,7 @@ func Save(p Provider) error {
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
+			p = keepKeys(p, f.Providers[i])
 			f.Providers[i] = p
 			return store(f)
 		}
@@ -260,6 +266,7 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
+	p = normalizeKeys(p)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -268,6 +275,7 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
 		// Presets own their request shape; custom headers are supported only
@@ -289,6 +297,13 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
+}
+
+// Catalogs are the models.dev ids the provider's models are looked up in,
+// first match wins: a gateway that resells several vendors names them all
+// ("openai, deepseek").
+func (p Provider) Catalogs() []string {
+	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
 }
 
 func cleanList(xs []string) []string {
