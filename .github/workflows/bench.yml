@@ -25,6 +25,13 @@ jobs:
           # 通过的顶层测试名单：编译失败的包里的测试既不算 pass 也不算 fail，只有名单能区分“没通过”
           passed=$(grep -o '"Action":"pass","Package":"[^"]*","Test":"[^"/]*"' test.json | sed 's/.*"Test":"//; s/"$//' | sort -u | tr '\n' ' ')
           echo "::notice title=passed::- ${passed}"
+          # 包级失败但没有失败的测试（测试结束后 panic、os.Exit、TestMain 失败等）：合并该包最后几行输出为一条注释
+          for p in $(grep -o '"Action":"fail","Package":"[^"]*","Elapsed"' test.json | sed 's/.*"Package":"//; s/".*//' | sort -u); do
+            grep -q "\"Action\":\"fail\",\"Package\":\"$p\",\"Test\"" test.json && continue
+            out=$(grep -F "\"Package\":\"$p\"" test.json | grep -o '"Output":"[^"]*"' | sed 's/^"Output":"//; s/"$//; s/\\n$//; s/\\t/ /g' \
+              | grep -v -E '^(=== |--- PASS|PASS$|ok |FAIL$)' | tail -n 15 | cut -c1-200 | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=pkgfail::$p%0A$out"
+          done
           grep -o '"Action":"fail","Package":"[^"]*","Test":"[^"]*"' test.json | head -n 25 | sed 's/^/::error title=failed-test::/'
           grep -h -E '_test.go:[0-9]+:|\.go:[0-9]+:[0-9]+:' build.log vet.log | head -n 25 | sed 's/^/::error title=compile::/'
           # 不带文件行号的构建错误（cgo、embed、模块解析等）也要能看到
