@@ -365,8 +365,39 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands, pl := s.plan(p, model, from)
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left})
+	var cands []candidate
+	var pl planned
+	var group *GroupRef
+	// a conversation's affinity is to one model: another's cache is its
+	// own, and an agent's side requests (a title, a summary) to a smaller
+	// model leave the conversation where it is
+	scope, mode, rotate := p.ID+"/"+model, p.Affinity, p.Routing == provider.Rotate
+	if g, ms, ok := provider.FindGroup(call.Model); ok {
+		// a routing group: every member's keys or accounts weighed together
+		cands, pl = s.planGroup(g, ms, from)
+		group = &GroupRef{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto}
+		for _, m := range ms {
+			group.Members = append(group.Members, m.Provider.ID+"/"+m.Model)
+		}
+		scope, mode, rotate = provider.GroupPrefix+g.ID, g.Affinity, g.Routing == provider.Rotate
+	} else {
+		cands, pl = s.plan(p, model, from)
+	}
+	if len(cands) == 0 {
+		call.Status, call.Error = 404, "no member ready"
+		writeError(w, from, 404, fmt.Sprintf("none of %s's models is ready", call.Model))
+		finishCapture()
+		s.record(call)
+		return
+	}
+	// the conversation stays with who answered it last, while its
+	// affinity says: what the vendor cached of it is read again
+	var aff *Affinity
+	var stuck string
+	if len(cands) > 1 {
+		cands, pl, aff, stuck = affine(scope, mode, rotate, r.Header, from, body, cands, pl)
+	}
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Affinity: aff, Order: pl.order, Left: pl.left})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
@@ -387,6 +418,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+			if aff != nil {
+				answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
+			}
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}

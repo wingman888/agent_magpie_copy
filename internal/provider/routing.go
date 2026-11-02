@@ -8,7 +8,6 @@ package provider
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -19,58 +18,8 @@ import (
 const (
 	Ordered   = "order"
 	Rotate    = "rotate"
-	LeastUsed = "least-used"
+	LeastUsed = "usage"
 )
-
-// The affinities besides the default, auto: how a conversation sticks to
-// the key or account that answered it last.
-const (
-	AffinitySession = "session" // the whole conversation
-	AffinityTurn    = "turn"    // within a user turn: while tool results come back
-	AffinityOff     = "off"     // never
-)
-
-// cleanRouting is a routing as magpie knows it: "" (smart) for one it
-// doesn't, "least-used" for its old spelling "usage".
-func cleanRouting(r string) string {
-	r = strings.ToLower(strings.TrimSpace(r))
-	switch r {
-	case Ordered, Rotate, LeastUsed:
-		return r
-	case "usage":
-		return LeastUsed
-	}
-	return ""
-}
-
-func validAffinity(a string) bool {
-	return a == "" || a == AffinitySession || a == AffinityTurn || a == AffinityOff
-}
-
-// cleanAffinity is an affinity as magpie knows it, "" (auto) for one it
-// doesn't.
-func cleanAffinity(a string) string {
-	a = strings.ToLower(strings.TrimSpace(a))
-	if validAffinity(a) {
-		return a
-	}
-	return ""
-}
-
-// SetAffinity changes how a provider's conversations stick to the key or
-// account that answered them last: "" auto, "session", "turn" or "off".
-func SetAffinity(id, affinity string) error {
-	a := strings.ToLower(strings.TrimSpace(affinity))
-	if !validAffinity(a) {
-		return fmt.Errorf("affinity is one of session, turn, off, or empty for auto — not %q", affinity)
-	}
-	p, err := Find(id)
-	if err != nil {
-		return err
-	}
-	p.Affinity = a
-	return Save(*p)
-}
 
 // SetRouting changes how a provider's requests spread over its keys or
 // accounts.
@@ -80,6 +29,17 @@ func SetRouting(id, routing string) error {
 		return err
 	}
 	p.Routing = routing
+	return Save(*p)
+}
+
+// SetAffinity changes how long a provider's conversations stay with the key
+// or account that answered them.
+func SetAffinity(id, affinity string) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	p.Affinity = affinity
 	return Save(*p)
 }
 

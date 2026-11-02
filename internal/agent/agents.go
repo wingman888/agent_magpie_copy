@@ -134,7 +134,17 @@ func ownOptions(authFile string, cur string, extra ...string) []Option {
 	sort.Strings(providers)
 	var out []Option
 	for _, p := range providers {
-		out = append(out, group(p, options(catalog.Provider(p), p+"/"))...)
+		name := catalog.ProviderName(p)
+		if name == "" {
+			name = p
+		}
+		opts := group(name, options(catalog.Provider(p), p+"/"))
+		if ic := providerIcon(p); ic != "" {
+			for i := range opts {
+				opts[i].GroupIcon = ic
+			}
+		}
+		out = append(out, opts...)
 	}
 	return out
 }

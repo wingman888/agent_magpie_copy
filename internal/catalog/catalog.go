@@ -230,6 +230,12 @@ func Provider(id string) []Model {
 	return out
 }
 
+// ProviderName is a models.dev provider's display name ("GitHub Copilot"
+// for "github-copilot"), or "" when the catalog doesn't know it.
+func ProviderName(id string) string {
+	return load()[id].Name
+}
+
 func textModel(m mdModel) bool {
 	if len(m.Modalities.Output) > 0 {
 		text := false

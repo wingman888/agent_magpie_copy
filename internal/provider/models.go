@@ -236,30 +236,27 @@ type Entry struct {
 	Model    string   `json:"model"` // what magpie sends the vendor
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
-	Provider Provider `json:"-"`
-	// Group is set on a routing group's entry (ID and Model "group/<id>",
-	// Provider only {ID: "group", Name: "Routing groups"}), with the
-	// members it can reach now.
-	Group   *Group   `json:"-"`
-	Members []Member `json:"-"`
+	Provider Provider `json:"-"`               // a group's: its first member's
+	Group    string   `json:"group,omitempty"` // set on a routing group (group.go)
+	Icons    []string `json:"-"`               // a group's: its providers' icons, one per provider
 }
 
-// IsGroup reports whether the entry is a routing group.
-func (e Entry) IsGroup() bool { return e.Group != nil }
-
 // Catalog lists every exposed model of every ready provider, then the
-// routing groups that have a member to reach.
+// routing groups.
 func Catalog() []Entry {
+	entries := providerEntries()
+	return append(entries, groupEntries(entries)...)
+}
+
+// providerEntries is the catalog without its groups.
+func providerEntries() []Entry {
 	var out []Entry
-	ready := readyProviders()
-	for _, p := range ready {
+	for _, p := range All() {
+		if !p.Ready() {
+			continue
+		}
 		for _, m := range p.Exposed() {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
-		}
-	}
-	for _, g := range groupsOf(load(), ready) {
-		if e, ok := groupEntry(g, membersOf(g, ready)); ok {
-			out = append(out, e)
 		}
 	}
 	return out
@@ -268,22 +265,22 @@ func Catalog() []Entry {
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
 // It accepts catalog ids, "provider/model" for any model (exposed or not),
 // and the bare model id when exactly one provider serves it.
-//
-// A routing group ("group/<id>") resolves to its first member that can be
-// reached: it answers for the group when asked what the model can do.
+// A group's id resolves to its first member.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
-	if IsGroup(id) {
-		if _, ms, ok := FindGroup(id); ok && len(ms) > 0 {
-			return ms[0].Provider, ms[0].Model, true
+	if strings.HasPrefix(id, GroupPrefix) {
+		for _, e := range Catalog() {
+			if e.ID == id {
+				return e.Provider, e.Model, true
+			}
 		}
 		return Provider{}, "", false
 	}
-	entries := Catalog()
+	return resolveIn(providerEntries(), id)
+}
+
+func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 	for _, e := range entries {
-		if e.IsGroup() {
-			continue
-		}
 		if e.ID == id {
 			return e.Provider, e.Model, true
 		}
@@ -295,7 +292,7 @@ func Resolve(id string) (Provider, string, bool) {
 	}
 	var hits []Entry
 	for _, e := range entries {
-		if !e.IsGroup() && e.Model == id {
+		if e.Model == id {
 			hits = append(hits, e)
 		}
 	}
