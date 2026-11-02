@@ -144,7 +144,7 @@ func TestGroupFailsOverOnTheseErrors(t *testing.T) {
 	}
 }
 
-func sse(events ...string) string { return strings.Join(events, "") }
+func sseJoin(events ...string) string { return strings.Join(events, "") }
 
 func ev(name, data string) string { return "event: " + name + "\ndata: " + data + "\n\n" }
 
@@ -152,7 +152,7 @@ const aStart = `{"type":"message_start","message":{"id":"msg_from_a","type":"mes
 const bStart = `{"type":"message_start","message":{"id":"msg_from_b","type":"message","role":"assistant","content":[],"model":"m","usage":{"input_tokens":1,"output_tokens":0}}}`
 
 func bStream() string {
-	return sse(ev("message_start", bStart), ev("ping", `{"type":"ping"}`),
+	return sseJoin(ev("message_start", bStart), ev("ping", `{"type":"ping"}`),
 		ev("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
 		ev("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello from b"}}`),
 		ev("content_block_stop", `{"type":"content_block_stop","index":0}`),
@@ -170,7 +170,7 @@ const groupMsg = `{"model":"group/mine","max_tokens":10,"stream":true,"messages"
 func TestStreamErrorBeforeContentFailsOver(t *testing.T) {
 	fresh(t)
 	quick(t)
-	a := &scripted{steps: []step{{ctype: "text/event-stream", body: sse(ev("message_start", aStart), ev("ping", `{"type":"ping"}`),
+	a := &scripted{steps: []step{{ctype: "text/event-stream", body: sseJoin(ev("message_start", aStart), ev("ping", `{"type":"ping"}`),
 		ev("error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`))}}}
 	b := &scripted{steps: []step{{ctype: "text/event-stream", body: bStream()}}}
 	upstream(t, "a", a)
@@ -198,7 +198,7 @@ func restingNow(id string) bool { _, ok := restOf(id); return ok }
 func TestStreamErrorAfterContentIsDelivered(t *testing.T) {
 	fresh(t)
 	quick(t)
-	a := &scripted{steps: []step{{ctype: "text/event-stream", body: sse(ev("message_start", aStart),
+	a := &scripted{steps: []step{{ctype: "text/event-stream", body: sseJoin(ev("message_start", aStart),
 		ev("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
 		ev("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`),
 		ev("error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`))}}}
@@ -218,7 +218,7 @@ func TestStreamHeldOnlyUpToTheLimit(t *testing.T) {
 	old := firstContentMax
 	firstContentMax = 10
 	t.Cleanup(func() { firstContentMax = old })
-	a := &scripted{steps: []step{{ctype: "text/event-stream", body: sse(ev("message_start", aStart),
+	a := &scripted{steps: []step{{ctype: "text/event-stream", body: sseJoin(ev("message_start", aStart),
 		ev("error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`))}}}
 	b := &scripted{steps: []step{{ctype: "text/event-stream", body: bStream()}}}
 	upstream(t, "a", a)
