@@ -638,7 +638,7 @@ func geminiModelObject(e provider.Entry) map[string]any {
 		name = e.ID
 	}
 	return map[string]any{"name": "models/" + e.ID, "baseModelId": e.ID, "version": "dial", "displayName": name,
-		"description": name + " from " + e.Provider.Name + ", served by dial",
+		"description":                name + " from " + e.Provider.Name + ", served by dial",
 		"supportedGenerationMethods": geminiMethods}
 }
 
