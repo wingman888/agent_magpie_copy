@@ -40,8 +40,8 @@ func fullSetup(t *testing.T) {
 	}
 	err = provider.Save(provider.Provider{
 		ID: "relay", Name: "My Relay", Icon: icon,
-		Chat:    "https://relay.secret-host.example/v1",
-		Key:     "sk-primary-SECRET-1111", KeyName: "Personal",
+		Chat: "https://relay.secret-host.example/v1",
+		Key:  "sk-primary-SECRET-1111", KeyName: "Personal",
 		Keys:    []provider.KeyAccount{{Name: "Team", Key: "sk-team-SECRET-2222"}},
 		Headers: map[string]string{"X-Api-Key": "hdr-SECRET-3333", "X-Team": "team-value-4444", "Authorization": "Bearer hdr-SECRET-5555"},
 	})

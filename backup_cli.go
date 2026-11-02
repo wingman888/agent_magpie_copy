@@ -26,8 +26,8 @@ const backupUsage = `usage:
 
 // stdin and stdinTTY are swapped in tests.
 var (
-	stdin  io.Reader = os.Stdin
-	stdinTTY         = func() bool { return term.IsTerminal(os.Stdin.Fd()) }
+	stdin    io.Reader = os.Stdin
+	stdinTTY           = func() bool { return term.IsTerminal(os.Stdin.Fd()) }
 )
 
 // backupCmd: `magpie backup [--no-keys] [file]`
@@ -236,11 +236,4 @@ func writePrivate(path string, data []byte) error {
 		return err
 	}
 	return os.Chmod(path, 0o600)
-}
-
-func plural(n int, what string) string {
-	if n == 1 {
-		return fmt.Sprintf("1 %s", what)
-	}
-	return fmt.Sprintf("%d %ss", n, what)
 }
