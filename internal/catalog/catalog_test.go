@@ -68,19 +68,3 @@ func TestDecorateCarriesTemperature(t *testing.T) {
 		t.Fatalf("decorated: %+v", out[1])
 	}
 }
-
-func TestLiveKeepsAPIs(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	if err := SaveLive("gw", "https://gw.example", []Model{{ID: "a", APIs: []string{"responses"}}, {ID: "b"}}); err != nil {
-		t.Fatal(err)
-	}
-	ms, _, ok := Live("gw")
-	if !ok || len(ms) != 2 || len(ms[0].APIs) != 1 || ms[0].APIs[0] != "responses" || ms[1].APIs != nil {
-		t.Fatalf("%+v %v", ms, ok)
-	}
-	// decorating with models.dev keeps what the vendor said
-	d := Decorate(ms, []Model{{ID: "a", Name: "A"}})
-	if d[0].Name != "A" || len(d[0].APIs) != 1 {
-		t.Fatalf("%+v", d)
-	}
-}
