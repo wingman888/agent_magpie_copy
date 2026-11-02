@@ -8,10 +8,10 @@ func TestSeveralKeys(t *testing.T) {
 	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1", Key: "sk-personal-1111"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddKey("relay", "Team", "sk-team-2222"); err != nil {
+	if err := AddKey("relay", "Team", "sk-team-2222", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddKey("relay", "", "sk-team-2222"); err == nil {
+	if err := AddKey("relay", "", "sk-team-2222", ""); err == nil {
 		t.Fatal("the same key was added twice")
 	}
 	p, _ := Find("relay")
@@ -55,5 +55,42 @@ func TestSeveralKeys(t *testing.T) {
 	}
 	if p, _ = Find("relay"); len(p.Keys) != 0 || p.Key != "sk-team-2222" || p.KeyName != "Team" {
 		t.Fatalf("after remove: %+v", p)
+	}
+}
+
+func TestKeyProtocol(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.test/v1", Anthropic: "https://relay.test", Key: "sk-oai-1111"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKey("relay", "Claude", "sk-ant-2222", Anthropic); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKey("relay", "", "sk-x-3333", "carrier-pigeon"); err == nil {
+		t.Fatal("took an unknown protocol")
+	}
+	if err := SetKeyProtocol("relay", keyID("sk-oai-1111"), Chat); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := Find("relay")
+	ks := p.KeyList()
+	if ks[0].Protocol != Chat || ks[1].Protocol != Anthropic {
+		t.Fatalf("keys %+v", ks)
+	}
+	// it goes with the key when the order changes
+	if err := UseKey("relay", keyID("sk-ant-2222")); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = Find("relay")
+	if p.Key != "sk-ant-2222" || p.KeyProtocol != Anthropic || p.Keys[0].Protocol != Chat {
+		t.Fatalf("after use: %+v", p)
+	}
+	q := p.WithKey(p.Keys[0])
+	if q.Key != "sk-oai-1111" || q.Chat == "" || q.Anthropic != "" || q.Responses != "" {
+		t.Fatalf("with the OpenAI key: %+v", q)
+	}
+	if q := p.WithKey(KeyAccount{Key: "k"}); q.Chat == "" || q.Anthropic == "" {
+		t.Fatalf("a key for any protocol: %+v", q)
 	}
 }

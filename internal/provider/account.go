@@ -41,6 +41,10 @@ type Account struct {
 	// a non-streaming request instead of relaying it.
 	Stream bool `json:"-"`
 
+	// Home is where a Grok account keeps its sign-in: the CLI's own home,
+	// or one of magpie's for a further account (see grok_accounts.go).
+	Home string `json:"-"`
+
 	// token is set on a saved sign-in in use beside the agent's own (see
 	// logins_on.go): the access token to run the agent's binary with.
 	token func(ctx context.Context) (string, error)
@@ -350,6 +354,13 @@ func claudeAccount() (Provider, bool) {
 	if statusPlan != "" {
 		plan = statusPlan
 	}
+	if m, err := readClaudeProfile(); err == nil && user != "" {
+		if acct, ok := m["oauthAccount"].(map[string]any); ok {
+			if email, _ := acct["emailAddress"].(string); strings.EqualFold(email, user) {
+				user = claudeUser(user, plan, acct)
+			}
+		}
+	}
 	if user == "" {
 		user = "Claude account"
 		if plan != "" {
@@ -542,6 +553,12 @@ func Accounts() []Provider {
 	if p, ok := copilotAccount(cfg); ok {
 		out = append(out, p)
 	}
+	if p, ok := cursorAccount(); ok {
+		out = append(out, p)
+	}
+	if p, ok := grokAccount(); ok {
+		out = append(out, p)
+	}
 	return out
 }
 
@@ -623,7 +640,15 @@ func codexAccount(home string) (Provider, bool) {
 	acct.sign = codexSign(func(ctx context.Context) (string, string, error) { return codexToken(ctx, path) })
 	acct.body = codexBody
 	acct.models = catalog.Codex
-	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
+	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
+		ms, err := codexModels(ctx, acct.sign)
+		if err != nil {
+			return nil, err
+		}
+		catalog.SaveLive(accountModels("codex", acct.User), CodexBase, ms)
+		codexFetchSaved(ctx)
+		return ms, catalog.SaveLive("codex", CodexBase, ms)
+	}
 	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 
@@ -737,6 +762,16 @@ func codexBody(body []byte) []byte {
 		m["input"] = []any{map[string]any{"type": "message", "role": "user",
 			"content": []any{map[string]any{"type": "input_text", "text": s}}}}
 	}
+	// Codex rejects system messages in input; developer preserves their
+	// instruction role without moving them out of conversation order.
+	if input, ok := m["input"].([]any); ok {
+		for _, item := range input {
+			msg, ok := item.(map[string]any)
+			if ok && msg["role"] == "system" && (msg["type"] == nil || msg["type"] == "message") {
+				msg["role"] = "developer"
+			}
+		}
+	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return body
@@ -765,6 +800,15 @@ type copilotSession struct {
 	Endpoints struct {
 		API string `json:"api"`
 	} `json:"endpoints"`
+	direct bool // the Copilot CLI's token, sent as is
+}
+
+// headers are what a request with this session carries.
+func (s copilotSession) headers() map[string]string {
+	if s.direct {
+		return copilotCLIHeaders
+	}
+	return copilotHeaders
 }
 
 var (
@@ -775,6 +819,7 @@ var (
 type copilotApp struct {
 	User  string `json:"user"`
 	Token string `json:"oauth_token"`
+	cli   bool // the standalone Copilot CLI's sign-in
 }
 
 // copilotLogin finds the GitHub token Copilot's editors and CLI keep.
@@ -795,20 +840,25 @@ func copilotLogin(cfg string) (copilotApp, bool) {
 			}
 		}
 	}
-	return copilotApp{}, false
+	return copilotCLILogin()
 }
 
-func copilotAccount(cfg string) (Provider, bool) {
-	app, ok := copilotLogin(cfg)
-	if !ok {
-		return Provider{}, false
+// session is what this sign-in's requests carry.
+func (a copilotApp) session(ctx context.Context) (copilotSession, error) {
+	if a.cli {
+		return copilotDirect(ctx, a.Token)
 	}
-	acct := &Account{Agent: "copilot", User: app.User}
+	return copilotToken(ctx, a.Token)
+}
+
+// copilotProvider is Copilot as one GitHub account serves it.
+func copilotProvider(app copilotApp, plan string) Provider {
+	acct := &Account{Agent: "copilot", User: app.User, Plan: plan}
 	if acct.User == "" {
 		acct.User = "GitHub"
 	}
 	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
-		s, err := copilotToken(ctx, app.Token)
+		s, err := app.session(ctx)
 		if err != nil {
 			return err
 		}
@@ -818,41 +868,120 @@ func copilotAccount(cfg string) (Provider, bool) {
 			}
 		}
 		req.Header.Set("Authorization", "Bearer "+s.Token)
-		for k, v := range copilotHeaders {
+		for k, v := range s.headers() {
 			req.Header.Set(k, v)
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
 		req.Header.Set("X-Initiator", "agent")
-		if lastRole(body) == "user" {
+		if userTurn(body) {
 			req.Header.Set("X-Initiator", "user")
 		}
-		if bytes.Contains(body, []byte(`"image_url"`)) {
+		if hasImage(body) {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
 	}
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := copilotModels(ctx, app.Token)
+		ms, err := copilotModels(ctx, app)
 		if err != nil {
 			return nil, err
 		}
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
-	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Website: "https://github.com/features/copilot", Account: acct}, true
+	// Copilot serves all three; which model is on which endpoint comes
+	// from its model list (see copilotModels and Provider.APIs).
+	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot",
+		Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase,
+		Website: "https://github.com/features/copilot", Account: acct}
 }
 
-// lastRole is the role of the last message in a chat request.
-func lastRole(body []byte) string {
+// userTurn reports whether a request's last turn is one the user typed, in
+// any of the three request shapes: a Chat or Anthropic message from the
+// user — not an Anthropic user message made only of tool results, nor a
+// Chat tool message — or a Responses input that is a string or ends in a
+// user message rather than a function's output.
+func userTurn(body []byte) bool {
 	var v struct {
 		Messages []struct {
-			Role string `json:"role"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
+		Input json.RawMessage `json:"input"`
 	}
-	if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
-		return ""
+	if json.Unmarshal(body, &v) != nil {
+		return false
 	}
-	return v.Messages[len(v.Messages)-1].Role
+	if len(v.Messages) > 0 {
+		last := v.Messages[len(v.Messages)-1]
+		if last.Role != "user" {
+			return false
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(last.Content, &blocks) != nil || len(blocks) == 0 {
+			return true // a plain string, or nothing to say otherwise
+		}
+		for _, b := range blocks {
+			if b.Type != "tool_result" {
+				return true
+			}
+		}
+		return false
+	}
+	in := bytes.TrimSpace(v.Input)
+	if len(in) == 0 {
+		return false
+	}
+	if in[0] == '"' {
+		return true
+	}
+	var items []struct {
+		Type string `json:"type"`
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(in, &items) != nil || len(items) == 0 {
+		return false
+	}
+	last := items[len(items)-1]
+	return last.Role == "user" && (last.Type == "" || last.Type == "message")
+}
+
+// hasImage reports whether a request carries a picture: a Chat image_url
+// part, a Responses input_image, or an Anthropic image block, at any depth
+// of its messages or input (a tool's result may hold one).
+func hasImage(body []byte) bool {
+	var v struct {
+		Messages any `json:"messages"`
+		Input    any `json:"input"`
+	}
+	if json.Unmarshal(body, &v) != nil {
+		return false
+	}
+	var walk func(x any) bool
+	walk = func(x any) bool {
+		switch t := x.(type) {
+		case map[string]any:
+			switch t["type"] {
+			case "image_url", "input_image", "image":
+				return true
+			}
+			for _, c := range t {
+				if walk(c) {
+					return true
+				}
+			}
+		case []any:
+			for _, c := range t {
+				if walk(c) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(v.Messages) || walk(v.Input)
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {
@@ -888,8 +1017,8 @@ func copilotToken(ctx context.Context, github string) (copilotSession, error) {
 var copilotInternal = regexp.MustCompile(`^(copilot-search|exec-agent|trajectory)|-(secondary|tertiary|4th|free-auto)$`)
 
 // copilotModels asks Copilot which chat models this account may use.
-func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) {
-	s, err := copilotToken(ctx, github)
+func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error) {
+	s, err := app.session(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -902,7 +1031,7 @@ func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) 
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.Token)
-	for k, v := range copilotHeaders {
+	for k, v := range s.headers() {
 		req.Header.Set(k, v)
 	}
 	res, err := http.DefaultClient.Do(req)
@@ -913,9 +1042,10 @@ func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) 
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	var v struct {
 		Data []struct {
-			ID           string `json:"id"`
-			Name         string `json:"name"`
-			Picker       bool   `json:"model_picker_enabled"`
+			ID           string   `json:"id"`
+			Name         string   `json:"name"`
+			Picker       bool     `json:"model_picker_enabled"`
+			Endpoints    []string `json:"supported_endpoints"`
 			Capabilities struct {
 				Type     string `json:"type"`
 				Supports struct {
@@ -939,7 +1069,7 @@ func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) 
 		if !m.Picker && (m.Policy == nil || m.Policy.State != "enabled") {
 			continue
 		}
-		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts})
+		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: catalog.EndpointAPIs(m.Endpoints)})
 	}
 	if len(out) == 0 {
 		return nil, errors.New("Copilot lists no chat model for this account")
