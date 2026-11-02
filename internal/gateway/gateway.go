@@ -77,9 +77,9 @@ type Call struct {
 
 // Server is the gateway.
 type Server struct {
-	client *http.Client
-	mu     sync.Mutex
-	recent []Call
+	client       *http.Client
+	mu           sync.Mutex
+	recent       []Call
 	subscription *subscriptionBridge
 	debug        bool
 	trace        trace // what routing did with each request, for the Gateway view
