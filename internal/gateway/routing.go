@@ -237,27 +237,11 @@ type left struct {
 // weigh orders one provider's candidates as its routing says, and tells
 // what it went by.
 func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
-	if len(cs) < 2 {
-		return cs, weighing{}
-	}
-	cs, wg := weighBy(p.Routing, p.ID, cs)
-	switch p.Routing {
-	case "", provider.Rotate, provider.LeastUsed:
-		if p.Account == nil {
-			sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, model, from) < keyFit(cs[j].p, model, from) })
-		}
-	}
-	return cs, wg
-}
-
-// weighBy orders candidates — of one provider, or of a routing group's
-// members together — as routing says; turn names whose turns rotate counts.
-// Each account's allowance is the one its own agent's vendor tells.
-func weighBy(routing, turn string, cs []candidate) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
 	}
+	// each account's own agent's: a group weighs accounts of several
 	known := map[string]map[string]provider.Allowance{}
 	now := time.Now()
 	wg.lefts = map[string]left{}
@@ -276,7 +260,7 @@ func weighBy(routing, turn string, cs []candidate) ([]candidate, weighing) {
 	}
 	lefts := wg.lefts
 	shareOf := func(c candidate) float64 { return lefts[c.rest].used }
-	switch routing {
+	switch p.Routing {
 	case "":
 		// of those with quota to spare, the one whose allowance renews
 		// soonest, since what it has left is lost then, while one renewing
@@ -324,10 +308,12 @@ func weighBy(routing, turn string, cs []candidate) ([]candidate, weighing) {
 			})
 		}
 		cs = append(append(fine, low...), spent...)
+	case provider.Ordered:
+		return cs, wg
 	case provider.Rotate:
 		routed.Lock()
-		n := routed.turn[turn] % len(cs)
-		routed.turn[turn]++
+		n := routed.turn[p.ID] % len(cs)
+		routed.turn[p.ID]++
 		routed.Unlock()
 		cs = append(append([]candidate{}, cs[n:]...), cs[:n]...)
 	case provider.LeastUsed:
@@ -357,6 +343,11 @@ func weighBy(routing, turn string, cs []candidate) ([]candidate, weighing) {
 			out[i] = cs[j]
 		}
 		cs = out
+	default:
+		return cs, wg
+	}
+	if p.Account == nil {
+		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, cs[i].model, from) < keyFit(cs[j].p, cs[j].model, from) })
 	}
 	return cs, wg
 }
