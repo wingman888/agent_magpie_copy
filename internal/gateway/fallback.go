@@ -368,6 +368,7 @@ type holdWriter struct {
 	hold    bool
 	proto   provider.Protocol
 	header  http.Header
+	snap    http.Header // headers as of WriteHeader, read by the timer
 	status  int
 	passing bool
 	held    bytes.Buffer
@@ -395,6 +396,7 @@ func (h *holdWriter) WriteHeader(code int) {
 		return
 	}
 	h.status = code
+	h.snap = h.header.Clone()
 	if h.hold && code >= 400 {
 		return
 	}
@@ -431,7 +433,7 @@ func (h *holdWriter) pass() {
 		return
 	}
 	dst := h.w.Header()
-	for k, v := range h.header {
+	for k, v := range h.snap {
 		dst[k] = v
 	}
 	h.w.WriteHeader(h.status)

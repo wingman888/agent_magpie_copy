@@ -449,9 +449,9 @@ cands:
 					case <-r.Context().Done():
 						timer.Stop()
 						call.Status, call.Error = statusCanceled, "canceled"
-						s.trace.update(tr, func(t *Route) {
-							t.Tries[len(t.Tries)-1].Kind, t.Tries[len(t.Tries)-1].Fail = kindCanceled, failCanceled
-						})
+						try.Status, try.Error, try.Fail, try.Kind = statusCanceled, "canceled", failCanceled, kindCanceled
+						try.Wait, try.Rest = 0, nil
+						s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 						model = c.model
 						break cands
 					}

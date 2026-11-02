@@ -195,7 +195,7 @@ func TestStreamErrorOnLastCandidateIsDelivered(t *testing.T) {
 	// plan/m1 has a fallback, so ask the spare directly: it is the only one
 	_ = s
 	code, body := send(s, "/v1/messages", reqAnth)
-	if code != 200 || !strings.Contains(body, "bad thing") && !strings.Contains(body, "from B") {
+	if code != 200 || (!strings.Contains(body, "bad thing") && !strings.Contains(body, "from B")) {
 		t.Fatalf("%d %s", code, body)
 	}
 }
@@ -309,7 +309,11 @@ func TestCanceledRequestBlamesNobody(t *testing.T) {
 		s.Handler().ServeHTTP(rec, req)
 		done.Store(true)
 	}()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream never received the request")
+	}
 	cancel()
 	for i := 0; i < 500 && !done.Load(); i++ {
 		time.Sleep(10 * time.Millisecond)
