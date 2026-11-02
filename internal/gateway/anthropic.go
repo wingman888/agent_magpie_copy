@@ -193,8 +193,8 @@ func buildAnthropic(r *Request, model string) []byte {
 	}
 	// an assistant turn made only of unsigned thinking is nothing to Anthropic
 	out := map[string]any{"model": model, "messages": msgs, "stream": r.Stream}
-	if sys := withJSONInstruction(r); sys != "" { // Anthropic has no JSON mode
-		out["system"] = sys
+	if r.System != "" {
+		out["system"] = r.System
 	}
 	maxTokens := r.MaxTokens
 	if maxTokens <= 0 {
@@ -202,9 +202,6 @@ func buildAnthropic(r *Request, model string) []byte {
 	}
 	if r.Thinking || r.Effort != "" {
 		budget := budgetOf(r.Effort)
-		if r.Budget > 0 {
-			budget = max(r.Budget, 1024)
-		}
 		if maxTokens < budget+4096 {
 			maxTokens = budget + 4096
 		}

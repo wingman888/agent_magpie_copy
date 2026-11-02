@@ -1,6 +1,6 @@
 // Package gateway is the local LLM endpoint agents talk to. It serves the
-// three wire APIs coding agents speak — OpenAI Chat Completions, OpenAI
-// Responses and Anthropic Messages — and forwards each call to whichever
+// wire APIs coding agents speak — OpenAI Chat Completions, OpenAI
+// Responses, Anthropic Messages and Google Gemini — and forwards each call to whichever
 // provider serves the requested model, translating between the APIs when
 // the provider does not speak the one the agent used.
 package gateway
@@ -75,13 +75,6 @@ type Request struct {
 	Effort     string // low | medium | high | xhigh | max, when the client asked
 	Thinking   bool   // the client asked for visible reasoning
 	Parallel   *bool  // parallel tool calls allowed
-
-	Budget       int             // thinking budget in tokens, when the client gave one
-	JSON         bool            // the reply must be JSON
-	JSONSchema   json.RawMessage // and match this schema, when given
-	HideThoughts bool            // the client asked not to see reasoning
-
-	arrayStream bool // Gemini streaming without alt=sse: one JSON array
 }
 
 // EventKind is what a streamed event carries.
