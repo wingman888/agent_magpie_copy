@@ -14,8 +14,8 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudebridge"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
-	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
@@ -32,7 +32,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie <agent>                  show one agent
   magpie <agent> <model>          set an agent's model   e.g. magpie claude deepseek/deepseek-chat
   magpie <agent> <field> <value>  set another field   e.g. magpie codex effort high
-  magpie claude <opus|sonnet|haiku|fable> <model>   give one Claude Code tier its own model ("" = follow the main model)
   magpie <agent> [field] default  back to the agent's own default, magpie's wiring removed
 
   magpie save <name>              snapshot every agent's settings as a profile
@@ -45,7 +44,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
-  magpie import [-y] <link>       add a provider from a magpie://import?… link, after showing it
+  magpie accounts [claude|codex] subscription accounts: list, switch, forget, add
+  magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
 
   magpie serve                    run the gateway alone (the app runs it too)
@@ -66,6 +66,7 @@ var (
 
 func main() {
 	gateway.Version = version
+	netproxy.Install()
 	update.GUI = hasGUI
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
@@ -78,22 +79,25 @@ func run(args []string) error {
 	agent.RenameLegacy()
 	if len(args) == 0 {
 		if hasGUI {
-			return runGUI(true)
+			return runGUI(true, "")
 		}
 		return tui.Run()
 	}
-	if provider.IsImportLink(args[0]) { // the system's magpie: protocol handler
-		return openLink(args[0])
+	// a magpie:// link the system handed over (Windows, Linux): the app
+	// opens it for the user to confirm
+	if strings.HasPrefix(strings.ToLower(args[0]), "magpie:") {
+		if !hasGUI {
+			return importCmd(args)
+		}
+		return runGUI(false, args[0])
 	}
 	switch args[0] {
-	case "import":
-		return importCmd(args[1:])
 	case "tui":
 		return tui.Run()
 	case "app", "gui":
-		return runGUI(true)
+		return runGUI(true, "")
 	case "tray":
-		return runGUI(false)
+		return runGUI(false, "")
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return nil
@@ -115,12 +119,16 @@ func run(args []string) error {
 		return nil
 	case "save", "use", "rm", "profiles":
 		return profiles(args)
+	case "import":
+		return importCmd(args[1:])
 	case "providers":
 		return providers()
 	case "presets":
 		return presets()
 	case "provider":
 		return providerCmd(args)
+	case "accounts":
+		return accountsCmd(args)
 	case "models":
 		return models()
 	case "serve":
@@ -146,9 +154,6 @@ func run(args []string) error {
 		}
 		// `magpie codex xhigh`: a bare value that belongs to a non-model field
 		// (effort levels, for instance) is routed there; anything else is a model.
-		if mainAccepts(a, args[1]) {
-			return set(a, a.Fields[0].Key, args[1])
-		}
 		if f := fieldForValue(a, args[1]); f != nil {
 			return set(a, f.Key, args[1])
 		}
@@ -186,22 +191,15 @@ func set(a *agent.Agent, key, value string) error {
 	return nil
 }
 
-// mainAccepts reports whether the agent's main model field lists the value;
-// a model that tier fields also list is still the main model.
-func mainAccepts(a *agent.Agent, v string) bool {
-	if len(a.Fields) < 2 {
-		return false
-	}
-	for _, o := range a.Fields[0].Options(a.Values()) {
-		if o.Value == v {
-			return true
-		}
-	}
-	return false
-}
-
 func fieldForValue(a *agent.Agent, v string) *agent.Field {
 	vals := a.Values()
+	// a model stays with the model, even where other fields offer it too
+	// (Claude Code's opus/sonnet/haiku/fable)
+	for _, o := range a.Fields[0].Options(vals) {
+		if o.Value == v {
+			return nil
+		}
+	}
 	for i := 1; i < len(a.Fields); i++ {
 		for _, o := range a.Fields[i].Options(vals) {
 			if o.Value == v {
@@ -230,7 +228,7 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
-				if v == "" && f.HideEmpty {
+				if v == "" && f.Quiet {
 					continue
 				}
 				if v == "" {

@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	_ "github.com/yetone/magpie/internal/netproxy" // outgoing requests follow the proxy setting
 	"io"
 	"net/http"
 	"os"

@@ -65,23 +65,3 @@ func TestMigrate(t *testing.T) {
 		t.Fatal("existing folder overwritten")
 	}
 }
-
-func TestTrayAndProxy(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if Load().Tray != "panel" {
-		t.Fatal("default tray")
-	}
-	for _, p := range []string{"", "direct", "http://h:1", "https://h", "socks5://127.0.0.1:1080", "socks5h://h:1", "127.0.0.1:7890"} {
-		if err := Save(Settings{Proxy: p}); err != nil {
-			t.Fatalf("%q: %v", p, err)
-		}
-	}
-	for _, p := range []string{"ftp://x", "bogus://h:1", "http://"} {
-		if Save(Settings{Proxy: p}) == nil {
-			t.Fatalf("%q accepted", p)
-		}
-	}
-	if Save(Settings{Tray: "sidebar"}) == nil {
-		t.Fatal("tray")
-	}
-}

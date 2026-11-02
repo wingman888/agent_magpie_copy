@@ -51,13 +51,10 @@ func isMagpie(v string) bool {
 
 // magpieModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-// piModels is magpieModels, replaceable in tests.
-var piModels = magpieModels
-
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstCatalog(e.Provider), Efforts: e.Efforts})
 	}
 	return out
 }
@@ -71,3 +68,11 @@ func group(name string, opts []Option) []Option {
 }
 
 func gatewayV1() string { return gateway.URL() + "/v1" }
+
+// firstCatalog is the first models.dev id a provider names.
+func firstCatalog(p provider.Provider) string {
+	if c := p.Catalogs(); len(c) > 0 {
+		return c[0]
+	}
+	return ""
+}

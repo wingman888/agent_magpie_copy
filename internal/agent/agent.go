@@ -29,9 +29,9 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
-	// HideEmpty keeps the field out of listings while it has no value of its
-	// own (a Claude Code tier that follows the main model).
-	HideEmpty bool
+	// Quiet fields are left out of listings while empty: they follow
+	// another field until set (Claude Code's per-tier models).
+	Quiet bool
 }
 
 // Agent is one supported coding agent.
