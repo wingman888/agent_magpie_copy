@@ -17,8 +17,8 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -76,16 +76,15 @@ type settingsJSON struct {
 	Dir     string `json:"dir"`     // where magpie keeps its files, as shown
 	Path    string `json:"path"`    // the same, absolute, for opening it
 	Gateway string `json:"gateway"` // the local endpoint
-	// the proxy vendor requests go through now, and where it came from:
-	// settings, environment, system, off or none
-	ProxyNow    string `json:"proxyNow"`
+	// ProxyInUse and ProxySource say which proxy requests to vendors take
+	// right now and why: settings | off | environment | system | none.
+	ProxyInUse  string `json:"proxyInUse"`
 	ProxySource string `json:"proxySource"`
 }
 
 func settingsState() settingsJSON {
-	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Path: settings.Dir(), Gateway: gateway.URL()}
-	s.ProxyNow, s.ProxySource = netproxy.Describe()
-	return s
+	proxy, source := netproxy.Describe()
+	return settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Path: settings.Dir(), Gateway: gateway.URL(), ProxyInUse: proxy, ProxySource: source}
 }
 
 // Handler serves the embedded UI and the JSON API.
