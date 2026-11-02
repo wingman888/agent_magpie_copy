@@ -359,8 +359,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
 		if !last && hw.failed() {
-			s.rest(c.p.ID)
-			skipped = append(skipped, c.p.ID+": "+call.Error)
+			s.rest(c.rest)
+			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
 		hw.release()
@@ -388,7 +388,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
