@@ -177,6 +177,34 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 `auth` to API key with the gateway token, and names the model in
 `settings.json`; a native model puts the previous auth back.
 
+## Import links
+
+A vendor or relay can hand you a ready-made provider as one link:
+
+```
+magpie://import?preset=deepseek&key=sk-…
+magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&anthropic=https://api.acme.example&key=sk-…&models=gpt-5.5,claude-sonnet-5
+```
+
+Run `magpie import '<link>'` (or open the link; the OS passes it to magpie as its first argument). magpie prints what the link would add, including the hosts your prompts and key would be sent to, warns if it would replace an existing provider, and asks `Add it? [y/N]`. **Nothing is saved until you answer y.** `-y` skips the question; without a terminal on stdin and without `-y`, magpie refuses. A link without a key reminds you to run `magpie provider key <id> <key>`.
+
+| Parameter | Meaning |
+| --- | --- |
+| `preset` | preset id (`magpie presets`); its endpoints are used |
+| `region` | which of a preset's regions; unknown regions are an error |
+| `name` | provider name; required without `preset`, overrides the preset's name with one |
+| `id` | provider id; defaults to the slug of the name (or the preset id) |
+| `key` | API key; omit to add it later |
+| `chat` / `responses` | OpenAI Chat Completions / Responses base URL (…/v1) |
+| `anthropic` | Anthropic Messages base URL (root, no /v1) |
+| `models` | comma-separated model ids to expose (up to 200) |
+| `catalog` | models.dev provider id, for names and reasoning levels |
+| `website`, `keys` | vendor site and key page (https only, otherwise ignored) |
+
+With `preset`, `chat`, `responses`, `anthropic`, `catalog`, `website` and `keys` are ignored. Without it, at least one base URL is required. Base URLs must be https (http is allowed only for localhost, loopback, private-network IPs and `.local` names) and must not carry credentials, a query or a fragment. Links with a bad URL, the id `magpie`, an empty id, or a key with control characters or over 4096 characters are rejected, not repaired.
+
+On a web page, link through `https://usemagpie.ai/import#<same parameters>`: parameters in the fragment are never sent to the server.
+
 ## Install
 
 Download the app for macOS, Windows or Linux from
