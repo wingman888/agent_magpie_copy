@@ -418,7 +418,7 @@ func retryAfterHeader(h http.Header, now time.Time) (time.Duration, bool) {
 	return 0, false
 }
 
-// unrest ends a candidate's rest: it just answered.
+// clearProviderRest ends a candidate's rest: it just answered.
 func clearProviderRest(id string) {
 	restingUntil.Lock()
 	delete(restingUntil.m, id)

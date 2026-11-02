@@ -895,7 +895,7 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		Website: "https://github.com/features/copilot", Account: acct}
 }
 
-// userTurn reports whether a request's last turn is one the user typed, in
+// copilotUserTurn reports whether a request's last turn is one the user typed, in
 // any of the three request shapes: a Chat or Anthropic user message (an
 // Anthropic one holding only tool results is the agent's), a Responses user
 // item or plain string input. Tool output — Chat's tool messages, Responses'
@@ -947,7 +947,7 @@ func copilotUserTurn(body []byte) bool {
 	return last.Role == "user" && (last.Type == "" || last.Type == "message")
 }
 
-// hasImage reports whether a request carries a picture: Chat's image_url
+// copilotHasImage reports whether a request carries a picture: Chat's image_url
 // parts, Responses' input_image, Anthropic's image blocks.
 func copilotHasImage(body []byte) bool {
 	if bytes.Contains(body, []byte(`"image_url"`)) || bytes.Contains(body, []byte(`"input_image"`)) {
@@ -963,7 +963,7 @@ func copilotHasImage(body []byte) bool {
 	return copilotImageBlock(v, 0)
 }
 
-// imageBlock looks for {"type":"image"} anywhere under the messages.
+// copilotImageBlock looks for {"type":"image"} anywhere under the messages.
 func copilotImageBlock(v any, depth int) bool {
 	if depth > 12 {
 		return false
