@@ -109,7 +109,11 @@ func TestAffinityModes(t *testing.T) {
 			s := New()
 			first := answeredBy(t, s, "ses-1", withModel(c.reqs[0], "lu/m"))
 			r := lastRoute(t, s)
-			if r.Affinity == nil || r.Affinity.Why != "first" || r.Affinity.Kept || r.Affinity.Mode != c.mode || r.Affinity.Turn != 1 {
+			wantFirst := "first"
+			if c.mode == provider.AffinityOff {
+				wantFirst = "off"
+			}
+			if r.Affinity == nil || r.Affinity.Why != wantFirst || r.Affinity.Kept || r.Affinity.Mode != c.mode || r.Affinity.Turn != 1 {
 				t.Fatalf("first: %+v", r.Affinity)
 			}
 			second := answeredBy(t, s, "ses-1", withModel(c.reqs[1], "lu/m"))
