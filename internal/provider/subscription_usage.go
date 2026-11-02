@@ -162,6 +162,11 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 		return q
 	}
 	_, plan, _ := claudeIdentity()
+	return claudeUsageWith(ctx, q, token, plan)
+}
+
+// claudeUsageWith asks Anthropic how much of one account's allowance is used.
+func claudeUsageWith(ctx context.Context, q SubscriptionQuota, token, plan string) SubscriptionQuota {
 	q.Plan = plan
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
@@ -169,7 +174,7 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
+	err := accountJSON(ctx, claudeBase+"/api/oauth/usage", token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
@@ -207,6 +212,11 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		q.Error = err.Error()
 		return q
 	}
+	return codexUsageWith(ctx, q, token, accountID)
+}
+
+// codexUsageWith asks ChatGPT how much of one account's allowance is used.
+func codexUsageWith(ctx context.Context, q SubscriptionQuota, token, accountID string) SubscriptionQuota {
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -215,12 +225,14 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	err := accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
 	if err != nil {
 		q.Error = err.Error()
 		return q
 	}
-	q.Plan = data.PlanType
+	if data.PlanType != "" {
+		q.Plan = data.PlanType
+	}
 	if data.RateLimit.Primary != nil {
 		q.Windows = append(q.Windows, data.RateLimit.Primary.window())
 	}
