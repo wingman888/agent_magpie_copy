@@ -110,7 +110,7 @@ func TestFailoverByStatusAndMessage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &foUpstream{reply: foJSONErr(tc.code, tc.msg)}
-			b := &foUpstream{reply: okReply}
+			b := &foUpstream{reply: foOKReply}
 			foPair(t, a, b)
 			code, body := foSend(foServer(), "/v1/chat/completions", chatReq)
 			if tc.move {
@@ -300,7 +300,7 @@ func TestCanceledRequestBlamesNobody(t *testing.T) {
 		started <- struct{}{}
 		<-r.Context().Done()
 	}}
-	b := &foUpstream{reply: okReply}
+	b := &foUpstream{reply: foOKReply}
 	foPair(t, a, b)
 	s := foServer()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -339,8 +339,8 @@ func TestCanceledRequestBlamesNobody(t *testing.T) {
 }
 
 func TestSuccessEndsRest(t *testing.T) {
-	a := &foUpstream{reply: okReply}
-	foPair(t, a, &foUpstream{reply: okReply})
+	a := &foUpstream{reply: foOKReply}
+	foPair(t, a, &foUpstream{reply: foOKReply})
 	restingUntil.Lock()
 	restingUntil.m["plan"] = time.Now().Add(time.Hour)
 	restingUntil.Unlock()
