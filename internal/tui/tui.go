@@ -1,4 +1,4 @@
-// Package tui is the interactive dial: one row per agent, arrow keys to pick
+// Package tui is magpie in the terminal: one row per agent, arrow keys to pick
 // a field, enter to change it.
 package tui
 
@@ -15,9 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/yetone/dial/internal/agent"
-	"github.com/yetone/dial/internal/catalog"
-	"github.com/yetone/dial/internal/profile"
+	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/profile"
 )
 
 // ---- styling ---------------------------------------------------------------
@@ -92,7 +92,7 @@ type flashMsg struct {
 
 type syncedMsg struct{ err error }
 
-// Run starts the interactive dial.
+// Run starts magpie in the terminal.
 func Run() error {
 	m := newModel()
 	if len(m.agents) == 0 {
@@ -488,7 +488,7 @@ func (m model) View() string {
 }
 
 func (m model) header(crumbs ...string) string {
-	s := pad + sTitle.Render("◉ dial")
+	s := pad + sTitle.Render("◉ magpie")
 	for _, c := range crumbs {
 		s += sCrumb.Render(" › ") + sText.Render(c)
 	}
