@@ -375,7 +375,8 @@ func failure(w http.ResponseWriter, proto provider.Protocol, p provider.Provider
 // sniffStream gives a reply without a Content-Type the one it deserves:
 // the ChatGPT backend streams events and says nothing about it.
 func sniffStream(res *http.Response) {
-	if res.Header.Get("Content-Type") != "" || res.StatusCode >= 400 {
+	// a server that names no type may be given text/plain by whatever sits in between
+	if ct := res.Header.Get("Content-Type"); (ct != "" && !strings.HasPrefix(ct, "text/plain")) || res.StatusCode >= 400 {
 		return
 	}
 	br := bufio.NewReader(res.Body)

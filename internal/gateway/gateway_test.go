@@ -375,7 +375,8 @@ func TestCodexAccountResponses(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.got, _ = io.ReadAll(r.Body)
 		f.head, f.path = r.Header, r.URL.Path
-		io.WriteString(w, f.reply) // no Content-Type set explicitly
+		w.Header()["Content-Type"] = nil // say nothing, and keep net/http from guessing
+		io.WriteString(w, f.reply)
 	}))
 	defer up.Close()
 	old := provider.CodexBase
