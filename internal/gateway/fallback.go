@@ -1,71 +1,116 @@
 package gateway
 
-// Fallback: a provider can name models to use when it can't take a request
-// — a coding plan out of quota, a rate limit, an overloaded or failing
-// vendor. The request goes to the next one only while none of the reply has
-// been sent, so an agent sees one clean answer from whoever gave it, never a
-// half from each. A provider that just failed that way waits at the back of
-// the line for a minute, rather than costing every request a doomed try.
-
 import (
 	"bytes"
+	"fmt"
 	"net/http"
-	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-const fallbackCooldown = time.Minute
+// restPeriod is how long a provider that just failed with a switchable error
+// is tried only after every other candidate.
+const restPeriod = time.Minute
 
+// candidate is one provider and model a request may be served by.
 type candidate struct {
-	p     provider.Provider
-	model string
-	// label names the provider, and the account when it has several keys
-	// on: "relay(team)", or "relay(sk-a…b123)" for a key without a name.
-	label string
-	// restID is what rests after a failure: the provider, or one of its keys.
-	restID string
+	p       provider.Provider
+	model   string
+	order   int  // place in the configured order: 0 is the model asked for
+	resting bool // the provider failed recently and was moved back
 }
 
-// keyCandidates is one try per key of p that is on, in order. A provider
-// with one key (or none, or a signed-in account) is a single try as before.
-func keyCandidates(p provider.Provider, model string) []candidate {
-	keys := p.KeysOn()
-	if p.Account != nil || len(keys) <= 1 {
-		return []candidate{{p: p, model: model, label: p.ID, restID: p.ID}}
-	}
-	out := make([]candidate, 0, len(keys))
-	for _, k := range keys {
-		kp := p
-		kp.Key, kp.KeyName, kp.Keys = k.Key, k.Name, nil
-		out = append(out, candidate{p: kp, model: model,
-			label:  p.ID + "(" + provider.KeyLabel(k.Name, k.Key) + ")",
-			restID: p.ID + "#" + provider.KeyID(k.Key)})
-	}
-	return out
+// restTable remembers providers that recently could not take a request.
+// It lives only as long as the gateway process.
+type restTable struct {
+	mu    sync.Mutex
+	until map[string]time.Time
+	why   map[string]string
+	now   func() time.Time
 }
 
-// candidates is the primary and then its fallbacks, each once per key it
-// has on, those resting after a recent failure moved behind the rest.
+func newRestTable() *restTable {
+	return &restTable{until: make(map[string]time.Time), why: make(map[string]string), now: time.Now}
+}
+
+// mark starts id's rest; reason is what it failed with.
+func (t *restTable) mark(id, reason string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.until[id] = t.now().Add(restPeriod)
+	t.why[id] = reason
+}
+
+// reason is what a resting provider last failed with.
+func (t *restTable) reason(id string) string {
+	if t == nil {
+		return ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.why[id]
+}
+
+func (t *restTable) resting(id string) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	u, ok := t.until[id]
+	if !ok {
+		return false
+	}
+	if !t.now().Before(u) {
+		delete(t.until, id)
+		delete(t.why, id)
+		return false
+	}
+	return true
+}
+
+func (t *restTable) reset() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.until = make(map[string]time.Time)
+	t.why = make(map[string]string)
+}
+
+// candidates lists who may serve a request for model on p: p itself, then
+// p's own fallbacks in order. Fallbacks that do not resolve, or repeat an
+// earlier provider and model, are skipped; fallbacks' own fallbacks are not
+// followed. Providers resting after a recent failure go last, in order.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := keyCandidates(p, model)
-	seen := map[string]bool{p.ID + "/" + model: true}
+	out := []candidate{{p: p, model: model}}
+	seen := map[string]bool{p.ID + "\x00" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
-		if !ok || seen[fp.ID+"/"+fm] {
+		if !ok {
 			continue
 		}
-		seen[fp.ID+"/"+fm] = true
-		out = append(out, keyCandidates(fp, fm)...)
+		key := fp.ID + "\x00" + fm
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, candidate{p: fp, model: fm, order: len(out)})
 	}
-	if len(out) == 1 {
+	if len(out) < 2 {
 		return out
 	}
 	var ready, resting []candidate
 	for _, c := range out {
-		if s.resting(c.restID) {
+		if s.rest.resting(c.p.ID) {
+			c.resting = true
 			resting = append(resting, c)
 		} else {
 			ready = append(ready, c)
@@ -74,103 +119,114 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 	return append(ready, resting...)
 }
 
-var restingUntil = struct {
-	sync.Mutex
-	m map[string]time.Time
-}{m: map[string]time.Time{}}
-
-func (s *Server) resting(id string) bool {
-	restingUntil.Lock()
-	defer restingUntil.Unlock()
-	return time.Now().Before(restingUntil.m[id])
+// switchPhrases mark a 400/401/403 as the provider being out of quota,
+// rate limited or overloaded rather than the request being wrong.
+var switchPhrases = []string{
+	"quota", "insufficient", "balance", "credit", "billing", "exceeded",
+	"rate limit", "rate_limit", "ratelimit", "usage limit", "usage_limit", "too many requests", "overloaded",
+	"余额", "额度", "欠费", "限流", "频率", "套餐", "用量", "上限",
 }
 
-func (s *Server) rest(id string) {
-	restingUntil.Lock()
-	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
-	restingUntil.Unlock()
-}
-
-// quotaWords are how vendors say "out of quota" or "slow down" when their
-// status code doesn't: some answer 400 or 403 with it.
-var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
-
-// retryable says whether another provider may do better with a request
-// that failed this way.
-func retryable(status int, body []byte) bool {
+// switchable reports whether an error reply means another provider should
+// be tried: the provider cannot take the request, not that it is malformed.
+func switchable(status int, bodies ...[]byte) bool {
 	switch {
 	case status == 402, status == 408, status == 429, status >= 500:
 		return true
 	case status == 400, status == 401, status == 403:
-		return quotaWords.Match(body)
+		for _, b := range bodies {
+			msg := strings.ToLower(string(b))
+			for _, ph := range switchPhrases {
+				if strings.Contains(msg, ph) {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }
 
-// holdWriter keeps an error reply back while another provider may still
-// answer: headers and body wait until release, or are dropped for the next
-// try. Anything else goes straight through.
-type holdWriter struct {
-	w       http.ResponseWriter
-	hold    bool
-	header  http.Header
-	status  int
-	passing bool
-	held    bytes.Buffer
+// fallbackWriter stands between one attempt and the client. A success
+// status goes straight through, and from then on so does everything else.
+// An error reply is held back until the attempt ends, so the gateway can
+// still decide to try someone else without the client seeing it.
+type fallbackWriter struct {
+	dst       http.ResponseWriter
+	header    http.Header
+	status    int
+	committed bool
+	buf       bytes.Buffer
+	upstream  []byte // the provider's raw error body, when one was read
 }
 
-func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
-	return &holdWriter{w: w, hold: hold, header: http.Header{}}
+func newFallbackWriter(dst http.ResponseWriter) *fallbackWriter {
+	return &fallbackWriter{dst: dst, header: make(http.Header)}
 }
 
-func (h *holdWriter) Header() http.Header { return h.header }
+func (w *fallbackWriter) Header() http.Header { return w.header }
 
-func (h *holdWriter) WriteHeader(code int) {
-	if h.status != 0 {
+func (w *fallbackWriter) WriteHeader(code int) {
+	if w.status != 0 {
 		return
 	}
-	h.status = code
-	if h.hold && code >= 400 {
+	w.status = code
+	if code < 400 {
+		w.commit()
+	}
+}
+
+func (w *fallbackWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.committed {
+		return w.dst.Write(p)
+	}
+	return w.buf.Write(p)
+}
+
+func (w *fallbackWriter) Flush() {
+	if !w.committed {
 		return
 	}
-	h.pass()
-}
-
-func (h *holdWriter) pass() {
-	dst := h.w.Header()
-	for k, v := range h.header {
-		dst[k] = v
-	}
-	h.w.WriteHeader(h.status)
-	h.passing = true
-}
-
-func (h *holdWriter) Write(b []byte) (int, error) {
-	if h.status == 0 {
-		h.WriteHeader(http.StatusOK)
-	}
-	if !h.passing {
-		return h.held.Write(b)
-	}
-	return h.w.Write(b)
-}
-
-func (h *holdWriter) Flush() {
-	if f, ok := h.w.(http.Flusher); ok && h.passing {
+	if f, ok := w.dst.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// failed reports a held error another provider could answer instead.
-func (h *holdWriter) failed() bool {
-	return !h.passing && h.status >= 400 && retryable(h.status, h.held.Bytes())
-}
-
-// release sends a held reply after all: nobody else is left to try.
-func (h *holdWriter) release() {
-	if h.passing || h.status == 0 {
+// commit sends the held reply to the client; after it, nothing is held.
+func (w *fallbackWriter) commit() {
+	if w.committed || w.status == 0 {
 		return
 	}
-	h.pass()
-	h.w.Write(h.held.Bytes())
+	w.committed = true
+	h := w.dst.Header()
+	for k, v := range w.header {
+		h[k] = v
+	}
+	w.dst.WriteHeader(w.status)
+	if w.buf.Len() > 0 {
+		w.dst.Write(w.buf.Bytes())
+		w.buf.Reset()
+	}
+}
+
+// noteUpstreamError keeps the provider's raw error body for deciding
+// whether to fall back, when w is a fallbackWriter.
+func noteUpstreamError(w http.ResponseWriter, b []byte) {
+	if fw, ok := w.(*fallbackWriter); ok {
+		fw.upstream = b
+	}
+}
+
+// failureReason is why an attempt failed: its status and a short message.
+func failureReason(status int, msg string) string {
+	msg = strings.Join(strings.Fields(msg), " ")
+	if r := []rune(msg); len(r) > 200 {
+		msg = string(r[:200]) + "…"
+	}
+	if msg == "" {
+		return fmt.Sprint(status)
+	}
+	return fmt.Sprintf("%d %s", status, msg)
 }
