@@ -56,8 +56,13 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
+	ApplyHeaders(req.Header, p.CustomHeaders())
 	return nil
 }
+
+// ApplyHeaders puts the user's own headers on a request, over whatever is
+// there (the key included), names exactly as typed.
+func ApplyHeaders(h http.Header, extra map[string]string) { catalog.ApplyHeaders(h, extra) }
 
 // Prepare adjusts a request body the way the backend wants it.
 func (p Provider) Prepare(body []byte) []byte {
