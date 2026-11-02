@@ -59,17 +59,19 @@ func signIn(t *testing.T) string {
 	return home
 }
 
-// isolate keeps tests off the machine's own Claude Code Keychain login and
-// forgets anything a previous test cached.
+// isolate keeps tests off the machine's own Claude Code and Cursor Keychain
+// logins and forgets anything a previous test cached.
 func isolate(t *testing.T) {
 	t.Helper()
 	oldKeychain, oldURL, oldBase, oldExe := claudeKeychain, claudeTokenURL, claudeBase, claudeExecutable
-	claudeKeychain = false
+	oldCursor := cursorKeychain
+	claudeKeychain, cursorKeychain = false, false
 	claudeExecutable = func() string { return "" }
 	forgetClaudeCredential()
 	forgetClaudeStatus()
 	t.Cleanup(func() {
 		claudeKeychain, claudeTokenURL, claudeBase, claudeExecutable = oldKeychain, oldURL, oldBase, oldExe
+		cursorKeychain = oldCursor
 		forgetClaudeCredential()
 		forgetClaudeStatus()
 	})
@@ -491,5 +493,33 @@ func TestClaudeSignedOut(t *testing.T) {
 	fake()
 	if _, ok := find(All(), "claude"); ok {
 		t.Fatal("claude listed after sign-out")
+	}
+}
+
+func TestLastRole(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"messages":[{"role":"system"},{"role":"user"}]}`: "user",
+		`{"messages":[{"role":"user"},{"role":"tool"}]}`:   "tool",
+		`{"input":"hi"}`: "user",
+		`{"input":[{"role":"user","content":"hi"}]}`:                                                                       "user",
+		`{"input":[{"role":"user"},{"type":"function_call_output","call_id":"c","output":"x"}]}`:                           "",
+		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"x"}]}]}`:                "tool",
+		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t"},{"type":"text","text":"and"}]}]}`: "user",
+		`{"messages":[{"role":"user","content":"hi"}]}`:                                                                    "user",
+		`not json`: "",
+	} {
+		if got := lastRole([]byte(body)); got != want {
+			t.Errorf("lastRole(%s) = %q, want %q", body, got, want)
+		}
+	}
+}
+
+func TestCopilotAPIs(t *testing.T) {
+	got := copilotAPIs([]string{"/responses", "ws:/responses", "/v1/messages", "/chat/completions", "/embeddings"})
+	if strings.Join(got, " ") != "responses anthropic chat" {
+		t.Errorf("copilotAPIs = %v", got)
+	}
+	if copilotAPIs(nil) != nil {
+		t.Error("no endpoints should be not known")
 	}
 }
