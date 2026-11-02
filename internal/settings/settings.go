@@ -9,6 +9,7 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,10 +22,90 @@ type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
 	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
-	// Proxy for magpie's own requests to vendors: "" follows the
-	// environment and then the system, "direct" uses none, anything else
-	// is the proxy (http://, https:// or socks5://; host:port means http).
+	// Proxy is the proxy for requests magpie sends to vendors: "" follows the
+	// environment and then the OS, "direct" uses none, anything else is a
+	// proxy address such as http://127.0.0.1:7890 or socks5://127.0.0.1:1080.
 	Proxy string `json:"proxy,omitempty"`
+}
+
+// ProxyDirect is the Proxy value that turns proxying off.
+const ProxyDirect = "direct"
+
+// IsDirect reports whether a Proxy value means "no proxy".
+func IsDirect(proxy string) bool {
+	return strings.EqualFold(strings.TrimSpace(proxy), ProxyDirect)
+}
+
+// ParseProxy parses a proxy address. http://, https://, socks5:// and
+// socks5h:// are accepted; a bare host:port is an HTTP proxy.
+func ParseProxy(s string) (*url.URL, error) {
+	s = strings.TrimSpace(s)
+	bad := func(why string) error {
+		return fmt.Errorf("invalid proxy %q: %s; use e.g. http://127.0.0.1:7890 or socks5://127.0.0.1:1080, or %q for none", s, why, ProxyDirect)
+	}
+	if s == "" {
+		return nil, bad("empty")
+	}
+	if strings.ContainsAny(s, " \t\r\n") {
+		return nil, bad("contains whitespace")
+	}
+	raw := s
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, bad("cannot be parsed")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, bad(fmt.Sprintf("unsupported scheme %q", u.Scheme))
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil, bad("missing host")
+	}
+	if strings.HasPrefix(u.Host, "[") {
+		if net.ParseIP(host) == nil {
+			return nil, bad("bad IPv6 address")
+		}
+	} else {
+		for _, c := range host {
+			ok := c == '-' || c == '.' || c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c > 127
+			if !ok {
+				return nil, bad("bad host")
+			}
+		}
+	}
+	if p := u.Port(); p != "" {
+		n := 0
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return nil, bad("bad port")
+			}
+			n = n*10 + int(c-'0')
+			if n > 65535 {
+				return nil, bad("bad port")
+			}
+		}
+	} else if strings.HasSuffix(u.Host, ":") {
+		return nil, bad("missing port")
+	}
+	if u.Opaque != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return nil, bad("unexpected path")
+	}
+	u.Path, u.RawPath = "", ""
+	return u, nil
+}
+
+func checkProxy(p string) error {
+	if p == "" || IsDirect(p) {
+		return nil
+	}
+	_, err := ParseProxy(p)
+	return err
 }
 
 // Themes and Langs are the accepted values, in the order the UI offers them.
@@ -67,16 +148,8 @@ func Save(s Settings) error {
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
 	}
-	s.Proxy = strings.TrimSpace(s.Proxy)
-	if s.Proxy != "" && s.Proxy != "direct" {
-		raw := s.Proxy
-		if !strings.Contains(raw, "://") {
-			raw = "http://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
-			return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", s.Proxy)
-		}
+	if err := checkProxy(s.Proxy); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
@@ -97,6 +170,10 @@ func (s Settings) normal() Settings {
 	}
 	if s.Tray == "" {
 		s.Tray = "panel"
+	}
+	s.Proxy = strings.TrimSpace(s.Proxy)
+	if IsDirect(s.Proxy) {
+		s.Proxy = ProxyDirect
 	}
 	return s
 }
