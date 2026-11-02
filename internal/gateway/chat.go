@@ -158,8 +158,19 @@ func dataURL(p Part) string {
 	return "data:" + p.MediaType + ";base64," + p.Data
 }
 
+// reasoningModel is a model that rejects temperature and top_p.
+func reasoningModel(model string) bool {
+	m := strings.ToLower(model)
+	for _, pre := range []string{"gpt-5", "o1", "o3", "o4", "codex"} {
+		if strings.HasPrefix(m, pre) || strings.Contains(m, "/"+pre) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildChat renders a request for a Chat Completions upstream.
-func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
+func buildChat(r *Request, model, host string) []byte {
 	var msgs []map[string]any
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
@@ -238,7 +249,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			out["max_tokens"] = r.MaxTokens
 		}
 	}
-	if !rejectTemp {
+	if !reasoningModel(model) {
 		if r.Temp != nil {
 			out["temperature"] = *r.Temp
 		}
@@ -531,38 +542,4 @@ func renderChat(res Result, model string) []byte {
 		"choices": []map[string]any{{"index": 0, "message": msg, "finish_reason": stopToChat(res.Stop)}},
 		"usage":   res.Usage.chat()})
 	return b
-}
-
-// developerToSystem rewrites role "developer" messages to "system" for
-// backends that only know the older role. A body without any is returned
-// untouched.
-func developerToSystem(body []byte) []byte {
-	var top map[string]json.RawMessage
-	if json.Unmarshal(body, &top) != nil {
-		return body
-	}
-	var msgs []map[string]json.RawMessage
-	if json.Unmarshal(top["messages"], &msgs) != nil {
-		return body
-	}
-	changed := false
-	for _, m := range msgs {
-		if string(m["role"]) == `"developer"` {
-			m["role"] = json.RawMessage(`"system"`)
-			changed = true
-		}
-	}
-	if !changed {
-		return body
-	}
-	raw, err := json.Marshal(msgs)
-	if err != nil {
-		return body
-	}
-	top["messages"] = raw
-	out, err := json.Marshal(top)
-	if err != nil {
-		return body
-	}
-	return out
 }
