@@ -853,14 +853,23 @@ var sessionHeaders = []string{
 	"session_id", "session-id", "x-claude-code-session-id",
 }
 
-// conversationID is a stable id for the conversation a request belongs to.
-// It is the agent's own session id when it sends one; otherwise it is derived
-// from the conversation's first user message, which every later turn repeats.
-func conversationID(in http.Header, body []byte) string {
+// sessionHeaderID is the session id the agent sent: the first of
+// sessionHeaders that is not blank, "" when it sent none.
+func sessionHeaderID(in http.Header) string {
 	for _, h := range sessionHeaders {
 		if v := strings.TrimSpace(in.Get(h)); v != "" {
 			return v
 		}
+	}
+	return ""
+}
+
+// conversationID is a stable id for the conversation a request belongs to.
+// It is the agent's own session id when it sends one; otherwise it is derived
+// from the conversation's first user message, which every later turn repeats.
+func conversationID(in http.Header, body []byte) string {
+	if v := sessionHeaderID(in); v != "" {
+		return v
 	}
 	var m struct {
 		Messages []json.RawMessage `json:"messages"`

@@ -90,11 +90,38 @@ var codexVersionCache struct {
 
 var semverRe = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.\-]+)?`)
 
+// CodexExecutable finds the Codex CLI, "" when it isn't installed; a var so
+// tests can fake it.
+var CodexExecutable = func() string {
+	if p, err := exec.LookPath("codex"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{filepath.Join(home, ".local", "bin", "codex"), "/usr/local/bin/codex", "/opt/homebrew/bin/codex"} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// codexExecutable is the Codex CLI asked for its version; a var so tests can
+// fake it without touching CodexExecutable.
+var codexExecutable = func() string { return CodexExecutable() }
+
+// forgetCodexVersion drops the cached Codex CLI version.
+func forgetCodexVersion() {
+	c := &codexVersionCache
+	c.Lock()
+	c.key, c.at, c.v = "", time.Time{}, ""
+	c.Unlock()
+}
+
 // codexCLIVersion is what `codex --version` says, "" when Codex CLI isn't
 // installed or doesn't say.
 func codexCLIVersion() string {
-	path, err := exec.LookPath("codex")
-	if err != nil {
+	path := codexExecutable()
+	if path == "" {
 		return ""
 	}
 	key := path

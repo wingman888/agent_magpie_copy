@@ -275,11 +275,30 @@ func TestAffSessionOf(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 	a := sessionOf(http.Header{}, provider.Anthropic, []byte(`{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"x","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"r"}]}]}`), "m")
-	if a.turn != 1 || !a.within {
+	if a.turn != 1 || !a.within || a.key != "" {
 		t.Fatalf("anthropic %+v", a)
 	}
 	r := sessionOf(http.Header{}, provider.Responses, []byte(`{"model":"m","input":[{"role":"user","content":"hi"},{"type":"function_call","call_id":"c","name":"x","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":"r"}]}`), "m")
 	if r.turn != 1 || !r.within {
 		t.Fatalf("responses %+v", r)
+	}
+}
+
+// Without a session header a request belongs to no conversation: nothing is
+// kept for it, and rotation moves on per request.
+func TestAffNoSessionHeader(t *testing.T) {
+	affHome(t)
+	up := &affCachedKeys{}
+	affThreeKeys(t, "rot", provider.Rotate, provider.AffinitySession, up)
+	s := New()
+	var got []string
+	for _, b := range []string{affTurn1, affWithin1, affWithin1} {
+		got = append(got, affAnsweredBy(t, s, "", affWithModel(b, "rot/m")))
+		if a := affLastRoute(t, s).Affinity; a != nil && a.Kept {
+			t.Fatalf("kept without a session: %+v", a)
+		}
+	}
+	if strings.Join(got, " ") != "k1 k2 k3" {
+		t.Fatalf("went to %v", got)
 	}
 }

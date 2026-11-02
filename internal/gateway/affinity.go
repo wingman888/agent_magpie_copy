@@ -42,9 +42,14 @@ type session struct {
 }
 
 // sessionOf places a request in its conversation: the agent's own session
-// id when it sends one, else one derived from the conversation's start.
+// id, from the first of sessionHeaders it sends. Without one the request
+// belongs to no conversation (key ""): nothing is kept for it and rotation
+// moves on per request.
 func sessionOf(in http.Header, from provider.Protocol, body []byte, model string) session {
-	s := session{key: conversationID(in, body) + "\x00" + model}
+	var s session
+	if id := sessionHeaderID(in); id != "" {
+		s.key = id + "\x00" + model
+	}
 	req, err := parse(from, body)
 	if err != nil {
 		return s

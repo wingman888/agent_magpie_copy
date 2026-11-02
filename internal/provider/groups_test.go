@@ -249,3 +249,21 @@ func TestGrpShowMissingAndHashedID(t *testing.T) {
 		t.Fatal("hash not stable")
 	}
 }
+
+// A bare model id served by several providers still resolves as before
+// groups: to the first provider that exposes it, never to its auto group.
+func TestGrpBareIDResolvesAsBefore(t *testing.T) {
+	grpHome(t)
+	Save(Provider{ID: "a", Key: "k", Chat: "https://a.example/v1", Models: []string{"m"}})
+	Save(Provider{ID: "b", Key: "k", Chat: "https://b.example/v1", Models: []string{"m"}})
+	if !slices.Contains(grpIDs(Catalog()), "group/auto-m") {
+		t.Fatalf("no auto group: %v", grpIDs(Catalog()))
+	}
+	p, m, ok := Resolve("m")
+	if !ok || p.ID != "a" || m != "m" {
+		t.Fatalf("bare id: %v %q %v", p.ID, m, ok)
+	}
+	if p, m, ok := Resolve("b/m"); !ok || p.ID != "b" || m != "m" {
+		t.Fatalf("qualified: %v %q %v", p.ID, m, ok)
+	}
+}

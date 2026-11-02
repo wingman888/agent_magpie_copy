@@ -69,11 +69,13 @@ func isolate(t *testing.T) {
 	claudeExecutable = func() string { return "" }
 	forgetClaudeCredential()
 	forgetClaudeStatus()
+	forgetCodexVersion()
 	t.Cleanup(func() {
 		claudeKeychain, claudeTokenURL, claudeBase, claudeExecutable = oldKeychain, oldURL, oldBase, oldExe
 		cursorKeychain = oldCursor
 		forgetClaudeCredential()
 		forgetClaudeStatus()
+		forgetCodexVersion()
 	})
 }
 
