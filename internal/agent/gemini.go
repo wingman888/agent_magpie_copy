@@ -196,7 +196,7 @@ func gemini(home string) *Agent {
 			{
 				Key: "model", Label: "model",
 				Get: jsonGet(path, "model.name"),
-				Set: jsonSet(path, "model.name"),
+				Set: setModel,
 				Options: func(map[string]string) []Option {
 					var ms []catalog.Model
 					for _, m := range catalog.Provider("google") {
