@@ -55,17 +55,13 @@ func (c candidate) label() string {
 // OpenAI one for a GPT model, else the key that speaks what the agent
 // spoke, so nothing is translated that needn't be.
 func perKey(p provider.Provider, model string, from provider.Protocol) []candidate {
-	out, aside, _ := perKeyOf(p, model, from)
-	return append(out, aside...)
+	out, _ := perKeyOf(p, model, from)
+	return out
 }
 
-// perKeyOf is perKey, split: the keys routing goes over, those made for
-// another protocol, and the accounts or keys it left out as not listing
-// the model. Keys made for different protocols are not one pool: routing
-// weighs, rotates and keeps conversations over those made for the
-// protocol that suits the request best, and the others are tried only
-// after them, in the order they suit it.
-func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, aside, left []candidate) {
+// perKeyOf is perKey, and the accounts or keys it left out as not listing
+// the model.
+func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, left []candidate) {
 	if p.Account != nil {
 		all := []candidate{{p, model, p.ID}}
 		for _, q := range p.AlsoOn() {
@@ -81,9 +77,9 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, a
 			}
 		}
 		if len(out) == 0 {
-			return all, nil, nil
+			return all, nil
 		}
-		return out, nil, left
+		return out, left
 	}
 	keys := p.KeysOn()
 	var unlisted []candidate
@@ -107,18 +103,10 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, a
 		out, unlisted = unlisted, nil // no key lists it: try them all the same
 	}
 	if len(out) == 0 {
-		return []candidate{{p, model, p.ID}}, nil, nil
+		return []candidate{{p, model, p.ID}}, nil
 	}
 	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
-	pool := out[:0:0]
-	for _, c := range out {
-		if c.p.KeyProtocol == out[0].p.KeyProtocol {
-			pool = append(pool, c)
-		} else {
-			aside = append(aside, c)
-		}
-	}
-	return pool, aside, unlisted
+	return out, unlisted
 }
 
 // keyFit ranks how well a key suits a request, best first: 0 fits, 1 needs
@@ -174,15 +162,13 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
 	var pl planned
 	add := func(q provider.Provider, m string, fallback bool) []candidate {
-		cs, aside, left := perKeyOf(q, m, from)
+		cs, left := perKeyOf(q, m, from)
 		cs, wg := weigh(q, cs, m, from)
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
 			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
 			pl.order = append(pl.order, w)
 		}
-		pl.order = append(pl.order, asideOf(aside, q, fallback, from)...)
-		cs = append(cs, aside...)
 		for _, c := range left {
 			w := weighed(c, q, weighing{}, fallback, from)
 			w.Unlisted = true
@@ -200,74 +186,6 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 		seen[fp.ID+"/"+fm] = true
 		out = append(out, add(fp, fm, true)...)
 	}
-	return restLast(out, pl)
-}
-
-// planGroup is plan for a routing group: every member's keys or accounts
-// weighed together as the group's routing says — in order, member by
-// member, each as its own provider's routing orders it; else all as one,
-// so a subscription whose allowance renews soonest goes first whichever
-// provider it is of. A member's fallbacks are not the group's.
-func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider.Protocol) ([]candidate, planned) {
-	var pl planned
-	var out []candidate
-	of := map[string]provider.Provider{} // candidate → its member's provider
-	var all, asides []candidate
-	var wAsides []Weighed
-	for _, m := range ms {
-		cs, aside, left := perKeyOf(m.Provider, m.Model, from)
-		asides, wAsides = append(asides, aside...), append(wAsides, asideOf(aside, m.Provider, false, from)...)
-		for _, c := range left {
-			w := weighed(c, m.Provider, weighing{}, false, from)
-			w.Unlisted = true
-			pl.left = append(pl.left, w)
-		}
-		if g.Routing == provider.Ordered {
-			cs, wg := weigh(m.Provider, cs, m.Model, from)
-			for i, c := range cs {
-				w := weighed(c, m.Provider, wg, false, from)
-				w.Turn = i == 0 && m.Provider.Routing == provider.Rotate && len(cs) > 1
-				pl.order = append(pl.order, w)
-			}
-			out = append(out, cs...)
-			continue
-		}
-		for _, c := range cs {
-			of[c.rest+"/"+c.model] = m.Provider
-		}
-		all = append(all, cs...)
-	}
-	if g.Routing != provider.Ordered {
-		cs, wg := weigh(provider.Provider{ID: provider.GroupPrefix + g.ID, Routing: g.Routing}, all, "", from)
-		for i, c := range cs {
-			w := weighed(c, of[c.rest+"/"+c.model], wg, false, from)
-			w.Routing = g.Routing
-			w.Turn = i == 0 && g.Routing == provider.Rotate && len(cs) > 1
-			pl.order = append(pl.order, w)
-		}
-		out = cs
-	}
-	out, pl.order = append(out, asides...), append(pl.order, wAsides...)
-	if len(out) == 0 {
-		return nil, pl
-	}
-	return restLast(out, pl)
-}
-
-// asideOf is how the trace tells the keys made for another protocol than
-// those routed over: after them, in the order they suit the request.
-func asideOf(cs []candidate, q provider.Provider, fallback bool, from provider.Protocol) []Weighed {
-	var out []Weighed
-	for _, c := range cs {
-		w := weighed(c, q, weighing{}, fallback, from)
-		w.Aside = true
-		out = append(out, w)
-	}
-	return out
-}
-
-// restLast moves those resting after a recent failure behind the rest.
-func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	if len(out) == 1 {
 		if r, ok := restOf(out[0].rest); ok {
 			pl.order[0].Rest = &r // tried all the same: there is no other

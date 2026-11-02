@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -72,9 +71,8 @@ func (p Provider) keyFor(proto Protocol) (Provider, bool) {
 }
 
 // testModel is the model a probe of proto's endpoint asks for: the first
-// exposed one q's key sees, else the first it sees at all — preferring one
-// the vendor's list says is served at that endpoint, then a Claude model on
-// the Anthropic endpoint, and never one the list says is served elsewhere.
+// exposed one q's key sees, else the first it sees at all — preferring a
+// Claude model on the Anthropic endpoint.
 func (p Provider) testModel(q Provider, proto Protocol) string {
 	k := q.first()
 	var pools [][]catalog.Model
@@ -82,17 +80,13 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		pools = append(pools, ms)
 	}
 	pools = append(pools, p.Available())
-	declared := func(id string) bool { return slices.Contains(p.APIs(id), proto) }
-	claude := func(id string) bool { return proto != Anthropic || isClaude(id) }
 	for _, want := range []func(string) bool{
-		func(id string) bool { return declared(id) && claude(id) },
-		declared,
-		claude,
+		func(id string) bool { return proto != Anthropic || isClaude(id) },
 		func(string) bool { return true },
 	} {
 		for _, pool := range pools {
 			for _, m := range pool {
-				if want(m.ID) && p.servedOn(m.ID, proto) && (k.Key == "" || p.Serves(k, m.ID)) {
+				if want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
 					return m.ID
 				}
 			}
