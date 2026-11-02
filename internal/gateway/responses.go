@@ -169,7 +169,7 @@ func responsesParts(raw json.RawMessage) []Part {
 }
 
 // buildResponses renders a request for a Responses upstream.
-func buildResponses(r *Request, model string) []byte {
+func buildResponses(r *Request, model string, rejectTemp bool) []byte {
 	var input []map[string]any
 	for _, m := range r.Messages {
 		var content []map[string]any
@@ -216,16 +216,7 @@ func buildResponses(r *Request, model string) []byte {
 	if r.MaxTokens > 0 {
 		out["max_output_tokens"] = r.MaxTokens
 	}
-	if r.JSON {
-		if len(r.JSONSchema) > 0 {
-			out["text"] = map[string]any{"format": map[string]any{"type": "json_schema", "name": "response", "schema": r.JSONSchema, "strict": false}}
-		} else {
-			out["text"] = map[string]any{"format": map[string]any{"type": "json_object"}}
-			// json_object wants the word JSON somewhere in the prompt
-			out["instructions"] = withJSONInstruction(r)
-		}
-	}
-	if !reasoningModel(model) {
+	if !rejectTemp {
 		if r.Temp != nil {
 			out["temperature"] = *r.Temp
 		}
