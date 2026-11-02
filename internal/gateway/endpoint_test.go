@@ -33,7 +33,7 @@ func (f *epFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		code := 400
 		if rej[0] != "" {
-			code = atoi(rej[0])
+			code = epAtoi(rej[0])
 		}
 		w.WriteHeader(code)
 		io.WriteString(w, rej[1])
@@ -62,7 +62,7 @@ func (f *epFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func atoi(s string) int {
+func epAtoi(s string) int {
 	n := 0
 	for _, c := range s {
 		n = n*10 + int(c-'0')
@@ -90,17 +90,17 @@ func epSetup(t *testing.T, f *epFake, id string) *Server {
 	return New()
 }
 
-func do(s *Server, path, body string) (int, string) {
+func epDo(s *Server, path, body string) (int, string) {
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
 	return rec.Code, rec.Body.String()
 }
 
-const chatReq = `{"model":"%s","messages":[{"role":"user","content":"hi"}]}`
+const epChatReq = `{"model":"%s","messages":[{"role":"user","content":"hi"}]}`
 
-func chatBody(model string) string { return strings.Replace(chatReq, "%s", model, 1) }
-func respBody(model string) string { return `{"model":"` + model + `","input":"hi"}` }
-func antBody(model string) string {
+func epChat(model string) string { return strings.Replace(epChatReq, "%s", model, 1) }
+func epResp(model string) string { return `{"model":"` + model + `","input":"hi"}` }
+func epAnt(model string) string {
 	return `{"model":"` + model + `","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
 }
 
@@ -109,7 +109,7 @@ func TestChatRejectedSwitchesToResponsesAndRemembers(t *testing.T) {
 	s := epSetup(t, f, "fake")
 	// Chat only provider-side order: the agent speaks Chat, so Chat is tried first
 	for i := 0; i < 2; i++ {
-		code, body := do(s, "/v1/chat/completions", chatBody("m"))
+		code, body := epDo(s, "/v1/chat/completions", epChat("m"))
 		if code != 200 || !strings.Contains(body, "via responses") {
 			t.Fatalf("round %d: %d %s", i, code, body)
 		}
@@ -118,7 +118,7 @@ func TestChatRejectedSwitchesToResponsesAndRemembers(t *testing.T) {
 		t.Fatalf("chat=%d responses=%d", f.count("/v1/chat/completions"), f.count("/v1/responses"))
 	}
 	// another model is not affected by the memory
-	if code, _ := do(s, "/v1/chat/completions", chatBody("other")); code != 200 && f.count("/v1/chat/completions") != 2 {
+	if code, _ := epDo(s, "/v1/chat/completions", epChat("other")); code != 200 && f.count("/v1/chat/completions") != 2 {
 		t.Errorf("other model should still probe chat: chat=%d", f.count("/v1/chat/completions"))
 	}
 }
@@ -127,7 +127,7 @@ func TestResponsesRejectedSwitchesToChat(t *testing.T) {
 	f := &epFake{rejects: map[string][2]string{"/v1/responses": {"400", `{"error":{"code":"unsupported_api_for_model","message":"nope"}}`}}}
 	s := epSetup(t, f, "fake")
 	for i := 0; i < 2; i++ {
-		code, body := do(s, "/v1/responses", respBody("m"))
+		code, body := epDo(s, "/v1/responses", epResp("m"))
 		if code != 200 || !strings.Contains(body, "via chat") {
 			t.Fatalf("round %d: %d %s", i, code, body)
 		}
@@ -140,11 +140,11 @@ func TestResponsesRejectedSwitchesToChat(t *testing.T) {
 func TestAnthropicRejectedRelayThenTranslate(t *testing.T) {
 	f := &epFake{rejects: map[string][2]string{"/v1/messages": {"400", `{"error":{"message":"use /v1/chat/completions"}}`}}}
 	s := epSetup(t, f, "fake")
-	code, body := do(s, "/v1/messages", antBody("m"))
+	code, body := epDo(s, "/v1/messages", epAnt("m"))
 	if code != 200 || !strings.Contains(body, "via chat") {
 		t.Fatalf("%d %s", code, body)
 	}
-	do(s, "/v1/messages", antBody("m"))
+	epDo(s, "/v1/messages", epAnt("m"))
 	if f.count("/v1/messages") != 1 || f.count("/v1/chat/completions") != 2 {
 		t.Fatalf("messages=%d chat=%d", f.count("/v1/messages"), f.count("/v1/chat/completions"))
 	}
@@ -153,7 +153,7 @@ func TestAnthropicRejectedRelayThenTranslate(t *testing.T) {
 func TestServerErrorDoesNotSwitchEndpoint(t *testing.T) {
 	f := &epFake{rejects: map[string][2]string{"/v1/chat/completions": {"500", `{"error":{"message":"use v1/responses"}}`}}}
 	s := epSetup(t, f, "fake")
-	code, _ := do(s, "/v1/chat/completions", chatBody("m"))
+	code, _ := epDo(s, "/v1/chat/completions", epChat("m"))
 	if code != 500 {
 		t.Fatalf("status %d", code)
 	}
@@ -167,7 +167,7 @@ func TestRejectedEverywhereReturnsLastError(t *testing.T) {
 	f := &epFake{rejects: map[string][2]string{
 		"/v1/chat/completions": {"400", msg}, "/v1/responses": {"404", `{"error":{"message":"use /v1/chat/completions"}}`}}}
 	s := epSetup(t, f, "fake")
-	code, body := do(s, "/v1/chat/completions", chatBody("m"))
+	code, body := epDo(s, "/v1/chat/completions", epChat("m"))
 	if code != 404 || !strings.Contains(body, "use /v1/chat/completions") {
 		t.Fatalf("%d %s", code, body)
 	}
@@ -179,15 +179,15 @@ func TestDeclaredAPIsAreNotProbed(t *testing.T) {
 	catalog.SaveLive("fake", "http://x", []catalog.Model{
 		{ID: "gpt-x", APIs: []string{"responses"}}, {ID: "claude-x", APIs: []string{"chat"}}})
 	for _, tc := range []struct{ path, body, want string }{
-		{"/v1/messages", antBody("gpt-x"), "/v1/responses"},
-		{"/v1/chat/completions", chatBody("gpt-x"), "/v1/responses"},
-		{"/v1/responses", respBody("claude-x"), "/v1/chat/completions"},
-		{"/v1/messages", antBody("claude-x"), "/v1/chat/completions"},
+		{"/v1/messages", epAnt("gpt-x"), "/v1/responses"},
+		{"/v1/chat/completions", epChat("gpt-x"), "/v1/responses"},
+		{"/v1/responses", epResp("claude-x"), "/v1/chat/completions"},
+		{"/v1/messages", epAnt("claude-x"), "/v1/chat/completions"},
 	} {
 		f.mu.Lock()
 		f.hits = map[string]int{}
 		f.mu.Unlock()
-		if code, body := do(s, tc.path, tc.body); code != 200 {
+		if code, body := epDo(s, tc.path, tc.body); code != 200 {
 			t.Fatalf("%s: %d %s", tc.path, code, body)
 		}
 		total := 0
@@ -206,13 +206,13 @@ func TestCountTokensOnlyWhenAnthropicServes(t *testing.T) {
 	f := &epFake{}
 	s := epSetup(t, f, "fake")
 	catalog.SaveLive("fake", "http://x", []catalog.Model{{ID: "claude-x", APIs: []string{"chat"}}, {ID: "m", APIs: []string{"chat", "anthropic"}}})
-	if code, _ := do(s, "/v1/messages/count_tokens", antBody("claude-x")); code != 200 {
+	if code, _ := epDo(s, "/v1/messages/count_tokens", epAnt("claude-x")); code != 200 {
 		t.Fatalf("status %d", code)
 	}
 	if f.count("/v1/messages/count_tokens") != 0 {
 		t.Error("count_tokens forwarded for a chat-only model")
 	}
-	do(s, "/v1/messages/count_tokens", antBody("m"))
+	epDo(s, "/v1/messages/count_tokens", epAnt("m"))
 	if f.count("/v1/messages/count_tokens") != 1 {
 		t.Error("count_tokens not forwarded for an anthropic model")
 	}
