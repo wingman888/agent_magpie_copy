@@ -11,10 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +31,7 @@ const codexClientVersion = "0.154.0"
 // models_cache.json, but that one is of whichever account Codex CLI last
 // asked with, if it ran at all.
 func codexModels(ctx context.Context, sign func(context.Context, *http.Request, []byte) error) ([]catalog.Model, error) {
-	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexAskVersion())
+	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexVersion())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -57,113 +55,60 @@ func codexModels(ctx context.Context, sign func(context.Context, *http.Request, 
 	return ms, nil
 }
 
-// codexAskVersion is the client version the models list is asked for: the
-// newest of the Codex CLI installed here, the one Codex CLI last asked with
-// and magpie's own default — the list leaves out models newer than the
-// client asking, and Codex CLI's cache can be older than the CLI itself.
-func codexAskVersion() string {
-	return newestVersion(codexCLIVersion(), codexCacheVersion(), codexClientVersion)
+var codexVersionCache struct {
+	sync.Mutex
+	v  string
+	at time.Time
 }
 
-// codexCacheVersion is the client version Codex CLI last asked with, ""
-// when it has not asked.
-func codexCacheVersion() string {
+// codexVersion is the client version the models list is asked for: the
+// newest of the Codex CLI installed, the one Codex CLI last asked with and
+// codexClientVersion. The list leaves out models newer than the client
+// asking, and Codex CLI's models_cache.json keeps the version it was written
+// with until Codex next asks — after an update that brought new models
+// (0.155 GPT-6 Luna and Sol), asking with it would leave them out.
+func codexVersion() string {
+	codexVersionCache.Lock()
+	defer codexVersionCache.Unlock()
+	if time.Since(codexVersionCache.at) < 10*time.Minute {
+		return codexVersionCache.v
+	}
+	v := codexClientVersion
+	newer := func(c string) {
+		if c = claudeSemverRE.FindString(c); c != "" && compareClaudeVersion(c, v) > 0 {
+			v = c
+		}
+	}
 	home, _ := os.UserHomeDir()
 	var c struct {
 		ClientVersion string `json:"client_version"`
 	}
 	if b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json")); err == nil && json.Unmarshal(b, &c) == nil {
-		return strings.TrimSpace(c.ClientVersion)
+		newer(c.ClientVersion)
 	}
-	return ""
-}
-
-// codexVersionTTL is how long the installed Codex CLI's version is trusted.
-var codexVersionTTL = 10 * time.Minute
-
-var codexVersionCache struct {
-	sync.Mutex
-	key string // the binary asked: its path, size and time
-	at  time.Time
-	v   string
-}
-
-var semverRe = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.\-]+)?`)
-
-// codexCLIVersion is what `codex --version` says, "" when Codex CLI isn't
-// installed or doesn't say.
-func codexCLIVersion() string {
-	path, err := exec.LookPath("codex")
-	if err != nil {
-		return ""
+	if exe := codexExecutable(); exe != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if out, err := exec.CommandContext(ctx, exe, "--version").Output(); err == nil {
+			newer(string(out)) // "codex-cli 0.155.1"
+		}
+		cancel()
 	}
-	key := path
-	if st, err := os.Stat(path); err == nil {
-		key = fmt.Sprintf("%s|%d|%d", path, st.Size(), st.ModTime().UnixNano())
-	}
-	c := &codexVersionCache
-	c.Lock()
-	if c.key == key && time.Since(c.at) < codexVersionTTL {
-		v := c.v
-		c.Unlock()
-		return v
-	}
-	c.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, _ := exec.CommandContext(ctx, path, "--version").Output()
-	v := semverRe.FindString(string(out))
-	c.Lock()
-	c.key, c.at, c.v = key, time.Now(), v
-	c.Unlock()
+	codexVersionCache.v, codexVersionCache.at = v, time.Now()
 	return v
 }
 
-// newestVersion is the newest of some dotted versions, "" ones skipped.
-func newestVersion(vs ...string) string {
-	best := ""
-	for _, v := range vs {
-		v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-		if v == "" {
-			continue
-		}
-		if best == "" || compareVersions(v, best) > 0 {
-			best = v
+// codexExecutable finds the codex CLI; a var so tests can fake it.
+var codexExecutable = func() string {
+	if p, err := exec.LookPath("codex"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{filepath.Join(home, ".local", "bin", "codex"), "/opt/homebrew/bin/codex", "/usr/local/bin/codex"} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
 		}
 	}
-	return best
-}
-
-// compareVersions orders two dotted versions; a pre-release ("-beta")
-// comes before the release it leads to.
-func compareVersions(a, b string) int {
-	ac, apre, _ := strings.Cut(a, "-")
-	bc, bpre, _ := strings.Cut(b, "-")
-	as, bs := strings.Split(ac, "."), strings.Split(bc, ".")
-	for i := 0; i < max(len(as), len(bs)); i++ {
-		var x, y int
-		if i < len(as) {
-			x, _ = strconv.Atoi(as[i])
-		}
-		if i < len(bs) {
-			y, _ = strconv.Atoi(bs[i])
-		}
-		if x != y {
-			if x < y {
-				return -1
-			}
-			return 1
-		}
-	}
-	switch {
-	case apre == bpre:
-		return 0
-	case apre == "":
-		return 1
-	case bpre == "":
-		return -1
-	}
-	return strings.Compare(apre, bpre)
+	return ""
 }
 
 // parseCodexModels reads the backend's list, the listed ones in its order.
