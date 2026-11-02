@@ -40,6 +40,9 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
+  magpie backup [--no-keys] [file]    providers, keys, settings, profiles and agent models in one file, sealed with a passphrase
+  magpie restore [--no-agents] <file> put a backup in on this machine
+
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
@@ -48,16 +51,11 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider fallback <id> <provider/model>…   use these when it's out of quota or down
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
-  magpie accounts [agent]         the Claude Code and Codex subscriptions magpie remembers
+  magpie accounts [agent] [--json]  every subscription magpie knows, with each one's allowance used and when it resets
   magpie accounts add <agent>     sign in to one more Claude or ChatGPT subscription
   magpie accounts switch <agent> <email>   sign the agent in to another of them
 
   magpie serve                    run the gateway alone (the app runs it too)
-  magpie backup [--no-keys] [file]     providers, keys, icons, settings, profiles and agent models
-                                       in one passphrase-protected file (default magpie.magpie-backup)
-  magpie restore [--no-agents] <file>  bring a backup back on this machine; keys already here stay
-                                       when the backup has none
-
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
   magpie sync                     refresh the model catalog and vendor model lists
   magpie agents                   list every supported agent
@@ -149,12 +147,12 @@ func run(args []string) error {
 		return accountsCmd(args)
 	case "usage":
 		return usageCmd(args)
+	case "update":
+		return updateCmd(args)
 	case "backup":
 		return backupCmd(args[1:])
 	case "restore":
 		return restoreCmd(args[1:])
-	case "update":
-		return updateCmd(args)
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 		return claudebridge.RunMCP(args[1:])
 	}

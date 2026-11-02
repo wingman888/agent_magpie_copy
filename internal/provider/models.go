@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -67,18 +68,106 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	if p.Account != nil && p.Account.fetch != nil {
 		return p.Account.fetch(ctx)
 	}
+	if keys := p.allKeys(); len(keys) > 1 {
+		return p.fetchPerKey(ctx, keys)
+	}
+	ms, base, err := p.fetchOne(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ms, catalog.SaveLive(p.ID, base, ms)
+}
+
+// fetchOne asks the first endpoint that answers, with p's key.
+func (p Provider) fetchOne(ctx context.Context) ([]catalog.Model, string, error) {
 	var lastErr error
 	for _, proto := range p.Speaks() {
 		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic, p.Headers)
 		if err == nil {
-			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
+			return ms, p.Base(proto), nil
 		}
 		lastErr = err
 	}
 	if lastErr == nil {
 		lastErr = errorf("%s has no endpoint to ask", p.Name)
 	}
-	return nil, lastErr
+	return nil, "", lastErr
+}
+
+// fetchPerKey asks with each key in turn, at the endpoint it is made for: a
+// relay that hands out a key per group lists each group's models to its key
+// only. The lists are merged, each model marking the keys that see it. A
+// key that can't be asked now keeps the models it saw last time.
+func (p Provider) fetchPerKey(ctx context.Context, keys []KeyAccount) ([]catalog.Model, error) {
+	old, _, _ := catalog.Live(p.ID)
+	var out []catalog.Model
+	at := map[string]int{}
+	add := func(m catalog.Model, id string) {
+		i, ok := at[m.ID]
+		if !ok {
+			m.Keys = nil
+			at[m.ID], i = len(out), len(out)
+			out = append(out, m)
+		}
+		if !slices.Contains(out[i].Keys, id) {
+			out[i].Keys = append(out[i].Keys, id)
+		}
+	}
+	var base string
+	var lastErr error
+	for _, k := range keys {
+		id := keyID(k.Key)
+		q := p.WithKey(k)
+		ms, b, err := q.fetchOne(ctx)
+		if err != nil {
+			lastErr = err
+			for _, m := range old {
+				if slices.Contains(m.Keys, id) {
+					add(m, id)
+				}
+			}
+			continue
+		}
+		if base == "" {
+			base = b
+		}
+		for _, m := range ms {
+			add(m, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil, lastErr
+	}
+	return out, catalog.SaveLive(p.ID, base, out)
+}
+
+// allKeys is every key the provider has, on or not, the first first.
+func (p Provider) allKeys() []KeyAccount {
+	if p.Key == "" {
+		return nil
+	}
+	out := []KeyAccount{p.first()}
+	for _, k := range p.Keys {
+		if k.Key != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// Serves reports whether key k can be asked for model: false only when the
+// vendor's lists say another of the provider's keys sees it and k doesn't.
+func (p Provider) Serves(k KeyAccount, model string) bool {
+	live, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return true
+	}
+	for _, m := range live {
+		if m.ID == model {
+			return len(m.Keys) == 0 || slices.Contains(m.Keys, keyID(k.Key))
+		}
+	}
+	return true
 }
 
 // Exposed lists the models magpie offers to agents for this provider: the
@@ -148,17 +237,29 @@ type Entry struct {
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`
+	// Group is set on a routing group's entry (ID and Model "group/<id>",
+	// Provider only {ID: "group", Name: "Routing groups"}), with the
+	// members it can reach now.
+	Group   *Group   `json:"-"`
+	Members []Member `json:"-"`
 }
 
-// Catalog lists every exposed model of every ready provider.
+// IsGroup reports whether the entry is a routing group.
+func (e Entry) IsGroup() bool { return e.Group != nil }
+
+// Catalog lists every exposed model of every ready provider, then the
+// routing groups that have a member to reach.
 func Catalog() []Entry {
 	var out []Entry
-	for _, p := range All() {
-		if !p.Ready() {
-			continue
-		}
+	ready := readyProviders()
+	for _, p := range ready {
 		for _, m := range p.Exposed() {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
+		}
+	}
+	for _, g := range groupsOf(load(), ready) {
+		if e, ok := groupEntry(g, membersOf(g, ready)); ok {
+			out = append(out, e)
 		}
 	}
 	return out
@@ -167,10 +268,22 @@ func Catalog() []Entry {
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
 // It accepts catalog ids, "provider/model" for any model (exposed or not),
 // and the bare model id when exactly one provider serves it.
+//
+// A routing group ("group/<id>") resolves to its first member that can be
+// reached: it answers for the group when asked what the model can do.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
+	if IsGroup(id) {
+		if _, ms, ok := FindGroup(id); ok && len(ms) > 0 {
+			return ms[0].Provider, ms[0].Model, true
+		}
+		return Provider{}, "", false
+	}
 	entries := Catalog()
 	for _, e := range entries {
+		if e.IsGroup() {
+			continue
+		}
 		if e.ID == id {
 			return e.Provider, e.Model, true
 		}
@@ -182,7 +295,7 @@ func Resolve(id string) (Provider, string, bool) {
 	}
 	var hits []Entry
 	for _, e := range entries {
-		if e.Model == id {
+		if !e.IsGroup() && e.Model == id {
 			hits = append(hits, e)
 		}
 	}
