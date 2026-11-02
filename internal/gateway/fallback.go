@@ -22,12 +22,37 @@ const fallbackCooldown = time.Minute
 type candidate struct {
 	p     provider.Provider
 	model string
+	label string // how a skipped try is named in the call log
+}
+
+// withKeys is one candidate per enabled key of the provider, in order. The
+// provider handed on carries just that key. With one key (or none, or a
+// signed-in account) it is the provider untouched.
+func withKeys(p provider.Provider, model string) []candidate {
+	on := p.KeysOn()
+	if p.Account != nil || len(on) <= 1 {
+		if len(on) == 1 {
+			p.Key, p.KeyName, p.Keys = on[0].Key, on[0].Name, nil
+		}
+		return []candidate{{p, model, p.ID}}
+	}
+	var out []candidate
+	for _, k := range on {
+		q := p
+		q.Key, q.KeyName, q.Keys = k.Key, k.Name, nil
+		who := k.Name
+		if who == "" {
+			who = provider.Mask(k.Key)
+		}
+		out = append(out, candidate{q, model, p.ID + "(" + who + ")"})
+	}
+	return out
 }
 
 // candidates is the primary and then its fallbacks, those resting after a
 // recent failure moved behind the rest.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := []candidate{{p, model}}
+	out := withKeys(p, model)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -35,14 +60,14 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, candidate{fp, fm})
+		out = append(out, withKeys(fp, fm)...)
 	}
 	if len(out) == 1 {
 		return out
 	}
 	var ready, resting []candidate
 	for _, c := range out {
-		if s.resting(c.p.ID) {
+		if s.resting(c.p.ID, c.p.Key) {
 			resting = append(resting, c)
 		} else {
 			ready = append(ready, c)
@@ -56,13 +81,17 @@ var restingUntil = struct {
 	m map[string]time.Time
 }{m: map[string]time.Time{}}
 
-func (s *Server) resting(id string) bool {
+func restKey(id, key string) string { return id + "\x00" + key }
+
+func (s *Server) resting(id, key string) bool {
+	id = restKey(id, key)
 	restingUntil.Lock()
 	defer restingUntil.Unlock()
 	return time.Now().Before(restingUntil.m[id])
 }
 
-func (s *Server) rest(id string) {
+func (s *Server) rest(id, key string) {
+	id = restKey(id, key)
 	restingUntil.Lock()
 	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
 	restingUntil.Unlock()
