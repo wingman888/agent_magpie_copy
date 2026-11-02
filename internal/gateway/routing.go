@@ -29,10 +29,19 @@ const usageHalfLife = time.Hour
 
 var routed = struct {
 	sync.Mutex
-	turn     map[string]int      // provider → requests routed in turn
+	turn     map[string]int      // provider and model, or group → turns routed in turn
 	used     map[string]tokenUse // candidate rest id → tokens it served
 	failures map[string]int      // candidate rest id → failures since it last answered
-}{turn: map[string]int{}, used: map[string]tokenUse{}, failures: map[string]int{}}
+	// conversation and what turns → where its current turn started, so
+	// tool results sent back within the turn stay there
+	started map[string]turnStart
+}{turn: map[string]int{}, used: map[string]tokenUse{}, failures: map[string]int{}, started: map[string]turnStart{}}
+
+type turnStart struct {
+	n    int
+	turn int
+	at   time.Time
+}
 
 type tokenUse struct {
 	n  float64
@@ -216,7 +225,15 @@ const (
 
 // route orders one provider's candidates as its routing says.
 func route(p provider.Provider, cs []candidate, model string, from provider.Protocol) []candidate {
-	cs, _ = weigh(p, cs, model, from)
+	cs, _ = weigh(p, cs, model, from, session{})
+	// keys suiting the request better first; the plan does this by pools,
+	// before routing, so it never upsets the turns
+	switch p.Routing {
+	case "", provider.Rotate, provider.LeastUsed:
+		if p.Account == nil {
+			sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, model, from) < keyFit(cs[j].p, model, from) })
+		}
+	}
 	return cs
 }
 
@@ -235,13 +252,25 @@ type left struct {
 }
 
 // weigh orders one provider's candidates as its routing says, and tells
-// what it went by.
-func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
+// what it went by. In turn, the provider's model takes turns, so a request
+// for another of its models doesn't move them on.
+func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol, s session) ([]candidate, weighing) {
+	if len(cs) < 2 {
+		return cs, weighing{}
+	}
+	return weighBy(p.Routing, p.ID+"/"+model, cs, s)
+}
+
+// weighBy orders candidates — of one provider, or of a routing group's
+// members together — as routing says; turn names whose turns rotate counts.
+// In turn, it is a user's turn that moves on to the next, not a request: a
+// tool result sent back within the conversation s's turn starts where the
+// turn did. Each account's allowance is the one its own agent's vendor tells.
+func weighBy(routing, turn string, cs []candidate, s session) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
 	}
-	// each account's own agent's: a group weighs accounts of several
 	known := map[string]map[string]provider.Allowance{}
 	now := time.Now()
 	wg.lefts = map[string]left{}
@@ -260,7 +289,7 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 	}
 	lefts := wg.lefts
 	shareOf := func(c candidate) float64 { return lefts[c.rest].used }
-	switch p.Routing {
+	switch routing {
 	case "":
 		// of those with quota to spare, the one whose allowance renews
 		// soonest, since what it has left is lost then, while one renewing
@@ -308,13 +337,8 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 			})
 		}
 		cs = append(append(fine, low...), spent...)
-	case provider.Ordered:
-		return cs, wg
 	case provider.Rotate:
-		routed.Lock()
-		n := routed.turn[p.ID] % len(cs)
-		routed.turn[p.ID]++
-		routed.Unlock()
+		n := nextTurn(turn, s) % len(cs)
 		cs = append(append([]candidate{}, cs[n:]...), cs[:n]...)
 	case provider.LeastUsed:
 		// a subscription by the share of its allowance used, as the vendor
@@ -343,11 +367,33 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 			out[i] = cs[j]
 		}
 		cs = out
-	default:
-		return cs, wg
-	}
-	if p.Account == nil {
-		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, cs[i].model, from) < keyFit(cs[j].p, cs[j].model, from) })
 	}
 	return cs, wg
+}
+
+// nextTurn is where in turn a request starts: the next one along for a new
+// turn, where its turn started for a tool result sent back within it.
+func nextTurn(turn string, s session) int {
+	routed.Lock()
+	defer routed.Unlock()
+	now := time.Now()
+	key := s.key + "\x00" + turn
+	if s.key != "" && s.within {
+		if st, ok := routed.started[key]; ok && st.turn == s.turn && now.Sub(st.at) <= sessionKeep {
+			st.at = now
+			routed.started[key] = st
+			return st.n
+		}
+	}
+	n := routed.turn[turn]
+	routed.turn[turn]++
+	if s.key != "" {
+		for k, st := range routed.started {
+			if now.Sub(st.at) > sessionKeep {
+				delete(routed.started, k)
+			}
+		}
+		routed.started[key] = turnStart{n: n, turn: s.turn, at: now}
+	}
+	return n
 }
