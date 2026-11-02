@@ -170,36 +170,6 @@ func (p Provider) Serves(k KeyAccount, model string) bool {
 	return true
 }
 
-// APIs lists the wire APIs the vendor's last model list declares the model
-// is served on, in magpie's order; nil when the list doesn't say (or there
-// is no list, or the model isn't on it).
-func (p Provider) APIs(model string) []Protocol {
-	live, _, ok := catalog.Live(p.ID)
-	if !ok {
-		return nil
-	}
-	for _, m := range live {
-		if m.ID != model {
-			continue
-		}
-		var out []Protocol
-		for _, pr := range Protocols {
-			if slices.Contains(m.APIs, string(pr)) {
-				out = append(out, pr)
-			}
-		}
-		return out
-	}
-	return nil
-}
-
-// servedOn reports whether model may be asked for at proto's endpoint: yes
-// unless the vendor's list names the APIs it is on and proto isn't one.
-func (p Provider) servedOn(model string, proto Protocol) bool {
-	apis := p.APIs(model)
-	return len(apis) == 0 || slices.Contains(apis, proto)
-}
-
 // Exposed lists the models magpie offers to agents for this provider: the
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
@@ -266,19 +236,31 @@ type Entry struct {
 	Model    string   `json:"model"` // what magpie sends the vendor
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
-	Provider Provider `json:"-"`               // a group's: its first member's
-	Group    string   `json:"group,omitempty"` // set on a routing group (group.go)
-	Icons    []string `json:"-"`               // a group's: its providers' icons, one per provider
+	Provider Provider `json:"-"`
+
+	// Group is set on a routing group (ID group/<id>), whose Members are
+	// those ready now; Model and Provider are then its first member's model
+	// and a stand-in named "group".
+	Group   *Group   `json:"group,omitempty"`
+	Members []Member `json:"-"`
 }
+
+// IsGroup reports whether the entry is a routing group.
+func (e Entry) IsGroup() bool { return e.Group != nil }
 
 // Catalog lists every exposed model of every ready provider, then the
-// routing groups.
+// routing groups that have a member ready.
 func Catalog() []Entry {
-	entries := providerEntries()
-	return append(entries, groupEntries(entries)...)
+	out := providerEntries()
+	for _, g := range groupsOf(load(), out) {
+		if e := groupEntry(g, members(g), out); e != nil {
+			out = append(out, *e)
+		}
+	}
+	return out
 }
 
-// providerEntries is the catalog without its groups.
+// providerEntries is the catalog without the groups.
 func providerEntries() []Entry {
 	var out []Entry
 	for _, p := range All() {
@@ -294,22 +276,23 @@ func providerEntries() []Entry {
 
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
 // It accepts catalog ids, "provider/model" for any model (exposed or not),
-// and the bare model id when exactly one provider serves it.
-// A group's id resolves to its first member.
+// and the bare model id when exactly one provider serves it. A routing
+// group, group/<id>, answers as its first member that is ready.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
-	if strings.HasPrefix(id, GroupPrefix) {
-		for _, e := range Catalog() {
-			if e.ID == id {
-				return e.Provider, e.Model, true
-			}
+	if IsGroupRef(id) {
+		_, ms, ok := FindGroup(id)
+		if !ok || len(ms) == 0 {
+			return Provider{}, "", false
 		}
-		return Provider{}, "", false
+		return ms[0].Provider, ms[0].Model, true
 	}
-	return resolveIn(providerEntries(), id)
+	return resolveModel(id)
 }
 
-func resolveIn(entries []Entry, id string) (Provider, string, bool) {
+// resolveModel is Resolve for a model of a provider, never a group.
+func resolveModel(id string) (Provider, string, bool) {
+	entries := providerEntries()
 	for _, e := range entries {
 		if e.ID == id {
 			return e.Provider, e.Model, true

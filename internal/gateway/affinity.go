@@ -1,18 +1,23 @@
 package gateway
 
-// Affinity: a conversation stays with the key or account that answered it,
-// so that what the vendor cached of it — the whole conversation so far, on
-// every request — is read again rather than sent afresh to someone else
-// and paid for in full. Routing still decides who goes first when nobody
-// has answered yet, and whenever the one that did is resting or all but
-// used up.
+// Session affinity: a conversation's next request goes, when it may, to the
+// key or account that answered it last, so the vendor's prompt cache — kept
+// per key or account — is read rather than the whole history paid for again.
+// It is kept per conversation and model: a small model's side request (a
+// title, a summary) in the same conversation leaves the main one where it is.
 //
-// How long it stays is the provider's or group's affinity: for the whole
-// session; within a turn only — while the agent sends tool results back,
-// until the user speaks again; never; or, by default, worked out from the
-// conversation itself: within a turn always, and across turns while what
-// the vendor said it read from its cache the last time is worth keeping
-// and not yet gone cold.
+// How hard it holds is the provider's Affinity, or the routing group's:
+//   - session: the whole conversation;
+//   - turn: within one user turn — while tool results go back — only;
+//   - off: never;
+//   - auto (""): within a turn always; across turns only when the last
+//     answer read at least cacheWorth tokens from the vendor's cache, no
+//     more than cacheFresh ago, the cache being warm then.
+//
+// Whatever the mode, one resting after a failure, with its allowance all but
+// used up, or no longer among those to try is not kept. Keeping only puts
+// one first: every other candidate still follows, so whether a request is
+// answered never depends on it.
 
 import (
 	"net/http"
@@ -23,173 +28,176 @@ import (
 )
 
 const (
-	// cacheWorth is how many tokens read from the vendor's cache make a
-	// conversation worth keeping where it is across turns.
-	cacheWorth = 1024
-	// cacheCold is how long a vendor keeps a prompt cached without it being
-	// read: five minutes at Anthropic and at OpenAI, the shortest there is.
-	cacheCold = 5 * time.Minute
-	// stickKeep is how long a conversation's last answerer is remembered.
-	stickKeep = 24 * time.Hour
+	cacheWorth  = 1024             // cache-read tokens worth keeping a conversation for across turns
+	cacheFresh  = 5 * time.Minute  // how long a vendor's prompt cache stays warm
+	sessionKeep = 24 * time.Hour   // how long conversations are remembered
+	prunePeriod = 10 * time.Minute // how often the forgotten are swept
 )
 
-// Affinity is what the trace tells of a request's conversation and whether
-// it stayed with who answered it last.
-type Affinity struct {
-	Mode      string    `json:"mode"`             // the provider's or group's: "", session, turn, off
-	Turn      int       `json:"turn"`             // the user's turns in the conversation so far
-	Within    bool      `json:"within,omitempty"` // the agent sending tool results back: mid-turn
-	Last      string    `json:"last,omitempty"`   // who answered the conversation last
-	LastTurn  int       `json:"lastTurn,omitempty"`
-	At        time.Time `json:"at,omitempty"`        // when
-	CacheRead int       `json:"cacheRead,omitempty"` // tokens that answer read from the vendor's cache
-	Kept      bool      `json:"kept,omitempty"`      // Last was put first for it
-	// Why it was kept — "session", "turn", "cache" — or not: "off", "first"
-	// (nobody has answered it yet), "new-turn", "no-cache" (the vendor
-	// read too little from its cache to keep), "cold" (too long ago),
-	// "resting", "spent", "gone" (no longer one to route to).
-	Why string `json:"why"`
+// session is one request's place in its conversation.
+type session struct {
+	key    string // the conversation and the model asked for
+	turn   int    // the user turns the conversation has had
+	within bool   // a tool result sent back within a turn
 }
 
-type stick struct {
-	rest      string
-	turn      int
-	at        time.Time
-	cacheRead int
-}
-
-var sticks = struct {
-	sync.Mutex
-	m map[string]stick // scope|conversation → who answered it last
-}{m: map[string]stick{}}
-
-// turnOf counts the user's turns in a request's conversation, and says
-// whether it is the agent handing tool results back within one.
-func turnOf(from provider.Protocol, body []byte) (turn int, within bool) {
+// sessionOf places a request in its conversation: the agent's own session
+// id when it sends one, else one derived from the conversation's start.
+func sessionOf(in http.Header, from provider.Protocol, body []byte, model string) session {
+	s := session{key: conversationID(in, body) + "\x00" + model}
 	req, err := parse(from, body)
 	if err != nil {
-		return 0, false
+		return s
 	}
 	for i, m := range req.Messages {
 		if m.Role != "user" {
 			continue
 		}
-		text, result := false, false
+		result := false
 		for _, p := range m.Parts {
-			switch p.Kind {
-			case Text, Image:
-				text = true
-			case ToolResult:
+			if p.Kind == ToolResult {
 				result = true
+				break
 			}
 		}
-		if text && !result {
-			turn++
+		if !result {
+			s.turn++
 		}
 		if i == len(req.Messages)-1 {
-			within = result
+			s.within = result
 		}
 	}
-	return turn, within
+	return s
 }
 
-// affine puts first whoever answered the conversation last, while its
-// affinity says to keep it there.
-func affine(scope, mode string, rotate bool, in http.Header, from provider.Protocol, body []byte, cs []candidate, pl planned) ([]candidate, planned, *Affinity, string) {
-	key := scope + "|" + conversationID(in, body)
-	a := &Affinity{Mode: mode}
-	a.Turn, a.Within = turnOf(from, body)
-	sticks.Lock()
-	st, had := sticks.m[key]
-	sticks.Unlock()
-	if had && time.Since(st.at) > stickKeep {
-		had = false
+// answered is who answered a conversation last, and how.
+type answered struct {
+	rest      string
+	turn      int
+	cacheRead int
+	at        time.Time
+}
+
+var sessions = struct {
+	sync.Mutex
+	last   map[string]answered
+	pruned time.Time
+}{last: map[string]answered{}}
+
+// remember notes who answered a conversation.
+func remember(s session, c candidate, cacheRead int) {
+	if s.key == "" {
+		return
 	}
-	if had {
-		a.Last, a.LastTurn, a.At, a.CacheRead = st.rest, st.turn, st.at, st.cacheRead
+	now := time.Now()
+	sessions.Lock()
+	defer sessions.Unlock()
+	sessions.last[s.key] = answered{rest: c.rest, turn: s.turn, cacheRead: cacheRead, at: now}
+	if now.Sub(sessions.pruned) < prunePeriod {
+		return
+	}
+	sessions.pruned = now
+	for k, a := range sessions.last {
+		if now.Sub(a.at) > sessionKeep {
+			delete(sessions.last, k)
+		}
+	}
+}
+
+func lastAnswered(key string) (answered, bool) {
+	sessions.Lock()
+	defer sessions.Unlock()
+	a, ok := sessions.last[key]
+	if !ok || time.Since(a.at) > sessionKeep {
+		return answered{}, false
+	}
+	return a, true
+}
+
+// keep puts first the one that answered the conversation last, when its
+// affinity mode says to and it can; with fewer than two to choose from
+// there is nothing to keep. The order in the trace follows.
+func keep(s session, mode string, cs []candidate, pl planned) ([]candidate, planned, *RouteAffinity) {
+	if len(cs) < 2 {
+		return cs, pl, nil
+	}
+	ra := &RouteAffinity{Mode: mode, Turn: s.turn, Within: s.within}
+	last, ok := lastAnswered(s.key)
+	if ok {
+		ra.Last, ra.CacheRead = last.rest, last.cacheRead
+	}
+	switch {
+	case mode == provider.AffinityOff:
+		ra.Why = "off"
+	case !ok:
+		ra.Why = "first"
+	case mode == provider.AffinitySession:
+		ra.Why = "session"
+	case s.within:
+		ra.Why = "turn"
+	case mode == provider.AffinityTurn:
+		ra.Why = "new-turn"
+	case last.cacheRead < cacheWorth:
+		ra.Why = "no-cache"
+	case time.Since(last.at) > cacheFresh:
+		ra.Why = "cold"
+	default:
+		ra.Why = "cache"
+	}
+	switch ra.Why {
+	case "session", "turn", "cache":
+	default:
+		return cs, pl, ra
 	}
 	at := -1
 	for i, c := range cs {
-		if had && c.rest == st.rest {
+		if c.rest == last.rest && !c.aside {
 			at = i
 			break
 		}
 	}
 	switch {
-	case mode == provider.AffinityOff:
-		a.Why = "off"
-	case !had:
-		a.Why = "first"
 	case at < 0:
-		a.Why = "gone"
-	case pl.order[at].Rest != nil:
-		a.Why = "resting"
-	case pl.order[at].Known && pl.order[at].Used >= usedShare:
-		a.Why = "spent"
-	case mode == provider.AffinitySession:
-		a.Why = "session"
-	case a.Within:
-		a.Why = "turn"
-	case mode == provider.AffinityTurn, rotate:
-		a.Why = "new-turn"
-	case st.cacheRead < cacheWorth:
-		a.Why = "no-cache"
-	case time.Since(st.at) > cacheCold:
-		a.Why = "cold"
+		ra.Why = "gone"
+	case resting(last.rest):
+		ra.Why = "resting"
+	case spent(cs[at]):
+		ra.Why = "spent"
 	default:
-		a.Why = "cache"
-	}
-	switch a.Why {
-	case "session", "turn", "cache":
-		a.Kept = true
-		if at > 0 {
-			cs = append(append([]candidate{cs[at]}, cs[:at]...), cs[at+1:]...)
-			order := append(append([]Weighed{pl.order[at]}, pl.order[:at]...), pl.order[at+1:]...)
-			pl.order = order
-		}
-		for j := range pl.order {
-			pl.order[j].Turn = false // kept, whoever's turn it was
-		}
-	case "new-turn":
-		if rotate {
-			cs, pl = after(cs, pl, at)
+		ra.Kept = true
+		cs = append(append([]candidate{cs[at]}, cs[:at]...), cs[at+1:]...)
+		if at < len(pl.order) {
+			order := append([]Weighed{pl.order[at]}, pl.order[:at]...)
+			pl.order = append(order, pl.order[at+1:]...)
 		}
 	}
-	return cs, pl, a, key
+	return cs, pl, ra
 }
 
-// after puts first the one after cs[at], round from the end, that isn't
-// resting.
-func after(cs []candidate, pl planned, at int) ([]candidate, planned) {
-	for d := 1; d < len(cs); d++ {
-		i := (at + d) % len(cs)
-		if pl.order[i].Rest != nil || pl.order[i].Aside {
-			continue // a turn goes round the keys routed over only
-		}
-		if i > 0 {
-			cs = append(append([]candidate{cs[i]}, cs[:i]...), cs[i+1:]...)
-			pl.order = append(append([]Weighed{pl.order[i]}, pl.order[:i]...), pl.order[i+1:]...)
-		}
-		for j := range pl.order {
-			pl.order[j].Turn = j == 0 // its turn after the last's, not by the count
-		}
-		break
-	}
-	return cs, pl
+func resting(id string) bool {
+	_, ok := restOf(id)
+	return ok
 }
 
-// answered remembers who answered a conversation, and what it read from
-// the vendor's cache doing so.
-func answered(key, rest string, turn, cacheRead int) {
-	now := time.Now()
-	sticks.Lock()
-	defer sticks.Unlock()
-	sticks.m[key] = stick{rest: rest, turn: turn, at: now, cacheRead: cacheRead}
-	if len(sticks.m) > 4096 {
-		for k, st := range sticks.m {
-			if now.Sub(st.at) > stickKeep {
-				delete(sticks.m, k)
-			}
-		}
+// spent says whether an account has all but used up the allowance that
+// counts the model, as its vendor last told.
+func spent(c candidate) bool {
+	if c.p.Account == nil {
+		return false
 	}
+	a, ok := allowances(c.p.Account.Agent)[c.p.Account.User]
+	if !ok {
+		return false
+	}
+	used, _ := a.For(c.model, time.Now())
+	return used >= usedShare
+}
+
+// affinityOf is the mode a request's conversation is kept by: its routing
+// group's when it asked for one, else its provider's.
+func affinityOf(p provider.Provider, g *provider.Group) string {
+	if g != nil {
+		return g.Affinity
+	}
+	return p.Affinity
 }
