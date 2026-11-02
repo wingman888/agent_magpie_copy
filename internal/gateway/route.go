@@ -32,9 +32,6 @@ type candidate struct {
 // label names the candidate in the call log: the provider id, and the key's
 // name when it has one.
 func (c candidate) label() string {
-	if c.p.Account != nil && c.p.Account.User != "" {
-		return c.p.ID + " (" + c.p.Account.User + ")"
-	}
 	if c.p.KeyName != "" {
 		return c.p.ID + " (" + c.p.KeyName + ")"
 	}
@@ -46,9 +43,6 @@ func (c candidate) restKey() string {
 	k := ""
 	if c.p.Key != "" {
 		k = provider.KeyRef(c.p.Key)
-	}
-	if c.p.Account != nil {
-		k = c.p.Account.User
 	}
 	return c.p.ID + "\x00" + k
 }
@@ -86,17 +80,8 @@ func speaks(p provider.Provider, protos ...provider.Protocol) bool {
 // client's own protocol (so nothing is translated needlessly). The rest
 // come after, as a last resort.
 func keyRoutes(p provider.Provider, model string, from provider.Protocol) []candidate {
-	if p.Account != nil {
-		// the agent's own login first, then the other accounts that are on
-		// (in the order they were saved)
-		out := []candidate{{p: p, model: model}}
-		for _, q := range p.OtherLogins() {
-			out = append(out, candidate{p: q, model: model})
-		}
-		return out
-	}
 	keys := p.ActiveKeys()
-	if len(keys) == 0 {
+	if p.Account != nil || len(keys) == 0 {
 		return []candidate{{p: p, model: model}}
 	}
 	type ranked struct {

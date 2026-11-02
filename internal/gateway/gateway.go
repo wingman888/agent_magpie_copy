@@ -411,7 +411,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
-		status, msg := s.serveClaudeSubscription(w, r, from, p.Account, model, body, u)
+		status, msg := s.serveClaudeSubscription(w, r, from, model, body, u)
 		return provider.Anthropic, status, msg
 	}
 	// a backend that only streams gets a non-streaming request translated

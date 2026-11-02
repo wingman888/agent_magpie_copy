@@ -102,7 +102,7 @@ func callbackBaseURL() string {
 	return "http://" + host + ":" + port
 }
 
-func (b *subscriptionBridge) start(ctx context.Context, req *Request, model string, extraEnv ...string) (*subscriptionRun, <-chan Event, error) {
+func (b *subscriptionBridge) start(ctx context.Context, req *Request, model string) (*subscriptionRun, <-chan Event, error) {
 	binary, err := claudeBinary()
 	if err != nil {
 		return nil, nil, err
@@ -143,7 +143,7 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model stri
 	args := claudeCLIArgs(model, string(mcpConfig), req.Effort)
 	cmd := exec.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
-	cmd.Env = append(cleanClaudeEnv(os.Environ()), extraEnv...)
+	cmd.Env = cleanClaudeEnv(os.Environ())
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cleanup()
@@ -215,7 +215,7 @@ func claudeCLIArgs(model, mcpConfig, effort string) []string {
 func cleanClaudeEnv(env []string) []string {
 	blocked := map[string]bool{
 		"ANTHROPIC_BASE_URL": true, "ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true,
-		"CLAUDECODE": true, "CLAUDE_CODE_ENTRYPOINT": true, "CLAUDE_CODE_SSE_PORT": true, "CLAUDE_CODE_OAUTH_TOKEN": true,
+		"CLAUDECODE": true, "CLAUDE_CODE_ENTRYPOINT": true, "CLAUDE_CODE_SSE_PORT": true,
 	}
 	out := make([]string, 0, len(env)+3)
 	for _, e := range env {
@@ -556,7 +556,7 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	_ = os.RemoveAll(run.tmp)
 }
 
-func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, acct *provider.Account, model string, body []byte, usage *Usage) (int, string) {
+func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) (int, string) {
 	req, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
@@ -569,17 +569,7 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	if run != nil {
 		events, err = run.continueWith(results)
 	} else {
-		// a remembered account the agent is not signed in to runs the
-		// genuine binary on that account's own token
-		var extraEnv []string
-		var tok string
-		var own bool
-		if tok, own, err = acct.OAuthToken(r.Context()); err == nil {
-			if own {
-				extraEnv = []string{"CLAUDE_CODE_OAUTH_TOKEN=" + tok}
-			}
-			run, events, err = s.subscription.start(r.Context(), req, model, extraEnv...)
-		}
+		run, events, err = s.subscription.start(r.Context(), req, model)
 	}
 	if err != nil {
 		return writeError(w, from, 502, "Claude Code: "+err.Error()), err.Error()
