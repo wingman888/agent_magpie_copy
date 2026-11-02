@@ -183,7 +183,11 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := byID[m.ID]; ok {
+		k, ok := byID[m.ID]
+		if i := strings.LastIndexByte(m.ID, '/'); !ok && i >= 0 {
+			k, ok = byID[m.ID[i+1:]] // a gateway's "deepseek/deepseek-chat"
+		}
+		if ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
