@@ -106,7 +106,7 @@
   }
   const tokens = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
   const pct = (n) => Math.round(n) + "%";
-  const FAIL = { rate: "rate limited", credit: "out of credit", quota: "quota used up", other: "failed" };
+  const FAIL = { rate: "rate limited", credit: "out of credit", quota: "quota used up", other: "failed", canceled: "canceled" };
   const failWord = (why) => t(FAIL[why] || "failed");
   const API = { anthropic: "Anthropic", chat: "OpenAI", responses: "OpenAI Responses", gemini: "Gemini" };
   const MODES = {
@@ -267,12 +267,17 @@
         ? t("{who} answered in {ms}{tk}. {agent} got one clean reply and never saw the {n} that failed first.", { who: name, ms: took(tr.ms), tk, agent, n: i })
         : t("{who} answered in {ms}{tk}.", { who: name, ms: took(tr.ms), tk });
     }
+    if (tr.fail === "canceled")
+      return t("{agent} canceled the request while {who} was answering: nobody failed, so nobody rests and nobody else is asked.", { who: name, agent });
+    if (tr.again)
+      return t("{who} answered {status} · {fail}, and nobody else is left to ask — a failure that may pass, so it is tried again in {d}, before any of the reply reaches {agent}.",
+        { who: name, status: tr.status, fail: failWord(tr.fail), d: took(tr.again), agent });
     if (tr.rest) {
       const next = r.tries[i + 1], nw = next && r.order.find((x) => x.id === next.id);
       return t("{who} answered {status} · {fail}. {how}; the request goes on to {next} before any of the reply reaches {agent}.",
         { who: name, status: tr.status, fail: failWord(tr.fail), how: restHow(tr.rest, at(tr.start) + (tr.ms || 0)), next: nw ? who(nw) : t("the next"), agent });
     }
-    const last = i === r.order.length - 1;
+    const last = i >= r.order.length - 1;
     return last
       ? t("{who} answered {status} and nobody is left to try, so {agent} gets the error.", { who: name, status: tr.status, agent })
       : t("{who} answered {status} — an error another account wouldn't fix, so {agent} gets it.", { who: name, status: tr.status, agent });
@@ -563,9 +568,10 @@
       for (const w of r.order) if (w.rest) rests.set(w.id, w.rest);
       for (const tr of r.tries) {
         if (tr.done && tr.status < 400) answered.add(tr.id);
-        else if (tr.done && !tr.rest) gave.set(tr.id, tr); // the error the agent got
+        else if (tr.done && !tr.rest && !tr.again) gave.set(tr.id, tr); // the error the agent got
         if (tr.rest) rests.set(tr.id, tr.rest);
       }
+      for (const id of answered) rests.delete(id); // it answered: whatever rest it began in is over
       const w = row.w, rest = rests.get(id), resting = rest && at(rest.until) > n;
       let s;
       if (w.unlisted) s = t("its plan doesn't list {model}", { model: w.model });
@@ -696,7 +702,7 @@
       });
       for (const tr of r.tries) {
         const a = by.get(tr.id);
-        if (!a || !tr.done) continue;
+        if (!a || !tr.done || tr.fail === "canceled") continue; // the agent's doing, not its
         a.tried++;
         const end = at(tr.start) + (tr.ms || 0);
         if (tr.status < 400) { a.ok++; a.last = Math.max(a.last, end); const m = r.order.find((x) => x.id === tr.id)?.model; if (m) a.models.add(m); }
@@ -875,7 +881,7 @@
         renderAll();
         dot.classList.add("back", "err");
         back = bird("res");
-        if (!tr.rest) { // that was the answer: the agent gets the error
+        if (!tr.rest && !tr.again) { // that was the answer: the agent gets the error
           await fly(dot, back, home(row, A), 1350);
           flying.delete(dot);
           away(back);

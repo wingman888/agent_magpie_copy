@@ -87,12 +87,8 @@ type Try struct {
 	Millis int64     `json:"ms,omitempty"`
 	Fail   string    `json:"fail,omitempty"` // why it failed, as rest tells it
 	Error  string    `json:"error,omitempty"`
-	Rest   *Rest     `json:"rest,omitempty"` // how long it now sits out; none when it was the last to try
-	// Kind tells what became of the try: "failover" (handed on to the next
-	// candidate), "retry" (the last candidate asked again after Wait ms),
-	// "canceled" (the agent went away); empty when it was the answer.
-	Kind string `json:"kind,omitempty"`
-	Wait int64  `json:"waitMs,omitempty"`
+	Rest   *Rest     `json:"rest,omitempty"`  // how long it now sits out; none when it was the last to try
+	Again  int64     `json:"again,omitempty"` // ms waited before it was tried again, the last one left
 }
 
 type planned struct {
@@ -138,8 +134,6 @@ type Totals struct {
 	Requests int `json:"requests"` // answered, one way or the other
 	Rerouted int `json:"rerouted"` // tries that failed and handed the request on
 	Errors   int `json:"errors"`   // requests whose agent got an error
-	Retried  int `json:"retried"`  // tries asked again after a wait
-	Canceled int `json:"canceled"` // requests their agent gave up on
 }
 
 // TraceState is the routes changed since a seq, and the totals.

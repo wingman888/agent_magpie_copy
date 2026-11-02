@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -54,6 +53,24 @@ type Account struct {
 	body   func(body []byte) []byte // request tweaks the backend insists on
 	models func() []catalog.Model
 	fetch  func(ctx context.Context) ([]catalog.Model, error)
+}
+
+// APIs lists the APIs model is served on, as the provider's last model
+// list said: Copilot serves its GPT models on Responses alone and its
+// Claude models on Chat and Anthropic's. nil is not known, and every API
+// the provider speaks may be tried.
+func (p Provider) APIs(model string) []Protocol {
+	ms, _, _ := catalog.Live(p.ID)
+	for _, m := range ms {
+		if m.ID == model && len(m.APIs) > 0 {
+			out := make([]Protocol, len(m.APIs))
+			for i, a := range m.APIs {
+				out[i] = Protocol(a)
+			}
+			return out
+		}
+	}
+	return nil
 }
 
 // Sign authenticates a request to the provider, refreshing what needs it.
@@ -875,11 +892,10 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
 		req.Header.Set("X-Initiator", "agent")
-		user, vision := copilotTurn(body)
-		if user {
+		if lastRole(body) == "user" {
 			req.Header.Set("X-Initiator", "user")
 		}
-		if vision {
+		if bytes.Contains(body, []byte(`"image_url"`)) || bytes.Contains(body, []byte(`"input_image"`)) || bytes.Contains(body, []byte(`"type":"image"`)) {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
@@ -891,91 +907,55 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
+	// each model is served on some of these: the newest GPT models on
+	// /responses alone, Claude's on /v1/messages and /chat/completions (its
+	// model list says; see Provider.APIs)
 	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
 }
 
-// copilotTurn reads a Chat, Anthropic or Responses request: whether its
-// last turn is the user's own (a turn made only of tool results is the
-// agent's), and whether it carries an image.
-func copilotTurn(body []byte) (user, vision bool) {
+// lastRole is the role of the last message in a chat, Anthropic or
+// Responses request. Tool results are "tool" in Anthropic's, where they
+// ride in a user message, and have none in Responses.
+func lastRole(body []byte) string {
 	var v struct {
-		Messages []json.RawMessage `json:"messages"`
-		Input    json.RawMessage   `json:"input"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+		Input json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &v) != nil {
-		return false, false
+		return ""
 	}
-	var items []json.RawMessage
-	switch {
-	case len(v.Messages) > 0:
-		items = v.Messages
-	case len(v.Input) > 0:
-		var s string
-		if json.Unmarshal(v.Input, &s) == nil {
-			return true, false
+	if len(v.Messages) > 0 {
+		last := v.Messages[len(v.Messages)-1]
+		var blocks []struct {
+			Type string `json:"type"`
 		}
-		if json.Unmarshal(v.Input, &items) != nil {
-			return false, false
-		}
-	}
-	for _, it := range items {
-		var x any
-		if json.Unmarshal(it, &x) == nil && hasImage(x) {
-			vision = true
-			break
-		}
-	}
-	if len(items) == 0 {
-		return false, vision
-	}
-	var last struct {
-		Type    string          `json:"type"`
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	}
-	if json.Unmarshal(items[len(items)-1], &last) != nil {
-		return false, vision
-	}
-	if last.Role != "user" || (last.Type != "" && last.Type != "message") {
-		return false, vision
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(last.Content, &blocks) == nil && len(blocks) > 0 {
-		onlyResults := true
-		for _, b := range blocks {
-			if b.Type != "tool_result" {
-				onlyResults = false
+		if last.Role == "user" && json.Unmarshal(last.Content, &blocks) == nil && len(blocks) > 0 {
+			results := 0
+			for _, b := range blocks {
+				if b.Type == "tool_result" {
+					results++
+				}
+			}
+			if results == len(blocks) {
+				return "tool"
 			}
 		}
-		if onlyResults {
-			return false, vision
-		}
+		return last.Role
 	}
-	return true, vision
-}
-
-// hasImage finds an image block anywhere in a decoded message.
-func hasImage(x any) bool {
-	switch v := x.(type) {
-	case []any:
-		for _, e := range v {
-			if hasImage(e) {
-				return true
-			}
-		}
-	case map[string]any:
-		if t, _ := v["type"].(string); t == "image_url" || t == "input_image" || t == "image" {
-			return true
-		}
-		for _, e := range v {
-			if hasImage(e) {
-				return true
-			}
-		}
+	var text string
+	if json.Unmarshal(v.Input, &text) == nil {
+		return "user"
 	}
-	return false
+	var items []struct {
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(v.Input, &items) != nil || len(items) == 0 {
+		return ""
+	}
+	return items[len(items)-1].Role
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {
@@ -1005,6 +985,23 @@ func copilotToken(ctx context.Context, github string) (copilotSession, error) {
 	}
 	copilotSessions[github] = s
 	return s, nil
+}
+
+// copilotAPIs names the APIs of Copilot's supported_endpoints; the
+// websocket one is left out, as is anything magpie doesn't speak.
+func copilotAPIs(endpoints []string) []string {
+	var out []string
+	for _, e := range endpoints {
+		switch e {
+		case "/chat/completions":
+			out = append(out, string(Chat))
+		case "/responses":
+			out = append(out, string(Responses))
+		case "/v1/messages":
+			out = append(out, string(Anthropic))
+		}
+	}
+	return out
 }
 
 // internal is a Copilot model id nobody picks by hand.
@@ -1069,30 +1066,6 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		return nil, errors.New("Copilot lists no chat model for this account")
 	}
 	return out, nil
-}
-
-// copilotAPIs maps the endpoints Copilot lists for a model to the APIs
-// magpie speaks; others (websocket, embeddings) are ignored, and a model
-// listing none of ours is unknown.
-func copilotAPIs(endpoints []string) []string {
-	var out []string
-	for _, e := range endpoints {
-		var api string
-		switch strings.TrimRight(strings.TrimSpace(e), "/") {
-		case "/chat/completions":
-			api = "chat"
-		case "/responses":
-			api = "responses"
-		case "/v1/messages":
-			api = "anthropic"
-		default:
-			continue
-		}
-		if !slices.Contains(out, api) {
-			out = append(out, api)
-		}
-	}
-	return out
 }
 
 // forgetClaudeStatus drops what `claude auth status` said; tests use it.
