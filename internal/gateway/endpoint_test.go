@@ -118,8 +118,8 @@ func TestChatRejectedSwitchesToResponsesAndRemembers(t *testing.T) {
 		t.Fatalf("chat=%d responses=%d", f.count("/v1/chat/completions"), f.count("/v1/responses"))
 	}
 	// another model is not affected by the memory
-	if code, _ := epDo(s, "/v1/chat/completions", epChat("other")); code != 200 && f.count("/v1/chat/completions") != 2 {
-		t.Errorf("other model should still probe chat: chat=%d", f.count("/v1/chat/completions"))
+	if code, _ := epDo(s, "/v1/chat/completions", epChat("gpt-x")); code != 200 || f.count("/v1/chat/completions") != 2 {
+		t.Errorf("other model should still probe chat: %d chat=%d", code, f.count("/v1/chat/completions"))
 	}
 }
 
@@ -165,10 +165,11 @@ func TestServerErrorDoesNotSwitchEndpoint(t *testing.T) {
 func TestRejectedEverywhereReturnsLastError(t *testing.T) {
 	msg := `{"error":{"message":"not a chat model"}}`
 	f := &epFake{rejects: map[string][2]string{
-		"/v1/chat/completions": {"400", msg}, "/v1/responses": {"404", `{"error":{"message":"use /v1/chat/completions"}}`}}}
+		"/v1/chat/completions": {"400", msg}, "/v1/responses": {"404", `{"error":{"message":"use /v1/chat/completions"}}`},
+		"/v1/messages": {"403", `{"error":{"message":"model is not accessible via the /v1/messages endpoint"}}`}}}
 	s := epSetup(t, f, "fake")
 	code, body := epDo(s, "/v1/chat/completions", epChat("m"))
-	if code != 404 || !strings.Contains(body, "use /v1/chat/completions") {
+	if code != 403 || !strings.Contains(body, "not accessible via the /v1/messages") {
 		t.Fatalf("%d %s", code, body)
 	}
 }
