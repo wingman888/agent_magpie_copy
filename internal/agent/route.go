@@ -49,19 +49,12 @@ func isMagpie(v string) bool {
 	return ok && strings.Contains(v, "/")
 }
 
-func firstOf(xs []string) string {
-	if len(xs) > 0 {
-		return xs[0]
-	}
-	return ""
-}
-
 // magpieModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstCatalog(e.Provider), Efforts: e.Efforts})
 	}
 	return out
 }
@@ -75,3 +68,11 @@ func group(name string, opts []Option) []Option {
 }
 
 func gatewayV1() string { return gateway.URL() + "/v1" }
+
+// firstCatalog is the first models.dev id a provider names.
+func firstCatalog(p provider.Provider) string {
+	if c := p.Catalogs(); len(c) > 0 {
+		return c[0]
+	}
+	return ""
+}

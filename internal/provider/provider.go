@@ -35,12 +35,14 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key"`              // API key, as typed by the user (the first, "in use" one)
 
-	// KeyName names the key in use, and Keys are the provider's other
-	// accounts: keys saved to switch to (see keys.go).
-	KeyName string       `json:"keyName,omitempty"`
-	Keys    []KeyAccount `json:"keys,omitempty"`
+	// KeyName and KeyProtocol describe Key: a label, and the one protocol it
+	// may be used for ("" = any). Keys holds the further keys; they are
+	// tried in order after Key, each only while it is not switched off.
+	KeyName     string     `json:"keyName,omitempty"`
+	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
+	Keys        []ExtraKey `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -49,27 +51,21 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
-	// Fallback is where a request goes when this provider can't take it —
-	// out of quota, rate limited, overloaded or down — before any of the
-	// reply has been sent: models as agents pick them (provider/model),
-	// tried in order.
-	Fallback []string `json:"fallback,omitempty"`
-
-	// Headers are extra HTTP request headers sent to the vendor, exactly as
-	// the user typed them. They ride on every request magpie makes to a plain
-	// key+URL provider — forwarded calls, connectivity tests, and model-list
-	// fetches — applied after the auth headers, so the user can override those
-	// when a gateway insists on a private scheme. Signed-in agent accounts
-	// ignore them: their auth is the agent's own.
-	Headers map[string]string `json:"headers,omitempty"`
-
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
+	Catalog string `json:"catalog,omitempty"` // models.dev id(s), comma separated, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// Headers are extra request headers sent to a custom vendor on every
+	// request (forwarding, tests, model lists), after the auth headers.
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// Fallback lists "provider/model" to try, in order, when this provider
+	// is out of quota, rate limited or down.
+	Fallback []string `json:"fallback,omitempty"`
 
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
@@ -113,7 +109,6 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	pruneIcons(f)
 	return os.Chmod(p, 0o600)
 }
 
@@ -136,7 +131,8 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
+		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -184,6 +180,9 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
+	if err := checkKeyProtocols(p); err != nil {
+		return err
+	}
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -196,6 +195,9 @@ func Save(p Provider) error {
 	}
 	if p.Name == "" {
 		p.Name = p.ID
+	}
+	if name, ok := strings.CutPrefix(p.Icon, "file:"); ok && IconFile(name) == "" {
+		return fmt.Errorf("%q is not a stored icon", p.Icon)
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
@@ -210,14 +212,22 @@ func Save(p Provider) error {
 		}
 	}
 	f := load()
+	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			return store(f)
+			replaced = true
+			break
 		}
 	}
-	f.Providers = append(f.Providers, p)
-	return store(f)
+	if !replaced {
+		f.Providers = append(f.Providers, p)
+	}
+	if err := store(f); err != nil {
+		return err
+	}
+	pruneIcons(f.Providers)
+	return nil
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -264,6 +274,7 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
+	p = normalizeKeys(p)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -272,12 +283,11 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = strings.Join(p.Catalogs(), ", ")
-	p.Headers = cleanHeaders(p.Headers)
-	if p.Preset != "" {
-		// Presets own their request shape; custom headers are supported only
-		// for user-defined providers.
+	p.Catalog = cleanCatalog(p.Catalog)
+	if pr := Preset(p.Preset); pr != nil {
 		p.Headers = nil
+	} else {
+		p.Headers = cleanHeaders(p.Headers)
 	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
@@ -296,12 +306,28 @@ func normalize(p Provider) Provider {
 	return p
 }
 
-// Catalogs are the models.dev ids the provider's models are looked up in,
-// first match wins: a gateway that resells several vendors names them all
-// ("openai, deepseek").
-func (p Provider) Catalogs() []string {
-	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
+func cleanHeaders(h map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range h {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = v
+	}
+	return out
 }
+
+// cleanCatalog normalises a comma separated list of catalog names.
+func cleanCatalog(s string) string {
+	return strings.Join(cleanList(strings.Split(s, ",")), ",")
+}
+
+// Catalogs lists the models.dev ids to look models up in, in order.
+func (p Provider) Catalogs() []string { return cleanList(strings.Split(p.Catalog, ",")) }
 
 func cleanList(xs []string) []string {
 	var out []string
@@ -309,21 +335,6 @@ func cleanList(xs []string) []string {
 		if x = strings.TrimSpace(x); x != "" && !contains(out, x) {
 			out = append(out, x)
 		}
-	}
-	return out
-}
-
-// cleanHeaders trims header names and values and drops entries with an empty
-// name, returning nil when nothing is left so the field stays out of the JSON.
-func cleanHeaders(h map[string]string) map[string]string {
-	out := make(map[string]string, len(h))
-	for k, v := range h {
-		if k = strings.TrimSpace(k); k != "" {
-			out[k] = strings.TrimSpace(v)
-		}
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	return out
 }
@@ -402,3 +413,32 @@ func Mask(s string) string {
 // Ready reports whether the provider can be used: it has a key, needs
 // none, or is a signed-in agent.
 func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+
+// SetIcon changes a custom provider's icon: a built-in name, a value from
+// StoreIcon, or "" for the generic one.
+func SetIcon(id, icon string) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	if p.Account != nil || Preset(p.Preset) != nil {
+		return fmt.Errorf("%s: 仅自定义供应商可设置图标 (only custom providers can set an icon)", p.Name)
+	}
+	icon = strings.TrimSpace(icon)
+	if !ValidIcon(icon) {
+		return fmt.Errorf("%q is not an icon name or stored image", icon)
+	}
+	p.Icon = icon
+	return Save(*p)
+}
+
+// SetFallback replaces a provider's fallback list ("provider/model", best
+// first). It works for signed-in accounts too.
+func SetFallback(id string, list []string) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	p.Fallback = list
+	return Save(*p)
+}

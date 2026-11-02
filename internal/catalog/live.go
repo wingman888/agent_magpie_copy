@@ -65,7 +65,13 @@ func SaveLive(provider, base string, models []Model) error {
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, nil)
+}
+
+// FetchWith is Fetch with extra request headers, applied after the auth
+// headers under the exact names given.
+func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -125,9 +131,12 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	// The user's own headers, after the defaults so a private auth scheme
-	// wins. Written directly so the name keeps the exact case the user typed.
 	for k, v := range headers {
+		for have := range req.Header {
+			if strings.EqualFold(have, k) {
+				delete(req.Header, have)
+			}
+		}
 		req.Header[k] = []string{v}
 	}
 	res, err := http.DefaultClient.Do(req)
@@ -174,20 +183,33 @@ type liveModel struct {
 	DisplayName string `json:"display_name"`
 }
 
-// Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order.
-func Decorate(live []Model, known []Model) []Model {
-	byID := make(map[string]Model, len(known))
-	for _, m := range known {
-		byID[m.ID] = m
+// Lookup finds a model in a list by id. A relay's "vendor/model" id that
+// is not listed as such matches the entry for the part after the last "/".
+// The first entry wins, so earlier catalogs take precedence.
+func Lookup(models []Model, id string) (Model, bool) {
+	for _, m := range models {
+		if m.ID == id {
+			return m, true
+		}
 	}
+	if i := strings.LastIndex(id, "/"); i >= 0 && i+1 < len(id) {
+		short := id[i+1:]
+		for _, m := range models {
+			if m.ID == short {
+				return m, true
+			}
+		}
+	}
+	return Model{}, false
+}
+
+// Decorate fills in names and reasoning levels for live models from the
+// catalog's entry for the same id, keeping the live order. Models the
+// catalog does not know are returned as they are.
+func Decorate(live []Model, known []Model) []Model {
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if i := strings.LastIndexByte(m.ID, '/'); !ok && i >= 0 {
-			k, ok = byID[m.ID[i+1:]] // a gateway's "deepseek/deepseek-chat"
-		}
-		if ok {
+		if k, ok := Lookup(known, m.ID); ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

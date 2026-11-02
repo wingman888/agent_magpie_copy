@@ -41,9 +41,10 @@ type Account struct {
 	// a non-streaming request instead of relaying it.
 	Stream bool `json:"-"`
 
-	// token is set on a saved sign-in in use beside the agent's own (see
-	// logins_on.go): the access token to run the agent's binary with.
-	token func(ctx context.Context) (string, error)
+	// Stored is set on a remembered account the agent is not signed in to
+	// (see logins.go); it works on tokens magpie keeps itself.
+	Stored bool `json:"-"`
+	token  func(ctx context.Context) (string, error)
 
 	sign   func(ctx context.Context, req *http.Request, body []byte) error
 	body   func(body []byte) []byte // request tweaks the backend insists on
@@ -60,14 +61,21 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
-	// The user's own headers ride on plain key+URL providers, after auth so
-	// they can override a default when a gateway insists on a private scheme.
-	// Written to the map directly, not via Set, so the name keeps the exact
-	// case the user typed — some gateways match header names case-sensitively.
-	for k, v := range p.Headers {
-		req.Header[k] = []string{v}
-	}
+	ApplyHeaders(req.Header, p.Headers)
 	return nil
+}
+
+// ApplyHeaders sets a vendor's extra headers, replacing any header of the
+// same name in any case, and keeping the name exactly as the user wrote it.
+func ApplyHeaders(h http.Header, extra map[string]string) {
+	for k, v := range extra {
+		for have := range h {
+			if strings.EqualFold(have, k) {
+				delete(h, have)
+			}
+		}
+		h[k] = []string{v}
+	}
 }
 
 // Prepare adjusts a request body the way the backend wants it.
@@ -351,6 +359,12 @@ func claudeAccount() (Provider, bool) {
 		plan = statusPlan
 	}
 	if user == "" {
+		user = claudeFileProfile().email
+	}
+	if user != "" {
+		rememberLogin(claudeLogin(c, user, plan), false)
+	}
+	if user == "" {
 		user = "Claude account"
 		if plan != "" {
 			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
@@ -362,16 +376,7 @@ func claudeAccount() (Provider, bool) {
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("User-Agent", claudeUserAgent())
-		req.Header.Set("X-Claude-Code-Session-Id", claudeSessionID())
-		req.Header.Set("anthropic-beta", claudeBetaHeader(claudeModelOf(body)))
-		req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-		req.Header.Set("x-app", "cli")
-		req.Header.Set("x-client-request-id", randomUUID())
-		for k, v := range claudeStainlessHeaders() {
-			req.Header.Set(k, v)
-		}
+		claudeSignHeaders(req, body, tok)
 		return nil
 	}
 	acct.body = claudeBody
@@ -385,6 +390,20 @@ func claudeAccount() (Provider, bool) {
 	}
 	return Provider{ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Anthropic: claudeBase,
 		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}, true
+}
+
+// claudeSignHeaders authenticates a request to Anthropic as Claude Code would.
+func claudeSignHeaders(req *http.Request, body []byte, tok string) {
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("User-Agent", claudeUserAgent())
+	req.Header.Set("X-Claude-Code-Session-Id", claudeSessionID())
+	req.Header.Set("anthropic-beta", claudeBetaHeader(claudeModelOf(body)))
+	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+	req.Header.Set("x-app", "cli")
+	req.Header.Set("x-client-request-id", randomUUID())
+	for k, v := range claudeStainlessHeaders() {
+		req.Header.Set(k, v)
+	}
 }
 
 // claudeModels asks Anthropic's Models API, authenticated with the account's
@@ -459,6 +478,34 @@ func claudeFresh(c claudeCredentials) bool {
 		(c.OAuth.ExpiresAt == 0 || time.Until(claudeExpiry(c.OAuth.ExpiresAt)) > 5*time.Minute)
 }
 
+type claudeRefreshed struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
+}
+
+// claudeRefresh trades a refresh token for a new pair at Anthropic.
+func claudeRefresh(ctx context.Context, refresh string) (claudeRefreshed, error) {
+	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": refresh,
+		"client_id": claudeClientID})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeTokenURL, bytes.NewReader(body))
+	if err != nil {
+		return claudeRefreshed{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return claudeRefreshed{}, errors.New("Claude Code token refresh: " + err.Error())
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	var fresh claudeRefreshed
+	if res.StatusCode != http.StatusOK || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
+		return claudeRefreshed{}, errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
+	}
+	return fresh, nil
+}
+
 // claudeToken returns a usable access token, refreshing it through Anthropic
 // when it is about to expire. A refresh rotates the refresh token, so the new
 // pair goes back where Claude Code will look for it.
@@ -479,40 +526,12 @@ func claudeToken(ctx context.Context) (string, error) {
 	if claudeFresh(c) {
 		return c.OAuth.AccessToken, nil
 	}
-	if err := claudeRefresh(ctx, &c); err != nil {
-		return "", err
-	}
-	if err := saveClaudeCredential(loc, c); err != nil {
-		return "", err
-	}
-	return c.OAuth.AccessToken, nil
-}
-
-// claudeRefresh trades a sign-in's refresh token for a new pair.
-func claudeRefresh(ctx context.Context, c *claudeCredentials) error {
 	if c.OAuth.RefreshToken == "" {
-		return errors.New("Claude Code OAuth token expired; run claude auth login")
+		return "", errors.New("Claude Code OAuth token expired; run claude auth login")
 	}
-	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": c.OAuth.RefreshToken,
-		"client_id": claudeClientID})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeTokenURL, bytes.NewReader(body))
+	fresh, err := claudeRefresh(ctx, c.OAuth.RefreshToken)
 	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return errors.New("Claude Code token refresh: " + err.Error())
-	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	var fresh struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-	}
-	if res.StatusCode != http.StatusOK || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
+		return "", err
 	}
 	c.OAuth.AccessToken = fresh.AccessToken
 	if fresh.RefreshToken != "" {
@@ -521,12 +540,14 @@ func claudeRefresh(ctx context.Context, c *claudeCredentials) error {
 	if fresh.ExpiresIn > 0 {
 		c.OAuth.ExpiresAt = time.Now().Add(time.Duration(fresh.ExpiresIn) * time.Second).UnixMilli()
 	}
-	return nil
+	if err := saveClaudeCredential(loc, c); err != nil {
+		return "", err
+	}
+	return fresh.AccessToken, nil
 }
 
 // Accounts lists the signed-in agents as providers.
 func Accounts() []Provider {
-	rememberLogins(false)
 	home, _ := os.UserHomeDir()
 	cfg := os.Getenv("XDG_CONFIG_HOME")
 	if cfg == "" {
@@ -588,8 +609,8 @@ func claimString(m map[string]any, keys ...string) string {
 
 const codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
 
-// codexTokenURL is where ChatGPT's tokens are issued and refreshed; a var
-// so tests can point it elsewhere.
+// codexTokenURL is where a ChatGPT account's tokens are refreshed; a var so
+// tests can point it elsewhere.
 var codexTokenURL = "https://auth.openai.com/oauth/token"
 
 // CodexBase is where a ChatGPT account's Codex requests go; a var so tests
@@ -617,32 +638,60 @@ func codexAccount(home string) (Provider, bool) {
 	id := jwtClaims(a.Tokens.IDToken)
 	acct := &Account{Agent: "codex", Stream: true,
 		User: claimString(id, "email"), Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")}
-	if acct.User == "" {
+	if acct.User != "" {
+		rememberLogin(codexLogin(path, acct.User, acct.Plan), false)
+	} else {
 		acct.User = "ChatGPT"
 	}
-	acct.sign = codexSign(func(ctx context.Context) (string, string, error) { return codexToken(ctx, path) })
+	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
+		tok, accountID, err := codexToken(ctx, path)
+		if err != nil {
+			return err
+		}
+		codexSignHeaders(req, tok, accountID)
+		return nil
+	}
 	acct.body = codexBody
 	acct.models = catalog.Codex
 	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
 	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 
-// codexSign authenticates a request to the ChatGPT backend with the
-// tokens token hands out.
-func codexSign(token func(context.Context) (tok, accountID string, err error)) func(context.Context, *http.Request, []byte) error {
-	return func(ctx context.Context, req *http.Request, _ []byte) error {
-		tok, accountID, err := token(ctx)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Authorization", "Bearer "+tok)
-		if accountID != "" {
-			req.Header.Set("chatgpt-account-id", accountID)
-		}
-		req.Header.Set("OpenAI-Beta", "responses=experimental")
-		req.Header.Set("originator", "magpie")
-		return nil
+func codexSignHeaders(req *http.Request, tok, accountID string) {
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if accountID != "" {
+		req.Header.Set("chatgpt-account-id", accountID)
 	}
+	req.Header.Set("OpenAI-Beta", "responses=experimental")
+	req.Header.Set("originator", "magpie")
+}
+
+type codexRefreshed struct {
+	IDToken      string `json:"id_token"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+// codexRefresh trades a refresh token for new tokens at OpenAI.
+func codexRefresh(ctx context.Context, refresh string) (codexRefreshed, error) {
+	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
+		"refresh_token": refresh, "scope": "openid profile email"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, bytes.NewReader(body))
+	if err != nil {
+		return codexRefreshed{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return codexRefreshed{}, errors.New("Codex token refresh: " + err.Error())
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	var fresh codexRefreshed
+	if res.StatusCode != 200 || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
+		return codexRefreshed{}, errors.New("Codex is signed out (token refresh failed); run codex login")
+	}
+	return fresh, nil
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI
@@ -662,60 +711,31 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 	if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
 		return a.Tokens.AccessToken, accountID, nil
 	}
-	var raw map[string]any
-	if !readJSON(path, &raw) {
-		return "", "", errors.New("Codex is signed out; run codex login")
-	}
-	tok, err = codexRefresh(ctx, raw)
+	fresh, err := codexRefresh(ctx, a.Tokens.RefreshToken)
 	if err != nil {
 		return "", "", err
 	}
 	// keep every other field of the file as Codex CLI wrote it
-	if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
-		os.WriteFile(path, append(out, '\n'), 0o600)
+	var raw map[string]any
+	if readJSON(path, &raw) {
+		toks, _ := raw["tokens"].(map[string]any)
+		if toks == nil {
+			toks = map[string]any{}
+		}
+		toks["access_token"] = fresh.AccessToken
+		if fresh.IDToken != "" {
+			toks["id_token"] = fresh.IDToken
+		}
+		if fresh.RefreshToken != "" {
+			toks["refresh_token"] = fresh.RefreshToken
+		}
+		raw["tokens"] = toks
+		raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
+		if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
+			os.WriteFile(path, append(out, '\n'), 0o600)
+		}
 	}
-	return tok, accountID, nil
-}
-
-// codexRefresh renews the tokens of an auth.json-shaped sign-in in place,
-// every other field left as it was, and returns the new access token.
-func codexRefresh(ctx context.Context, raw map[string]any) (string, error) {
-	toks, _ := raw["tokens"].(map[string]any)
-	if toks == nil {
-		toks = map[string]any{}
-	}
-	refresh, _ := toks["refresh_token"].(string)
-	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
-		"refresh_token": refresh, "scope": "openid profile email"})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", errors.New("Codex token refresh: " + err.Error())
-	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	var fresh struct {
-		IDToken      string `json:"id_token"`
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-	}
-	if res.StatusCode != 200 || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return "", errors.New("Codex is signed out (token refresh failed); run codex login")
-	}
-	toks["access_token"] = fresh.AccessToken
-	if fresh.IDToken != "" {
-		toks["id_token"] = fresh.IDToken
-	}
-	if fresh.RefreshToken != "" {
-		toks["refresh_token"] = fresh.RefreshToken
-	}
-	raw["tokens"] = toks
-	raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
-	return fresh.AccessToken, nil
+	return fresh.AccessToken, accountID, nil
 }
 
 // codexBody makes a Responses request acceptable to the ChatGPT backend:

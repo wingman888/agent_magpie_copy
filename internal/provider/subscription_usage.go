@@ -162,16 +162,12 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 		return q
 	}
 	_, plan, _ := claudeIdentity()
-	q.Plan = plan
-	q.Windows, err = claudeWindows(ctx, token)
-	if err != nil {
-		q.Error = err.Error()
-	}
-	return q
+	return claudeUsageWith(ctx, q, token, plan)
 }
 
-// claudeWindows is the allowance of the Claude account token signs in to.
-func claudeWindows(ctx context.Context, token string) ([]QuotaWindow, error) {
+// claudeUsageWith asks Anthropic how much of one account's allowance is used.
+func claudeUsageWith(ctx context.Context, q SubscriptionQuota, token, plan string) SubscriptionQuota {
+	q.Plan = plan
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
@@ -182,18 +178,18 @@ func claudeWindows(ctx context.Context, token string) ([]QuotaWindow, error) {
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
-		return []QuotaWindow{}, err
+		q.Error = err.Error()
+		return q
 	}
-	out := []QuotaWindow{}
 	for _, x := range []struct {
 		name string
 		w    *quotaWire
 	}{{"5 hours", data.FiveHour}, {"7 days", data.SevenDay}, {"7 days · Opus", data.SevenDayOpus}, {"7 days · Sonnet", data.SevenDaySonnet}} {
 		if x.w != nil {
-			out = append(out, x.w.window(x.name))
+			q.Windows = append(q.Windows, x.w.window(x.name))
 		}
 	}
-	return out, nil
+	return q
 }
 
 type quotaWire struct {
@@ -216,16 +212,11 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		q.Error = err.Error()
 		return q
 	}
-	q.Plan, q.Windows, err = codexWindows(ctx, token, accountID)
-	if err != nil {
-		q.Error = err.Error()
-	}
-	return q
+	return codexUsageWith(ctx, q, token, accountID)
 }
 
-// codexWindows is the plan and allowance of the ChatGPT account token
-// signs in to.
-func codexWindows(ctx context.Context, token, accountID string) (plan string, out []QuotaWindow, err error) {
+// codexUsageWith asks ChatGPT how much of one account's allowance is used.
+func codexUsageWith(ctx context.Context, q SubscriptionQuota, token, accountID string) SubscriptionQuota {
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -234,17 +225,21 @@ func codexWindows(ctx context.Context, token, accountID string) (plan string, ou
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	out = []QuotaWindow{}
-	if err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data); err != nil {
-		return "", out, err
+	err := accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	if err != nil {
+		q.Error = err.Error()
+		return q
+	}
+	if data.PlanType != "" {
+		q.Plan = data.PlanType
 	}
 	if data.RateLimit.Primary != nil {
-		out = append(out, data.RateLimit.Primary.window())
+		q.Windows = append(q.Windows, data.RateLimit.Primary.window())
 	}
 	if data.RateLimit.Secondary != nil {
-		out = append(out, data.RateLimit.Secondary.window())
+		q.Windows = append(q.Windows, data.RateLimit.Secondary.window())
 	}
-	return data.PlanType, out, nil
+	return q
 }
 
 type codexWindow struct {
