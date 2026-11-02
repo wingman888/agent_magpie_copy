@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -58,23 +57,20 @@ func Running() bool {
 
 // Call is one request the gateway handled, for the status views.
 type Call struct {
-	Time     time.Time         `json:"time"`
-	Agent    string            `json:"agent"` // who called, from the client's User-Agent
-	Model    string            `json:"model"`
-	Provider string            `json:"provider"`
-	From     provider.Protocol `json:"from"`
-	To       provider.Protocol `json:"to"`
-	Status   int               `json:"status"`
-	Millis   int64             `json:"ms"`
-	Error    string            `json:"error,omitempty"`
-	// Fallback is set when candidates failed before one served the request
-	// (another key, or a fallback model): their provider ids, and key names.
-	Fallback          string `json:"fallback,omitempty"`
-	Usage             Usage  `json:"usage"`
-	RequestBody       string `json:"requestBody,omitempty"`
-	ResponseBody      string `json:"responseBody,omitempty"`
-	RequestTruncated  bool   `json:"requestTruncated,omitempty"`
-	ResponseTruncated bool   `json:"responseTruncated,omitempty"`
+	Time              time.Time         `json:"time"`
+	Agent             string            `json:"agent"` // who called, from the client's User-Agent
+	Model             string            `json:"model"`
+	Provider          string            `json:"provider"`
+	From              provider.Protocol `json:"from"`
+	To                provider.Protocol `json:"to"`
+	Status            int               `json:"status"`
+	Millis            int64             `json:"ms"`
+	Error             string            `json:"error,omitempty"`
+	Usage             Usage             `json:"usage"`
+	RequestBody       string            `json:"requestBody,omitempty"`
+	ResponseBody      string            `json:"responseBody,omitempty"`
+	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
+	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
 }
 
 // Server is the gateway.
@@ -87,16 +83,13 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	// rest remembers candidates that ran out of quota, until when.
-	rest  map[string]time.Time
-	clock func() time.Time // tests; nil means time.Now
 }
 
 // New makes a gateway.
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 netproxy.Func,
+			Proxy:                 http.ProxyFromEnvironment,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,
@@ -228,23 +221,15 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ok && p.Anthropic != "" {
-		// keys limited to OpenAI endpoints have no business here
-		for _, c := range keyRoutes(p, model, provider.Anthropic) {
-			if c.p.Base(provider.Anthropic) == "" {
-				continue
-			}
-			res, err := s.forward(r.Context(), c.p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-			if err != nil {
-				continue
-			}
+		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+		if err == nil {
+			defer res.Body.Close()
 			if res.StatusCode < 400 {
-				defer res.Body.Close()
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(res.StatusCode)
 				io.Copy(w, res.Body)
 				return
 			}
-			res.Body.Close()
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -362,71 +347,46 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	cands := s.candidates(p, model, from)
-	if len(cands) == 0 {
-		call.Provider = p.ID
-		call.Status, call.Error = 502, p.Name+" has no key that fits its endpoints"
-		writeError(w, from, call.Status, call.Error)
-		call.Millis = time.Since(start).Milliseconds()
-		finishCapture()
-		s.record(call)
-		return
-	}
-	var failed []string
-	for i, c := range cands {
-		last := i == len(cands)-1
-		out := http.ResponseWriter(w)
-		var hold *holdWriter
-		if !last {
-			hold = newHold(w)
-			out = hold
-		}
-		var u Usage
-		to, status, errMsg := s.attempt(out, r, from, c, body, &u)
-		if hold != nil && hold.finish(r.Context().Err() == nil) {
-			failed = append(failed, c.label())
-			s.markRest(c)
-			continue
-		}
-		if status >= 400 && worthRetry(status, []byte(capture.body.text())) {
-			s.markRest(c)
-		}
-		call.Provider, call.To, call.Status, call.Error, call.Usage = c.p.ID, to, status, errMsg, u
-		call.Fallback = strings.Join(failed, ", ")
-		call.Millis = time.Since(start).Milliseconds()
-		finishCapture()
-		s.record(call)
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: c.p.ID, Model: c.model,
-			Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
-			CacheWrite: u.CacheWrite, Reasoning: u.Reasoning, Millis: call.Millis, Status: status})
-		return
-	}
-}
-
-// attempt serves the request through one candidate, writing to w. It returns
-// the protocol spoken upstream, the status the client got, and any error text.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, c candidate, body []byte, u *Usage) (provider.Protocol, int, string) {
-	p, model := c.p, c.model
+	call.Provider = p.ID
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
-		status, msg := s.serveClaudeSubscription(w, r, from, p.Account, model, body, u)
-		return provider.Anthropic, status, msg
+		call.To = provider.Anthropic
+		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
-	if p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body)) {
-		status, msg := s.passthrough(w, r, p, from, model, body, u)
-		return from, status, msg
+	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
+	if relay {
+		call.To = from
+		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+	} else {
+		to := p.Speaks()
+		if len(to) == 0 {
+			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
+			writeError(w, from, call.Status, call.Error)
+			call.Millis = time.Since(start).Milliseconds()
+			finishCapture()
+			s.record(call)
+			return
+		}
+		call.To = to[0]
+		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 	}
-	to := p.Speaks()
-	if len(to) == 0 {
-		msg := p.Name + " has no endpoint configured"
-		return from, writeError(w, from, 502, msg), msg
-	}
-	status, msg := s.translate(w, r, p, from, to[0], model, body, u)
-	return to[0], status, msg
+	call.Millis = time.Since(start).Milliseconds()
+	finishCapture()
+	s.record(call)
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
 // forward sends a request to the provider.

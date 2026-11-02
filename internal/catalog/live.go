@@ -66,12 +66,6 @@ func SaveLive(provider, base string, models []Model) error {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with extra request headers, applied after the auth
-// headers under the exact names given.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -98,7 +92,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key, anthropic)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +109,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -130,14 +124,6 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	}
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
-	}
-	for k, v := range headers {
-		for have := range req.Header {
-			if strings.EqualFold(have, k) {
-				delete(req.Header, have)
-			}
-		}
-		req.Header[k] = []string{v}
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -183,33 +169,16 @@ type liveModel struct {
 	DisplayName string `json:"display_name"`
 }
 
-// Lookup finds a model in a list by id. A relay's "vendor/model" id that
-// is not listed as such matches the entry for the part after the last "/".
-// The first entry wins, so earlier catalogs take precedence.
-func Lookup(models []Model, id string) (Model, bool) {
-	for _, m := range models {
-		if m.ID == id {
-			return m, true
-		}
-	}
-	if i := strings.LastIndex(id, "/"); i >= 0 && i+1 < len(id) {
-		short := id[i+1:]
-		for _, m := range models {
-			if m.ID == short {
-				return m, true
-			}
-		}
-	}
-	return Model{}, false
-}
-
 // Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order. Models the
-// catalog does not know are returned as they are.
+// catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
+	byID := make(map[string]Model, len(known))
+	for _, m := range known {
+		byID[m.ID] = m
+	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := Lookup(known, m.ID); ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

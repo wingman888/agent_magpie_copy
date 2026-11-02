@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = p.known()
+		known = catalog.Provider(p.Catalog)
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -37,16 +37,6 @@ func (p Provider) Available() []catalog.Model {
 		if !strings.Contains(m.ID, "-exp") && !strings.Contains(m.ID, "preview") {
 			out = append(out, m)
 		}
-	}
-	return out
-}
-
-// known is the models.dev entries of every catalog the provider names, in
-// the order they are listed.
-func (p Provider) known() []catalog.Model {
-	var out []catalog.Model
-	for _, c := range p.Catalogs() {
-		out = append(out, catalog.Provider(c)...)
 	}
 	return out
 }
@@ -64,7 +54,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.Headers)
+		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic)
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -80,7 +70,6 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
-	known := p.known()
 	byID := make(map[string]catalog.Model, len(avail))
 	for _, m := range avail {
 		byID[m.ID] = m
@@ -91,11 +80,7 @@ func (p Provider) Exposed() []catalog.Model {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
 			} else {
-				if k, ok := catalog.Lookup(known, id); ok {
-					out = append(out, catalog.Model{ID: id, Name: k.Name, Provider: k.Provider, Released: k.Released, Efforts: k.Efforts, Temperature: k.Temperature, Price: k.Price})
-				} else {
-					out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
-				}
+				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
 			}
 		}
 		return out
@@ -117,8 +102,10 @@ func (p Provider) Exposed() []catalog.Model {
 // plus the vendor's own list — so a model released after this binary was
 // built is handled without a code change.
 func (p Provider) RejectsTemperature(model string) bool {
-	if m, ok := catalog.Lookup(p.Available(), model); ok && m.Temperature != nil {
-		return !*m.Temperature
+	for _, m := range p.Available() {
+		if m.ID == model && m.Temperature != nil {
+			return !*m.Temperature
+		}
 	}
 	return false
 }
