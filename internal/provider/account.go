@@ -819,7 +819,7 @@ var (
 type copilotApp struct {
 	User  string `json:"user"`
 	Token string `json:"oauth_token"`
-	cli   bool   // the standalone Copilot CLI's sign-in
+	cli   bool // the standalone Copilot CLI's sign-in
 }
 
 // copilotLogin finds the GitHub token Copilot's editors and CLI keep.
@@ -874,10 +874,10 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
 		req.Header.Set("X-Initiator", "agent")
-		if userTurn(body) {
+		if lastRole(body) == "user" {
 			req.Header.Set("X-Initiator", "user")
 		}
-		if hasImage(body) {
+		if bytes.Contains(body, []byte(`"image_url"`)) {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
@@ -889,99 +889,20 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
-	// Copilot serves all three; which model is on which endpoint comes
-	// from its model list (see copilotModels and Provider.APIs).
-	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot",
-		Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase,
-		Website: "https://github.com/features/copilot", Account: acct}
+	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
 }
 
-// userTurn reports whether a request's last turn is one the user typed, in
-// any of the three request shapes: a Chat or Anthropic message from the
-// user — not an Anthropic user message made only of tool results, nor a
-// Chat tool message — or a Responses input that is a string or ends in a
-// user message rather than a function's output.
-func userTurn(body []byte) bool {
+// lastRole is the role of the last message in a chat request.
+func lastRole(body []byte) string {
 	var v struct {
 		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
+			Role string `json:"role"`
 		} `json:"messages"`
-		Input json.RawMessage `json:"input"`
 	}
-	if json.Unmarshal(body, &v) != nil {
-		return false
+	if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
+		return ""
 	}
-	if len(v.Messages) > 0 {
-		last := v.Messages[len(v.Messages)-1]
-		if last.Role != "user" {
-			return false
-		}
-		var blocks []struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(last.Content, &blocks) != nil || len(blocks) == 0 {
-			return true // a plain string, or nothing to say otherwise
-		}
-		for _, b := range blocks {
-			if b.Type != "tool_result" {
-				return true
-			}
-		}
-		return false
-	}
-	in := bytes.TrimSpace(v.Input)
-	if len(in) == 0 {
-		return false
-	}
-	if in[0] == '"' {
-		return true
-	}
-	var items []struct {
-		Type string `json:"type"`
-		Role string `json:"role"`
-	}
-	if json.Unmarshal(in, &items) != nil || len(items) == 0 {
-		return false
-	}
-	last := items[len(items)-1]
-	return last.Role == "user" && (last.Type == "" || last.Type == "message")
-}
-
-// hasImage reports whether a request carries a picture: a Chat image_url
-// part, a Responses input_image, or an Anthropic image block, at any depth
-// of its messages or input (a tool's result may hold one).
-func hasImage(body []byte) bool {
-	var v struct {
-		Messages any `json:"messages"`
-		Input    any `json:"input"`
-	}
-	if json.Unmarshal(body, &v) != nil {
-		return false
-	}
-	var walk func(x any) bool
-	walk = func(x any) bool {
-		switch t := x.(type) {
-		case map[string]any:
-			switch t["type"] {
-			case "image_url", "input_image", "image":
-				return true
-			}
-			for _, c := range t {
-				if walk(c) {
-					return true
-				}
-			}
-		case []any:
-			for _, c := range t {
-				if walk(c) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	return walk(v.Messages) || walk(v.Input)
+	return v.Messages[len(v.Messages)-1].Role
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {
@@ -1042,10 +963,9 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	var v struct {
 		Data []struct {
-			ID           string   `json:"id"`
-			Name         string   `json:"name"`
-			Picker       bool     `json:"model_picker_enabled"`
-			Endpoints    []string `json:"supported_endpoints"`
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			Picker       bool   `json:"model_picker_enabled"`
 			Capabilities struct {
 				Type     string `json:"type"`
 				Supports struct {
@@ -1069,7 +989,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		if !m.Picker && (m.Policy == nil || m.Policy.State != "enabled") {
 			continue
 		}
-		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: catalog.EndpointAPIs(m.Endpoints)})
+		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts})
 	}
 	if len(out) == 0 {
 		return nil, errors.New("Copilot lists no chat model for this account")
