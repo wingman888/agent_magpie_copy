@@ -27,11 +27,9 @@ const providerUsage = `usage:
   magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
+  magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
-  magpie provider fallback <id> [<provider/model>… | none]
-                                          models the gateway turns to, in order, when it is out of
-                                          quota, rate limited, overloaded or down (none clears them)
   magpie provider rm <id>                 remove a provider
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
@@ -46,7 +44,7 @@ func providers() error {
 		return nil
 	}
 	uses := usesByProvider()
-	type row struct{ name, id, host, key, models, uses, fallback string }
+	type row struct{ name, id, host, key, models, uses string }
 	var rows []row
 	w := [5]int{}
 	for _, p := range all {
@@ -74,7 +72,7 @@ func providers() error {
 			r.uses = green.Render("← " + strings.Join(u, ", "))
 		}
 		if len(p.Fallback) > 0 {
-			r.fallback = "  " + muted.Render("fallback: "+fallbackChain(p.Fallback))
+			r.uses += muted.Render("  ⤷ " + strings.Join(p.Fallback, " → "))
 		}
 		for i, s := range []string{r.name, r.id, r.host, r.key, r.models} {
 			w[i] = max(w[i], lipgloss.Width(s))
@@ -82,7 +80,7 @@ func providers() error {
 		rows = append(rows, r)
 	}
 	for _, r := range rows {
-		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses+r.fallback)
+		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
 	for _, x := range provider.Excluded() {
 		name := x.Agent
@@ -219,6 +217,40 @@ func providerCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(p.Icon))
 		return nil
+	case "fallback":
+		// where requests go when this provider is out of quota, rate
+		// limited or down; "none" clears the list
+		if len(rest) < 1 {
+			return fmt.Errorf("magpie provider fallback <id> [provider/model… | none]")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if len(rest) > 1 {
+			p.Fallback = nil
+			if !(len(rest) == 2 && rest[1] == "none") {
+				for _, id := range rest[1:] {
+					if _, _, ok := provider.Resolve(id); !ok {
+						return fmt.Errorf("magpie knows no model %q (magpie models lists them)", id)
+					}
+					p.Fallback = append(p.Fallback, id)
+				}
+			}
+			if err := provider.Save(*p); err != nil {
+				return err
+			}
+			if p, err = provider.Find(p.ID); err != nil {
+				return err
+			}
+		}
+		if len(p.Fallback) == 0 {
+			fmt.Println(p.Name, muted.Render("has no fallback · magpie provider fallback "+p.ID+" <provider/model>…"))
+			return nil
+		}
+		fmt.Println(green.Render("✓"), p.Name, "falls back to", strings.Join(p.Fallback, muted.Render(" → ")),
+			muted.Render("· when out of quota, rate limited or down"))
+		return nil
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -259,8 +291,6 @@ func providerCmd(args []string) error {
 			os.Exit(1)
 		}
 		return nil
-	case "fallback", "fallbacks":
-		return fallbackCmd(rest)
 	case "models":
 		if len(rest) < 1 {
 			return fmt.Errorf("magpie provider models <id> [model ids to expose…]")
@@ -294,68 +324,6 @@ func providerCmd(args []string) error {
 		return err
 	}
 	return showProvider(*p)
-}
-
-const fallbackUsage = "magpie provider fallback <id> [<provider/model>… | none]"
-
-// fallbackChain spells a fallback list the way the CLI shows it: a → b.
-func fallbackChain(xs []string) string { return strings.Join(xs, " → ") }
-
-// fallbackCmd: `magpie provider fallback <id> [<provider/model>… | none]`
-func fallbackCmd(rest []string) error {
-	if len(rest) < 1 {
-		return fmt.Errorf("%s", fallbackUsage)
-	}
-	p, err := provider.Find(rest[0])
-	if err != nil {
-		return err
-	}
-	models := rest[1:]
-	if len(models) == 0 {
-		if len(p.Fallback) == 0 {
-			fmt.Println(muted.Render(p.Name+" has no fallback ·"), fallbackUsage)
-			return nil
-		}
-		fmt.Println(" ", bold.Render(p.Name), muted.Render("fallback:"), fallbackChain(p.Fallback))
-		return nil
-	}
-	if len(models) == 1 && strings.EqualFold(strings.TrimSpace(models[0]), "none") {
-		models = nil
-	} else {
-		var clean []string
-		for _, m := range models {
-			if m = strings.TrimSpace(m); m == "" {
-				continue
-			}
-			rp, model, ok := provider.Resolve(m)
-			if !ok {
-				return fmt.Errorf("magpie does not know the model %q — magpie models lists the ones it does (as provider/model)", m)
-			}
-			if !strings.Contains(m, "/") {
-				// a bare model id is kept as the provider/model it resolved to
-				m = rp.ID + "/" + model
-			}
-			clean = append(clean, m)
-		}
-		if len(clean) == 0 {
-			return fmt.Errorf("%s", fallbackUsage)
-		}
-		models = clean
-	}
-	p.Fallback = models
-	if err := provider.Save(*p); err != nil {
-		return err
-	}
-	saved, err := provider.Find(p.ID)
-	if err != nil {
-		return err
-	}
-	if len(saved.Fallback) == 0 {
-		fmt.Println(green.Render("✓"), saved.Name, "has no fallback now")
-		return nil
-	}
-	fmt.Println(green.Render("✓"), saved.Name, "falls back to", fallbackChain(saved.Fallback))
-	return nil
 }
 
 // addProvider: `magpie provider add <preset> [key]` or `magpie provider add <name> k=v…`
@@ -439,7 +407,6 @@ func showProvider(p provider.Provider) error {
 		kv("key", amber.Render("not set")+muted.Render("  magpie provider key "+p.ID+" …"))
 	}
 	kv("catalog", p.Catalog)
-	kv("fallback", fallbackChain(p.Fallback))
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
 	for _, k := range slices.Sorted(maps.Keys(p.Headers)) {
