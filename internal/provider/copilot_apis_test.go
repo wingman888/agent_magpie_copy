@@ -13,13 +13,6 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 )
 
-func isolate(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-}
-
 func TestCopilotAPIs(t *testing.T) {
 	got := copilotAPIs([]string{"/chat/completions", "ws:/responses", "/v1/messages", "/embeddings", "/responses", "/responses"})
 	if want := []string{"chat", "anthropic", "responses"}; !reflect.DeepEqual(got, want) {

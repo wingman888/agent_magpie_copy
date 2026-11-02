@@ -978,6 +978,34 @@ func hasImage(x any) bool {
 	return false
 }
 
+func copilotToken(ctx context.Context, github string) (copilotSession, error) {
+	copilotMu.Lock()
+	defer copilotMu.Unlock()
+	if s, ok := copilotSessions[github]; ok && time.Until(time.Unix(s.ExpiresAt, 0)) > 2*time.Minute {
+		return s, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, CopilotTokenURL, nil)
+	if err != nil {
+		return copilotSession{}, err
+	}
+	req.Header.Set("Authorization", "token "+github)
+	req.Header.Set("Accept", "application/json")
+	for k, v := range copilotHeaders {
+		req.Header.Set(k, v)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return copilotSession{}, errors.New("Copilot sign-in: " + err.Error())
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	var s copilotSession
+	if res.StatusCode != 200 || json.Unmarshal(b, &s) != nil || s.Token == "" {
+		return copilotSession{}, errors.New("Copilot is signed out (" + APIError(b, res.Status) + "); sign in to Copilot again")
+	}
+	copilotSessions[github] = s
+	return s, nil
+
 // internal is a Copilot model id nobody picks by hand.
 var copilotInternal = regexp.MustCompile(`^(copilot-search|exec-agent|trajectory)|-(secondary|tertiary|4th|free-auto)$`)
 
