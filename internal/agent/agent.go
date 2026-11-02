@@ -18,7 +18,6 @@ type Option struct {
 	Note  string `json:"note"`
 	Icon  string `json:"icon,omitempty"`  // bundled icon name
 	Group string `json:"group,omitempty"` // section header in the picker
-	Ref   string `json:"ref,omitempty"`   // the catalog model, the same in every agent
 }
 
 // Field is one tunable setting of an agent. Set with an empty value puts
