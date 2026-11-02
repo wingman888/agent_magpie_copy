@@ -1,16 +1,11 @@
 package provider
 
-// Custom icons: a picture the user chose for one of their own providers.
-// magpie keeps its own copy under the config directory, named after the
-// picture's content, so moving or deleting the original changes nothing and
-// the same picture is stored once. A provider refers to it as "file:<name>".
-
 import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,134 +13,104 @@ import (
 	"time"
 )
 
-// MaxIcon is the largest picture magpie keeps as an icon.
+// A provider's own picture lives in the icons folder beside providers.json,
+// named after its content, and the provider's Icon reads "file:<name>". The
+// built-in icons are plain names ("deepseek-color").
+const iconPrefix = "file:"
+
+// MaxIcon is the largest picture magpie keeps for a provider.
 const MaxIcon = 1 << 20
 
-// IconPrefix marks an icon that is a picture the user supplied.
-const IconPrefix = "file:"
+var iconName = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
 
-// iconGrace is how long a stored picture nobody uses yet is kept, so one
-// being edited in is not swept away before its provider is saved.
-const iconGrace = time.Hour
-
-var iconNameRe = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
-
-// IconDir is where stored pictures live: next to providers.json.
+// IconDir is where pictures given to providers are kept.
 func IconDir() string { return filepath.Join(filepath.Dir(Path()), "icons") }
 
-// IconFile returns where the stored picture called name lives, or "" when
-// name is not one StoreIcon could have produced.
+// IconFile is the path of a stored picture, for a name as StoreIcon made it;
+// "" for anything else, so a request can't reach outside the folder.
 func IconFile(name string) string {
-	if !iconNameRe.MatchString(name) {
+	if !iconName.MatchString(name) {
 		return ""
 	}
 	return filepath.Join(IconDir(), name)
 }
 
-// iconExt tells the picture's type from its content.
-func iconExt(data []byte) string {
-	switch {
-	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
-		return ".png"
-	case bytes.HasPrefix(data, []byte{0xFF, 0xD8, 0xFF}):
-		return ".jpg"
-	case bytes.HasPrefix(data, []byte("GIF87a")), bytes.HasPrefix(data, []byte("GIF89a")):
-		return ".gif"
-	case len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP":
-		return ".webp"
-	case bytes.HasPrefix(data, []byte{0x00, 0x00, 0x01, 0x00}):
-		return ".ico"
-	case bytes.Contains(bytes.ToLower(data), []byte("<svg")):
-		return ".svg"
-	}
-	return ""
-}
-
-// StoreIcon keeps a picture and returns the reference to put in a
-// provider's Icon.
+// StoreIcon keeps a picture (PNG, JPEG, GIF, WebP, ICO or SVG) and returns
+// the Icon value that points at it. The same picture is stored once.
 func StoreIcon(data []byte) (string, error) {
 	if len(data) == 0 {
-		return "", errors.New("the icon file is empty")
+		return "", errors.New("the picture is empty")
 	}
 	if len(data) > MaxIcon {
-		return "", fmt.Errorf("the icon is %d KB; pick a smaller image (at most 1 MB)", (len(data)+1023)/1024)
+		return "", errors.New("the picture is over 1 MB; pick a smaller one")
 	}
 	ext := iconExt(data)
 	if ext == "" {
-		return "", errors.New("unsupported image type: use a PNG, JPEG, GIF, WebP, ICO or SVG picture")
+		return "", errors.New("not a picture magpie can show: use PNG, JPEG, GIF, WebP, ICO or SVG")
 	}
 	sum := sha256.Sum256(data)
-	name := hex.EncodeToString(sum[:])[:16] + ext
-	dir := IconDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	name := hex.EncodeToString(sum[:8]) + "." + ext
+	if err := os.MkdirAll(IconDir(), 0o755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, name)
-	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
-		now := time.Now()
-		_ = os.Chtimes(path, now, now) // fresh again: not swept before it is saved
-		return IconPrefix + name, nil
-	}
-	tmp, err := os.CreateTemp(dir, ".icon-*")
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(IconDir(), name), data, 0o644); err != nil {
 		return "", err
 	}
-	_, werr := tmp.Write(data)
-	cerr := tmp.Close()
-	if werr != nil || cerr != nil {
-		os.Remove(tmp.Name())
-		return "", errors.Join(werr, cerr)
-	}
-	os.Chmod(tmp.Name(), 0o644)
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
-		return "", err
-	}
-	return IconPrefix + name, nil
+	return iconPrefix + name, nil
 }
 
-// StoreIconFile keeps the picture at path; see StoreIcon.
+// StoreIconFile is StoreIcon for a picture on disk.
 func StoreIconFile(path string) (string, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return "", err
 	}
-	if st.IsDir() {
-		return "", fmt.Errorf("%s is a directory, not a picture", path)
-	}
 	if st.Size() > MaxIcon {
-		return "", fmt.Errorf("the icon is %d KB; pick a smaller image (at most 1 MB)", (st.Size()+1023)/1024)
+		return "", errors.New("the picture is over 1 MB; pick a smaller one")
 	}
-	data, err := os.ReadFile(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	return StoreIcon(data)
+	return StoreIcon(b)
 }
 
-// sweepIcons removes stored pictures no provider in f refers to, once they
-// are older than iconGrace. Failing to sweep is not an error worth reporting.
-func sweepIcons(f file) {
+func iconExt(b []byte) string {
+	switch http.DetectContentType(b) {
+	case "image/png":
+		return "png"
+	case "image/jpeg":
+		return "jpg"
+	case "image/gif":
+		return "gif"
+	case "image/webp":
+		return "webp"
+	case "image/x-icon", "image/vnd.microsoft.icon":
+		return "ico"
+	}
+	head := bytes.ToLower(b[:min(len(b), 1024)])
+	if bytes.Contains(head, []byte("<svg")) {
+		return "svg"
+	}
+	return ""
+}
+
+// pruneIcons removes pictures no provider points at any more. One picked in
+// the editor is stored before its provider is saved, so a fresh one stays.
+func pruneIcons(f file) {
 	used := map[string]bool{}
 	for _, p := range f.Providers {
-		if name, ok := strings.CutPrefix(p.Icon, IconPrefix); ok {
+		if name, ok := strings.CutPrefix(p.Icon, iconPrefix); ok {
 			used[name] = true
 		}
 	}
-	dir := IconDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().Add(-iconGrace)
-	for _, e := range entries {
-		if e.IsDir() || used[e.Name()] {
+	ents, _ := os.ReadDir(IconDir())
+	for _, e := range ents {
+		if !iconName.MatchString(e.Name()) || used[e.Name()] {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil || !info.ModTime().Before(cutoff) {
-			continue
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > time.Hour {
+			os.Remove(filepath.Join(IconDir(), e.Name()))
 		}
-		os.Remove(filepath.Join(dir, e.Name()))
 	}
 }
