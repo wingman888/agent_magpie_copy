@@ -46,7 +46,6 @@ type providerJSON struct {
 	Ready     bool               `json:"ready"`
 	Chosen    []string           `json:"chosen"`   // the user's explicit picks, if any
 	Fallback  []string           `json:"fallback"` // where requests go when this one can't take them
-	Routing   string             `json:"routing"`  // how requests spread over its keys or accounts
 	Models    []modelJSON        `json:"models"`   // everything the vendor lists, exposed ones flagged
 	Exposed   int                `json:"exposed"`  // how many reach the agents
 	Fetched   string             `json:"fetched"`  // "3h ago" when the list came from the vendor
@@ -120,7 +119,7 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Headers: p.Headers,
 		Ready:   p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
-		Fallback: p.Fallback, Routing: p.Routing,
+		Fallback: p.Fallback,
 	}
 	if out.Fallback == nil {
 		out.Fallback = []string{}
@@ -145,11 +144,6 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		out.Account = &accountJSON{Account: *a, Agent: a.Agent, Name: a.Agent, Icon: "generic"}
 		if ag, err := agent.Find(a.Agent); err == nil {
 			out.Account.Name, out.Account.Icon = ag.Name, ag.Icon
-		} else if a.Agent == "cursor" {
-			// cursor-agent runs behind the gateway, not as an agent magpie configures
-			out.Account.Name, out.Account.Icon = "Cursor CLI", "cursor"
-		} else if a.Agent == "grok" {
-			out.Account.Name, out.Account.Icon = "Grok CLI", "xai"
 		}
 		out.Account.Logins = provider.Logins(a.Agent)
 	}
@@ -222,7 +216,6 @@ func ago(t time.Time) string {
 }
 
 func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
-	importAppsRoutes(mux, gw)
 	mux.HandleFunc("GET /api/providers", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, providersState(gw))
 	})
@@ -279,9 +272,8 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if old != nil {
 				// the other keys are kept apart, in the Accounts list
 				in.Keys = old.Keys
-				in.Routing = old.Routing // set on its own, with route
 				if in.Key == old.Key {
-					in.KeyName, in.KeyProtocol = old.KeyName, old.KeyProtocol
+					in.KeyName = old.KeyName
 				}
 			}
 			if in.Icon == "" && old != nil && in.Preset == "" {
@@ -307,11 +299,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			}
 			writeJSON(rw, map[string]string{"key": p.Key})
 			return
-		case "route":
-			if err := provider.SetRouting(in.ID, in.Routing); err != nil {
-				fail(rw, err)
-				return
-			}
 		case "delete":
 			if err := provider.Delete(in.ID); err != nil {
 				fail(rw, err)
@@ -388,10 +375,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 	})
 	// A provider's several keys: add one, put one in use, name or remove it.
 	mux.HandleFunc("POST /api/keys/{action}", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct {
-			ID, Key, Name, Ref string
-			Protocol           provider.Protocol
-		}
+		var in struct{ ID, Key, Name, Ref string }
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return
@@ -399,9 +383,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 		var err error
 		switch r.PathValue("action") {
 		case "add":
-			err = provider.AddKey(in.ID, in.Name, in.Key, in.Protocol)
-		case "protocol":
-			err = provider.SetKeyProtocol(in.ID, in.Ref, in.Protocol)
+			err = provider.AddKey(in.ID, in.Name, in.Key)
 		case "use":
 			err = provider.UseKey(in.ID, in.Ref)
 		case "remove":
