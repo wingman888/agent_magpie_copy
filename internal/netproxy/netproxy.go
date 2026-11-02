@@ -17,16 +17,19 @@ import (
 
 func init() {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		t.Proxy = For
+		t.Proxy = ForRequest
 	}
 }
 
 // Transport is a ready http.Transport that follows For.
 func Transport() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.Proxy = For
+	t.Proxy = ForRequest
 	return t
 }
+
+// ForRequest is For as an http.Transport Proxy func.
+func ForRequest(r *http.Request) (*url.URL, error) { return For(r.URL) }
 
 // For returns the proxy a request to u should use; nil means direct.
 func For(u *url.URL) (*url.URL, error) {
