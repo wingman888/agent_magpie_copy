@@ -1,43 +1,57 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
+	"time"
+
+	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/dial/internal/usage"
 )
 
-// ---- Google Gemini API (client side) ----------------------------------------
+// ---- Google Gemini API --------------------------------------------------------
 //
-// Gemini CLI speaks only Google's own API, so the gateway serves it:
-//   POST /v1beta/models/{model}:generateContent
-//   POST /v1beta/models/{model}:streamGenerateContent?alt=sse
-//   POST /v1beta/models/{model}:countTokens
-//   GET  /v1beta/models
-// The model is in the path, so the route handler folds it (and whether the
-// call streams) into the body before the shared request path sees it.
+// Gemini is only ever a client-facing API: no upstream speaks it, so a
+// Gemini call is always translated to one of the three provider protocols.
+
+// Gemini is the client protocol of the Gemini API.
+const Gemini provider.Protocol = "gemini"
 
 type gPart struct {
-	Text       string `json:"text,omitempty"`
-	Thought    bool   `json:"thought,omitempty"`
-	Signature  string `json:"thoughtSignature,omitempty"`
-	InlineData *struct {
-		MimeType string `json:"mimeType"`
-		Data     string `json:"data"`
-	} `json:"inlineData,omitempty"`
-	FileData *struct {
-		MimeType string `json:"mimeType"`
-		FileURI  string `json:"fileUri"`
-	} `json:"fileData,omitempty"`
-	FunctionCall *struct {
-		ID   string          `json:"id,omitempty"`
-		Name string          `json:"name"`
-		Args json.RawMessage `json:"args,omitempty"`
-	} `json:"functionCall,omitempty"`
-	FunctionResponse *struct {
-		ID       string          `json:"id,omitempty"`
-		Name     string          `json:"name"`
-		Response json.RawMessage `json:"response,omitempty"`
-	} `json:"functionResponse,omitempty"`
+	Text             string          `json:"text,omitempty"`
+	Thought          bool            `json:"thought,omitempty"`
+	ThoughtSignature string          `json:"thoughtSignature,omitempty"`
+	InlineData       *gBlob          `json:"inlineData,omitempty"`
+	FileData         *gFile          `json:"fileData,omitempty"`
+	FunctionCall     *gFunctionCall  `json:"functionCall,omitempty"`
+	FunctionResponse *gFunctionReply `json:"functionResponse,omitempty"`
+}
+
+type gBlob struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
+type gFile struct {
+	MimeType string `json:"mimeType"`
+	FileURI  string `json:"fileUri"`
+}
+
+type gFunctionCall struct {
+	ID   string          `json:"id,omitempty"`
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args,omitempty"`
+}
+
+type gFunctionReply struct {
+	ID       string          `json:"id,omitempty"`
+	Name     string          `json:"name"`
+	Response json.RawMessage `json:"response,omitempty"`
+	Parts    []gPart         `json:"parts,omitempty"`
 }
 
 type gContent struct {
@@ -46,8 +60,6 @@ type gContent struct {
 }
 
 type gRequest struct {
-	Model             string          `json:"model"`
-	Stream            bool            `json:"stream"`
 	Contents          []gContent      `json:"contents"`
 	SystemInstruction json.RawMessage `json:"systemInstruction,omitempty"`
 	Tools             []struct {
@@ -60,7 +72,7 @@ type gRequest struct {
 	} `json:"tools,omitempty"`
 	ToolConfig *struct {
 		FunctionCallingConfig *struct {
-			Mode                 string   `json:"mode"`
+			Mode                 string   `json:"mode,omitempty"`
 			AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 		} `json:"functionCallingConfig,omitempty"`
 	} `json:"toolConfig,omitempty"`
@@ -75,80 +87,93 @@ type gRequest struct {
 		ThinkingConfig     *struct {
 			ThinkingBudget  *int   `json:"thinkingBudget,omitempty"`
 			ThinkingLevel   string `json:"thinkingLevel,omitempty"`
-			IncludeThoughts bool   `json:"includeThoughts,omitempty"`
+			IncludeThoughts *bool  `json:"includeThoughts,omitempty"`
 		} `json:"thinkingConfig,omitempty"`
 	} `json:"generationConfig,omitempty"`
 }
 
+// parseGemini reads a GenerateContentRequest. The model and whether to
+// stream come from the URL, so the caller fills them in.
 func parseGemini(body []byte) (*Request, error) {
 	var g gRequest
 	if err := json.Unmarshal(body, &g); err != nil {
 		return nil, fmt.Errorf("invalid request: %v", err)
 	}
-	r := &Request{Model: g.Model, Stream: g.Stream}
-	r.System = geminiText(g.SystemInstruction)
-	if gc := g.GenerationConfig; gc != nil {
-		r.MaxTokens, r.Temp, r.TopP, r.Stop = gc.MaxOutputTokens, gc.Temperature, gc.TopP, gc.StopSequences
-		if tc := gc.ThinkingConfig; tc != nil {
-			switch {
-			case tc.ThinkingLevel != "":
-				r.Effort = effortOf(tc.ThinkingLevel)
-			case tc.ThinkingBudget != nil && *tc.ThinkingBudget < 0:
-				r.Effort = "medium" // -1: let the model decide
-			case tc.ThinkingBudget != nil:
-				r.Effort = effortOfBudget(*tc.ThinkingBudget)
-			}
-			r.Thinking = r.Effort != ""
-		}
-		// structured output has no seat in the other APIs; ask for it
-		if strings.HasPrefix(gc.ResponseMimeType, "application/json") {
-			ask := "Respond with a single JSON value and nothing else"
-			if s := firstJSON(gc.ResponseJSONSchema, gc.ResponseSchema); s != "" {
-				ask += ", matching this JSON schema:\n" + s
-			}
-			if r.System != "" {
-				r.System += "\n\n"
-			}
-			r.System += ask + "."
-		}
+	r := &Request{System: geminiSystem(g.SystemInstruction)}
+
+	// tool call ids: kept when the client sent them, made up otherwise; a
+	// response without an id answers the latest call of the same name
+	type call struct {
+		id, name string
+		answered bool
 	}
-	// function results carry the call's id when the client kept it; older
-	// clients send only the name, matched to the latest call of that name
-	names := map[string]string{}
+	var calls []*call
+	n := 0
+	newCallID := func() string {
+		n++
+		return fmt.Sprintf("call_%d_%s", n, newID())
+	}
 	for _, c := range g.Contents {
-		role := "user"
+		msg := Message{Role: "user"}
 		if c.Role == "model" || c.Role == "assistant" {
-			role = "assistant"
+			msg.Role = "assistant"
 		}
-		msg := Message{Role: role}
 		for _, p := range c.Parts {
 			switch {
 			case p.FunctionCall != nil:
-				fc := p.FunctionCall
-				id := fc.ID
+				id := p.FunctionCall.ID
 				if id == "" {
-					id = "call_" + newID()
+					id = newCallID()
 				}
-				names[fc.Name] = id
-				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: id, Name: fc.Name, Args: parseArgs(string(fc.Args))})
+				calls = append(calls, &call{id: id, name: p.FunctionCall.Name})
+				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: id, Name: p.FunctionCall.Name, Args: geminiArgs(p.FunctionCall.Args)})
 			case p.FunctionResponse != nil:
 				fr := p.FunctionResponse
 				id := fr.ID
-				if id == "" {
-					id = names[fr.Name]
-				}
-				text, isErr := functionResponseText(fr.Response)
-				msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: id, Name: fr.Name, Text: text, IsError: isErr})
-			case p.InlineData != nil:
-				if strings.HasPrefix(p.InlineData.MimeType, "image/") {
-					msg.Parts = append(msg.Parts, Part{Kind: Image, MediaType: p.InlineData.MimeType, Data: p.InlineData.Data})
+				if id != "" {
+					for _, c := range calls {
+						if c.id == id {
+							c.answered = true
+						}
+					}
 				} else {
-					msg.Parts = append(msg.Parts, Part{Kind: Text, Text: "[attachment " + p.InlineData.MimeType + "]"})
+					var hit *call
+					for i := len(calls) - 1; i >= 0; i-- {
+						if calls[i].name == fr.Name && !calls[i].answered {
+							hit = calls[i]
+							break
+						}
+					}
+					if hit == nil {
+						for i := len(calls) - 1; i >= 0; i-- {
+							if calls[i].name == fr.Name {
+								hit = calls[i]
+								break
+							}
+						}
+					}
+					if hit != nil {
+						hit.answered = true
+						id = hit.id
+					} else {
+						id = newCallID()
+					}
 				}
-			case p.FileData != nil:
-				msg.Parts = append(msg.Parts, Part{Kind: Image, MediaType: p.FileData.MimeType, URL: p.FileData.FileURI})
+				out, isErr := geminiResult(fr.Response)
+				msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: id, Text: out, IsError: isErr})
+				for _, sub := range fr.Parts {
+					if q, ok := geminiMedia(sub); ok {
+						msg.Parts = append(msg.Parts, q)
+					}
+				}
 			case p.Thought:
-				msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: p.Text, Signature: p.Signature})
+				if p.Text != "" {
+					msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: p.Text})
+				}
+			case p.InlineData != nil || p.FileData != nil:
+				if q, ok := geminiMedia(p); ok {
+					msg.Parts = append(msg.Parts, q)
+				}
 			case p.Text != "":
 				msg.Parts = append(msg.Parts, Part{Kind: Text, Text: p.Text})
 			}
@@ -157,36 +182,91 @@ func parseGemini(body []byte) (*Request, error) {
 			r.Messages = append(r.Messages, msg)
 		}
 	}
-	for _, t := range g.Tools {
-		for _, f := range t.FunctionDeclarations {
-			schema := f.ParametersJSONSchema
-			if len(schema) == 0 {
-				schema = jsonSchema(f.Parameters)
-			}
-			r.Tools = append(r.Tools, Tool{Name: f.Name, Description: f.Description, Schema: schema})
-		}
-	}
-	if g.ToolConfig != nil && g.ToolConfig.FunctionCallingConfig != nil {
-		fc := g.ToolConfig.FunctionCallingConfig
+	r.Messages = mergeTurns(r.Messages)
+
+	var allowed []string
+	if tc := g.ToolConfig; tc != nil && tc.FunctionCallingConfig != nil {
+		fc := tc.FunctionCallingConfig
+		allowed = fc.AllowedFunctionNames
 		switch strings.ToUpper(fc.Mode) {
 		case "NONE":
 			r.ToolChoice = "none"
 		case "ANY":
-			if len(fc.AllowedFunctionNames) == 1 {
-				r.ToolChoice = "name:" + fc.AllowedFunctionNames[0]
+			if len(allowed) == 1 {
+				r.ToolChoice = "name:" + allowed[0]
 			} else {
 				r.ToolChoice = "required"
 			}
-		default:
+		case "AUTO", "VALIDATED":
 			r.ToolChoice = "auto"
+		}
+	}
+	for _, t := range g.Tools {
+		for _, fd := range t.FunctionDeclarations {
+			if fd.Name == "" {
+				continue
+			}
+			if len(allowed) > 0 && r.ToolChoice != "none" && !contains(allowed, fd.Name) {
+				continue
+			}
+			schema := fd.ParametersJSONSchema
+			if len(schema) == 0 {
+				schema = fd.Parameters
+			}
+			r.Tools = append(r.Tools, Tool{Name: fd.Name, Description: fd.Description, Schema: normalizeSchema(schema)})
+		}
+	}
+
+	if gc := g.GenerationConfig; gc != nil {
+		r.MaxTokens, r.Temp, r.TopP, r.Stop = gc.MaxOutputTokens, gc.Temperature, gc.TopP, gc.StopSequences
+		if mt := strings.ToLower(strings.TrimSpace(gc.ResponseMimeType)); mt == "application/json" || strings.HasSuffix(mt, "+json") {
+			r.JSON = true
+			schema := gc.ResponseJSONSchema
+			if len(schema) == 0 {
+				schema = gc.ResponseSchema
+			}
+			r.JSONSchema = normalizeSchema(schema)
+		}
+		if tc := gc.ThinkingConfig; tc != nil {
+			if tc.ThinkingBudget != nil {
+				switch b := *tc.ThinkingBudget; {
+				case b < 0:
+					r.Thinking, r.Effort = true, "medium"
+				case b == 0:
+					r.Thinking, r.Effort = false, ""
+				default:
+					r.Thinking, r.Budget = true, b
+					switch {
+					case b <= 1024:
+						r.Effort = "low"
+					case b <= 8192:
+						r.Effort = "medium"
+					default:
+						r.Effort = "high"
+					}
+				}
+			}
+			if l := strings.ToLower(strings.TrimSpace(tc.ThinkingLevel)); l != "" {
+				if e := effortOf(l); e != "" {
+					r.Thinking, r.Effort, r.Budget = true, e, 0
+				}
+			}
+			if tc.IncludeThoughts != nil {
+				if *tc.IncludeThoughts {
+					if tc.ThinkingBudget == nil || *tc.ThinkingBudget != 0 {
+						r.Thinking = true
+					}
+				} else {
+					r.HideThoughts = true
+				}
+			}
 		}
 	}
 	return r, nil
 }
 
-// geminiText joins the text parts of a Content, which may also arrive as a
-// bare string.
-func geminiText(raw json.RawMessage) string {
+// geminiSystem reads systemInstruction: a Content, or a bare string.
+func geminiSystem(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -195,47 +275,77 @@ func geminiText(raw json.RawMessage) string {
 		return s
 	}
 	var c gContent
-	if json.Unmarshal(raw, &c) != nil {
-		var parts []gPart
-		if json.Unmarshal(raw, &parts) != nil {
-			return ""
-		}
-		c.Parts = parts
-	}
-	var b strings.Builder
+	json.Unmarshal(raw, &c)
+	var out []string
 	for _, p := range c.Parts {
-		if !p.Thought && p.Text != "" {
-			if b.Len() > 0 {
-				b.WriteString("\n\n")
-			}
-			b.WriteString(p.Text)
+		if p.Text != "" && !p.Thought {
+			out = append(out, p.Text)
 		}
 	}
-	return b.String()
+	return strings.Join(out, "\n")
 }
 
-// functionResponseText is what a tool said, as the other APIs carry it:
-// Gemini CLI wraps output in {output} or {error}; anything else is the
-// response object as JSON.
-func functionResponseText(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 {
+// geminiMedia turns inline or linked data into an image, or a placeholder
+// for anything an upstream could not take.
+func geminiMedia(p gPart) (Part, bool) {
+	switch {
+	case p.InlineData != nil:
+		mt := strings.ToLower(p.InlineData.MimeType)
+		if strings.HasPrefix(mt, "image/") && p.InlineData.Data != "" {
+			return Part{Kind: Image, MediaType: p.InlineData.MimeType, Data: p.InlineData.Data}, true
+		}
+		if mt == "" {
+			mt = "unknown"
+		}
+		return Part{Kind: Text, Text: "[attachment: " + mt + " omitted]"}, true
+	case p.FileData != nil:
+		mt := strings.ToLower(p.FileData.MimeType)
+		if strings.HasPrefix(mt, "image/") && strings.HasPrefix(p.FileData.FileURI, "http") {
+			return Part{Kind: Image, MediaType: p.FileData.MimeType, URL: p.FileData.FileURI}, true
+		}
+		if mt == "" {
+			mt = "file"
+		}
+		return Part{Kind: Text, Text: "[attachment: " + mt + " omitted]"}, true
+	case p.Text != "":
+		return Part{Kind: Text, Text: p.Text}, true
+	}
+	return Part{}, false
+}
+
+// geminiArgs keeps a function call's arguments as a JSON object.
+func geminiArgs(raw json.RawMessage) json.RawMessage {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return json.RawMessage("{}")
+	}
+	return parseArgs(s)
+}
+
+// geminiResult flattens a functionResponse.response into the text of a
+// tool result: {"output": "…"} becomes the string, {"error": …} marks it
+// failed, anything else stays JSON.
+func geminiResult(raw json.RawMessage) (string, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 {
 		return "", false
 	}
 	var m map[string]json.RawMessage
 	if json.Unmarshal(raw, &m) == nil {
-		if e, ok := m["error"]; ok && len(m) == 1 {
-			var s string
-			if json.Unmarshal(e, &s) == nil {
-				return s, true
+		if len(m) == 1 {
+			for k, v := range m {
+				var s string
+				if (k == "output" || k == "error" || k == "result" || k == "content") && json.Unmarshal(v, &s) == nil {
+					return s, k == "error"
+				}
+				if k == "error" {
+					return string(v), true
+				}
 			}
-			return string(e), true
 		}
-		if o, ok := m["output"]; ok && len(m) == 1 {
-			var s string
-			if json.Unmarshal(o, &s) == nil {
-				return s, false
+		if _, ok := m["error"]; ok {
+			if _, out := m["output"]; !out {
+				return string(raw), true
 			}
-			return string(o), false
 		}
 	}
 	var s string
@@ -245,76 +355,107 @@ func functionResponseText(raw json.RawMessage) (string, bool) {
 	return string(raw), false
 }
 
-func firstJSON(xs ...json.RawMessage) string {
-	for _, x := range xs {
-		if len(x) > 0 {
-			return string(jsonSchema(x))
-		}
-	}
-	return ""
-}
-
-// jsonSchema turns Gemini's OpenAPI-flavoured schema into JSON Schema:
-// type names come lowercased and its own extras drop out.
-func jsonSchema(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 {
+// normalizeSchema turns Gemini's OpenAPI-flavoured schema (upper-case type
+// names) into plain JSON Schema.
+func normalizeSchema(raw json.RawMessage) json.RawMessage {
+	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
 		return nil
 	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var v any
-	if json.Unmarshal(raw, &v) != nil {
+	if err := dec.Decode(&v); err != nil {
 		return raw
 	}
-	var walk func(any) any
-	walk = func(v any) any {
-		switch x := v.(type) {
-		case map[string]any:
-			out := make(map[string]any, len(x))
-			for k, val := range x {
-				switch k {
-				case "type":
-					switch t := val.(type) {
-					case string:
-						out[k] = strings.ToLower(t)
-					case []any:
-						ts := make([]any, len(t))
-						for i, e := range t {
-							if s, ok := e.(string); ok {
-								ts[i] = strings.ToLower(s)
-							} else {
-								ts[i] = e
-							}
-						}
-						out[k] = ts
-					default:
-						out[k] = val
-					}
-				case "nullable":
-					if b, ok := val.(bool); ok && b {
-						out["x-nullable"] = true
-					}
-				case "propertyOrdering", "example":
-				default:
-					out[k] = walk(val)
-				}
-			}
-			return out
-		case []any:
-			out := make([]any, len(x))
-			for i, e := range x {
-				out[i] = walk(e)
-			}
-			return out
-		}
-		return v
-	}
-	b, err := json.Marshal(walk(v))
+	out, err := json.Marshal(normalizeSchemaValue(v))
 	if err != nil {
 		return raw
 	}
-	return b
+	return out
 }
 
-func stopToGemini(s string) string {
+var schemaTypes = map[string]bool{"string": true, "number": true, "integer": true, "boolean": true, "array": true, "object": true, "null": true}
+
+func normalizeSchemaValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			switch k {
+			case "enum", "const", "default", "example", "examples", "required", "propertyOrdering":
+				continue // data, not schema
+			case "type":
+				switch t := val.(type) {
+				case string:
+					l := strings.ToLower(t)
+					if schemaTypes[l] {
+						x[k] = l
+					} else if l == "type_unspecified" || l == "" {
+						delete(x, k)
+					}
+				case []any:
+					for i, e := range t {
+						if s, ok := e.(string); ok && schemaTypes[strings.ToLower(s)] {
+							t[i] = strings.ToLower(s)
+						}
+					}
+				default:
+					x[k] = normalizeSchemaValue(val)
+				}
+			case "properties", "$defs", "definitions", "patternProperties":
+				// a map of names to schemas; a property may be called "type"
+				if m, ok := val.(map[string]any); ok {
+					for name, s := range m {
+						m[name] = normalizeSchemaValue(s)
+					}
+				}
+			default:
+				x[k] = normalizeSchemaValue(val)
+			}
+		}
+		if n, ok := x["nullable"].(bool); ok {
+			delete(x, "nullable")
+			if t, ok := x["type"].(string); ok && n {
+				x["type"] = []any{t, "null"}
+			}
+		}
+		return x
+	case []any:
+		for i, e := range x {
+			x[i] = normalizeSchemaValue(e)
+		}
+		return x
+	}
+	return v
+}
+
+// jsonInstruction is what an upstream without a JSON mode is told when the
+// client wants JSON back.
+func jsonInstruction(r *Request) string {
+	if !r.JSON {
+		return ""
+	}
+	s := "Respond with only a single valid JSON value: no prose, no explanations, no Markdown code fences."
+	if len(r.JSONSchema) > 0 {
+		s += " The JSON must conform to this JSON Schema:\n" + string(r.JSONSchema)
+	}
+	return s
+}
+
+// withJSONInstruction is the system prompt with the JSON instruction added.
+func withJSONInstruction(r *Request) string {
+	ins := jsonInstruction(r)
+	if ins == "" {
+		return r.System
+	}
+	if r.System == "" {
+		return ins
+	}
+	return r.System + "\n\n" + ins
+}
+
+// ---- replies --------------------------------------------------------------------
+
+func finishToGemini(s string) string {
 	switch s {
 	case "length":
 		return "MAX_TOKENS"
@@ -324,154 +465,274 @@ func stopToGemini(s string) string {
 	return "STOP"
 }
 
-// gemini is a Usage as usageMetadata: the prompt count includes cached
-// tokens, and thoughts are counted apart from the answer.
 func (u Usage) gemini() map[string]any {
-	out := map[string]any{"promptTokenCount": u.Input + u.CacheRead, "candidatesTokenCount": max(u.Output-u.Reasoning, 0),
-		"totalTokenCount": u.Input + u.CacheRead + u.Output}
-	if u.CacheRead > 0 {
-		out["cachedContentTokenCount"] = u.CacheRead
+	prompt := u.Input + u.CacheRead + u.CacheWrite
+	cand := u.Output - u.Reasoning
+	if cand < 0 {
+		cand = 0
 	}
+	out := map[string]any{"promptTokenCount": prompt, "candidatesTokenCount": cand, "totalTokenCount": prompt + u.Output}
 	if u.Reasoning > 0 {
 		out["thoughtsTokenCount"] = u.Reasoning
 	}
-	return out
-}
-
-// geminiParts renders reply parts. Function calls go out whole, so a
-// streaming encoder holds one back until its arguments have all arrived.
-func geminiParts(parts []Part) []map[string]any {
-	out := []map[string]any{}
-	for _, p := range parts {
-		switch p.Kind {
-		case Text:
-			if p.Text != "" {
-				out = append(out, map[string]any{"text": p.Text})
-			}
-		case Thinking:
-			if p.Text != "" {
-				out = append(out, map[string]any{"text": p.Text, "thought": true})
-			}
-		case ToolCall:
-			id := p.ID
-			if id == "" {
-				id = "call_" + newID()
-			}
-			out = append(out, map[string]any{"functionCall": map[string]any{"id": id, "name": p.Name, "args": argsOf(p)}})
-		}
+	if u.CacheRead > 0 {
+		out["cachedContentTokenCount"] = u.CacheRead
 	}
 	return out
 }
 
-// geminiEncoder writes events as a Gemini streamGenerateContent stream.
+func geminiCall(p Part) map[string]any {
+	id := p.ID
+	if id == "" {
+		id = "call_" + newID()
+	}
+	return map[string]any{"functionCall": map[string]any{"id": id, "name": p.Name, "args": parseArgs(string(argsOf(p)))}}
+}
+
+func geminiResponseID(id string) string {
+	if id == "" {
+		return newID()
+	}
+	return id
+}
+
+// geminiEncoder writes events as Gemini stream chunks. Text and thoughts go
+// out as they come; a function call waits until its arguments are whole.
 type geminiEncoder struct {
-	w       *sseWriter
-	model   string
-	id      string
-	started bool
-	tool    *Part // function call whose arguments are still arriving
-	args    strings.Builder
-	col     collector
+	w     *sseWriter
+	model string
+	hide  bool // the client turned thoughts off
+	col   collector
+	sent  int // tool calls already written
+	id    string
 }
 
-func (e *geminiEncoder) chunk(parts []map[string]any, finish string, usage map[string]any) {
-	if len(parts) == 0 && finish == "" && usage == nil {
-		return
-	}
-	if parts == nil {
-		parts = []map[string]any{}
-	}
+func (e *geminiEncoder) chunk(parts []map[string]any, finish string, u *Usage) {
 	cand := map[string]any{"content": map[string]any{"role": "model", "parts": parts}, "index": 0}
 	if finish != "" {
 		cand["finishReason"] = finish
 	}
-	msg := map[string]any{"candidates": []map[string]any{cand}, "modelVersion": e.model, "responseId": e.id}
-	if usage != nil {
-		msg["usageMetadata"] = usage
-	}
-	e.w.event("", msg)
-}
-
-func (e *geminiEncoder) start(ev Event) {
-	if e.started {
-		return
-	}
-	e.started = true
-	e.id = ev.MsgID
 	if e.id == "" {
-		e.id = newID()
+		e.id = geminiResponseID(e.col.res.ID)
 	}
-	if ev.Model != "" {
-		e.model = ev.Model
+	out := map[string]any{"candidates": []any{cand}, "modelVersion": e.model, "responseId": e.id}
+	if u != nil {
+		out["usageMetadata"] = u.gemini()
 	}
-	e.w.begin()
+	e.w.event("", out)
 }
 
-// flushTool sends the function call that was being assembled.
-func (e *geminiEncoder) flushTool() {
-	if e.tool == nil {
-		return
+// flushTools writes the function calls whose arguments are complete.
+func (e *geminiEncoder) flushTools() {
+	i := 0
+	for _, p := range e.col.res.Parts {
+		if p.Kind != ToolCall {
+			continue
+		}
+		if p.Args == nil {
+			return
+		}
+		if i >= e.sent {
+			e.chunk([]map[string]any{geminiCall(p)}, "", nil)
+			e.sent++
+		}
+		i++
 	}
-	e.tool.Args = parseArgs(e.args.String())
-	e.chunk(geminiParts([]Part{*e.tool}), "", nil)
-	e.tool = nil
-	e.args.Reset()
 }
 
 func (e *geminiEncoder) event(ev Event) {
-	if ev.Kind != KStart && !e.started {
-		e.start(Event{})
+	e.col.add(ev)
+	switch ev.Kind {
+	case KText, KThink, KToolStart, KStop:
+		e.flushTools()
 	}
 	switch ev.Kind {
-	case KStart:
-		e.start(ev)
 	case KText:
-		e.flushTool()
-		e.chunk(geminiParts([]Part{{Kind: Text, Text: ev.Text}}), "", nil)
+		if ev.Text != "" {
+			e.chunk([]map[string]any{{"text": ev.Text}}, "", nil)
+		}
 	case KThink:
-		e.flushTool()
-		e.chunk(geminiParts([]Part{{Kind: Thinking, Text: ev.Text}}), "", nil)
-	case KToolStart:
-		e.flushTool()
-		e.tool = &Part{Kind: ToolCall, ID: ev.ID, Name: ev.Name}
-	case KToolArgs:
-		if e.tool != nil {
-			e.args.WriteString(ev.Text)
+		if ev.Text != "" && !e.hide {
+			e.chunk([]map[string]any{{"text": ev.Text, "thought": true}}, "", nil)
 		}
 	case KError:
-		e.w.event("", map[string]any{"error": map[string]any{"code": 502, "message": ev.Text, "status": "UNAVAILABLE"}})
+		e.w.event("", map[string]any{"error": map[string]any{"code": 500, "message": ev.Text, "status": "INTERNAL"}})
 	}
-	e.col.add(ev)
 }
 
 func (e *geminiEncoder) finish() {
-	if !e.started {
-		e.start(Event{})
-	}
-	e.flushTool()
 	res := e.col.finish()
-	e.chunk(nil, stopToGemini(res.Stop), res.Usage.gemini())
+	e.flushTools()
+	e.chunk([]map[string]any{{"text": ""}}, finishToGemini(res.Stop), &res.Usage)
 }
 
-// renderGemini is the non-streaming reply.
-func renderGemini(res Result, model string) []byte {
-	if res.Model != "" {
-		model = res.Model
+// geminiResponse is a whole GenerateContentResponse.
+func geminiResponse(res Result, model string, hide bool) map[string]any {
+	parts := []map[string]any{}
+	for _, p := range res.Parts {
+		switch p.Kind {
+		case Text:
+			parts = append(parts, map[string]any{"text": p.Text})
+		case Thinking:
+			if !hide && p.Text != "" {
+				parts = append(parts, map[string]any{"text": p.Text, "thought": true})
+			}
+		case ToolCall:
+			parts = append(parts, geminiCall(p))
+		}
 	}
-	id := res.ID
-	if id == "" {
-		id = newID()
+	return map[string]any{
+		"candidates": []any{map[string]any{"content": map[string]any{"role": "model", "parts": parts},
+			"finishReason": finishToGemini(res.Stop), "index": 0}},
+		"usageMetadata": res.Usage.gemini(),
+		"modelVersion":  model,
+		"responseId":    geminiResponseID(res.ID),
 	}
-	b, _ := json.Marshal(map[string]any{
-		"candidates": []map[string]any{{"content": map[string]any{"role": "model", "parts": geminiParts(res.Parts)},
-			"finishReason": stopToGemini(res.Stop), "index": 0}},
-		"usageMetadata": res.Usage.gemini(), "modelVersion": model, "responseId": id,
-	})
+}
+
+func renderGemini(res Result, model string, hide bool) []byte {
+	b, _ := json.Marshal(geminiResponse(res, model, hide))
 	return b
 }
 
-// geminiModels is GET /v1beta/models: the catalog in Google's shape.
-func geminiModel(id, name string) map[string]any {
-	return map[string]any{"name": "models/" + id, "displayName": name, "description": name + " via magpie",
+// geminiStatus is the google.rpc status name for an HTTP status.
+func geminiStatus(code int) string {
+	switch code {
+	case 400:
+		return "INVALID_ARGUMENT"
+	case 401:
+		return "UNAUTHENTICATED"
+	case 403:
+		return "PERMISSION_DENIED"
+	case 404:
+		return "NOT_FOUND"
+	case 409:
+		return "ABORTED"
+	case 429:
+		return "RESOURCE_EXHAUSTED"
+	case 499:
+		return "CANCELLED"
+	case 501:
+		return "UNIMPLEMENTED"
+	case 503, 529:
+		return "UNAVAILABLE"
+	case 504:
+		return "DEADLINE_EXCEEDED"
+	}
+	if code >= 500 {
+		return "INTERNAL"
+	}
+	return "FAILED_PRECONDITION"
+}
+
+// ---- HTTP ------------------------------------------------------------------------
+
+// geminiTarget splits "models/fake/m1:generateContent" into the model and
+// the method. Model ids may hold colons; the method follows the last one.
+func geminiTarget(rest string) (model, method string) {
+	rest = strings.TrimPrefix(strings.TrimPrefix(rest, "/"), "models/")
+	if i := strings.LastIndex(rest, ":"); i >= 0 {
+		return rest[:i], rest[i+1:]
+	}
+	return rest, ""
+}
+
+func geminiModel(e provider.Entry) map[string]any {
+	name := e.Name
+	if name == "" {
+		name = e.ID
+	}
+	return map[string]any{"name": "models/" + e.ID, "baseModelId": e.ID, "version": "dial", "displayName": name,
+		"description": name + " via " + e.Provider.Name + ", served by dial",
 		"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent", "countTokens"}}
+}
+
+func (s *Server) geminiModels(w http.ResponseWriter, r *http.Request) {
+	models := []map[string]any{}
+	for _, e := range provider.Catalog() {
+		models = append(models, geminiModel(e))
+	}
+	writeJSON(w, 200, map[string]any{"models": models})
+}
+
+func (s *Server) geminiGet(w http.ResponseWriter, r *http.Request) {
+	id, _ := geminiTarget(r.PathValue("rest"))
+	for _, e := range provider.Catalog() {
+		if e.ID == id {
+			writeJSON(w, 200, geminiModel(e))
+			return
+		}
+	}
+	writeError(w, Gemini, 404, fmt.Sprintf("dial knows no model %q", id))
+}
+
+// geminiPost serves generateContent, streamGenerateContent and countTokens.
+func (s *Server) geminiPost(w http.ResponseWriter, r *http.Request) {
+	model, method := geminiTarget(r.PathValue("rest"))
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if err != nil {
+		writeError(w, Gemini, 400, err.Error())
+		return
+	}
+	switch method {
+	case "countTokens":
+		s.geminiCount(w, body)
+		return
+	case "generateContent", "streamGenerateContent":
+	default:
+		writeError(w, Gemini, 404, fmt.Sprintf("dial does not serve method %q; it serves generateContent, streamGenerateContent and countTokens", method))
+		return
+	}
+	if model == "" {
+		writeError(w, Gemini, 400, "no model in the request path")
+		return
+	}
+	start := time.Now()
+	call := Call{Time: start, From: Gemini, Model: model, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
+	p, upModel, ok := provider.Resolve(model)
+	if !ok {
+		s.unknownModel(w, Gemini, &call)
+		return
+	}
+	req, err := parseGemini(body)
+	if err != nil {
+		call.Provider, call.Status, call.Error = p.ID, writeError(w, Gemini, 400, err.Error()), err.Error()
+		s.record(call)
+		return
+	}
+	req.Model = model
+	req.Stream = method == "streamGenerateContent"
+	req.arrayStream = req.Stream && r.URL.Query().Get("alt") != "sse"
+	s.route(w, r, Gemini, &call, p, upModel, nil, req)
+}
+
+// geminiCount answers countTokens with a rough estimate.
+func (s *Server) geminiCount(w http.ResponseWriter, body []byte) {
+	var wrap struct {
+		GenerateContentRequest json.RawMessage `json:"generateContentRequest"`
+	}
+	if json.Unmarshal(body, &wrap) == nil && len(wrap.GenerateContentRequest) > 0 && string(wrap.GenerateContentRequest) != "null" {
+		body = wrap.GenerateContentRequest
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		body = []byte("{}")
+	}
+	req, err := parseGemini(body)
+	if err != nil {
+		writeError(w, Gemini, 400, err.Error())
+		return
+	}
+	n := len(req.System)
+	for _, m := range req.Messages {
+		for _, p := range m.Parts {
+			n += len(p.Text) + len(p.Args) + len(p.Name)
+			if p.Kind == Image {
+				n += 1032 // about 258 tokens, Gemini's price of an image
+			}
+		}
+	}
+	for _, t := range req.Tools {
+		n += len(t.Name) + len(t.Description) + len(t.Schema)
+	}
+	writeJSON(w, 200, map[string]any{"totalTokens": max(1, n/4)})
 }
