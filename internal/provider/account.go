@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -819,7 +820,7 @@ var (
 type copilotApp struct {
 	User  string `json:"user"`
 	Token string `json:"oauth_token"`
-	cli   bool // the standalone Copilot CLI's sign-in
+	cli   bool   // the standalone Copilot CLI's sign-in
 }
 
 // copilotLogin finds the GitHub token Copilot's editors and CLI keep.
@@ -874,10 +875,11 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
 		req.Header.Set("X-Initiator", "agent")
-		if lastRole(body) == "user" {
+		user, vision := copilotTurn(body)
+		if user {
 			req.Header.Set("X-Initiator", "user")
 		}
-		if bytes.Contains(body, []byte(`"image_url"`)) {
+		if vision {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
@@ -889,49 +891,91 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
-	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
+	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
 }
 
-// lastRole is the role of the last message in a chat request.
-func lastRole(body []byte) string {
+// copilotTurn reads a Chat, Anthropic or Responses request: whether its
+// last turn is the user's own (a turn made only of tool results is the
+// agent's), and whether it carries an image.
+func copilotTurn(body []byte) (user, vision bool) {
 	var v struct {
-		Messages []struct {
-			Role string `json:"role"`
-		} `json:"messages"`
+		Messages []json.RawMessage `json:"messages"`
+		Input    json.RawMessage   `json:"input"`
 	}
-	if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
-		return ""
+	if json.Unmarshal(body, &v) != nil {
+		return false, false
 	}
-	return v.Messages[len(v.Messages)-1].Role
+	var items []json.RawMessage
+	switch {
+	case len(v.Messages) > 0:
+		items = v.Messages
+	case len(v.Input) > 0:
+		var s string
+		if json.Unmarshal(v.Input, &s) == nil {
+			return true, false
+		}
+		if json.Unmarshal(v.Input, &items) != nil {
+			return false, false
+		}
+	}
+	for _, it := range items {
+		var x any
+		if json.Unmarshal(it, &x) == nil && hasImage(x) {
+			vision = true
+			break
+		}
+	}
+	if len(items) == 0 {
+		return false, vision
+	}
+	var last struct {
+		Type    string          `json:"type"`
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(items[len(items)-1], &last) != nil {
+		return false, vision
+	}
+	if last.Role != "user" || (last.Type != "" && last.Type != "message") {
+		return false, vision
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(last.Content, &blocks) == nil && len(blocks) > 0 {
+		onlyResults := true
+		for _, b := range blocks {
+			if b.Type != "tool_result" {
+				onlyResults = false
+			}
+		}
+		if onlyResults {
+			return false, vision
+		}
+	}
+	return true, vision
 }
 
-func copilotToken(ctx context.Context, github string) (copilotSession, error) {
-	copilotMu.Lock()
-	defer copilotMu.Unlock()
-	if s, ok := copilotSessions[github]; ok && time.Until(time.Unix(s.ExpiresAt, 0)) > 2*time.Minute {
-		return s, nil
+// hasImage finds an image block anywhere in a decoded message.
+func hasImage(x any) bool {
+	switch v := x.(type) {
+	case []any:
+		for _, e := range v {
+			if hasImage(e) {
+				return true
+			}
+		}
+	case map[string]any:
+		if t, _ := v["type"].(string); t == "image_url" || t == "input_image" || t == "image" {
+			return true
+		}
+		for _, e := range v {
+			if hasImage(e) {
+				return true
+			}
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, CopilotTokenURL, nil)
-	if err != nil {
-		return copilotSession{}, err
-	}
-	req.Header.Set("Authorization", "token "+github)
-	req.Header.Set("Accept", "application/json")
-	for k, v := range copilotHeaders {
-		req.Header.Set(k, v)
-	}
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return copilotSession{}, errors.New("Copilot sign-in: " + err.Error())
-	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	var s copilotSession
-	if res.StatusCode != 200 || json.Unmarshal(b, &s) != nil || s.Token == "" {
-		return copilotSession{}, errors.New("Copilot is signed out (" + APIError(b, res.Status) + "); sign in to Copilot again")
-	}
-	copilotSessions[github] = s
-	return s, nil
+	return false
 }
 
 // internal is a Copilot model id nobody picks by hand.
@@ -963,9 +1007,10 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	var v struct {
 		Data []struct {
-			ID           string `json:"id"`
-			Name         string `json:"name"`
-			Picker       bool   `json:"model_picker_enabled"`
+			ID           string   `json:"id"`
+			Name         string   `json:"name"`
+			Picker       bool     `json:"model_picker_enabled"`
+			Endpoints    []string `json:"supported_endpoints"`
 			Capabilities struct {
 				Type     string `json:"type"`
 				Supports struct {
@@ -989,12 +1034,36 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		if !m.Picker && (m.Policy == nil || m.Policy.State != "enabled") {
 			continue
 		}
-		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts})
+		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: copilotAPIs(m.Endpoints)})
 	}
 	if len(out) == 0 {
 		return nil, errors.New("Copilot lists no chat model for this account")
 	}
 	return out, nil
+}
+
+// copilotAPIs maps the endpoints Copilot lists for a model to the APIs
+// magpie speaks; others (websocket, embeddings) are ignored, and a model
+// listing none of ours is unknown.
+func copilotAPIs(endpoints []string) []string {
+	var out []string
+	for _, e := range endpoints {
+		var api string
+		switch strings.TrimRight(strings.TrimSpace(e), "/") {
+		case "/chat/completions":
+			api = "chat"
+		case "/responses":
+			api = "responses"
+		case "/v1/messages":
+			api = "anthropic"
+		default:
+			continue
+		}
+		if !slices.Contains(out, api) {
+			out = append(out, api)
+		}
+	}
+	return out
 }
 
 // forgetClaudeStatus drops what `claude auth status` said; tests use it.

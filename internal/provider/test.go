@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -81,7 +82,8 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 	}
 	pools = append(pools, p.Available())
 	for _, want := range []func(string) bool{
-		func(id string) bool { return proto != Anthropic || isClaude(id) },
+		func(id string) bool { return p.servesAPI(id, proto) && (proto != Anthropic || isClaude(id)) },
+		func(id string) bool { return p.servesAPI(id, proto) },
 		func(string) bool { return true },
 	} {
 		for _, pool := range pools {
@@ -93,6 +95,13 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		}
 	}
 	return ""
+}
+
+// servesAPI is false only when the model list says the model is not served
+// on proto's endpoint.
+func (p Provider) servesAPI(model string, proto Protocol) bool {
+	apis := p.APIs(model)
+	return len(apis) == 0 || slices.Contains(apis, proto)
 }
 
 func isClaude(id string) bool {

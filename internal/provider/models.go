@@ -57,6 +57,31 @@ func (p Provider) firstCatalog() string {
 	return ""
 }
 
+// APIs are the APIs the provider's last model list declares for the model;
+// nil when it says nothing.
+func (p Provider) APIs(model string) []Protocol {
+	live, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return nil
+	}
+	for _, m := range live {
+		if m.ID != model {
+			continue
+		}
+		var out []Protocol
+		for _, a := range m.APIs {
+			switch pr := Protocol(a); pr {
+			case Chat, Responses, Anthropic:
+				if !slices.Contains(out, pr) {
+					out = append(out, pr)
+				}
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // Fetched reports when the vendor's own list was last fetched.
 func (p Provider) Fetched() (time.Time, bool) {
 	_, t, ok := catalog.Live(p.ID)
