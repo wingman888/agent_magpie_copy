@@ -70,8 +70,9 @@ const (
 
 func withModel(f, model string) string { return strings.Replace(f, "%s", model, 1) }
 
-func answeredBy(t *testing.T, code int, out string) string {
+func answeredBy(t *testing.T, s *Server, session, body string) string {
 	t.Helper()
+	code, out := sendAs(s, session, body)
 	if code != 200 {
 		t.Fatalf("%d %s", code, out)
 	}
@@ -106,12 +107,12 @@ func TestAffinityModes(t *testing.T) {
 			up := &cachedKeys{cached: c.cached}
 			threeKeys(t, "lu", provider.LeastUsed, c.mode, up)
 			s := New()
-			first := answeredBy(t, sendAs(s, "ses-1", withModel(c.reqs[0], "lu/m")))
+			first := answeredBy(t, s, "ses-1", withModel(c.reqs[0], "lu/m"))
 			r := lastRoute(t, s)
 			if r.Affinity == nil || r.Affinity.Why != "first" || r.Affinity.Kept || r.Affinity.Mode != c.mode || r.Affinity.Turn != 1 {
 				t.Fatalf("first: %+v", r.Affinity)
 			}
-			second := answeredBy(t, sendAs(s, "ses-1", withModel(c.reqs[1], "lu/m")))
+			second := answeredBy(t, s, "ses-1", withModel(c.reqs[1], "lu/m"))
 			r = lastRoute(t, s)
 			a := r.Affinity
 			if a == nil || a.Why != c.why || a.Kept != c.same || (second == first) != c.same {
@@ -140,14 +141,14 @@ func TestAffinityCold(t *testing.T) {
 	up := &cachedKeys{cached: 5000}
 	threeKeys(t, "lu", provider.LeastUsed, "", up)
 	s := New()
-	answeredBy(t, sendAs(s, "ses-c", withModel(aTurn1, "lu/m")))
+	answeredBy(t, s, "ses-c", withModel(aTurn1, "lu/m"))
 	sessions.Lock()
 	for k, a := range sessions.last {
 		a.at = a.at.Add(-cacheFresh - time.Minute)
 		sessions.last[k] = a
 	}
 	sessions.Unlock()
-	answeredBy(t, sendAs(s, "ses-c", withModel(aTurn2, "lu/m")))
+	answeredBy(t, s, "ses-c", withModel(aTurn2, "lu/m"))
 	if a := lastRoute(t, s).Affinity; a == nil || a.Why != "cold" || a.Kept {
 		t.Fatalf("%+v", a)
 	}
@@ -168,17 +169,17 @@ func TestRotateByTurn(t *testing.T) {
 				`{"model":"%s","messages":[{"role":"user","content":"fix it"},{"role":"assistant","content":"done"},{"role":"user","content":"now test"},{"role":"assistant","content":"ok"},{"role":"user","content":"third"}]}`,
 				`{"model":"%s","messages":[{"role":"user","content":"fix it"},{"role":"assistant","content":"done"},{"role":"user","content":"now test"},{"role":"assistant","content":"ok"},{"role":"user","content":"third"},{"role":"assistant","content":"ok"},{"role":"user","content":"fourth"}]}`}
 			for i, tn := range turns {
-				k := answeredBy(t, sendAs(s, "ses-r", withModel(tn, "rot/m")))
+				k := answeredBy(t, s, "ses-r", withModel(tn, "rot/m"))
 				got = append(got, k)
 				// a small model's side request, in the same conversation
-				answeredBy(t, sendAs(s, "ses-r", withModel(`{"model":"%s","messages":[{"role":"user","content":"title?"}]}`, "rot/small")))
+				answeredBy(t, s, "ses-r", withModel(`{"model":"%s","messages":[{"role":"user","content":"title?"}]}`, "rot/small"))
 				if i < 2 {
 					w := aWithin1
 					if i == 1 {
 						w = aWithin2
 					}
 					for range 2 {
-						if wk := answeredBy(t, sendAs(s, "ses-r", withModel(w, "rot/m"))); wk != k {
+						if wk := answeredBy(t, s, "ses-r", withModel(w, "rot/m")); wk != k {
 							t.Fatalf("turn %d: tool result went to %s, the turn to %s", i+1, wk, k)
 						}
 					}
@@ -197,11 +198,11 @@ func TestAffinityResting(t *testing.T) {
 	up := &cachedKeys{}
 	threeKeys(t, "ses", "", provider.AffinitySession, up)
 	s := New()
-	first := answeredBy(t, sendAs(s, "ses-a", withModel(aTurn1, "ses/m")))
+	first := answeredBy(t, s, "ses-a", withModel(aTurn1, "ses/m"))
 	if first != "k1" {
 		t.Fatalf("first %s", first)
 	}
-	if k := answeredBy(t, sendAs(s, "ses-a", withModel(aTurn2, "ses/m"))); k != "k1" {
+	if k := answeredBy(t, s, "ses-a", withModel(aTurn2, "ses/m")); k != "k1" {
 		t.Fatalf("session kept on %s", k)
 	}
 	k1 := "ses#" + provider.KeyID("k1")
@@ -209,13 +210,13 @@ func TestAffinityResting(t *testing.T) {
 	restingUntil.m[k1] = time.Now().Add(time.Minute)
 	restingUntil.note[k1] = Rest{Why: failRate, Status: 429}
 	restingUntil.Unlock()
-	if k := answeredBy(t, sendAs(s, "ses-a", withModel(aWithin2, "ses/m"))); k == "k1" {
+	if k := answeredBy(t, s, "ses-a", withModel(aWithin2, "ses/m")); k == "k1" {
 		t.Fatal("went to the resting key")
 	}
 	if a := lastRoute(t, s).Affinity; a == nil || a.Why != "resting" || a.Kept || a.Last != k1 {
 		t.Fatalf("resting: %+v", a)
 	}
-	answeredBy(t, sendAs(s, "ses-b", withModel(aWithin2, "ses/m")))
+	answeredBy(t, s, "ses-b", withModel(aWithin2, "ses/m"))
 	if a := lastRoute(t, s).Affinity; a == nil || a.Why != "first" || a.Kept || a.Last != "" {
 		t.Fatalf("another session: %+v", a)
 	}
@@ -231,8 +232,8 @@ func TestAffinityOneCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := New()
-	answeredBy(t, sendAs(s, "x", withModel(aTurn1, "one/m")))
-	answeredBy(t, sendAs(s, "x", withModel(aWithin1, "one/m")))
+	answeredBy(t, s, "x", withModel(aTurn1, "one/m"))
+	answeredBy(t, s, "x", withModel(aWithin1, "one/m"))
 	if a := lastRoute(t, s).Affinity; a != nil {
 		t.Fatalf("%+v", a)
 	}
