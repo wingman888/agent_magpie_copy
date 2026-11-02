@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -206,7 +207,7 @@ func parseGemini(body []byte) (*Request, error) {
 			if fd.Name == "" {
 				continue
 			}
-			if len(allowed) > 0 && r.ToolChoice != "none" && !contains(allowed, fd.Name) {
+			if len(allowed) > 0 && r.ToolChoice != "none" && !slices.Contains(allowed, fd.Name) {
 				continue
 			}
 			schema := fd.ParametersJSONSchema
@@ -643,7 +644,7 @@ func geminiModel(e provider.Entry) map[string]any {
 		name = e.ID
 	}
 	return map[string]any{"name": "models/" + e.ID, "baseModelId": e.ID, "version": "dial", "displayName": name,
-		"description": name + " via " + e.Provider.Name + ", served by dial",
+		"description":                name + " via " + e.Provider.Name + ", served by dial",
 		"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent", "countTokens"}}
 }
 

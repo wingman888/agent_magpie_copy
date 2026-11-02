@@ -365,9 +365,9 @@ func TestGeminiCountTokensAndModels(t *testing.T) {
 
 func TestGeminiTargetAndSchema(t *testing.T) {
 	for in, want := range map[string][2]string{
-		"fake/m1:generateContent":            {"fake/m1", "generateContent"},
+		"fake/m1:generateContent":              {"fake/m1", "generateContent"},
 		"models/fake/m1:streamGenerateContent": {"fake/m1", "streamGenerateContent"},
-		"ollama/qwen3:8b:generateContent":     {"ollama/qwen3:8b", "generateContent"},
+		"ollama/qwen3:8b:generateContent":      {"ollama/qwen3:8b", "generateContent"},
 	} {
 		m, meth := geminiTarget(in)
 		if m != want[0] || meth != want[1] {
