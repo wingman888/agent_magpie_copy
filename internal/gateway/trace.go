@@ -37,6 +37,7 @@ type Route struct {
 	Error    string    `json:"error,omitempty"`
 	Millis   int64     `json:"ms,omitempty"`
 	Tokens   int       `json:"tokens,omitempty"`
+	Canceled bool      `json:"canceled,omitempty"` // the agent went away before it was answered
 }
 
 // GroupRef is the routing group a request asked for.
@@ -88,7 +89,24 @@ type Try struct {
 	Fail   string    `json:"fail,omitempty"` // why it failed, as rest tells it
 	Error  string    `json:"error,omitempty"`
 	Rest   *Rest     `json:"rest,omitempty"` // how long it now sits out; none when it was the last to try
+	// Then is what came of its failing: "fallback" (handed on to the next
+	// candidate), "retry" (the same one tried again, after Wait
+	// milliseconds), or "canceled" (the agent went away)
+	Then  string `json:"then,omitempty"`
+	Wait  int64  `json:"wait,omitempty"`
+	Retry int    `json:"retry,omitempty"` // which retry of the same candidate this is: 1, 2…
 }
+
+// What came of a try's failing.
+const (
+	thenFallback = "fallback"
+	thenRetry    = "retry"
+	thenCanceled = "canceled"
+)
+
+// failCanceled is a try's failure when the agent went away mid-request:
+// nobody's fault, so nobody rests for it.
+const failCanceled = "canceled"
 
 type planned struct {
 	order, left []Weighed
@@ -132,6 +150,8 @@ type trace struct {
 type Totals struct {
 	Requests int `json:"requests"` // answered, one way or the other
 	Rerouted int `json:"rerouted"` // tries that failed and handed the request on
+	Retried  int `json:"retried"`  // tries that failed and were tried again
+	Canceled int `json:"canceled"` // requests the agent went away from
 	Errors   int `json:"errors"`   // requests whose agent got an error
 }
 
@@ -180,11 +200,16 @@ func (t *trace) update(r *Route, f func(r *Route)) {
 	if r.Done && !done {
 		t.totals.Requests++
 		for _, try := range r.Tries {
-			if try.Rest != nil {
+			switch {
+			case try.Then == thenFallback || try.Then == "" && try.Rest != nil:
 				t.totals.Rerouted++
+			case try.Then == thenRetry:
+				t.totals.Retried++
 			}
 		}
-		if r.Status >= 400 {
+		if r.Canceled {
+			t.totals.Canceled++
+		} else if r.Status >= 400 {
 			t.totals.Errors++
 		}
 	}

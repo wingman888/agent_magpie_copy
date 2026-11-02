@@ -29,6 +29,41 @@ type Model struct {
 	// Keys, for a vendor whose keys each see models of their own, are the
 	// keys (by fingerprint) whose list has this one; empty is every key.
 	Keys []string `json:",omitempty"`
+	// APIs, when the vendor's own list says, are the wire APIs the model is
+	// served on: "chat", "responses", "anthropic". Empty is unknown.
+	APIs []string `json:",omitempty"`
+}
+
+// EndpointAPIs maps a vendor's supported_endpoints list (as Copilot gives
+// it: "/chat/completions", "/responses", "/v1/messages", …) to the APIs magpie
+// speaks. Other endpoints — websockets, embeddings — are ignored; nothing
+// recognized, or no list at all, is unknown (nil).
+func EndpointAPIs(endpoints []string) []string {
+	var out []string
+	add := func(api string) {
+		for _, x := range out {
+			if x == api {
+				return
+			}
+		}
+		out = append(out, api)
+	}
+	for _, e := range endpoints {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if strings.Contains(e, "://") || strings.HasPrefix(e, "ws:") || strings.HasPrefix(e, "wss:") {
+			continue
+		}
+		e = strings.TrimRight(e, "/")
+		switch e {
+		case "/chat/completions", "/v1/chat/completions":
+			add("chat")
+		case "/responses", "/v1/responses":
+			add("responses")
+		case "/v1/messages", "/messages":
+			add("anthropic")
+		}
+	}
+	return out
 }
 
 // Price is what a model costs, in USD per million tokens.
