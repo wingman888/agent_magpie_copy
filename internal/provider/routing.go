@@ -8,7 +8,6 @@ package provider
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -19,10 +18,7 @@ import (
 const (
 	Ordered   = "order"
 	Rotate    = "rotate"
-	LeastUsed = "least-used"
-
-	// legacyLeastUsed is what least-used was stored as before.
-	legacyLeastUsed = "usage"
+	LeastUsed = "usage"
 )
 
 // SetRouting changes how a provider's requests spread over its keys or
@@ -36,50 +32,15 @@ func SetRouting(id, routing string) error {
 	return Save(*p)
 }
 
-// The affinities besides the default, auto: how hard a conversation is kept
-// on the key or account that answered it last, so the vendor's prompt cache
-// is read rather than paid for again.
-const (
-	AffinitySession = "session" // the whole conversation
-	AffinityTurn    = "turn"    // within one user turn only
-	AffinityOff     = "off"     // never
-)
-
-// SetAffinity changes how a provider keeps a conversation on the key or
-// account that answered it last.
+// SetAffinity changes how long a provider's conversations stay with the key
+// or account that answered them.
 func SetAffinity(id, affinity string) error {
 	p, err := Find(id)
 	if err != nil {
 		return err
 	}
-	a := strings.ToLower(strings.TrimSpace(affinity))
-	if a != "" && a != "auto" && cleanAffinity(a) == "" {
-		return fmt.Errorf("affinity is session, turn, off or empty (auto), not %q", affinity)
-	}
-	p.Affinity = cleanAffinity(a)
+	p.Affinity = affinity
 	return Save(*p)
-}
-
-// cleanRouting is a routing as stored: one magpie knows, else "" (smart).
-func cleanRouting(r string) string {
-	r = strings.ToLower(strings.TrimSpace(r))
-	switch r {
-	case Ordered, Rotate, LeastUsed:
-		return r
-	case legacyLeastUsed:
-		return LeastUsed
-	}
-	return ""
-}
-
-// cleanAffinity is an affinity as stored: one magpie knows, else "" (auto).
-func cleanAffinity(a string) string {
-	a = strings.ToLower(strings.TrimSpace(a))
-	switch a {
-	case AffinitySession, AffinityTurn, AffinityOff:
-		return a
-	}
-	return ""
 }
 
 var usedCache struct {

@@ -163,15 +163,54 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 		if name == "" {
 			name = id
 		}
-		out = append(out, Model{ID: id, Name: name})
+		out = append(out, Model{ID: id, Name: name, APIs: EndpointAPIs(r.Endpoints)})
 	}
 	return out, nil
 }
 
 type liveModel struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	DisplayName string `json:"display_name"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	DisplayName string   `json:"display_name"`
+	Endpoints   []string `json:"supported_endpoints"`
+}
+
+// EndpointAPIs maps the endpoint paths a model list declares for a model
+// ("/chat/completions", "/responses", "/v1/messages") to the APIs magpie
+// speaks ("chat", "responses", "anthropic"), in that order. Anything else —
+// websockets, embeddings — is ignored; nil means the list didn't say.
+func EndpointAPIs(endpoints []string) []string {
+	has := map[string]bool{}
+	for _, e := range endpoints {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if i := strings.Index(e, "://"); i >= 0 { // a full URL: keep the path
+			e = e[i+3:]
+			if j := strings.IndexByte(e, '/'); j >= 0 {
+				e = e[j:]
+			} else {
+				e = ""
+			}
+		}
+		e = strings.TrimRight(e, "/")
+		if !strings.HasPrefix(e, "/") {
+			e = "/" + e
+		}
+		switch e {
+		case "/chat/completions", "/v1/chat/completions":
+			has["chat"] = true
+		case "/responses", "/v1/responses":
+			has["responses"] = true
+		case "/v1/messages", "/messages":
+			has["anthropic"] = true
+		}
+	}
+	var out []string
+	for _, a := range []string{"chat", "responses", "anthropic"} {
+		if has[a] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // Decorate fills in names and reasoning levels for live models from the
