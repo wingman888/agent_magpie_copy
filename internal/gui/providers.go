@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -39,10 +38,7 @@ type providerJSON struct {
 	Website   string            `json:"website"`
 	KeysURL   string            `json:"keysUrl"`
 	Headers   map[string]string `json:"headers,omitempty"`
-	// where a custom provider's balance is asked (see provider.Balance)
-	BalanceURL  string `json:"balanceURL,omitempty"`
-	BalancePath string `json:"balancePath,omitempty"`
-	Key         struct {
+	Key       struct {
 		Set      bool   `json:"set"`
 		Masked   string `json:"masked"`
 		Optional bool   `json:"optional"`
@@ -51,7 +47,6 @@ type providerJSON struct {
 	Chosen    []string           `json:"chosen"`   // the user's explicit picks, if any
 	Fallback  []string           `json:"fallback"` // where requests go when this one can't take them
 	Routing   string             `json:"routing"`  // how requests spread over its keys or accounts
-	Affinity  string             `json:"affinity"` // how long a conversation stays with who answered it
 	Models    []modelJSON        `json:"models"`   // everything the vendor lists, exposed ones flagged
 	Exposed   int                `json:"exposed"`  // how many reach the agents
 	Fetched   string             `json:"fetched"`  // "3h ago" when the list came from the vendor
@@ -89,15 +84,6 @@ type gatewayJSON struct {
 	Mine    bool           `json:"mine"` // this process serves it
 	Models  int            `json:"models"`
 	Calls   []gateway.Call `json:"calls"`
-	Groups  []gwGroupJSON  `json:"groups"` // the catalog's routing groups, listed before the models
-}
-
-// gwGroupJSON is a routing group as the Gateway view lists it.
-type gwGroupJSON struct {
-	ID        string   `json:"id"` // group/<id>, what a request names
-	Name      string   `json:"name"`
-	Icons     []string `json:"icons"`     // its providers', one each
-	Providers []string `json:"providers"` // their names, in the group's order
 }
 
 type excludedJSON struct {
@@ -119,9 +105,6 @@ func currentProvider(a *agent.Agent) (string, string) {
 		return "", ""
 	}
 	v := strings.TrimPrefix(a.Fields[0].Get(), "magpie/")
-	if strings.HasPrefix(v, provider.GroupPrefix) {
-		return "", "" // a routing group: no one provider
-	}
 	if pid, model, ok := strings.Cut(v, "/"); ok {
 		if _, err := provider.Find(pid); err == nil {
 			return pid, model
@@ -135,9 +118,9 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
-		Headers: p.Headers, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath,
-		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
-		Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity,
+		Headers: p.Headers,
+		Ready:   p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
+		Fallback: p.Fallback, Routing: p.Routing,
 	}
 	if out.Fallback == nil {
 		out.Fallback = []string{}
@@ -214,22 +197,7 @@ func providersState(gw *gateway.Server) providersJSON {
 	for _, pr := range provider.Presets() {
 		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID]})
 	}
-	cat := provider.Catalog()
-	s.Gateway = gatewayJSON{URL: gateway.URL(), Models: len(cat), Calls: []gateway.Call{}, Groups: []gwGroupJSON{}}
-	for _, e := range cat {
-		if e.Group == "" {
-			continue
-		}
-		g := gwGroupJSON{ID: e.ID, Name: e.Name, Icons: e.Icons}
-		if _, ms, ok := provider.FindGroup(e.ID); ok {
-			for _, m := range ms {
-				if !slices.Contains(g.Providers, m.Provider.Name) {
-					g.Providers = append(g.Providers, m.Provider.Name)
-				}
-			}
-		}
-		s.Gateway.Groups = append(s.Gateway.Groups, g)
-	}
+	s.Gateway = gatewayJSON{URL: gateway.URL(), Models: len(provider.Catalog()), Calls: []gateway.Call{}}
 	if gw != nil {
 		s.Gateway.Running, s.Gateway.Mine = true, true
 		s.Gateway.Calls = gw.Recent()
@@ -255,8 +223,6 @@ func ago(t time.Time) string {
 
 func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 	importAppsRoutes(mux, gw)
-	traceRoutes(mux, gw)
-	groupRoutes(mux)
 	mux.HandleFunc("GET /api/providers", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, providersState(gw))
 	})
@@ -343,11 +309,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			return
 		case "route":
 			if err := provider.SetRouting(in.ID, in.Routing); err != nil {
-				fail(rw, err)
-				return
-			}
-		case "affinity":
-			if err := provider.SetAffinity(in.ID, in.Affinity); err != nil {
 				fail(rw, err)
 				return
 			}

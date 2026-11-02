@@ -616,9 +616,7 @@ func (r *subscriptionRun) finish() {
 	if ch != nil {
 		close(ch)
 	}
-	if r.bridge != nil {
-		r.bridge.removeRun(r)
-	}
+	r.bridge.removeRun(r)
 }
 
 func (r *subscriptionRun) abort() {
@@ -629,9 +627,6 @@ func (r *subscriptionRun) abort() {
 }
 
 func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
-	if b == nil || run == nil {
-		return
-	}
 	b.mu.Lock()
 	delete(b.runs, run.token)
 	for id, owner := range b.calls {
