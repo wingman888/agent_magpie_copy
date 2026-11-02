@@ -1,13 +1,11 @@
 package gui
 
 import (
-	"context"
 	"net/http"
-	"time"
 
-	"github.com/yetone/magpie/internal/agent"
-	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/usage"
+	"github.com/yetone/dial/internal/agent"
+	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/dial/internal/usage"
 )
 
 // usageGroup is a usage.Group with what the UI needs to draw it.
@@ -65,15 +63,5 @@ func usageRoutes(mux *http.ServeMux) {
 			p = usage.Month
 		}
 		writeJSON(rw, usageState(p))
-	})
-	// The subscriptions' quotas and the keys' balances come from the
-	// vendors, which can be slow or unreachable, so the page asks for them
-	// apart from the local log.
-	mux.HandleFunc("GET /api/usage/quotas", func(rw http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-		defer cancel()
-		balances := make(chan []provider.SubscriptionQuota, 1)
-		go func() { balances <- provider.KeyBalances(ctx) }()
-		writeJSON(rw, append(provider.SubscriptionUsage(ctx), <-balances...))
 	})
 }
