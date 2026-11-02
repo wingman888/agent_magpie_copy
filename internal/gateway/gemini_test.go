@@ -176,7 +176,6 @@ func TestGeminiGenerateChatUpstream(t *testing.T) {
 	if out.ModelVersion != "fake/m1" {
 		t.Errorf("modelVersion %q", out.ModelVersion)
 	}
-	// the call was recorded like any other
 }
 
 func TestGeminiRecordsCall(t *testing.T) {
