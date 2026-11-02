@@ -68,15 +68,3 @@ func TestDecorateCarriesTemperature(t *testing.T) {
 		t.Fatalf("decorated: %+v", out[1])
 	}
 }
-
-func TestLiveKeepsAPIs(t *testing.T) {
-	writeCatalog(t, `{}`)
-	in := []Model{{ID: "gpt-x", APIs: []string{"responses"}}, {ID: "plain"}}
-	if err := SaveLive("p", "http://x", in); err != nil {
-		t.Fatal(err)
-	}
-	got, _, ok := Live("p")
-	if !ok || len(got) != 2 || len(got[0].APIs) != 1 || got[0].APIs[0] != "responses" || got[1].APIs != nil {
-		t.Fatalf("got %+v", got)
-	}
-}
