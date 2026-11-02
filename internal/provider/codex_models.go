@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 )
@@ -28,7 +31,7 @@ const codexClientVersion = "0.154.0"
 // models_cache.json, but that one is of whichever account Codex CLI last
 // asked with, if it ran at all.
 func codexModels(ctx context.Context, sign func(context.Context, *http.Request, []byte) error) ([]catalog.Model, error) {
-	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexCacheVersion())
+	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexVersion())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -52,16 +55,60 @@ func codexModels(ctx context.Context, sign func(context.Context, *http.Request, 
 	return ms, nil
 }
 
-// codexCacheVersion is the client version Codex CLI last asked with.
-func codexCacheVersion() string {
+var codexVersionCache struct {
+	sync.Mutex
+	v  string
+	at time.Time
+}
+
+// codexVersion is the client version the models list is asked for: the
+// newest of the Codex CLI installed, the one Codex CLI last asked with and
+// codexClientVersion. The list leaves out models newer than the client
+// asking, and Codex CLI's models_cache.json keeps the version it was written
+// with until Codex next asks — after an update that brought new models
+// (0.155 GPT-6 Luna and Sol), asking with it would leave them out.
+func codexVersion() string {
+	codexVersionCache.Lock()
+	defer codexVersionCache.Unlock()
+	if time.Since(codexVersionCache.at) < 10*time.Minute {
+		return codexVersionCache.v
+	}
+	v := codexClientVersion
+	newer := func(c string) {
+		if c = claudeSemverRE.FindString(c); c != "" && compareClaudeVersion(c, v) > 0 {
+			v = c
+		}
+	}
 	home, _ := os.UserHomeDir()
 	var c struct {
 		ClientVersion string `json:"client_version"`
 	}
-	if b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json")); err == nil && json.Unmarshal(b, &c) == nil && c.ClientVersion != "" {
-		return c.ClientVersion
+	if b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json")); err == nil && json.Unmarshal(b, &c) == nil {
+		newer(c.ClientVersion)
 	}
-	return codexClientVersion
+	if exe := codexExecutable(); exe != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if out, err := exec.CommandContext(ctx, exe, "--version").Output(); err == nil {
+			newer(string(out)) // "codex-cli 0.155.1"
+		}
+		cancel()
+	}
+	codexVersionCache.v, codexVersionCache.at = v, time.Now()
+	return v
+}
+
+// codexExecutable finds the codex CLI; a var so tests can fake it.
+var codexExecutable = func() string {
+	if p, err := exec.LookPath("codex"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{filepath.Join(home, ".local", "bin", "codex"), "/opt/homebrew/bin/codex", "/usr/local/bin/codex"} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
 
 // parseCodexModels reads the backend's list, the listed ones in its order.

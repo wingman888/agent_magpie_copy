@@ -4,7 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 // A ChatGPT account lists the models of its own plan, asked with its own
@@ -39,5 +42,26 @@ func TestCodexModelsOfTheAccount(t *testing.T) {
 	ms := p.Available()
 	if len(ms) != 1 || ms[0].ID != "gpt-5.6-luna" || len(ms[0].Efforts) != 2 {
 		t.Fatalf("after fetching: %+v", ms)
+	}
+}
+
+// The models list is asked for with the newest Codex known: the CLI
+// installed over the version its cache was written with.
+func TestCodexVersion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeFile(t, filepath.Join(home, ".codex", "models_cache.json"), map[string]any{"client_version": "0.154.0"})
+	exe := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho codex-cli 0.155.1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := codexExecutable
+	t.Cleanup(func() { codexExecutable = old; codexVersionCache.at = time.Time{} })
+	for _, c := range []struct{ exe, want string }{{exe, "0.155.1"}, {"", "0.154.0"}} {
+		codexExecutable = func() string { return c.exe }
+		codexVersionCache.at = time.Time{}
+		if got := codexVersion(); got != c.want {
+			t.Errorf("with %q: %s, want %s", c.exe, got, c.want)
+		}
 	}
 }

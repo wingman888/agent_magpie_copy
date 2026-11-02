@@ -241,17 +241,19 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 	if len(cs) < 2 {
 		return cs, wg
 	}
-	var known map[string]provider.Allowance
-	if p.Account != nil {
-		known = allowances(p.Account.Agent)
-	}
+	// each account's own agent's: a group weighs accounts of several
+	known := map[string]map[string]provider.Allowance{}
 	now := time.Now()
 	wg.lefts = map[string]left{}
 	for _, c := range cs {
 		if c.p.Account == nil {
 			continue
 		}
-		if a, ok := known[c.p.Account.User]; ok {
+		ag := c.p.Account.Agent
+		if _, ok := known[ag]; !ok {
+			known[ag] = allowances(ag)
+		}
+		if a, ok := known[ag][c.p.Account.User]; ok {
 			u, r := a.For(c.model, now)
 			wg.lefts[c.rest] = left{u, r} // one not known counts as unused
 		}
@@ -345,7 +347,7 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 		return cs, wg
 	}
 	if p.Account == nil {
-		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, model, from) < keyFit(cs[j].p, model, from) })
+		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, cs[i].model, from) < keyFit(cs[j].p, cs[j].model, from) })
 	}
 	return cs, wg
 }

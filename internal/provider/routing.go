@@ -32,6 +32,17 @@ func SetRouting(id, routing string) error {
 	return Save(*p)
 }
 
+// SetAffinity changes how long a provider's conversations stay with the key
+// or account that answered them.
+func SetAffinity(id, affinity string) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	p.Affinity = affinity
+	return Save(*p)
+}
+
 var usedCache struct {
 	sync.Mutex
 	m       map[string]map[string]Allowance // agent → user → allowance

@@ -170,6 +170,31 @@ func (p Provider) Serves(k KeyAccount, model string) bool {
 	return true
 }
 
+// APIs are the wire APIs the vendor's last model list says model is served
+// on; nil when the list doesn't say (or there is no list).
+func (p Provider) APIs(model string) []Protocol {
+	live, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return nil
+	}
+	for _, m := range live {
+		if m.ID != model {
+			continue
+		}
+		var out []Protocol
+		for _, a := range m.APIs {
+			switch pr := Protocol(strings.ToLower(strings.TrimSpace(a))); pr {
+			case Chat, Responses, Anthropic:
+				if !slices.Contains(out, pr) {
+					out = append(out, pr)
+				}
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // Exposed lists the models magpie offers to agents for this provider: the
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
@@ -236,11 +261,20 @@ type Entry struct {
 	Model    string   `json:"model"` // what magpie sends the vendor
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
-	Provider Provider `json:"-"`
+	Provider Provider `json:"-"`               // a group's: its first member's
+	Group    string   `json:"group,omitempty"` // set on a routing group (group.go)
+	Icons    []string `json:"-"`               // a group's: its providers' icons, one per provider
 }
 
-// Catalog lists every exposed model of every ready provider.
+// Catalog lists every exposed model of every ready provider, then the
+// routing groups.
 func Catalog() []Entry {
+	entries := providerEntries()
+	return append(entries, groupEntries(entries)...)
+}
+
+// providerEntries is the catalog without its groups.
+func providerEntries() []Entry {
 	var out []Entry
 	for _, p := range All() {
 		if !p.Ready() {
@@ -256,9 +290,21 @@ func Catalog() []Entry {
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
 // It accepts catalog ids, "provider/model" for any model (exposed or not),
 // and the bare model id when exactly one provider serves it.
+// A group's id resolves to its first member.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
-	entries := Catalog()
+	if strings.HasPrefix(id, GroupPrefix) {
+		for _, e := range Catalog() {
+			if e.ID == id {
+				return e.Provider, e.Model, true
+			}
+		}
+		return Provider{}, "", false
+	}
+	return resolveIn(providerEntries(), id)
+}
+
+func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 	for _, e := range entries {
 		if e.ID == id {
 			return e.Provider, e.Model, true
