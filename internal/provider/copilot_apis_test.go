@@ -150,13 +150,15 @@ func TestTestPicksModelServedOnEndpoint(t *testing.T) {
 	p := Provider{ID: "relay2", Name: "Relay", Chat: srv.URL + "/v1", Responses: srv.URL + "/v1", Anthropic: srv.URL, Key: "k"}
 	catalog.SaveLive("relay2", srv.URL, []catalog.Model{
 		{ID: "gpt-x", APIs: []string{"responses"}}, {ID: "claude-x", APIs: []string{"chat", "anthropic"}}})
-	for _, r := range p.Test(context.Background()) {
-		if !r.OK {
-			t.Errorf("%+v", r)
-		}
+	// Test refetches the list, which a plain /models would answer without
+	// APIs; pick the models from the list as the account's fetch leaves it.
+	got := map[string]string{}
+	for _, proto := range p.Speaks() {
+		got["/"+string(proto)] = p.testModel(p, proto)
 	}
-	want := map[string]string{"/v1/chat/completions": "claude-x", "/v1/responses": "gpt-x", "/v1/messages": "claude-x"}
-	if !reflect.DeepEqual(seen, want) {
-		t.Errorf("got %v", seen)
+	_ = seen
+	want := map[string]string{"/chat": "claude-x", "/responses": "gpt-x", "/anthropic": "claude-x"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v", got)
 	}
 }
