@@ -113,7 +113,7 @@ func endpointSetup(t *testing.T, f *endpointFake, models []string, protos ...pro
 	}
 }
 
-func serveOn(h http.Handler, path, body string) (int, string) {
+func hit(h http.Handler, path, body string) (int, string) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))
 	h.ServeHTTP(rec, req)
@@ -126,7 +126,7 @@ func TestChatClientMovesToResponsesAndRemembers(t *testing.T) {
 	endpointSetup(t, f, []string{"m1"}, provider.Chat, provider.Responses)
 	h := New().Handler()
 	for _, stream := range []string{"false", "true"} {
-		code, body := serveOn(h, "/v1/chat/completions", `{"model":"m1","stream":`+stream+`,"messages":[{"role":"user","content":"hi"}]}`)
+		code, body := hit(h, "/v1/chat/completions", `{"model":"m1","stream":`+stream+`,"messages":[{"role":"user","content":"hi"}]}`)
 		if code != 200 || !strings.Contains(body, "from responses") || strings.Contains(body, "not accessible") {
 			t.Fatalf("stream=%s: %d %s", stream, code, body)
 		}
@@ -135,7 +135,7 @@ func TestChatClientMovesToResponsesAndRemembers(t *testing.T) {
 		t.Fatalf("calls: %v", f.calls)
 	}
 	// another model of the same provider is untouched by the memory
-	serveOn(h, "/v1/chat/completions", `{"model":"fake/m2","messages":[{"role":"user","content":"hi"}]}`)
+	hit(h, "/v1/chat/completions", `{"model":"fake/m2","messages":[{"role":"user","content":"hi"}]}`)
 	if f.count(chatPath) != 2 {
 		t.Fatalf("m2 should try chat first: %v", f.calls)
 	}
@@ -146,14 +146,14 @@ func TestResponsesClientMovesToChatAndRemembers(t *testing.T) {
 		`{"error":{"message":"The requested model is not supported.","code":"unsupported_api_for_model","type":"invalid_request_error"}}`}}}
 	endpointSetup(t, f, []string{"m1"}, provider.Chat, provider.Responses)
 	h := New().Handler()
-	code, body := serveOn(h, "/v1/responses", `{"model":"m1","input":"hi"}`)
+	code, body := hit(h, "/v1/responses", `{"model":"m1","input":"hi"}`)
 	if code != 200 || !strings.Contains(body, "from chat") {
 		t.Fatalf("first: %d %s", code, body)
 	}
 	if f.count(responsesPath) != 1 || f.count(chatPath) != 1 {
 		t.Fatalf("calls: %v", f.calls)
 	}
-	code, body = serveOn(h, "/v1/responses", `{"model":"m1","input":"again","stream":true}`)
+	code, body = hit(h, "/v1/responses", `{"model":"m1","input":"again","stream":true}`)
 	if code != 200 || !strings.Contains(body, "from chat") {
 		t.Fatalf("second: %d %s", code, body)
 	}
@@ -179,7 +179,7 @@ func TestDeclaredAPIsAreNotProbed(t *testing.T) {
 				{ID: "gpt-x", APIs: []string{"responses"}}, {ID: "claude-x", APIs: []string{"chat"}}}); err != nil {
 				t.Fatal(err)
 			}
-			code, body := serveOn(New().Handler(), tc.path, tc.body)
+			code, body := hit(New().Handler(), tc.path, tc.body)
 			if code != 200 {
 				t.Fatalf("%d %s", code, body)
 			}
@@ -193,7 +193,7 @@ func TestDeclaredAPIsAreNotProbed(t *testing.T) {
 func TestServerErrorWithEndpointWordsDoesNotMove(t *testing.T) {
 	f := &endpointFake{refuse: map[string]refusal{chatPath: {500, `{"error":{"message":"oops, use v1/responses"}}`}}}
 	endpointSetup(t, f, []string{"m1"}, provider.Chat, provider.Responses)
-	code, body := serveOn(New().Handler(), "/v1/chat/completions", `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`)
+	code, body := hit(New().Handler(), "/v1/chat/completions", `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`)
 	if code != 500 || f.count(responsesPath) != 0 {
 		t.Fatalf("%d %s, calls %v", code, body, f.calls)
 	}
@@ -223,7 +223,7 @@ func TestLastEndpointRefusalIsPassedOn(t *testing.T) {
 	refused := `{"error":{"message":"model is not accessible via the /chat/completions endpoint"}}`
 	f := &endpointFake{refuse: map[string]refusal{chatPath: {400, refused}, responsesPath: {404, `{"error":{"message":"use /v1/chat/completions"}}`}}}
 	endpointSetup(t, f, []string{"m1"}, provider.Chat, provider.Responses)
-	code, body := serveOn(New().Handler(), "/v1/chat/completions", `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`)
+	code, body := hit(New().Handler(), "/v1/chat/completions", `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`)
 	if code != 404 || !strings.Contains(body, "use /v1/chat/completions") {
 		t.Fatalf("%d %s", code, body)
 	}
@@ -290,11 +290,11 @@ func TestCountTokensOnlyWhereAnthropicServes(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := New().Handler()
-	code, body := serveOn(h, "/v1/messages/count_tokens", `{"model":"gpt-x","messages":[{"role":"user","content":"hello there"}]}`)
+	code, body := hit(h, "/v1/messages/count_tokens", `{"model":"gpt-x","messages":[{"role":"user","content":"hello there"}]}`)
 	if code != 200 || !strings.Contains(body, "input_tokens") || f.total() != 0 {
 		t.Fatalf("gpt-x: %d %s, calls %v", code, body, f.calls)
 	}
-	serveOn(h, "/v1/messages/count_tokens", `{"model":"claude-x","messages":[{"role":"user","content":"hello there"}]}`)
+	hit(h, "/v1/messages/count_tokens", `{"model":"claude-x","messages":[{"role":"user","content":"hello there"}]}`)
 	if f.count("/v1/messages/count_tokens") != 1 {
 		t.Fatalf("claude-x should be counted upstream: %v", f.calls)
 	}
