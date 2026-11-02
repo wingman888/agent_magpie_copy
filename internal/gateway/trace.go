@@ -21,32 +21,22 @@ const traceKeep = 60
 
 // Route is one request's way through routing.
 type Route struct {
-	Seq      int64     `json:"seq"` // the trace's count when it last changed
-	ID       int64     `json:"id"`
-	Time     time.Time `json:"time"`
-	Agent    string    `json:"agent"`
-	Model    string    `json:"model"`              // as the agent asked
-	Provider string    `json:"provider"`           // the provider the model resolved to
-	Group    *GroupRef `json:"group,omitempty"`    // the routing group the agent asked for
-	Affinity *Affinity `json:"affinity,omitempty"` // its conversation, and whether it stayed put
-	Order    []Weighed `json:"order"`              // who was to try it, first first
-	Left     []Weighed `json:"left,omitempty"`
-	Tries    []Try     `json:"tries"`
-	Done     bool      `json:"done"`
-	Status   int       `json:"status,omitempty"`
-	Error    string    `json:"error,omitempty"`
-	Millis   int64     `json:"ms,omitempty"`
-	Tokens   int       `json:"tokens,omitempty"`
-}
-
-// GroupRef is the routing group a request asked for.
-type GroupRef struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Routing  string   `json:"routing"`
-	Affinity string   `json:"affinity"`
-	Auto     bool     `json:"auto,omitempty"`
-	Members  []string `json:"members"` // those ready, as provider/model
+	Seq      int64          `json:"seq"` // the trace's count when it last changed
+	ID       int64          `json:"id"`
+	Time     time.Time      `json:"time"`
+	Agent    string         `json:"agent"`
+	Model    string         `json:"model"`              // as the agent asked
+	Provider string         `json:"provider"`           // the provider the model resolved to; group/<id> for a group
+	Group    *RouteGroup    `json:"group,omitempty"`    // the routing group asked for
+	Affinity *RouteAffinity `json:"affinity,omitempty"` // whether the conversation was kept where it was
+	Order    []Weighed      `json:"order"`              // who was to try it, first first
+	Left     []Weighed      `json:"left,omitempty"`
+	Tries    []Try          `json:"tries"`
+	Done     bool           `json:"done"`
+	Status   int            `json:"status,omitempty"`
+	Error    string         `json:"error,omitempty"`
+	Millis   int64          `json:"ms,omitempty"`
+	Tokens   int            `json:"tokens,omitempty"`
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -61,7 +51,7 @@ type Weighed struct {
 	Agent    string            `json:"agent,omitempty"`
 	Plan     string            `json:"plan,omitempty"`
 	Model    string            `json:"model"`
-	Routing  string            `json:"routing"` // its provider's: "", order, rotate, usage
+	Routing  string            `json:"routing"` // its provider's: "", order, rotate, least-used
 	Fallback bool              `json:"fallback,omitempty"`
 	Shared   bool              `json:"shared,omitempty"` // its provider has more than one on
 	Known    bool              `json:"known,omitempty"`  // the vendor said what the account has left
@@ -73,9 +63,42 @@ type Weighed struct {
 	Speaks   provider.Protocol `json:"speaks,omitempty"` // a key made for one protocol only
 	Rest     *Rest             `json:"rest,omitempty"`   // resting after a failure, when the request came
 	Unlisted bool              `json:"unlisted,omitempty"`
-	// Aside: a key made for another protocol than the keys routed over,
-	// tried only after them
+	// Aside is a key made for another protocol than the ones that suit the
+	// request best, tried only after all of those.
 	Aside bool `json:"aside,omitempty"`
+}
+
+// RouteGroup is the routing group a request asked for.
+type RouteGroup struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Routing  string   `json:"routing"`  // "", order, rotate, least-used
+	Affinity string   `json:"affinity"` // "", session, turn, off
+	Auto     bool     `json:"auto"`     // one magpie found on its own
+	Members  []string `json:"members"`  // the members ready, provider/model
+}
+
+// RouteAffinity is what session affinity made of a request: whether the
+// conversation stayed on the key or account that answered it last.
+type RouteAffinity struct {
+	Mode      string `json:"mode"`           // "", session, turn, off
+	Turn      int    `json:"turn"`           // the user turns the conversation has had
+	Within    bool   `json:"within"`         // a tool result sent back within a turn
+	Last      string `json:"last,omitempty"` // who answered it last
+	CacheRead int    `json:"cacheRead"`      // the tokens that answer read from the vendor's cache
+	Kept      bool   `json:"kept"`           // put first for it
+	// Why: kept for "session", "turn" or "cache"; not for "off", "first",
+	// "new-turn", "no-cache", "cold", "resting", "spent" or "gone".
+	Why string `json:"why"`
+}
+
+// routeGroup is g as the trace tells it.
+func routeGroup(g provider.Group, ms []provider.Member) *RouteGroup {
+	rg := &RouteGroup{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto, Members: []string{}}
+	for _, m := range ms {
+		rg.Members = append(rg.Members, m.Ref)
+	}
+	return rg
 }
 
 // Try is one candidate trying the request.
@@ -96,7 +119,7 @@ type planned struct {
 
 func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
 	w := Weighed{ID: c.rest, Provider: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Model: c.model,
-		Routing: p.Routing, Fallback: fallback, Shared: c.rest != p.ID}
+		Routing: p.Routing, Fallback: fallback, Shared: c.rest != p.ID, Aside: c.aside}
 	switch {
 	case c.p.Account != nil:
 		w.Kind, w.Who, w.Agent, w.Plan = "account", c.p.Account.User, c.p.Account.Agent, c.p.Account.Plan

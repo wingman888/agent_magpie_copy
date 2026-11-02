@@ -349,7 +349,27 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	p, model, ok := provider.Resolve(call.Model)
+	var group *provider.Group
+	var members []provider.Member
+	var p provider.Provider
+	var model string
+	ok := false
+	if provider.IsGroupRef(call.Model) {
+		g, ms, found := provider.FindGroup(call.Model)
+		if found && len(ms) == 0 {
+			call.Status, call.Error = 404, "routing group has no model ready"
+			writeError(w, from, 404, fmt.Sprintf("magpie's routing group %q (%s) has no model ready: none of its members' providers can take requests now", g.Name, g.Ref()))
+			finishCapture()
+			s.record(call)
+			return
+		}
+		if found {
+			group, members, ok = &g, ms, true
+			p, model = ms[0].Provider, ms[0].Model
+		}
+	} else {
+		p, model, ok = provider.Resolve(call.Model)
+	}
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
@@ -365,39 +385,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
+	// — or, for a routing group, the keys and accounts of all its members
+	rt := Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID}
 	var cands []candidate
 	var pl planned
-	var group *GroupRef
-	// a conversation's affinity is to one model: another's cache is its
-	// own, and an agent's side requests (a title, a summary) to a smaller
-	// model leave the conversation where it is
-	scope, mode, rotate := p.ID+"/"+model, p.Affinity, p.Routing == provider.Rotate
-	if g, ms, ok := provider.FindGroup(call.Model); ok {
-		// a routing group: every member's keys or accounts weighed together
-		cands, pl = s.planGroup(g, ms, from)
-		group = &GroupRef{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto}
-		for _, m := range ms {
-			group.Members = append(group.Members, m.Provider.ID+"/"+m.Model)
-		}
-		scope, mode, rotate = provider.GroupPrefix+g.ID, g.Affinity, g.Routing == provider.Rotate
+	if group != nil {
+		cands, pl = s.planGroup(*group, members, from)
+		rt.Provider, rt.Group = group.Ref(), routeGroup(*group, members)
 	} else {
 		cands, pl = s.plan(p, model, from)
 	}
-	if len(cands) == 0 {
-		call.Status, call.Error = 404, "no member ready"
-		writeError(w, from, 404, fmt.Sprintf("none of %s's models is ready", call.Model))
-		finishCapture()
-		s.record(call)
-		return
-	}
-	// the conversation stays with who answered it last, while its
-	// affinity says: what the vendor cached of it is read again
-	var aff *Affinity
-	var stuck string
-	if len(cands) > 1 {
-		cands, pl, aff, stuck = affine(scope, mode, rotate, r.Header, from, body, cands, pl)
-	}
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Affinity: aff, Order: pl.order, Left: pl.left})
+	rt.Order, rt.Left = pl.order, pl.left
+	tr := s.trace.begin(rt)
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
@@ -418,9 +417,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			if aff != nil {
-				answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
-			}
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}
