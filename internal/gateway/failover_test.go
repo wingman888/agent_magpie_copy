@@ -154,7 +154,7 @@ func foSpareStream(_ int, w http.ResponseWriter, _ *http.Request) {
 
 func TestStreamErrorBeforeContentFailsOver(t *testing.T) {
 	a := &foUpstream{reply: foAnthStream(foMsgStart, foPing, foOverload)}
-	b := &foUpstream{reply: spareStream}
+	b := &foUpstream{reply: foSpareStream}
 	foPair(t, a, b)
 	s := foServer()
 	code, body := foSend(s, "/v1/messages", foReqAnth)
@@ -182,7 +182,7 @@ func TestStreamErrorBeforeContentFailsOver(t *testing.T) {
 
 func TestStreamErrorAfterContentIsDelivered(t *testing.T) {
 	a := &foUpstream{reply: foAnthStream(foMsgStart, foBlockBeg, foTextA, foOverload)}
-	b := &foUpstream{reply: spareStream}
+	b := &foUpstream{reply: foSpareStream}
 	foPair(t, a, b)
 	code, body := foSend(foServer(), "/v1/messages", foReqAnth)
 	if code != 200 || !strings.Contains(body, "partial") || !strings.Contains(body, "Overloaded") || b.count() != 0 {
@@ -192,7 +192,7 @@ func TestStreamErrorAfterContentIsDelivered(t *testing.T) {
 
 func TestStreamErrorOnLastCandidateIsDelivered(t *testing.T) {
 	a := &foUpstream{reply: foAnthStream(foMsgStart, foPing, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad thing\"}}")}
-	foPair(t, a, &foUpstream{reply: spareStream})
+	foPair(t, a, &foUpstream{reply: foSpareStream})
 	s := foServer()
 	// plan/m1 has a fallback, so ask the spare directly: it is the only one
 	_ = s
@@ -358,7 +358,7 @@ func TestStreamHeldPastLimitPasses(t *testing.T) {
 	t.Cleanup(func() { streamHoldMax = old })
 	big := "event: ping\ndata: {\"type\":\"ping\",\"pad\":\"" + strings.Repeat("x", 200) + "\"}"
 	a := &foUpstream{reply: foAnthStream(foMsgStart, big, foOverload)}
-	b := &foUpstream{reply: spareStream}
+	b := &foUpstream{reply: foSpareStream}
 	foPair(t, a, b)
 	_, body := foSend(foServer(), "/v1/messages", foReqAnth)
 	if !strings.Contains(body, "Overloaded") || b.count() != 0 {
