@@ -13,10 +13,10 @@ import (
 	"strings"
 )
 
-// ExtraKey is a key besides the first one.
 // Key is the short name for an additional key.
 type Key = ExtraKey
 
+// ExtraKey is a key besides the first one.
 type ExtraKey struct {
 	Key      string   `json:"key"`
 	Name     string   `json:"name,omitempty"`
