@@ -66,6 +66,11 @@ func SaveLive(provider, base string, models []Model) error {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, nil)
+}
+
+// FetchWith is Fetch with extra headers on every request (see ApplyHeaders).
+func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -92,7 +97,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -109,7 +114,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -125,6 +130,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, er
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
+	ApplyHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -190,4 +196,25 @@ func Decorate(live []Model, known []Model) []Model {
 		out = append(out, m)
 	}
 	return out
+}
+
+// ApplyHeaders sets extra headers over what a request already carries. A
+// name replaces any header spelled the same up to case, and goes out
+// exactly as given: some gateways match header names case-sensitively, so
+// it is not canonicalized.
+func ApplyHeaders(h http.Header, extra map[string]string) {
+	if len(extra) == 0 {
+		return
+	}
+	for k := range h {
+		for name := range extra {
+			if strings.EqualFold(k, name) {
+				delete(h, k)
+				break
+			}
+		}
+	}
+	for name, v := range extra {
+		h[name] = []string{v}
+	}
 }
