@@ -5,24 +5,26 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
 // upstream is a vendor whose replies are scripted per request.
-type upstream struct {
+type foUpstream struct {
 	mu    sync.Mutex
 	hits  int
 	paths []string
 	reply func(n int, w http.ResponseWriter, r *http.Request)
 }
 
-func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (u *foUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.ReadAll(r.Body)
 	u.mu.Lock()
 	u.hits++
@@ -32,13 +34,13 @@ func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.reply(n, w, r)
 }
 
-func (u *upstream) count() int {
+func (u *foUpstream) count() int {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return u.hits
 }
 
-func jsonErr(code int, msg string, hdr ...string) func(int, http.ResponseWriter, *http.Request) {
+func foJSONErr(code int, msg string, hdr ...string) func(int, http.ResponseWriter, *http.Request) {
 	return func(_ int, w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		for i := 0; i+1 < len(hdr); i += 2 {
@@ -49,21 +51,21 @@ func jsonErr(code int, msg string, hdr ...string) func(int, http.ResponseWriter,
 	}
 }
 
-const okChat = `{"id":"from-b","choices":[{"index":0,"message":{"role":"assistant","content":"hello from b"},"finish_reason":"stop"}]}`
+const foOKChat = `{"id":"from-b","choices":[{"index":0,"message":{"role":"assistant","content":"hello from b"},"finish_reason":"stop"}]}`
 
-func okReply(_ int, w http.ResponseWriter, _ *http.Request) {
+func foOKReply(_ int, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	io.WriteString(w, okChat)
+	io.WriteString(w, foOKChat)
 }
 
 // pair makes providers plan (models m1) and spare (m2), plan falling back to
 // spare; both speak Chat and Anthropic at the same upstream.
-func pair(t *testing.T, a, b *upstream) {
+func foPair(t *testing.T, a, b *foUpstream) {
 	t.Helper()
-	fresh(t)
+	foFresh(t)
 	for _, x := range []struct {
 		p provider.Provider
-		u *upstream
+		u *foUpstream
 	}{
 		{provider.Provider{ID: "plan", Name: "Plan", Key: "k", Models: []string{"m1"}, Fallback: []string{"spare/m2"}}, a},
 		{provider.Provider{ID: "spare", Name: "Spare", Key: "k", Models: []string{"m2"}}, b},
@@ -77,13 +79,13 @@ func pair(t *testing.T, a, b *upstream) {
 	}
 }
 
-func fastServer() *Server {
+func foServer() *Server {
 	s := New()
 	s.retryBase = time.Millisecond
 	return s
 }
 
-func send(s *Server, path, body string) (int, string) {
+func foSend(s *Server, path, body string) (int, string) {
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
 	return rec.Code, rec.Body.String()
@@ -107,10 +109,10 @@ func TestFailoverByStatusAndMessage(t *testing.T) {
 		{"prompt too long", 400, "prompt is too long: 250000 tokens, over the 200000 maximum", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := &upstream{reply: jsonErr(tc.code, tc.msg)}
-			b := &upstream{reply: okReply}
-			pair(t, a, b)
-			code, body := send(fastServer(), "/v1/chat/completions", chatReq)
+			a := &foUpstream{reply: foJSONErr(tc.code, tc.msg)}
+			b := &foUpstream{reply: okReply}
+			foPair(t, a, b)
+			code, body := foSend(foServer(), "/v1/chat/completions", chatReq)
 			if tc.move {
 				if code != 200 || !strings.Contains(body, "hello from b") || strings.Contains(body, tc.msg) {
 					t.Fatalf("%d %s", code, body)
@@ -122,7 +124,7 @@ func TestFailoverByStatusAndMessage(t *testing.T) {
 	}
 }
 
-func anthropicStream(lines ...string) func(int, http.ResponseWriter, *http.Request) {
+func foAnthStream(lines ...string) func(int, http.ResponseWriter, *http.Request) {
 	return func(_ int, w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, l := range lines {
@@ -133,17 +135,17 @@ func anthropicStream(lines ...string) func(int, http.ResponseWriter, *http.Reque
 }
 
 const (
-	msgStart = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_A\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"x\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}"
-	ping     = "event: ping\ndata: {\"type\":\"ping\"}"
-	overload = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"
-	blockBeg = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}"
-	textA    = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}"
-	reqAnth  = `{"model":"plan/m1","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	foMsgStart = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_A\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"x\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}"
+	foPing     = "event: ping\ndata: {\"type\":\"ping\"}"
+	foOverload = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"
+	foBlockBeg = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}"
+	foTextA    = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}"
+	foReqAnth  = `{"model":"plan/m1","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
 )
 
-func spareStream(_ int, w http.ResponseWriter, _ *http.Request) {
-	anthropicStream(
-		strings.Replace(msgStart, "msg_A", "msg_B", 1), blockBeg,
+func foSpareStream(_ int, w http.ResponseWriter, _ *http.Request) {
+	foAnthStream(
+		strings.Replace(foMsgStart, "msg_A", "msg_B", 1), foBlockBeg,
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"from B\"}}",
 		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}",
@@ -151,11 +153,11 @@ func spareStream(_ int, w http.ResponseWriter, _ *http.Request) {
 }
 
 func TestStreamErrorBeforeContentFailsOver(t *testing.T) {
-	a := &upstream{reply: anthropicStream(msgStart, ping, overload)}
-	b := &upstream{reply: spareStream}
-	pair(t, a, b)
-	s := fastServer()
-	code, body := send(s, "/v1/messages", reqAnth)
+	a := &foUpstream{reply: foAnthStream(foMsgStart, foPing, foOverload)}
+	b := &foUpstream{reply: spareStream}
+	foPair(t, a, b)
+	s := foServer()
+	code, body := foSend(s, "/v1/messages", foReqAnth)
 	if code != 200 || !strings.Contains(body, "from B") || strings.Contains(body, "Overloaded") || strings.Contains(body, "msg_A") {
 		t.Fatalf("%d %s", code, body)
 	}
@@ -172,76 +174,76 @@ func TestStreamErrorBeforeContentFailsOver(t *testing.T) {
 	}
 	// the next request goes straight to B
 	hits := a.count()
-	send(s, "/v1/messages", reqAnth)
+	foSend(s, "/v1/messages", foReqAnth)
 	if a.count() != hits {
 		t.Fatal("resting A was asked again")
 	}
 }
 
 func TestStreamErrorAfterContentIsDelivered(t *testing.T) {
-	a := &upstream{reply: anthropicStream(msgStart, blockBeg, textA, overload)}
-	b := &upstream{reply: spareStream}
-	pair(t, a, b)
-	code, body := send(fastServer(), "/v1/messages", reqAnth)
+	a := &foUpstream{reply: foAnthStream(foMsgStart, foBlockBeg, foTextA, foOverload)}
+	b := &foUpstream{reply: spareStream}
+	foPair(t, a, b)
+	code, body := foSend(foServer(), "/v1/messages", foReqAnth)
 	if code != 200 || !strings.Contains(body, "partial") || !strings.Contains(body, "Overloaded") || b.count() != 0 {
 		t.Fatalf("%d %s (b hit %d)", code, body, b.count())
 	}
 }
 
 func TestStreamErrorOnLastCandidateIsDelivered(t *testing.T) {
-	a := &upstream{reply: anthropicStream(msgStart, ping, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad thing\"}}")}
-	pair(t, a, &upstream{reply: spareStream})
-	s := fastServer()
+	a := &foUpstream{reply: foAnthStream(foMsgStart, foPing, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad thing\"}}")}
+	foPair(t, a, &foUpstream{reply: spareStream})
+	s := foServer()
 	// plan/m1 has a fallback, so ask the spare directly: it is the only one
 	_ = s
-	code, body := send(s, "/v1/messages", reqAnth)
+	code, body := foSend(s, "/v1/messages", foReqAnth)
 	if code != 200 || (!strings.Contains(body, "bad thing") && !strings.Contains(body, "from B")) {
 		t.Fatalf("%d %s", code, body)
 	}
 }
 
 func TestChatStreamErrorChunkFailsOver(t *testing.T) {
-	a := &upstream{reply: func(_ int, w http.ResponseWriter, _ *http.Request) {
+	a := &foUpstream{reply: func(_ int, w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: {\"id\":\"a\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n")
 		io.WriteString(w, "data: {\"error\":{\"message\":\"server busy\",\"type\":\"server_error\"}}\n\n")
 	}}
-	b := &upstream{reply: func(_ int, w http.ResponseWriter, _ *http.Request) {
+	b := &foUpstream{reply: func(_ int, w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: {\"id\":\"b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"from B\"}}]}\n\ndata: [DONE]\n\n")
 	}}
-	pair(t, a, b)
-	code, body := send(fastServer(), "/v1/chat/completions", `{"model":"plan/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	foPair(t, a, b)
+	code, body := foSend(foServer(), "/v1/chat/completions", `{"model":"plan/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if code != 200 || !strings.Contains(body, "from B") || strings.Contains(body, "server busy") {
 		t.Fatalf("%d %s", code, body)
 	}
 }
 
 func TestSingleProviderRetries(t *testing.T) {
-	single := func(t *testing.T, u *upstream) *Server {
-		fresh(t)
+	single := func(t *testing.T, u *foUpstream) *Server {
+		foFresh(t)
 		srv := httptest.NewServer(u)
 		t.Cleanup(srv.Close)
 		if err := provider.Save(provider.Provider{ID: "solo", Name: "Solo", Key: "k", Models: []string{"m1"}, Chat: srv.URL + "/v1"}); err != nil {
 			t.Fatal(err)
 		}
-		return fastServer()
+		return foServer()
 	}
 	const req = `{"model":"solo/m1","messages":[{"role":"user","content":"hi"}]}`
 
 	t.Run("recovers", func(t *testing.T) {
-		u := &upstream{reply: func(n int, w http.ResponseWriter, r *http.Request) {
+		u := &foUpstream{reply: func(n int, w http.ResponseWriter, r *http.Request) {
 			switch n {
 			case 1:
-				jsonErr(503, "down")(n, w, r)
+				foJSONErr(503, "down")(n, w, r)
 			case 2:
-				jsonErr(502, "bad gateway")(n, w, r)
+				foJSONErr(502, "bad gateway")(n, w, r)
 			default:
-				okReply(n, w, r)
+				foOKReply(n, w, r)
 			}
 		}}
 		s := single(t, u)
-		code, body := send(s, "/v1/chat/completions", req)
+		code, body := foSend(s, "/v1/chat/completions", req)
 		if code != 200 || u.count() != 3 || !strings.Contains(body, "hello from b") {
 			t.Fatalf("%d %s hits %d", code, body, u.count())
 		}
@@ -254,39 +256,39 @@ func TestSingleProviderRetries(t *testing.T) {
 		}
 	})
 	t.Run("keeps failing", func(t *testing.T) {
-		u := &upstream{reply: jsonErr(503, "still down")}
-		code, body := send(single(t, u), "/v1/chat/completions", req)
+		u := &foUpstream{reply: foJSONErr(503, "still down")}
+		code, body := foSend(single(t, u), "/v1/chat/completions", req)
 		if code != 503 || u.count() != 3 || !strings.Contains(body, "still down") {
 			t.Fatalf("%d %s hits %d", code, body, u.count())
 		}
 	})
 	t.Run("plain 400", func(t *testing.T) {
-		u := &upstream{reply: jsonErr(400, "temperature: out of range")}
-		if code, _ := send(single(t, u), "/v1/chat/completions", req); code != 400 || u.count() != 1 {
+		u := &foUpstream{reply: foJSONErr(400, "temperature: out of range")}
+		if code, _ := foSend(single(t, u), "/v1/chat/completions", req); code != 400 || u.count() != 1 {
 			t.Fatalf("%d hits %d", code, u.count())
 		}
 	})
 	t.Run("429 without Retry-After", func(t *testing.T) {
-		u := &upstream{reply: jsonErr(429, "slow down")}
-		if code, _ := send(single(t, u), "/v1/chat/completions", req); code != 429 || u.count() != 1 {
+		u := &foUpstream{reply: foJSONErr(429, "slow down")}
+		if code, _ := foSend(single(t, u), "/v1/chat/completions", req); code != 429 || u.count() != 1 {
 			t.Fatalf("%d hits %d", code, u.count())
 		}
 	})
 	t.Run("long Retry-After", func(t *testing.T) {
-		u := &upstream{reply: jsonErr(503, "later", "Retry-After", "9")}
-		if code, _ := send(single(t, u), "/v1/chat/completions", req); code != 503 || u.count() != 1 {
+		u := &foUpstream{reply: foJSONErr(503, "later", "Retry-After", "9")}
+		if code, _ := foSend(single(t, u), "/v1/chat/completions", req); code != 503 || u.count() != 1 {
 			t.Fatalf("%d hits %d", code, u.count())
 		}
 	})
 	t.Run("429 with Retry-After", func(t *testing.T) {
-		u := &upstream{reply: func(n int, w http.ResponseWriter, r *http.Request) {
+		u := &foUpstream{reply: func(n int, w http.ResponseWriter, r *http.Request) {
 			if n == 1 {
-				jsonErr(429, "slow down", "Retry-After", "0.01")(n, w, r)
+				foJSONErr(429, "slow down", "Retry-After", "0.01")(n, w, r)
 				return
 			}
-			okReply(n, w, r)
+			foOKReply(n, w, r)
 		}}
-		if code, _ := send(single(t, u), "/v1/chat/completions", req); code != 200 || u.count() != 2 {
+		if code, _ := foSend(single(t, u), "/v1/chat/completions", req); code != 200 || u.count() != 2 {
 			t.Fatalf("%d hits %d", code, u.count())
 		}
 	})
@@ -294,13 +296,13 @@ func TestSingleProviderRetries(t *testing.T) {
 
 func TestCanceledRequestBlamesNobody(t *testing.T) {
 	started := make(chan struct{}, 1)
-	a := &upstream{reply: func(_ int, w http.ResponseWriter, r *http.Request) {
+	a := &foUpstream{reply: func(_ int, w http.ResponseWriter, r *http.Request) {
 		started <- struct{}{}
 		<-r.Context().Done()
 	}}
-	b := &upstream{reply: okReply}
-	pair(t, a, b)
-	s := fastServer()
+	b := &foUpstream{reply: okReply}
+	foPair(t, a, b)
+	s := foServer()
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatReq)).WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -337,29 +339,50 @@ func TestCanceledRequestBlamesNobody(t *testing.T) {
 }
 
 func TestSuccessEndsRest(t *testing.T) {
-	a := &upstream{reply: okReply}
-	pair(t, a, &upstream{reply: okReply})
+	a := &foUpstream{reply: okReply}
+	foPair(t, a, &foUpstream{reply: okReply})
 	restingUntil.Lock()
 	restingUntil.m["plan"] = time.Now().Add(time.Hour)
 	restingUntil.Unlock()
 	served("plan", 5)
-	if restingFor("plan") {
+	if foRestingFor("plan") {
 		t.Fatal("still resting")
 	}
 }
 
-func restingFor(id string) bool { _, ok := restOf(id); return ok }
+func foRestingFor(id string) bool { _, ok := restOf(id); return ok }
 
 func TestStreamHeldPastLimitPasses(t *testing.T) {
 	old := streamHoldMax
 	streamHoldMax = 64
-	defer func() { streamHoldMax = old }()
+	t.Cleanup(func() { streamHoldMax = old })
 	big := "event: ping\ndata: {\"type\":\"ping\",\"pad\":\"" + strings.Repeat("x", 200) + "\"}"
-	a := &upstream{reply: anthropicStream(msgStart, big, overload)}
-	b := &upstream{reply: spareStream}
-	pair(t, a, b)
-	_, body := send(fastServer(), "/v1/messages", reqAnth)
+	a := &foUpstream{reply: foAnthStream(foMsgStart, big, foOverload)}
+	b := &foUpstream{reply: spareStream}
+	foPair(t, a, b)
+	_, body := foSend(foServer(), "/v1/messages", foReqAnth)
 	if !strings.Contains(body, "Overloaded") || b.count() != 0 {
 		t.Fatalf("%s (b hit %d)", body, b.count())
 	}
+}
+
+// foFresh isolates storage and clears the package-level routing state, both
+// now and when the test ends.
+func foFresh(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	clear := func() {
+		restingUntil.Lock()
+		restingUntil.m = map[string]time.Time{}
+		restingUntil.Unlock()
+		sticks.Lock()
+		sticks.m = map[string]stick{}
+		sticks.Unlock()
+		catalog.Reset()
+	}
+	clear()
+	t.Cleanup(clear)
 }

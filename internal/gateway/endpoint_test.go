@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
@@ -79,15 +80,16 @@ func (f *epFake) count(path string) int {
 // epSetup saves provider "fake" with all three endpoints on the fake.
 func epSetup(t *testing.T, f *epFake, id string) *Server {
 	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	foFresh(t)
 	up := httptest.NewServer(f)
 	t.Cleanup(up.Close)
 	if err := provider.Save(provider.Provider{ID: id, Name: "Fake", Key: "k", Models: []string{"m", "gpt-x", "claude-x"},
 		Chat: up.URL + "/v1", Responses: up.URL + "/v1", Anthropic: up.URL}); err != nil {
 		t.Fatal(err)
 	}
-	return New()
+	s := New()
+	s.retryBase = time.Millisecond
+	return s
 }
 
 func epDo(s *Server, path, body string) (int, string) {

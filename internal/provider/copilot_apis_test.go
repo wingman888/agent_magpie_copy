@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func TestCopilotAPIs(t *testing.T) {
 }
 
 func TestProviderAPIs(t *testing.T) {
-	isolate(t)
+	cpIsolate(t)
 	p := Provider{ID: "relay", Chat: "http://x"}
 	if p.APIs("gpt-x") != nil {
 		t.Error("no list should be unknown")
@@ -42,7 +43,7 @@ func TestProviderAPIs(t *testing.T) {
 }
 
 func TestCopilotModelsReadEndpoints(t *testing.T) {
-	isolate(t)
+	cpIsolate(t)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"data":[
 		 {"id":"gpt-6","name":"GPT 6","model_picker_enabled":true,"capabilities":{"type":"chat"},"supported_endpoints":["/responses","ws:/responses"]},
@@ -57,8 +58,11 @@ func TestCopilotModelsReadEndpoints(t *testing.T) {
 	defer tok.Close()
 	old := CopilotTokenURL
 	CopilotTokenURL = tok.URL
-	defer func() { CopilotTokenURL = old }()
 	copilotSessions = map[string]copilotSession{}
+	t.Cleanup(func() {
+		CopilotTokenURL = old
+		copilotSessions = map[string]copilotSession{}
+	})
 
 	p := copilotProvider(copilotApp{User: "u", Token: "gho_x"}, "")
 	if got := p.Speaks(); !reflect.DeepEqual(got, []Protocol{Chat, Responses, Anthropic}) {
@@ -108,15 +112,18 @@ func TestCopilotTurn(t *testing.T) {
 }
 
 func TestCopilotSignHeaders(t *testing.T) {
-	isolate(t)
+	cpIsolate(t)
 	tok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"token": "t", "expires_at": time.Now().Add(time.Hour).Unix()})
 	}))
 	defer tok.Close()
 	old := CopilotTokenURL
 	CopilotTokenURL = tok.URL
-	defer func() { CopilotTokenURL = old }()
 	copilotSessions = map[string]copilotSession{}
+	t.Cleanup(func() {
+		CopilotTokenURL = old
+		copilotSessions = map[string]copilotSession{}
+	})
 	p := copilotProvider(copilotApp{User: "u", Token: "gho_x"}, "")
 	body := `{"input":[{"role":"user","content":[{"type":"input_image","image_url":"d"}]}]}`
 	req, _ := http.NewRequest("POST", "http://x/responses", nil)
@@ -134,7 +141,7 @@ func TestCopilotSignHeaders(t *testing.T) {
 }
 
 func TestTestPicksModelServedOnEndpoint(t *testing.T) {
-	isolate(t)
+	cpIsolate(t)
 	seen := map[string]string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -161,4 +168,20 @@ func TestTestPicksModelServedOnEndpoint(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v", got)
 	}
+}
+
+// cpIsolate points every storage path at a temp dir and restores the
+// Copilot session cache when the test ends.
+func cpIsolate(t *testing.T) {
+	t.Helper()
+	isolate(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	catalog.Reset()
+	t.Cleanup(func() {
+		catalog.Reset()
+		copilotSessions = map[string]copilotSession{}
+	})
 }
