@@ -16,7 +16,6 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
-	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
@@ -52,10 +51,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie accounts add <agent>     sign in to one more Claude or ChatGPT subscription
   magpie accounts switch <agent> <email>   sign the agent in to another of them
 
-  magpie backup [--no-keys] [file]   everything set up here, in one passphrase-sealed file
-                                  (default magpie.magpie-backup; --no-keys: no API keys or credential headers)
-  magpie restore [--no-agents] <file>  put a backup back on this machine (--no-agents: leave agents' models alone)
-
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
   magpie sync                     refresh the model catalog and vendor model lists
@@ -83,11 +78,6 @@ func main() {
 }
 
 func run(args []string) error {
-	// internal: the auth provider of a Grok run behind the gateway, asked
-	// for a token often; nothing else of magpie's needs to start for it
-	if len(args) == 3 && args[0] == "grok-token" {
-		return provider.GrokToken(os.Stdout, args[1], args[2], os.Getenv("GROK_AUTH_EXPIRED") == "1")
-	}
 	settings.Migrate()
 	agent.RenameLegacy()
 	if len(args) == 0 {
@@ -150,10 +140,6 @@ func run(args []string) error {
 		return usageCmd(args)
 	case "update":
 		return updateCmd(args)
-	case "backup":
-		return backupCmd(args[1:])
-	case "restore":
-		return restoreCmd(args[1:])
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 		return claudebridge.RunMCP(args[1:])
 	}

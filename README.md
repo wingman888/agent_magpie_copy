@@ -71,7 +71,6 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
-| DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
 
 Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
@@ -204,7 +203,6 @@ you press *Add*. `magpie import <link>` does the same in a terminal.
 | `models`    | model ids to expose, comma separated                               |
 | `catalog`   | models.dev provider id, for model names and reasoning levels       |
 | `website`, `keys` | the vendor's site and its API-key page (https)               |
-| `icon`      | an https picture of the vendor's own (PNG, JPEG, GIF, WebP, ICO, SVG, at most 1 MB). magpie downloads it once, after you confirm the import, into its icons folder; without one it falls back to the catalog's logo or a plain mark |
 
 Base URLs must be https (plain http only to this machine or the local
 network). Web pages and GitHub don't link custom schemes reliably, so link
@@ -324,34 +322,6 @@ Keys in the terminal version:
 
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
-
-### Backup and restore
-
-```sh
-magpie backup                       # → ./magpie.magpie-backup, asks for a passphrase twice
-magpie backup --no-keys ~/b.magpie-backup   # no API keys, no credential-like headers
-magpie restore magpie.magpie-backup # on the other machine
-magpie restore --no-agents b.magpie-backup  # providers, settings and profiles only
-echo "passphrase" | magpie backup   # not a terminal: the first line of stdin is the passphrase
-```
-
-`magpie backup` puts everything you set up into one file sealed with a
-passphrase (AES-256-GCM, key from PBKDF2-SHA256): every provider with its
-keys, key accounts and request headers, the pictures you picked for them, the
-settings, the saved profiles and each agent's model and other fields. The file
-is readable by you only (0600). Lose the passphrase and the file can't be
-opened. `--no-keys` leaves out every API key and any header whose name looks
-like a credential (`Authorization`, `X-Api-Key`, cookies, tokens …); other
-headers stay.
-
-`magpie restore` replaces providers with the same id and adds the rest; a
-provider in the backup without a key keeps the key this machine has. Pictures
-already here are not overwritten, settings are replaced, profiles are written
-by name (others are kept), and agents' settings are applied only to the
-agents installed here — the rest are listed as skipped, as is any model not
-available yet. Providers left without a key are listed: add one with
-`magpie provider key <id> <key>`. Subscriptions (signed-in Claude Code, Codex
-…) are never in a backup: sign in on each machine.
 
 ## Files
 
