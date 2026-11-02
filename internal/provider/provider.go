@@ -37,31 +37,12 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName names the key in use, and Keys are the provider's other
-	// accounts: keys saved to switch to (see keys.go).
-	KeyName string       `json:"keyName,omitempty"`
-	Keys    []KeyAccount `json:"keys,omitempty"`
-
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
 	Chat      string `json:"chat,omitempty"`
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
-
-	// Fallback is where a request goes when this provider can't take it —
-	// out of quota, rate limited, overloaded or down — before any of the
-	// reply has been sent: models as agents pick them (provider/model),
-	// tried in order.
-	Fallback []string `json:"fallback,omitempty"`
-
-	// Headers are extra HTTP request headers sent to the vendor, exactly as
-	// the user typed them. They ride on every request magpie makes to a plain
-	// key+URL provider — forwarded calls, connectivity tests, and model-list
-	// fetches — applied after the auth headers, so the user can override those
-	// when a gateway insists on a private scheme. Signed-in agent accounts
-	// ignore them: their auth is the agent's own.
-	Headers map[string]string `json:"headers,omitempty"`
 
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
@@ -70,6 +51,10 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// Headers are extra HTTP headers sent with every request to a custom
+	// vendor, after the key, names exactly as the user typed them.
+	Headers map[string]string `json:"headers,omitempty"`
 
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
@@ -113,8 +98,11 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	pruneIcons(f)
-	return os.Chmod(p, 0o600)
+	if err := os.Chmod(p, 0o600); err != nil {
+		return err
+	}
+	cleanIcons(f)
+	return nil
 }
 
 // All lists the configured providers in the order they were added, then
@@ -136,7 +124,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
+		a.Models = picks[a.ID].Models
 		out = append(out, a)
 	}
 	return out
@@ -200,7 +188,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -271,13 +259,14 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = strings.Join(p.Catalogs(), ", ")
+	p.Icon = strings.TrimSpace(p.Icon)
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
-		// Presets own their request shape; custom headers are supported only
-		// for user-defined providers.
+		// a preset vendor is reached the way magpie knows; it wears its own icon
 		p.Headers = nil
+		if iconRef(p.Icon) != "" || strings.HasPrefix(p.Icon, IconPrefix) {
+			p.Icon = ""
+		}
 	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
@@ -296,11 +285,34 @@ func normalize(p Provider) Provider {
 	return p
 }
 
-// Catalogs are the models.dev ids the provider's models are looked up in,
-// first match wins: a gateway that resells several vendors names them all
-// ("openai, deepseek").
-func (p Provider) Catalogs() []string {
-	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
+// cleanHeaders trims header names and values and drops nameless ones.
+// Names keep their case: "X-Org-Id" and "X-ORG-id" are two entries.
+func cleanHeaders(h map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range h {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = strings.TrimSpace(v)
+	}
+	return out
+}
+
+// Custom reports whether the provider is a plain key-and-URL endpoint the
+// user entered: neither a preset vendor nor a signed-in agent.
+func (p Provider) Custom() bool { return p.Preset == "" && p.Account == nil }
+
+// CustomHeaders are the extra headers sent to the provider; only a custom
+// provider has any.
+func (p Provider) CustomHeaders() map[string]string {
+	if !p.Custom() {
+		return nil
+	}
+	return cleanHeaders(p.Headers)
 }
 
 func cleanList(xs []string) []string {
@@ -309,21 +321,6 @@ func cleanList(xs []string) []string {
 		if x = strings.TrimSpace(x); x != "" && !contains(out, x) {
 			out = append(out, x)
 		}
-	}
-	return out
-}
-
-// cleanHeaders trims header names and values and drops entries with an empty
-// name, returning nil when nothing is left so the field stays out of the JSON.
-func cleanHeaders(h map[string]string) map[string]string {
-	out := make(map[string]string, len(h))
-	for k, v := range h {
-		if k = strings.TrimSpace(k); k != "" {
-			out[k] = strings.TrimSpace(v)
-		}
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	return out
 }
