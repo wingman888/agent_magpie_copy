@@ -198,7 +198,7 @@ const (
 	aStartA = `{"type":"message_start","message":{"id":"msg_from_A","type":"message","role":"assistant","model":"m","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`
 	aStartB = `{"type":"message_start","message":{"id":"msg_from_B","type":"message","role":"assistant","model":"m","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`
 	aPing   = `{"type":"ping"}`
-	aBlock  = `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
+	foBlock  = `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
 	aStop   = `{"type":"content_block_stop","index":0}`
 	aMsgEnd = `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`
 	aDone   = `{"type":"message_stop"}`
@@ -218,7 +218,7 @@ func TestAnthropicStreamFailsOverBeforeContent(t *testing.T) {
 	freshFailover(t)
 	sseType := "text/event-stream"
 	a := &scripted{replies: []reply{{ctype: sseType, body: anthropicSSE(aStartA, aPing, aOver)}}}
-	b := &scripted{replies: []reply{{ctype: sseType, body: anthropicSSE(aStartB, aBlock, aText("from B"), aStop, aMsgEnd, aDone)}}}
+	b := &scripted{replies: []reply{{ctype: sseType, body: anthropicSSE(aStartB, foBlock, aText("from B"), aStop, aMsgEnd, aDone)}}}
 	member(t, "a", provider.Anthropic, a)
 	member(t, "b", provider.Anthropic, b)
 	orderedGroup(t, "a/m", "b/m")
@@ -237,8 +237,8 @@ func TestAnthropicStreamFailsOverBeforeContent(t *testing.T) {
 
 	// once content went out, the error goes too, and nobody else is asked
 	freshFailover(t)
-	a = &scripted{replies: []reply{{ctype: sseType, body: anthropicSSE(aStartA, aBlock, aText("partial"), aOver)}}}
-	b = &scripted{replies: []reply{{ctype: sseType, body: anthropicSSE(aStartB, aBlock, aText("from B"), aStop, aMsgEnd, aDone)}}}
+	a = &scripted{replies: []reply{{ctype: sseType, body: anthropicSSE(aStartA, foBlock, aText("partial"), aOver)}}}
+	b = &scripted{replies: []reply{{ctype: sseType, body: anthropicSSE(aStartB, foBlock, aText("from B"), aStop, aMsgEnd, aDone)}}}
 	member(t, "a", provider.Anthropic, a)
 	member(t, "b", provider.Anthropic, b)
 	orderedGroup(t, "a/m", "b/m")
@@ -432,7 +432,7 @@ func TestHeldStreamPassesAfterWait(t *testing.T) {
 		case <-release:
 		case <-r.Context().Done():
 		}
-		io.WriteString(w, anthropicSSE(aBlock, aText("late"), aStop, aMsgEnd, aDone))
+		io.WriteString(w, anthropicSSE(foBlock, aText("late"), aStop, aMsgEnd, aDone))
 	}))
 	t.Cleanup(up.Close)
 	for _, id := range []string{"a", "b"} {
