@@ -30,7 +30,7 @@ type Bundle struct {
 	// Icons are the pictures providers point at ("file:<name>"), by name.
 	Icons map[string][]byte `json:"icons,omitempty"`
 	// Settings is nil when the machine had none saved.
-	Settings *settings.Settings        `json:"settings,omitempty"`
+	Settings *settings.Settings         `json:"settings,omitempty"`
 	Profiles map[string]profile.Profile `json:"profiles,omitempty"`
 	// Agents is every installed agent's settings, "agent.field" → value,
 	// as a profile spells them.
