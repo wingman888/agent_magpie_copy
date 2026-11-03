@@ -132,7 +132,7 @@ func TestProviderIconCommand(t *testing.T) {
 	}
 	src := writeTemp(t, "logo.png", pngBytes(16))
 	captureStdout(t, func() {
-		if err := providerCmd([]string{"magpie", "provider", "icon", "relay", src}); err != nil {
+		if err := providerCmd([]string{"provider", "icon", "relay", src}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -145,7 +145,7 @@ func TestProviderIconCommand(t *testing.T) {
 	}
 
 	captureStdout(t, func() {
-		if err := providerCmd([]string{"magpie", "provider", "icon", "relay", "deepseek-color"}); err != nil {
+		if err := providerCmd([]string{"provider", "icon", "relay", "deepseek-color"}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -154,7 +154,7 @@ func TestProviderIconCommand(t *testing.T) {
 	}
 
 	captureStdout(t, func() {
-		if err := providerCmd([]string{"magpie", "provider", "icon", "relay", ""}); err != nil {
+		if err := providerCmd([]string{"provider", "icon", "relay", ""}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -170,12 +170,12 @@ func TestProviderIconRejectionKeepsIcon(t *testing.T) {
 	}
 	bad := writeTemp(t, "notes.txt", []byte("plain text"))
 	captureStdout(t, func() {
-		if err := providerCmd([]string{"magpie", "provider", "icon", "relay", bad}); err == nil {
+		if err := providerCmd([]string{"provider", "icon", "relay", bad}); err == nil {
 			t.Error("text file accepted as icon")
 		}
 	})
 	captureStdout(t, func() {
-		if err := providerCmd([]string{"magpie", "provider", "icon", "relay", "./missing.png"}); err == nil {
+		if err := providerCmd([]string{"provider", "icon", "relay", "./missing.png"}); err == nil {
 			t.Error("missing file accepted as icon")
 		}
 	})
@@ -191,7 +191,7 @@ func TestProviderIconRefusedForPreset(t *testing.T) {
 	}
 	before, _ := provider.Find("deepseek")
 	captureStdout(t, func() {
-		err := providerCmd([]string{"magpie", "provider", "icon", "deepseek", "generic"})
+		err := providerCmd([]string{"provider", "icon", "deepseek", "generic"})
 		if err == nil || !strings.Contains(err.Error(), "custom") {
 			t.Errorf("preset icon error = %v, want one mentioning custom", err)
 		}
