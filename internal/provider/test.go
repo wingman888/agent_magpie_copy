@@ -21,7 +21,8 @@ type Result struct {
 }
 
 // Test sends the smallest possible request to each endpoint the vendor
-// serves, with the first exposed model, and reports what came back.
+// serves, with the first exposed model, and reports what came back. An account
+// is probed the way its backend takes requests, signed with the agent's token.
 func (p Provider) Test(ctx context.Context) []Result {
 	p.Fetch(ctx)
 	model := ""
@@ -29,6 +30,9 @@ func (p Provider) Test(ctx context.Context) []Result {
 		model = ms[0].ID
 	} else if ms := p.Available(); len(ms) > 0 {
 		model = ms[0].ID
+	}
+	if p.Account != nil {
+		return p.testAccount(ctx, model)
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
@@ -49,6 +53,55 @@ func (p Provider) Test(ctx context.Context) []Result {
 		out = append(out, probe(ctx, proto, url, body, model, headers))
 	}
 	return out
+}
+
+// testAccount probes each protocol an account's backend takes. The body is
+// adjusted for that backend, and the request is signed by the account.
+func (p Provider) testAccount(ctx context.Context, model string) []Result {
+	var out []Result
+	for _, proto := range p.Upstream() {
+		var body string
+		switch proto {
+		case Chat:
+			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
+		case Responses:
+			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
+		default:
+			continue
+		}
+		out = append(out, probeAccount(ctx, p, proto, body, model))
+	}
+	return out
+}
+
+// probeAccount sends one request to an account's backend. Sign fills in the
+// address and credentials, so the placeholder URL is replaced before sending.
+func probeAccount(ctx context.Context, p Provider, proto Protocol, body, model string) Result {
+	r := Result{Protocol: proto, Model: model}
+	if model == "" {
+		r.Error = "no model to try: expose one, or refresh the model list"
+		return r
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	raw := p.Prepare([]byte(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://account.invalid/", strings.NewReader(string(raw)))
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("User-Agent", "dial")
+	if err := p.Sign(ctx, req, proto, raw); err != nil {
+		r.Error = err.Error()
+		if IsSignedOut(err) {
+			r.Status = http.StatusUnauthorized
+			r.Error += "; " + p.SignInHint()
+		}
+		return r
+	}
+	return send(req, r)
 }
 
 // AuthHeaders is how a request to the vendor proves who it is. Anthropic's
@@ -84,6 +137,12 @@ func probe(ctx context.Context, proto Protocol, url, body, model string, headers
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	return send(req, r)
+}
+
+// send performs a prepared probe request and fills in the result.
+func send(req *http.Request, r Result) Result {
+	url := req.URL.String()
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
 	r.Millis = time.Since(start).Milliseconds()
