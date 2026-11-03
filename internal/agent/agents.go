@@ -32,9 +32,6 @@ func All() []*Agent {
 		cursor(home),
 		copilot(home),
 		crush(home, cfg),
-		dsh(home),
-		commandCode(home),
-		omp(home),
 	}
 }
 
