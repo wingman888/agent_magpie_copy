@@ -78,10 +78,16 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key.
+// Field looks a field up by key, or failing that by its label (the name the
+// picker shows, e.g. "auth" for Gemini CLI's provider key).
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
+			return &a.Fields[i]
+		}
+	}
+	for i := range a.Fields {
+		if a.Fields[i].Label == key {
 			return &a.Fields[i]
 		}
 	}
