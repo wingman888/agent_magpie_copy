@@ -125,7 +125,7 @@ func TestKeyTierRanksFourLevels(t *testing.T) {
 		// gpt model: own family 0, any-key direct 1, any-key translated 2, other family 3
 		{"gpt, chat client, own key", provider.Chat, "gpt-5.5", chatKey, 0},
 		{"gpt, chat client, any key direct", provider.Chat, "gpt-5.5", gen, 1},
-		{"gpt, anthropic client, any key translated", provider.Anthropic, "gpt-5.5", gen, 2},
+		{"gpt, responses client, any key translated", provider.Responses, "gpt-5.5", gen, 2},
 		{"gpt, anthropic client, anthropic key", provider.Anthropic, "gpt-5.5", antKey, 3},
 		// unknown model: direct key 0, others 1; the name never favours a key
 		{"unknown, chat client, own key", provider.Chat, "deepseek-chat", chatKey, 0},
