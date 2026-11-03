@@ -20,17 +20,14 @@ type usageGroup struct {
 
 type usageJSON struct {
 	usage.Summary
-	Agents        []usageGroup                 `json:"agents"`
-	Models        []usageGroup                 `json:"models"`
-	Path          string                       `json:"path"`
-	Subscriptions []provider.SubscriptionQuota `json:"subscriptions"`
+	Agents []usageGroup `json:"agents"`
+	Models []usageGroup `json:"models"`
+	Path   string       `json:"path"`
 }
 
-func usageState(ctx context.Context, p usage.Period) usageJSON {
+func usageState(p usage.Period) usageJSON {
 	s := usage.Summarize(p)
-	quotaCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	out := usageJSON{Summary: s, Agents: []usageGroup{}, Models: []usageGroup{}, Path: tilde(usage.Path()), Subscriptions: provider.SubscriptionUsage(quotaCtx)}
+	out := usageJSON{Summary: s, Agents: []usageGroup{}, Models: []usageGroup{}, Path: tilde(usage.Path())}
 	agents := map[string]*agent.Agent{}
 	for _, a := range agent.All() {
 		agents[a.ID] = a
@@ -67,6 +64,13 @@ func usageRoutes(mux *http.ServeMux) {
 		default:
 			p = usage.Month
 		}
-		writeJSON(rw, usageState(r.Context(), p))
+		writeJSON(rw, usageState(p))
+	})
+	// The subscriptions' quotas come from the vendors, which can be slow or
+	// unreachable, so the page asks for them apart from the local log.
+	mux.HandleFunc("GET /api/usage/quotas", func(rw http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		defer cancel()
+		writeJSON(rw, provider.SubscriptionUsage(ctx))
 	})
 }
