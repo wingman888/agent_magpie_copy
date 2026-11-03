@@ -183,6 +183,9 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
+	if err := checkIcon(p.Icon); err != nil {
+		return err
+	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
@@ -196,14 +199,22 @@ func Save(p Provider) error {
 		}
 	}
 	f := load()
+	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			return store(f)
+			replaced = true
+			break
 		}
 	}
-	f.Providers = append(f.Providers, p)
-	return store(f)
+	if !replaced {
+		f.Providers = append(f.Providers, p)
+	}
+	if err := store(f); err != nil {
+		return err
+	}
+	pruneIcons()
+	return nil
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its

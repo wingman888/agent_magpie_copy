@@ -23,7 +23,8 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, header.<Name>=value
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.<Name>=value
+  magpie provider icon <id> <file|name|"">  set a custom vendor's icon: an image file, a built-in logo name, or "" for the default
   magpie provider key <id> <key>          change the API key
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
@@ -173,6 +174,31 @@ func providerCmd(args []string) error {
 	switch verb {
 	case "add":
 		return addProvider(rest)
+	case "icon":
+		if len(rest) != 2 {
+			return fmt.Errorf("magpie provider icon <id> <image file|built-in name|\"\">")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if err := requireCustom(*p); err != nil {
+			return err
+		}
+		icon, err := provider.IconFromArg(rest[1])
+		if err != nil {
+			return err
+		}
+		p.Icon = icon
+		if err := provider.Save(*p); err != nil {
+			return err
+		}
+		if icon == "" {
+			fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render("reset to the default"))
+		} else {
+			fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(icon))
+		}
+		return nil
 	case "key":
 		if len(rest) != 2 {
 			return fmt.Errorf("magpie provider key <id> <key>")
@@ -276,6 +302,9 @@ func addProvider(rest []string) error {
 		} else {
 			rest = rest[1:]
 		}
+		if hasPair(rest, "icon") {
+			return errIconNotCustom(p)
+		}
 	} else {
 		p = provider.Provider{Name: rest[0]}
 		rest = rest[1:]
@@ -284,6 +313,29 @@ func addProvider(rest []string) error {
 		return err
 	}
 	return saveNew(p)
+}
+
+// hasPair reports whether one of the key=value pairs sets key k.
+func hasPair(pairs []string, k string) bool {
+	for _, kv := range pairs {
+		if name, _, ok := strings.Cut(kv, "="); ok && strings.EqualFold(strings.TrimSpace(name), k) {
+			return true
+		}
+	}
+	return false
+}
+
+// requireCustom errors unless p is a custom vendor: presets and signed-in
+// accounts take their look from magpie or the agent.
+func requireCustom(p provider.Provider) error {
+	if p.Preset != "" || p.Account != nil {
+		return errIconNotCustom(p)
+	}
+	return nil
+}
+
+func errIconNotCustom(p provider.Provider) error {
+	return fmt.Errorf("仅自定义供应商可设置图标：%s 是预设或已登录的账号", p.Name)
 }
 
 // saveNew saves a provider the user just added, then asks the vendor for
@@ -351,6 +403,7 @@ func showProvider(p provider.Provider) error {
 	for _, k := range names {
 		kv("header", k+": "+hs[k])
 	}
+	kv("icon", p.Icon)
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
@@ -422,7 +475,11 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "keys":
 			p.KeysURL = v
 		case "icon":
-			p.Icon = v
+			icon, err := provider.IconFromArg(v)
+			if err != nil {
+				return err
+			}
+			p.Icon = icon
 		default:
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}
