@@ -202,8 +202,13 @@ func TestGeminiFieldByLabelMatchesKey(t *testing.T) {
 	if a.Field("auth") == nil || a.Field("auth") != a.Field("provider") {
 		t.Fatal(`Field("auth") should resolve to the provider field`)
 	}
-	if a.Fields[0].Key != "model" {
-		t.Errorf("model should be the first field, got %q", a.Fields[0].Key)
+	// Fields[0] must stay the auth field: `dial gemini default` and the GUI/CLI
+	// provider lookups read it by position, as they did before routing existed.
+	if a.Fields[0].Key != "provider" {
+		t.Errorf("provider (auth) should stay the first field, got %q", a.Fields[0].Key)
+	}
+	if a.Fields[1].Key != "model" {
+		t.Errorf("model should be the second field, got %q", a.Fields[1].Key)
 	}
 }
 

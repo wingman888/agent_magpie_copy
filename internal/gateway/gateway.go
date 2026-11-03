@@ -406,8 +406,9 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 			})
 		})
 		// A broken connection ends the reply without a stop; the encoder
-		// sees that from the missing stop. The error is only recorded.
-		if rerr != nil && failed == "" {
+		// sees that from the missing stop. For the Gemini API the error is
+		// also recorded; the other client APIs keep their original behaviour.
+		if rerr != nil && failed == "" && from == provider.Gemini {
 			failed = rerr.Error()
 		}
 		enc.finish()
@@ -417,7 +418,9 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	rerr := readSSE(res.Body, func(_, data string) error {
 		return dec(data, col.add)
 	})
-	if rerr != nil && col.err == "" {
+	// Transport errors fail a non-streamed Gemini reply with 502 when nothing
+	// was received; other client APIs keep returning whatever was collected.
+	if rerr != nil && col.err == "" && from == provider.Gemini {
 		col.err = rerr.Error()
 	}
 	if col.err != "" && len(col.res.Parts) == 0 {

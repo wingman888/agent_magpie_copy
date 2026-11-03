@@ -182,8 +182,36 @@ func gemini(home string) *Agent {
 			}
 			return ""
 		},
-		// model comes first: it is the field a bare `dial gemini <value>` sets.
+		// Field order matches the original: auth first (Fields[0] is what
+		// `dial gemini default` and the GUI's provider lookup read), model second.
+		// Model logic is reached through Field("model") / fieldForValue, not by index.
 		Fields: []Field{
+			{
+				Key: "provider", Label: "auth",
+				Get: current,
+				Set: use,
+				Options: func(map[string]string) []Option {
+					key := Option{Value: "api-key", Label: "API key", Icon: "gemini-color"}
+					switch {
+					case dialKey() != "":
+						key.Note = "the Google key from dial's providers"
+					case envKey() != "":
+						key.Note = "GEMINI_API_KEY from ~/.gemini/.env"
+					default:
+						key.Note = "needs GEMINI_API_KEY — add Google Gemini in dial's providers"
+					}
+					out := []Option{
+						{Value: "google", Label: "Google account", Icon: "gemini-color", Note: "OAuth sign-in"},
+						key,
+						{Value: "vertex", Label: "Vertex AI", Icon: "googlecloud-color", Note: "Vertex AI · $GOOGLE_CLOUD_PROJECT"},
+						{Value: dialID, Label: dialID, Note: "local gateway · models from every provider (pick a catalog model)"},
+					}
+					if current() == "custom" {
+						out = append(out, Option{Value: "custom", Note: hostOf(base()) + " (from .env)"})
+					}
+					return out
+				},
+			},
 			{
 				Key: "model", Label: "model",
 				Get: model,
@@ -212,32 +240,6 @@ func gemini(home string) *Agent {
 						}
 					}
 					return append(group("Google", options(ms, "")), viaDial("")...)
-				},
-			},
-			{
-				Key: "provider", Label: "auth",
-				Get: current,
-				Set: use,
-				Options: func(map[string]string) []Option {
-					key := Option{Value: "api-key", Label: "API key", Icon: "gemini-color"}
-					switch {
-					case dialKey() != "":
-						key.Note = "the Google key from dial's providers"
-					case envKey() != "":
-						key.Note = "GEMINI_API_KEY from ~/.gemini/.env"
-					default:
-						key.Note = "needs GEMINI_API_KEY — add Google Gemini in dial's providers"
-					}
-					out := []Option{
-						{Value: "google", Label: "Google account", Icon: "gemini-color", Note: "OAuth sign-in"},
-						key,
-						{Value: "vertex", Label: "Vertex AI", Icon: "googlecloud-color", Note: "Vertex AI · $GOOGLE_CLOUD_PROJECT"},
-						{Value: dialID, Label: dialID, Note: "local gateway · models from every provider (pick a catalog model)"},
-					}
-					if current() == "custom" {
-						out = append(out, Option{Value: "custom", Note: hostOf(base()) + " (from .env)"})
-					}
-					return out
 				},
 			},
 		},
