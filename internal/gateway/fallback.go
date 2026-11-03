@@ -136,17 +136,18 @@ func keyFit(q provider.Provider, model string, from provider.Protocol) int {
 // bestFit divides a provider's keys into the pool that suits the request
 // best, which routing works within, and the rest. The rest are aside: tried
 // only after the pool fails, those made for no protocol before those made
-// for another. Within each group, the order they came in holds.
-func bestFit(cs []candidate, model string, from provider.Protocol) (main, aside []candidate) {
+// for another. Within each group, the order they came in holds. Each
+// candidate is fitted for the model it is asked for.
+func bestFit(cs []candidate, from provider.Protocol) (main, aside []candidate) {
 	if len(cs) == 0 {
 		return nil, nil
 	}
-	best := keyFit(cs[0].p, model, from)
+	best := keyFit(cs[0].p, cs[0].model, from)
 	for _, c := range cs[1:] {
-		best = min(best, keyFit(c.p, model, from))
+		best = min(best, keyFit(c.p, c.model, from))
 	}
 	for _, c := range cs {
-		if keyFit(c.p, model, from) == best {
+		if keyFit(c.p, c.model, from) == best {
 			main = append(main, c)
 		} else {
 			c.aside = true
@@ -154,7 +155,7 @@ func bestFit(cs []candidate, model string, from provider.Protocol) (main, aside 
 		}
 	}
 	sort.SliceStable(aside, func(i, j int) bool {
-		return keyFit(aside[i].p, model, from) < keyFit(aside[j].p, model, from)
+		return keyFit(aside[i].p, aside[i].model, from) < keyFit(aside[j].p, aside[j].model, from)
 	})
 	return main, aside
 }
@@ -186,24 +187,18 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 // plan is candidates, and for the routing trace what each stood where it
 // did by, and those left out.
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
+	return s.planIn(p, model, from, turnRef{})
+}
+
+// planIn is plan within the turn tn.
+func (s *Server) planIn(p provider.Provider, model string, from provider.Protocol, tn turnRef) ([]candidate, planned) {
 	var pl planned
 	var items []placed
 	chain := 0 // the provider's place in the chain: the primary is 0
 	add := func(q provider.Provider, m string, fallback bool) {
 		cs, left := perKeyOf(q, m, from)
-		cs, wg := weigh(q, cs, m, from)
-		// the turn is routing's among the main pool; keys aside do not count
-		mains := 0
-		for _, c := range cs {
-			if !c.aside {
-				mains++
-			}
-		}
-		for i, c := range cs {
-			w := weighed(c, q, wg, fallback, from)
-			w.Turn = i == 0 && q.Routing == provider.Rotate && mains > 1
-			items = append(items, placed{c: c, w: w, seg: chain})
-		}
+		cs, wg := weighIn(q, cs, m, from, tn)
+		items = placeAll(items, cs, wg, q, fallback, chain, from, q.Routing == provider.Rotate)
 		for _, c := range left {
 			w := weighed(c, q, weighing{}, fallback, from)
 			w.Unlisted = true
@@ -221,6 +216,33 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 		seen[fp.ID+"/"+fm] = true
 		add(fp, fm, true)
 	}
+	return arrange(items, pl)
+}
+
+// placeAll adds one provider's candidates, as weighed, to items: the seg-th
+// place of the chain. The first of them is the turn when the provider
+// rotates and has keys to turn among.
+func placeAll(items []placed, cs []candidate, wg weighing, q provider.Provider, fallback bool, seg int, from provider.Protocol, rotate bool) []placed {
+	// the turn is routing's among the main pool; keys aside do not count
+	mains := 0
+	for _, c := range cs {
+		if !c.aside {
+			mains++
+		}
+	}
+	for i, c := range cs {
+		w := weighed(c, q, wg, fallback, from)
+		w.Turn = i == 0 && rotate && mains > 1
+		items = append(items, placed{c: c, w: w, seg: seg})
+	}
+	return items
+}
+
+// arrange puts placed candidates in the order they are tried: those not
+// resting first, a provider's place in the chain before the next's, and a
+// provider's keys aside after its main pool. It fills in what each rests
+// for, and the trace's order to match.
+func arrange(items []placed, pl planned) ([]candidate, planned) {
 	// A key that is resting, its own failure, waits behind the rest. A key
 	// aside is tried only once its provider's main pool is spent: it rests
 	// with that pool, and otherwise follows it, before the next provider.

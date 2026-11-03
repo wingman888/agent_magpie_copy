@@ -99,19 +99,29 @@ func providers() error {
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
+// An agent routed to a routing group is not counted under any provider.
 func usesByProvider() map[string][]string {
 	out := map[string][]string{}
 	for _, a := range agent.Detected() {
 		if len(a.Fields) == 0 {
 			continue
 		}
-		v := a.Fields[0].Get()
-		v = strings.TrimPrefix(v, "magpie/")
-		if pid, _, ok := strings.Cut(v, "/"); ok {
+		if pid, ok := providerOfModel(a.Fields[0].Get()); ok {
 			out[pid] = append(out[pid], a.Name)
 		}
 	}
 	return out
+}
+
+// providerOfModel is the provider id a model value names, "magpie/" aside.
+// A routing group names no provider, so it reports false.
+func providerOfModel(v string) (string, bool) {
+	v = strings.TrimPrefix(v, "magpie/")
+	if strings.HasPrefix(v, provider.GroupPrefix) {
+		return "", false
+	}
+	pid, _, ok := strings.Cut(v, "/")
+	return pid, ok
 }
 
 // presets: `magpie presets`
@@ -149,27 +159,64 @@ func models() error {
 		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
 	}
-	w := 0
-	for _, e := range entries {
-		w = max(w, len(e.ID))
-	}
-	last := ""
-	for _, e := range entries {
-		if e.Provider.ID != last {
-			last = e.Provider.ID
-			fmt.Println(faint.Render("  " + e.Provider.Name))
-		}
-		line := "  " + pad(e.ID, w)
-		if e.Name != "" && e.Name != e.Model {
-			line += "  " + muted.Render(e.Name)
-		}
-		if len(e.Efforts) > 0 {
-			line += faint.Render("  " + strings.Join(e.Efforts, "/"))
-		}
+	for _, line := range catalogLines(entries) {
 		fmt.Println(line)
 	}
 	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
 	return nil
+}
+
+// catalogLines lays the catalog out: the routing groups first, under a
+// heading of their own, then each provider's models under its name.
+func catalogLines(entries []provider.Entry) []string {
+	w := 0
+	for _, e := range entries {
+		w = max(w, len(e.ID))
+	}
+	var groups, others []provider.Entry
+	for _, e := range entries {
+		if e.Group != nil {
+			groups = append(groups, e)
+		} else {
+			others = append(others, e)
+		}
+	}
+	var out []string
+	if len(groups) > 0 {
+		out = append(out, faint.Render("  Routing groups"))
+		for _, e := range groups {
+			out = append(out, entryLine(e, w))
+		}
+	}
+	last := ""
+	for _, e := range others {
+		if e.Provider.ID != last {
+			last = e.Provider.ID
+			out = append(out, faint.Render("  "+e.Provider.Name))
+		}
+		out = append(out, entryLine(e, w))
+	}
+	return out
+}
+
+// entryLine is one model of the catalog listing, its id padded to w. A
+// routing group names the models it draws on, since it has no provider.
+func entryLine(e provider.Entry, w int) string {
+	line := "  " + pad(e.ID, w)
+	if e.Name != "" && e.Name != e.Model {
+		line += "  " + muted.Render(e.Name)
+	}
+	if e.Group != nil {
+		var ms []string
+		for _, m := range e.Group.Members {
+			ms = append(ms, m.String())
+		}
+		line += faint.Render("  " + strings.Join(ms, " · "))
+	}
+	if len(e.Efforts) > 0 {
+		line += faint.Render("  " + strings.Join(e.Efforts, "/"))
+	}
+	return line
 }
 
 // providerCmd: `magpie provider <verb> …`

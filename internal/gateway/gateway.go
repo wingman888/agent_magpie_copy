@@ -177,8 +177,13 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 }
 
 func modelObject(e provider.Entry) map[string]any {
+	owner := e.Provider.ID
+	if e.Group != nil {
+		// a routing group has no provider of its own
+		owner = "magpie"
+	}
 	return map[string]any{"id": e.ID, "object": "model", "type": "model", "created": 0, "created_at": "2025-01-01T00:00:00Z",
-		"owned_by": e.Provider.ID, "display_name": e.Name}
+		"owned_by": owner, "display_name": e.Name}
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +200,17 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if strings.HasPrefix(id, provider.GroupPrefix) {
+		// a group is described as its first member that can be used now
+		e, ok := groupEntry(id)
+		if !ok {
+			writeError(w, provider.Chat, 404, noGroupReady(id))
+			return
+		}
+		e.ID = id
+		writeJSON(w, 200, modelObject(e))
+		return
+	}
 	for _, e := range provider.Catalog() {
 		if e.ID == id {
 			writeJSON(w, 200, modelObject(e))
@@ -349,24 +365,78 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	p, model, ok := provider.Resolve(call.Model)
-	if !ok {
-		call.Status, call.Error = 404, "unknown model"
-		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
-		if ids := provider.IDs(); len(ids) > 0 {
-			msg += "; it has " + strings.Join(ids, ", ")
-		} else {
-			msg += "; add a provider in magpie first"
-		}
+	fail := func(what, msg string) {
+		call.Status, call.Error = 404, what
 		writeError(w, from, 404, msg)
 		finishCapture()
 		s.record(call)
-		return
+	}
+	session := sessionOf(r.Header)
+	var tn turnRef
+	if session != "" {
+		turn, within := turnOf(from, body)
+		tn = turnRef{session: session, model: call.Model, turn: turn, within: within}
 	}
 	// the primary, then its fallbacks while it can't take the request and
-	// nothing has been sent yet
-	cands, pl := s.plan(p, model, from)
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left})
+	// nothing has been sent yet; a routing group's members instead
+	var cands []candidate
+	var pl planned
+	var model, mode, providerName string
+	var group *GroupTrace
+	if strings.HasPrefix(call.Model, provider.GroupPrefix) {
+		g, ms, ok := provider.FindGroup(call.Model)
+		if !ok {
+			msg := noGroupReady(call.Model)
+			fail(msg, msg)
+			return
+		}
+		members := make([]memberOf, 0, len(ms))
+		names := make([]string, 0, len(ms))
+		for _, m := range ms {
+			q, err := provider.Find(m.Provider)
+			if err != nil {
+				continue
+			}
+			members = append(members, memberOf{p: *q, model: m.Model})
+			names = append(names, m.String())
+		}
+		cands, pl = s.planGroup(g, members, from, tn)
+		if len(cands) == 0 {
+			msg := noGroupReady(call.Model)
+			fail(msg, msg)
+			return
+		}
+		mode = g.Affinity
+		if mode == "" && len(members) > 0 {
+			mode = members[0].p.Affinity
+		}
+		group = &GroupTrace{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity,
+			Auto: provider.GroupAuto(g.ID), Members: names}
+		providerName = call.Model
+	} else {
+		p, m, ok := provider.Resolve(call.Model)
+		if !ok {
+			msg := fmt.Sprintf("magpie knows no model %q", call.Model)
+			if ids := provider.IDs(); len(ids) > 0 {
+				msg += "; it has " + strings.Join(ids, ", ")
+			} else {
+				msg += "; add a provider in magpie first"
+			}
+			fail("unknown model", msg)
+			return
+		}
+		model = m
+		cands, pl = s.planIn(p, model, from, tn)
+		mode, providerName = p.Affinity, p.ID
+	}
+	// a conversation keeps to the key or account that last answered it, when
+	// its affinity says so: that one moves to the front
+	fromAt, to, aff := affine(cands, session, call.Model, mode, tn, start)
+	if fromAt >= 0 {
+		cands, pl.order = shift(cands, fromAt, to), shift(pl.order, fromAt, to)
+	}
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: providerName,
+		Order: pl.order, Left: pl.left, Group: group, Affinity: aff})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
@@ -387,6 +457,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+			if session != "" {
+				recordReply(session, call.Model, c, call.Usage.CacheRead)
+			}
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}

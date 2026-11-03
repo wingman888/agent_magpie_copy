@@ -29,10 +29,11 @@ const usageHalfLife = time.Hour
 
 var routed = struct {
 	sync.Mutex
-	turn     map[string]int      // pool (see turnPool) → requests routed in turn
-	used     map[string]tokenUse // candidate rest id → tokens it served
-	failures map[string]int      // candidate rest id → failures since it last answered
-}{turn: map[string]int{}, used: map[string]tokenUse{}, failures: map[string]int{}}
+	turn     map[string]int       // pool (see turnPool) → requests routed in turn, for those with no session
+	turns    map[string]turnState // session, model and pool → the turn it is in and the key it took
+	used     map[string]tokenUse  // candidate rest id → tokens it served
+	failures map[string]int       // candidate rest id → failures since it last answered
+}{turn: map[string]int{}, turns: map[string]turnState{}, used: map[string]tokenUse{}, failures: map[string]int{}}
 
 type tokenUse struct {
 	n  float64
@@ -220,18 +221,45 @@ func route(p provider.Provider, cs []candidate, model string, from provider.Prot
 	return cs
 }
 
+// turnRef is the turn a request is in: the agent's session and the model it
+// asked for, the user turn it belongs to (how many user turns the
+// conversation holds so far), and whether it is a tool result sent back
+// within that turn. A request with no session is a turn of its own.
+type turnRef struct {
+	session string
+	model   string
+	turn    int
+	within  bool
+}
+
+// turnState is where a session's turn stands in one pool: the user turn it
+// is, the index of the key it took, and when it was last routed.
+type turnState struct {
+	turn int
+	cur  int
+	at   time.Time
+}
+
 // turnPool names the pool a turn is taken within: the provider, and the
 // protocol its keys are made for ("" when any). cs is the pool, the keys
 // that suit the request; the ones aside are not in it.
 func turnPool(p provider.Provider, cs []candidate) string {
+	if len(cs) == 0 {
+		return p.ID
+	}
 	return p.ID + "|" + string(cs[0].p.KeyProtocol)
 }
+
+// cid names a candidate in the weighing: the account or key it is, and the
+// model it is asked for. One account can serve several models, each with
+// its own allowance.
+func cid(c candidate) string { return c.rest + "\x00" + c.model }
 
 // weighing is what one provider's candidates were ordered by: the share of
 // its allowance each account has used and when that renews, and the tokens
 // each served lately. The routing trace shows the same.
 type weighing struct {
-	lefts map[string]left // the accounts the vendor said what they have left of
+	lefts map[string]left // the accounts the vendor said what they have left of (see cid)
 
 	tokens map[string]float64 // least used: tokens each served lately
 }
@@ -244,21 +272,30 @@ type left struct {
 // weigh orders one provider's candidates as its routing says, and tells
 // what it went by.
 func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
+	return weighIn(p, cs, model, from, turnRef{})
+}
+
+// weighIn is weigh within the turn tn (see turnRef).
+func weighIn(p provider.Provider, cs []candidate, model string, from provider.Protocol, tn turnRef) ([]candidate, weighing) {
 	if p.Account == nil {
 		// the keys that suit the request best are the pool routing works
 		// within; the others follow it, aside (see bestFit)
-		if main, aside := bestFit(cs, model, from); len(aside) > 0 {
-			out, wg := weigh(p, main, model, from)
+		if main, aside := bestFit(cs, from); len(aside) > 0 {
+			out, wg := weighIn(p, main, model, from, tn)
 			return append(out, aside...), wg
 		}
 	}
+	return weighPool(p.Routing, turnPool(p, cs), cs, tn)
+}
+
+// weighPool orders candidates that share one routing: pool names the turns
+// a rotating pool takes. The candidates may come from several providers, as
+// a routing group's members do; each account is weighed by its own
+// allowance.
+func weighPool(routing, pool string, cs []candidate, tn turnRef) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
-	}
-	var known map[string]provider.Allowance
-	if p.Account != nil {
-		known = allowances(p.Account.Agent)
 	}
 	now := time.Now()
 	wg.lefts = map[string]left{}
@@ -266,14 +303,14 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 		if c.p.Account == nil {
 			continue
 		}
-		if a, ok := known[c.p.Account.User]; ok {
+		if a, ok := allowances(c.p.Account.Agent)[c.p.Account.User]; ok {
 			u, r := a.For(c.model, now)
-			wg.lefts[c.rest] = left{u, r} // one not known counts as unused
+			wg.lefts[cid(c)] = left{u, r} // one not known counts as unused
 		}
 	}
 	lefts := wg.lefts
-	shareOf := func(c candidate) float64 { return lefts[c.rest].used }
-	switch p.Routing {
+	shareOf := func(c candidate) float64 { return lefts[cid(c)].used }
+	switch routing {
 	case "":
 		// of those with quota to spare, the one whose allowance renews
 		// soonest, since what it has left is lost then, while one renewing
@@ -296,7 +333,7 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 			}
 		}
 		sort.SliceStable(fine, func(i, j int) bool {
-			ri, rj := lefts[fine[i].rest].renews, lefts[fine[j].rest].renews
+			ri, rj := lefts[cid(fine[i])].renews, lefts[cid(fine[j])].renews
 			for k := 0; k < len(ri) || k < len(rj); k++ {
 				var a, b time.Time // to the hour, so a few minutes don't reorder
 				if k < len(ri) {
@@ -326,11 +363,7 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 	case provider.Rotate:
 		// each pool of keys takes its turns apart: the keys made for
 		// Anthropic and those made for Chat do not move each other along
-		pool := turnPool(p, cs)
-		routed.Lock()
-		n := routed.turn[pool] % len(cs)
-		routed.turn[pool]++
-		routed.Unlock()
+		n := rotateStart(pool, tn, len(cs))
 		cs = append(append([]candidate{}, cs[n:]...), cs[:n]...)
 	case provider.LeastUsed:
 		// a subscription by the share of its allowance used, as the vendor
@@ -363,4 +396,42 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 		return cs, wg
 	}
 	return cs, wg
+}
+
+// rotateStart is the index, among n keys, of the key the turn in tn starts
+// on in a rotating pool. A request with no session is a turn of its own,
+// and each takes the next key the pool hands out. In a session, a turn takes
+// the key after the one the session's previous turn took, and the requests
+// within that turn — tool results sent back — keep to the key it started
+// on. A session's first turn in the pool takes the next key the pool hands
+// out. The session's place is kept per model, so other models' requests in
+// between do not move it.
+func rotateStart(pool string, tn turnRef, n int) int {
+	routed.Lock()
+	defer routed.Unlock()
+	if tn.session == "" {
+		i := routed.turn[pool] % n
+		routed.turn[pool]++
+		return i
+	}
+	now := time.Now()
+	for k, st := range routed.turns {
+		if now.Sub(st.at) > sessionKeep {
+			delete(routed.turns, k)
+		}
+	}
+	key := tn.session + "\x00" + tn.model + "\x00" + pool
+	st, ok := routed.turns[key]
+	switch {
+	case ok && st.turn == tn.turn:
+		// the same turn goes on with the key it started on
+	case ok:
+		st.cur = (st.cur + 1) % n
+	default:
+		st.cur = routed.turn[pool] % n
+		routed.turn[pool]++
+	}
+	st.turn, st.at = tn.turn, now
+	routed.turns[key] = st
+	return st.cur % n
 }

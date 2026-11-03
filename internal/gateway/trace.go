@@ -21,20 +21,48 @@ const traceKeep = 60
 
 // Route is one request's way through routing.
 type Route struct {
-	Seq      int64     `json:"seq"` // the trace's count when it last changed
-	ID       int64     `json:"id"`
-	Time     time.Time `json:"time"`
-	Agent    string    `json:"agent"`
-	Model    string    `json:"model"`    // as the agent asked
-	Provider string    `json:"provider"` // the provider the model resolved to
-	Order    []Weighed `json:"order"`    // who was to try it, first first
-	Left     []Weighed `json:"left,omitempty"`
-	Tries    []Try     `json:"tries"`
-	Done     bool      `json:"done"`
-	Status   int       `json:"status,omitempty"`
-	Error    string    `json:"error,omitempty"`
-	Millis   int64     `json:"ms,omitempty"`
-	Tokens   int       `json:"tokens,omitempty"`
+	Seq      int64          `json:"seq"` // the trace's count when it last changed
+	ID       int64          `json:"id"`
+	Time     time.Time      `json:"time"`
+	Agent    string         `json:"agent"`
+	Model    string         `json:"model"`    // as the agent asked
+	Provider string         `json:"provider"` // the provider the model resolved to
+	Order    []Weighed      `json:"order"`    // who was to try it, first first
+	Left     []Weighed      `json:"left,omitempty"`
+	Tries    []Try          `json:"tries"`
+	Done     bool           `json:"done"`
+	Status   int            `json:"status,omitempty"`
+	Error    string         `json:"error,omitempty"`
+	Millis   int64          `json:"ms,omitempty"`
+	Tokens   int            `json:"tokens,omitempty"`
+	Group    *GroupTrace    `json:"group,omitempty"`    // the routing group the agent named, if it named one
+	Affinity *AffinityTrace `json:"affinity,omitempty"` // how the conversation kept to the key that last answered it
+}
+
+// GroupTrace is the routing group a request named: its members that can be
+// used now, as provider/model.
+type GroupTrace struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Routing  string   `json:"routing"`
+	Affinity string   `json:"affinity"`
+	Auto     bool     `json:"auto"` // found by magpie, not kept by the user
+	Members  []string `json:"members"`
+}
+
+// AffinityTrace is how a conversation kept to the key or account that last
+// answered it: the mode, the user turn it is in, whether the request is a
+// tool result within that turn, what answered last and the cache it read,
+// whether it was kept (moved first), and why (session, turn, cache keep it;
+// off, first, new-turn, no-cache, cold, resting, spent, gone do not).
+type AffinityTrace struct {
+	Mode      string `json:"mode"`
+	Turn      int    `json:"turn"`
+	Within    bool   `json:"within"`
+	Last      string `json:"last,omitempty"` // what answered last: its rest id
+	CacheRead int    `json:"cacheRead"`
+	Kept      bool   `json:"kept"`
+	Why       string `json:"why"`
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -95,7 +123,7 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	default:
 		w.Kind = "provider"
 	}
-	if l, ok := wg.lefts[c.rest]; ok {
+	if l, ok := wg.lefts[cid(c)]; ok {
 		w.Known, w.Used, w.Renews = true, l.used, l.renews
 	}
 	if wg.tokens != nil {

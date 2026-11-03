@@ -343,6 +343,18 @@ func autoID(key string) string {
 	return "auto-" + base + "-" + tag
 }
 
+// GroupAuto says whether a group id is one magpie finds on its own, rather
+// than one the user keeps (saved, or replacing a found one).
+func GroupAuto(id string) bool {
+	id = groupID(id)
+	f := load()
+	if i := indexGroup(f.Groups, id); i >= 0 && !f.Groups[i].Hidden {
+		return false
+	}
+	ps := All()
+	return hasGroup(discover(ps, exposureOf(ps)), id)
+}
+
 // groupsNow is the groups as they stand: the user's first, then the ones
 // magpie finds that the user has neither hidden nor replaced.
 func groupsNow(ps []Provider, x exposure) []Group {
