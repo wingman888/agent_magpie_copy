@@ -37,24 +37,12 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName names the front key (Key). Keys are the other keys the provider
-	// holds, in the order magpie tries them after the front one. Key stays the
-	// front key, so anything that reads it sees the account magpie uses first.
-	KeyName string     `json:"keyName,omitempty"`
-	Keys    []KeyEntry `json:"keys,omitempty"`
-
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
 	Chat      string `json:"chat,omitempty"`
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
-
-	// Fallback is where a request goes when this provider can't take it —
-	// out of quota, rate limited, overloaded or down — before any of the
-	// reply has been sent: models as agents pick them (provider/model),
-	// tried in order.
-	Fallback []string `json:"fallback,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
@@ -67,6 +55,11 @@ type Provider struct {
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
+
+	// Fallback is the ordered list of "provider/model" ids the gateway tries
+	// when this provider cannot answer (quota spent, rate limited, overloaded
+	// or down). Saved trimmed, without blanks or repeats.
+	Fallback []string `json:"fallback,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
@@ -137,7 +130,8 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
+		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -221,6 +215,53 @@ func Save(p Provider) error {
 	return store(f)
 }
 
+// SetFallback replaces a provider's fallback list with refs, in order. Each ref
+// must be a provider/model magpie knows; if one is not, nothing is saved. An
+// empty refs clears the list.
+func SetFallback(id string, refs []string) (Provider, error) {
+	p, err := Find(id)
+	if err != nil {
+		return Provider{}, err
+	}
+	var chain []string
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue // blanks are dropped, as they are when the config is read
+		}
+		pid, model, ok := strings.Cut(ref, "/")
+		if !ok || strings.TrimSpace(pid) == "" || strings.TrimSpace(model) == "" {
+			return Provider{}, fmt.Errorf("%q is not provider/model", ref)
+		}
+		fp, err := Find(pid)
+		if err != nil || !fp.Knows(model) {
+			return Provider{}, fmt.Errorf("magpie doesn't know the model %q · magpie models lists them", ref)
+		}
+		chain = append(chain, fp.ID+"/"+model)
+	}
+	p.Fallback = cleanList(chain)
+	if err := Save(*p); err != nil {
+		return Provider{}, err
+	}
+	return *p, nil
+}
+
+// Knows reports whether magpie knows the model: it is exposed to agents or
+// listed by the vendor (or the signed-in agent).
+func (p Provider) Knows(model string) bool {
+	for _, m := range p.Exposed() {
+		if m.ID == model {
+			return true
+		}
+	}
+	for _, m := range p.Available() {
+		if m.ID == model {
+			return true
+		}
+	}
+	return false
+}
+
 // Delete removes a provider. An account is only hidden from magpie (its
 // model picks kept); signing out is the agent's job.
 func Delete(id string) error {
@@ -265,15 +306,6 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p.Key, p.Keys)
-	if p.Key == "" && len(p.Keys) > 0 {
-		// no front key but others: the first of them fronts
-		p.Key, p.KeyName, p.Keys = p.Keys[0].Key, p.Keys[0].Name, p.Keys[1:]
-	}
-	if p.Key == "" {
-		p.KeyName = ""
-	}
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -282,7 +314,6 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
 		// Presets own their request shape; custom headers are supported only
@@ -304,13 +335,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
-}
-
-// Catalogs are the models.dev ids the provider's models are looked up in,
-// first match wins: a gateway that resells several vendors names them all
-// ("openai, deepseek").
-func (p Provider) Catalogs() []string {
-	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
 }
 
 func cleanList(xs []string) []string {

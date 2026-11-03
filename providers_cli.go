@@ -27,8 +27,8 @@ const providerUsage = `usage:
   magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
-  magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
+  magpie provider fallback <id> [<provider/model>… | none]   models to try, in order, when this one can't answer
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
@@ -68,11 +68,11 @@ func providers() error {
 		} else {
 			r.models = fmt.Sprintf("%d models", n)
 		}
+		if len(p.Fallback) > 0 {
+			r.models += muted.Render("  · fallback " + strings.Join(p.Fallback, " → "))
+		}
 		if u := uses[p.ID]; len(u) > 0 {
 			r.uses = green.Render("← " + strings.Join(u, ", "))
-		}
-		if len(p.Fallback) > 0 {
-			r.uses += muted.Render("  ⤷ " + strings.Join(p.Fallback, " → "))
 		}
 		for i, s := range []string{r.name, r.id, r.host, r.key, r.models} {
 			w[i] = max(w[i], lipgloss.Width(s))
@@ -217,40 +217,6 @@ func providerCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(p.Icon))
 		return nil
-	case "fallback":
-		// where requests go when this provider is out of quota, rate
-		// limited or down; "none" clears the list
-		if len(rest) < 1 {
-			return fmt.Errorf("magpie provider fallback <id> [provider/model… | none]")
-		}
-		p, err := provider.Find(rest[0])
-		if err != nil {
-			return err
-		}
-		if len(rest) > 1 {
-			p.Fallback = nil
-			if !(len(rest) == 2 && rest[1] == "none") {
-				for _, id := range rest[1:] {
-					if _, _, ok := provider.Resolve(id); !ok {
-						return fmt.Errorf("magpie knows no model %q (magpie models lists them)", id)
-					}
-					p.Fallback = append(p.Fallback, id)
-				}
-			}
-			if err := provider.Save(*p); err != nil {
-				return err
-			}
-			if p, err = provider.Find(p.ID); err != nil {
-				return err
-			}
-		}
-		if len(p.Fallback) == 0 {
-			fmt.Println(p.Name, muted.Render("has no fallback · magpie provider fallback "+p.ID+" <provider/model>…"))
-			return nil
-		}
-		fmt.Println(green.Render("✓"), p.Name, "falls back to", strings.Join(p.Fallback, muted.Render(" → ")),
-			muted.Render("· when out of quota, rate limited or down"))
-		return nil
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -291,6 +257,8 @@ func providerCmd(args []string) error {
 			os.Exit(1)
 		}
 		return nil
+	case "fallback":
+		return fallbackCmd(rest)
 	case "models":
 		if len(rest) < 1 {
 			return fmt.Errorf("magpie provider models <id> [model ids to expose…]")
@@ -324,6 +292,43 @@ func providerCmd(args []string) error {
 		return err
 	}
 	return showProvider(*p)
+}
+
+// fallbackCmd: `magpie provider fallback <id> [provider/model… | none]`
+func fallbackCmd(rest []string) error {
+	const usageLine = "magpie provider fallback <id> [<provider/model>… | none]"
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: %s", usageLine)
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	refs := rest[1:]
+	if len(refs) == 0 {
+		if len(p.Fallback) == 0 {
+			fmt.Println(muted.Render("no fallback for " + p.Name + " · " + usageLine))
+			return nil
+		}
+		fmt.Println(bold.Render(p.Name), muted.Render("fallback"), strings.Join(p.Fallback, " → "))
+		return nil
+	}
+	if slices.Contains(refs, "none") {
+		if len(refs) > 1 {
+			return fmt.Errorf("none stands alone: %s", usageLine)
+		}
+		refs = nil
+	}
+	saved, err := provider.SetFallback(p.ID, refs)
+	if err != nil {
+		return err
+	}
+	if len(saved.Fallback) == 0 {
+		fmt.Println(green.Render("✓"), saved.Name, "fallback cleared")
+		return nil
+	}
+	fmt.Println(green.Render("✓"), saved.Name, "fallback", strings.Join(saved.Fallback, " → "))
+	return nil
 }
 
 // addProvider: `magpie provider add <preset> [key]` or `magpie provider add <name> k=v…`
@@ -405,6 +410,9 @@ func showProvider(p provider.Provider) error {
 		kv("key", muted.Render("none needed"))
 	default:
 		kv("key", amber.Render("not set")+muted.Render("  magpie provider key "+p.ID+" …"))
+	}
+	if len(p.Fallback) > 0 {
+		kv("fallback", strings.Join(p.Fallback, " → "))
 	}
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
