@@ -68,12 +68,8 @@ func targetsFor(p provider.Provider, model string) []target {
 	out := []target{{p: p, model: model}}
 	seen := map[string]bool{p.ID + "\x00" + model: true}
 	for _, name := range p.Fallback {
-		name = strings.TrimSpace(name)
-		if _, _, ok := strings.Cut(name, "/"); !ok {
-			continue // fallbacks are written provider/model, never a bare model id
-		}
-		fp, fm, ok := provider.Resolve(name)
-		if !ok || !offers(fp, fm) {
+		fp, fm, ok := FallbackTarget(name)
+		if !ok {
 			continue
 		}
 		key := fp.ID + "\x00" + fm
@@ -84,6 +80,22 @@ func targetsFor(p provider.Provider, model string) []target {
 		out = append(out, target{p: fp, model: fm})
 	}
 	return out
+}
+
+// FallbackTarget resolves one Fallback entry ("provider/model") to the
+// provider and vendor model it names. It reports false for entries that are
+// not written provider/model or that the provider does not offer. The CLI
+// uses it to check entries before saving, so both agree on what is known.
+func FallbackTarget(name string) (provider.Provider, string, bool) {
+	name = strings.TrimSpace(name)
+	if _, _, ok := strings.Cut(name, "/"); !ok {
+		return provider.Provider{}, "", false // fallbacks are written provider/model, never a bare model id
+	}
+	fp, fm, ok := provider.Resolve(name)
+	if !ok || !offers(fp, fm) {
+		return provider.Provider{}, "", false
+	}
+	return fp, fm, true
 }
 
 // offers reports whether a provider serves a model: the user picked it, or
