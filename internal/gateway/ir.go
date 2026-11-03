@@ -1,6 +1,6 @@
 // Package gateway is the local LLM endpoint agents talk to. It serves the
-// wire APIs coding agents speak — OpenAI Chat Completions, OpenAI
-// Responses, Anthropic Messages and Google Gemini — and forwards each call to whichever
+// wire APIs coding agents speak — OpenAI Chat Completions, OpenAI Responses,
+// Anthropic Messages and the Gemini API — and forwards each call to whichever
 // provider serves the requested model, translating between the APIs when
 // the provider does not speak the one the agent used.
 package gateway
@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// The APIs are close cousins; everything below is the shape they have
+// The three APIs are close cousins; everything below is the shape they have
 // in common. A request is parsed into it, and a reply is produced from it.
 
 // Kind is what a part of a message holds.
@@ -62,19 +62,20 @@ type Tool struct {
 
 // Request is a call to a model, whichever API it arrived in.
 type Request struct {
-	Model      string
-	System     string
-	Messages   []Message
-	Tools      []Tool
-	ToolChoice string // "" | auto | none | required | name:<tool>
-	MaxTokens  int
-	Temp       *float64
-	TopP       *float64
-	Stop       []string
-	Stream     bool
-	Effort     string // low | medium | high | xhigh | max, when the client asked
-	Thinking   bool   // the client asked for visible reasoning
-	Parallel   *bool  // parallel tool calls allowed
+	Model        string
+	System       string
+	Messages     []Message
+	Tools        []Tool
+	ToolChoice   string // "" | auto | none | required | name:<tool>
+	MaxTokens    int
+	Temp         *float64
+	TopP         *float64
+	Stop         []string
+	Stream       bool
+	Effort       string // low | medium | high | xhigh | max, when the client asked
+	Thinking     bool   // the client asked for reasoning, so the upstream should reason
+	ShowThoughts bool   // the client wants reasoning text back (Gemini includeThoughts)
+	Parallel     *bool  // parallel tool calls allowed
 }
 
 // EventKind is what a streamed event carries.
