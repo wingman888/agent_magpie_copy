@@ -96,29 +96,40 @@ func ParseImport(link string) (Provider, error) {
 		return Provider{}, fmt.Errorf("%q is reserved; pick another id", Scheme)
 	}
 
-	if key := vals.Get("key"); key != "" {
-		if len(key) > maxImportKey {
-			return Provider{}, fmt.Errorf("key is longer than %d bytes", maxImportKey)
+	if raw := vals.Get("key"); raw != "" {
+		// Control characters are checked before trimming: U+0085 (NEL) is a
+		// control character but also unicode.IsSpace, so trimming first would
+		// hide it.
+		if hasControl(raw) {
+			return Provider{}, errors.New("key contains control characters")
 		}
-		for i := 0; i < len(key); i++ {
-			// ASCII control characters (incl. CR/LF) and DEL; other bytes, such as
-			// spaces and UTF-8 sequences, are kept as they are.
-			if c := key[i]; c < 0x20 || c == 0x7f {
-				return Provider{}, errors.New("key contains control characters")
+		// Surrounding whitespace is noise from copy-paste; interior spaces are
+		// part of the key and are kept. A key that is blank after trimming is
+		// treated as no key.
+		if key := strings.TrimSpace(raw); key != "" {
+			if len(key) > maxImportKey {
+				return Provider{}, fmt.Errorf("key is longer than %d bytes", maxImportKey)
 			}
+			p.Key = key
 		}
-		p.Key = key
 	}
 
 	if raw := vals.Get("models"); raw != "" {
 		if hasControl(raw) {
 			return Provider{}, errors.New("models contains control characters")
 		}
-		list := cleanList(strings.Split(raw, ","))
-		if len(list) > maxImportModels {
-			return Provider{}, fmt.Errorf("at most %d models per import, got %d", maxImportModels, len(list))
+		parts := strings.Split(raw, ",")
+		// Count before deduplicating so an oversized list is refused cheaply.
+		nonEmpty := 0
+		for _, part := range parts {
+			if strings.TrimSpace(part) != "" {
+				nonEmpty++
+			}
 		}
-		p.Models = list
+		if nonEmpty > maxImportModels {
+			return Provider{}, fmt.Errorf("at most %d models per import, got %d", maxImportModels, nonEmpty)
+		}
+		p.Models = dedupeModels(parts)
 	}
 
 	if presetID != "" {
@@ -225,6 +236,25 @@ func httpsLink(raw string) string {
 		return ""
 	}
 	return s
+}
+
+// dedupeModels trims each item, drops empty ones and repeated ids, keeping the
+// first occurrence order. It uses a map, so the cost is linear in the input.
+func dedupeModels(parts []string) []string {
+	seen := make(map[string]struct{}, len(parts))
+	var out []string
+	for _, part := range parts {
+		m := strings.TrimSpace(part)
+		if m == "" {
+			continue
+		}
+		if _, dup := seen[m]; dup {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+	}
+	return out
 }
 
 func hasControl(s string) bool {

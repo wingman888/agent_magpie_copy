@@ -242,6 +242,68 @@ func TestImportKeyPrintableKept(t *testing.T) {
 	}
 }
 
+func TestImportKeyTrimmedAtEnds(t *testing.T) {
+	importIsolate(t)
+	p := mustParse(t, "magpie://import?preset=deepseek&key=%20%20sk-x%20%20")
+	if p.Key != "sk-x" {
+		t.Errorf("key = %q, want sk-x", p.Key)
+	}
+	p = mustParse(t, "magpie://import?preset=deepseek&key=sk-a%20b%20c")
+	if p.Key != "sk-a b c" {
+		t.Errorf("interior spaces lost: key = %q", p.Key)
+	}
+}
+
+func TestImportBlankKeyIsNoKey(t *testing.T) {
+	importIsolate(t)
+	for _, link := range []string{
+		"magpie://import?preset=deepseek&key=%20%20%20",
+		"magpie://import?preset=deepseek&key=",
+	} {
+		p := mustParse(t, link)
+		if p.Key != "" || p.Ready() {
+			t.Errorf("%q: key %q ready %v, want no key", link, p.Key, p.Ready())
+		}
+	}
+}
+
+func TestImportKeyC1ControlRejected(t *testing.T) {
+	importIsolate(t)
+	// U+0080..U+009F are control characters; U+0085 is also a space for
+	// TrimSpace, so it must be caught before trimming.
+	for _, key := range []string{"%C2%85", "%20%C2%85%20", "sk%C2%85x", "%C2%80", "sk%C2%9Fx"} {
+		link := "magpie://import?preset=deepseek&key=" + key
+		if p, err := ParseImport(link); err == nil {
+			t.Errorf("%q accepted with key %q", link, p.Key)
+		}
+	}
+}
+
+func TestImportModelsHugeRejected(t *testing.T) {
+	importIsolate(t)
+	if _, err := ParseImport("magpie://import?preset=deepseek&models=" + manyModelsQuery(100000)); err == nil {
+		t.Error("100000 unique models accepted")
+	}
+}
+
+func TestImportModelsCountedBeforeDedupe(t *testing.T) {
+	importIsolate(t)
+	// 201 entries, all the same id: the limit applies to the entries given,
+	// so this is refused rather than collapsed to one model.
+	raw := strings.TrimSuffix(strings.Repeat("a,", 201), ",")
+	if _, err := ParseImport("magpie://import?preset=deepseek&models=" + raw); err == nil {
+		t.Error("201 duplicate entries accepted")
+	}
+}
+
+func TestImportModelsDedupe(t *testing.T) {
+	importIsolate(t)
+	p := mustParse(t, "magpie://import?preset=deepseek&models=a,%20a%20,,b,a,b")
+	if strings.Join(p.Models, "|") != "a|b" {
+		t.Errorf("models = %q, want a|b", p.Models)
+	}
+}
+
 func TestImportUnknownParamIgnored(t *testing.T) {
 	importIsolate(t)
 	p := mustParse(t, "magpie://import?name=Relay&chat=https://a.example/v1&base=x&foo=bar")
