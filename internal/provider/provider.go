@@ -150,7 +150,14 @@ func Slug(name string) string {
 }
 
 // Save adds or replaces a provider.
-func Save(p Provider) error {
+func Save(p Provider) error { return save(p, true) }
+
+// SaveImported adds or replaces a provider from an import link. Unlike Save it
+// accepts a provider with no key yet: the user supplies one later with
+// `magpie provider key`.
+func SaveImported(p Provider) error { return save(p, false) }
+
+func save(p Provider, needKey bool) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -179,7 +186,7 @@ func Save(p Provider) error {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
-		if p.Key == "" && !keyOptional(p) {
+		if needKey && p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}

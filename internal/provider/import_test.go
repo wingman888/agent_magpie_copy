@@ -148,13 +148,16 @@ func TestParseImportExplicitIDAndNameTruncation(t *testing.T) {
 	if p.ID != "my-relay" {
 		t.Errorf("id = %q, want the explicit one", p.ID)
 	}
-	// 100 two-byte runes: cut to 80 runes, not 80 bytes
-	p, err = ParseImport("magpie://import?name=" + strings.Repeat("%C3%A9", 100) + "&chat=https://a.example/v1")
+	// "Acme " plus 100 two-byte runes: cut to 80 runes (not bytes), id still "acme"
+	p, err = ParseImport("magpie://import?name=Acme%20" + strings.Repeat("%C3%A9", 100) + "&chat=https://a.example/v1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Name != strings.Repeat("é", 80) {
+	if want := "Acme " + strings.Repeat("é", 75); p.Name != want {
 		t.Errorf("truncated name = %d runes, want the first 80", len([]rune(p.Name)))
+	}
+	if p.ID != "acme" {
+		t.Errorf("id = %q", p.ID)
 	}
 }
 

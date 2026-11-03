@@ -60,7 +60,7 @@ func importLink(args []string, in io.Reader, interactive bool, out io.Writer) er
 		}
 	}
 
-	if err := provider.Save(p); err != nil {
+	if err := provider.SaveImported(p); err != nil {
 		return err
 	}
 	if err := reportAdded(out, p); err != nil {
