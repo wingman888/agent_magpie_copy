@@ -193,11 +193,11 @@ func Save(p Provider) error {
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			return store(f)
+			return storeAndCollect(f)
 		}
 	}
 	f.Providers = append(f.Providers, p)
-	return store(f)
+	return storeAndCollect(f)
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -208,11 +208,11 @@ func Delete(id string) error {
 		for i := range f.Providers {
 			if f.Providers[i].ID == id {
 				f.Providers[i].Hidden = true
-				return store(f)
+				return storeAndCollect(f)
 			}
 		}
 		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
-		return store(f)
+		return storeAndCollect(f)
 	}
 	f := load()
 	keep := f.Providers[:0]
@@ -228,7 +228,7 @@ func Delete(id string) error {
 		return fmt.Errorf("no provider %q", id)
 	}
 	f.Providers = keep
-	return store(f)
+	return storeAndCollect(f)
 }
 
 // keyOptional is true for local servers, which usually have no key.

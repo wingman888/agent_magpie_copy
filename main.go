@@ -64,11 +64,8 @@ var (
 )
 
 func main() {
-	// Before anything makes a request, so the default HTTP client (used by
-	// account, usage and catalog code) and the gateway follow the proxy rules.
-	// GUI and CLI/TUI both start here.
-	netproxy.Install()
 	gateway.Version = version
+	netproxy.Install()
 	update.GUI = hasGUI
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
