@@ -37,7 +37,7 @@ func TestRotateTurnsEachProtocolPoolApart(t *testing.T) {
 		{"claude-x", provider.Chat, rest("k1")},
 		{"m", provider.Chat, rest("kc1")},
 		{"claude-x", provider.Anthropic, rest("k2")},
-		{"m", provider.Anthropic, rest("kc2")},
+		{"m", provider.Chat, rest("kc2")},
 		{"claude-x", provider.Chat, rest("k1")},
 		{"m", provider.Chat, rest("kc1")},
 	} {
