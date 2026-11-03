@@ -193,14 +193,27 @@ func run(args []string) error {
 }
 
 // leavesAgentsAlone says whether a command must not rewrite the agents' own
-// files. backup only reads them, so the one-off rename of old agent settings
-// is left out for it. (restore is handled by isRestore.)
+// files. backup only reads them; restore --no-agents is asked not to touch
+// them at all, so the one-off rename of old agent settings is left out too.
 func leavesAgentsAlone(args []string) bool {
-	return len(args) > 0 && args[0] == "backup"
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "backup":
+		return true
+	case "restore":
+		for _, a := range args[1:] {
+			if a == "--no-agents" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-// isRestore says whether the command is `magpie restore`, which does its own
-// startup migration in restoreCmd, after the backup has been opened.
+// isRestore says whether the command is `magpie restore`. Its startup
+// migrations run in restoreCmd instead, once the backup has been opened.
 func isRestore(args []string) bool {
 	return len(args) > 0 && args[0] == "restore"
 }
