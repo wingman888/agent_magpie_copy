@@ -190,7 +190,7 @@ func TestNotChatModel(t *testing.T) {
 		want   bool
 	}{
 		{400, `{"error":{"message":"not a chat model; use /v1/responses"}}`, true},
-		{404, `use v1/completions`, false}, // not a phrase of the rule: it is no refusal
+		{404, `use v1/completions`, true},
 		{429, `rate limit`, false},
 		{200, `use v1/responses`, false},
 	} {

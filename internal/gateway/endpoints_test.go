@@ -293,8 +293,7 @@ func TestNotChatModelPhrases(t *testing.T) {
 		{400, `use /v1/chat/completions`, true},
 		{400, `not supported in the v1/responses`, true},
 		{400, `not supported in /v1/responses`, true},
-		{404, `use v1/completions`, false}, // not a phrase of the rule
-		{400, `use v1/completions`, false},
+		{404, `use v1/completions`, true},
 		{400, `messages: field required`, false},
 		{500, `use v1/responses`, false},
 		{502, `unsupported_api_for_model`, false},

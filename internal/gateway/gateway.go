@@ -656,6 +656,8 @@ func notChatModel(status int, body []byte) bool {
 		"not supported in /v1/chat/completions",
 		"not supported in the v1/responses",
 		"not supported in /v1/responses",
+		"use v1/completions",
+		"use /v1/completions",
 		"use v1/responses",
 		"use /v1/responses",
 		"use v1/chat/completions",
