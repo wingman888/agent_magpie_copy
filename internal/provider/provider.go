@@ -253,7 +253,8 @@ func Delete(id string) error {
 
 // keepKeys carries the stored provider's extra keys over to a save that does
 // not bring its own list, so a form that knows nothing of them cannot drop
-// them. The current key's name and limit follow the key while it stays the same.
+// them. A save that keeps the current key also keeps its name and limit when
+// the caller left those blank.
 func keepKeys(old, p Provider) Provider {
 	if p.Keys == nil {
 		p.Keys = old.Keys
