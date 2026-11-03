@@ -67,9 +67,7 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
-	// Fallback lists the providers tried before Provider answered, each as
-	// "<providerId>: <reason>", joined by "; ". Empty when nothing switched.
-	Fallback          string            `json:"fallback,omitempty"`
+	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
@@ -85,9 +83,6 @@ type Server struct {
 	// responseOnly remembers models rejected by Chat Completions, avoiding a
 	// known-failing probe on every Claude Code turn.
 	responseOnly map[string]bool
-	// resting holds providers that just failed in a switchable way, until the
-	// time shown. Memory only: a restart clears it.
-	resting      map[string]restEntry
 	subscription *subscriptionBridge
 	debug        bool
 }
@@ -218,7 +213,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	p, model, ok := provider.Resolve(modelOf(body))
 	// Claude Subscription generations run through the Claude Code binary. Its
 	// OAuth token must not take a direct HTTP side path just for token counting.
-	if ok && p.Account != nil && p.Account.Agent == "claude" {
+	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok") {
 		req, err := parseAnthropic(body)
 		if err != nil {
 			writeError(w, provider.Anthropic, 400, err.Error())
@@ -226,6 +221,18 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
+	}
+	if ok {
+		// a relay's OpenAI-only key can't count Anthropic tokens
+		q := p
+		q.Anthropic = ""
+		for _, c := range perKey(p, model, provider.Anthropic) {
+			if c.p.Anthropic != "" {
+				q = c.p
+				break
+			}
+		}
+		p = q
 	}
 	if ok && p.Anthropic != "" {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
@@ -354,97 +361,80 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	call.Provider = p.ID
-
-	// Candidates in order: the primary, then its fallbacks. A candidate that
-	// fails in a switchable way (see switchable) hands over to the next one,
-	// as long as its error has not reached the client.
-	var (
-		u      Usage
-		failed []string
-		at     int // index in targets of the candidate that answered
-		res    outcome
-	)
-	targets := s.order(targetsFor(p, model))
-	for i, t := range targets {
-		at = i
-		if len(targets) == 1 {
-			// no fallbacks configured: the reply goes straight to the client
-			res = s.attempt(w, r, from, body, t, &u)
-			break
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
+	cands := s.candidates(p, model, from)
+	var skipped []string
+	for i, c := range cands {
+		last := i == len(cands)-1 || r.Context().Err() != nil
+		hw := newHoldWriter(w, !last)
+		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+		if !last && hw.failed() {
+			s.restAfter(c.rest, hw.status, hw.header, hw.held.Bytes())
+			skipped = append(skipped, c.label()+": "+call.Error)
+			continue
 		}
-		g := newGate(w)
-		var au Usage
-		res = s.attempt(g, r, from, body, t, &au)
-		status, held := g.failure()
-		if held && switchable(status, g.held.Bytes()) {
-			note := reasonOf(t.p, status, res.msg)
-			s.rest(t.p.ID, note)
-			if i+1 < len(targets) && r.Context().Err() == nil {
-				failed = append(failed, note)
-				continue
-			}
+		hw.release()
+		model = c.model
+		if call.Status < 400 {
+			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
 		}
-		g.release()
-		u = au
 		break
 	}
-	final := targets[at]
-	// a resting provider that was not reached still explains the switch
-	for _, t := range targets[at+1:] {
-		if t.rest != "" {
-			failed = append(failed, t.rest)
-		}
-	}
-	call.Provider = final.p.ID
-	call.To, call.Status, call.Error = res.to, res.status, res.msg
-	call.Usage = u
-	if len(failed) > 0 {
-		call.Fallback = strings.Join(failed, "; ")
+	if len(skipped) > 0 {
+		call.Fallback = strings.Join(skipped, "; ")
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	if res.noEndpoint {
-		return
+	if call.To != "" {
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 	}
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: final.p.ID, Model: final.model,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
-// outcome is how one attempt at a provider ended.
-type outcome struct {
-	to         provider.Protocol
-	status     int
-	msg        string
-	noEndpoint bool // the provider speaks no protocol the request can use
-}
-
-// attempt sends the request to one candidate and writes its reply to w.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte, t target, u *Usage) outcome {
-	p, model := t.p, t.model
+// attempt sends a request to one provider. call.To stays empty when the
+// provider has no endpoint to send it to.
+func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
-		status, msg := s.serveClaudeSubscription(w, r, from, model, body, u)
-		return outcome{to: provider.Anthropic, status: status, msg: msg}
+		call.To = provider.Anthropic
+		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
+	}
+	// Cursor's API belongs to its own clients: its CLI does the talking
+	if p.Account != nil && p.Account.Agent == "cursor" {
+		call.To = from
+		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+			return s.subscription.startCursor(ctx, req, model)
+		}
+		return s.serveSubscription(w, r, from, "Cursor", model, body, &call.Usage, start)
+	}
+	// and so does Grok's
+	if p.Account != nil && p.Account.Agent == "grok" {
+		call.To = from
+		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+			return s.subscription.startGrok(ctx, req, model, p.Account.Home)
+		}
+		return s.serveSubscription(w, r, from, "Grok", model, body, &call.Usage, start)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
 	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
 	if relay {
-		status, msg := s.passthrough(w, r, p, from, model, body, u)
-		return outcome{to: from, status: status, msg: msg}
+		call.To = from
+		return s.passthrough(w, r, p, from, model, body, &call.Usage)
 	}
 	to := p.Speaks()
 	if len(to) == 0 {
 		msg := p.Name + " has no endpoint configured"
-		return outcome{status: writeError(w, from, 502, msg), msg: msg, noEndpoint: true}
+		return writeError(w, from, 502, msg), msg
 	}
-	status, msg := s.translate(w, r, p, from, to[0], model, body, u)
-	return outcome{to: to[0], status: status, msg: msg}
+	call.To = to[0]
+	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 }
 
 // forward sends a request to the provider.
