@@ -31,6 +31,9 @@ func (c *codexFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.body, _ = io.ReadAll(r.Body)
 	if c.ctype != "" {
 		w.Header().Set("Content-Type", c.ctype)
+	} else {
+		// a nil entry keeps net/http from sniffing a type into the reply
+		w.Header()["Content-Type"] = nil
 	}
 	if c.code != 0 {
 		w.WriteHeader(c.code)
