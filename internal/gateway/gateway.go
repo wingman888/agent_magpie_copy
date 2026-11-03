@@ -85,7 +85,6 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	trace        trace // what routing did with each request, for the Gateway view
 }
 
 // New makes a gateway.
@@ -162,7 +161,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("POST /_magpie/claude-mcp/{token}", s.subscription.mcpCall)
-	mux.HandleFunc(CodexPath+"/", s.codexBackend)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
 	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +213,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	p, model, ok := provider.Resolve(modelOf(body))
 	// Claude Subscription generations run through the Claude Code binary. Its
 	// OAuth token must not take a direct HTTP side path just for token counting.
-	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok") {
+	if ok && p.Account != nil && p.Account.Agent == "claude" {
 		req, err := parseAnthropic(body)
 		if err != nil {
 			writeError(w, provider.Anthropic, 400, err.Error())
@@ -225,16 +223,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ok {
-		// a relay's OpenAI-only key can't count Anthropic tokens
-		q := p
-		q.Anthropic = ""
-		for _, c := range perKey(p, model, provider.Anthropic) {
-			if c.p.Anthropic != "" {
-				q = c.p
-				break
-			}
-		}
-		p = q
+		p, ok = anthropicKey(p)
 	}
 	if ok && p.Anthropic != "" {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
@@ -254,6 +243,25 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
+}
+
+// anthropicKey is p using its first key on that may go to its Anthropic
+// endpoint: one for all protocols, or for Anthropic's. ok is false when
+// every key is kept for other endpoints.
+func anthropicKey(p provider.Provider) (provider.Provider, bool) {
+	if p.Account != nil {
+		return p, true
+	}
+	keys := p.KeysOn()
+	if len(keys) == 0 {
+		return p, true
+	}
+	for _, k := range keys {
+		if k.Protocol == "" || k.Protocol == provider.Anthropic {
+			return p.WithKey(k), true
+		}
+	}
+	return p, false
 }
 
 // handle is the request path of one client API.
@@ -349,27 +357,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	var group *provider.Group
-	var members []provider.Member
-	var p provider.Provider
-	var model string
-	ok := false
-	if provider.IsGroupRef(call.Model) {
-		g, ms, found := provider.FindGroup(call.Model)
-		if found && len(ms) == 0 {
-			call.Status, call.Error = 404, "routing group has no model ready"
-			writeError(w, from, 404, fmt.Sprintf("magpie's routing group %q (%s) has no model ready: none of its members' providers can take requests now", g.Name, g.Ref()))
-			finishCapture()
-			s.record(call)
-			return
-		}
-		if found {
-			group, members, ok = &g, ms, true
-			p, model = ms[0].Provider, ms[0].Model
-		}
-	} else {
-		p, model, ok = provider.Resolve(call.Model)
-	}
+	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
@@ -385,46 +373,20 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	// — or, for a routing group, the keys and accounts of all its members
-	rt := Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID}
-	// the conversation stays on whoever answered it last when it may
-	ss := sessionOf(r.Header, from, body, call.Model)
-	var cands []candidate
-	var pl planned
-	if group != nil {
-		cands, pl = s.planGroup(*group, members, from, ss)
-		rt.Provider, rt.Group = group.Ref(), routeGroup(*group, members)
-	} else {
-		cands, pl = s.plan(p, model, from, ss)
-	}
-	cands, pl, rt.Affinity = keep(ss, affinityOf(p, group), cands, pl)
-	rt.Order, rt.Left = pl.order, pl.left
-	tr := s.trace.begin(rt)
+	cands := s.candidates(p, model, from)
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
 		hw := newHoldWriter(w, !last)
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		began := time.Now()
-		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
 		if !last && hw.failed() {
-			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
-			try.Fail, try.Rest = rest.Why, &rest
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			s.rest(c.rest)
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
 		hw.release()
 		model = c.model
-		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			remember(ss, c, call.Usage.CacheRead)
-		} else {
-			try.Fail = failure(call.Status, []byte(call.Error))
-		}
-		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 		break
 	}
 	if len(skipped) > 0 {
@@ -432,10 +394,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
-	s.trace.update(tr, func(t *Route) {
-		t.Done, t.Status, t.Error, t.Millis = true, call.Status, call.Error, call.Millis
-		t.Tokens = call.Usage.Input + call.Usage.Output + call.Usage.CacheRead + call.Usage.CacheWrite
-	})
 	s.record(call)
 	if call.To != "" {
 		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
@@ -453,22 +411,6 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
 		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
-	}
-	// Cursor's API belongs to its own clients: its CLI does the talking
-	if p.Account != nil && p.Account.Agent == "cursor" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startCursor(ctx, req, model)
-		}
-		return s.serveSubscription(w, r, from, "Cursor", model, body, &call.Usage, start)
-	}
-	// and so does Grok's
-	if p.Account != nil && p.Account.Agent == "grok" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startGrok(ctx, req, model, p.Account.Home)
-		}
-		return s.serveSubscription(w, r, from, "Grok", model, body, &call.Usage, start)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
@@ -528,7 +470,6 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
 	rd, sse := eventStream(res)
@@ -671,7 +612,6 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(actual)
@@ -853,23 +793,14 @@ var sessionHeaders = []string{
 	"session_id", "session-id", "x-claude-code-session-id",
 }
 
-// sessionHeaderID is the session id the agent sent: the first of
-// sessionHeaders that is not blank, "" when it sent none.
-func sessionHeaderID(in http.Header) string {
-	for _, h := range sessionHeaders {
-		if v := strings.TrimSpace(in.Get(h)); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
 // conversationID is a stable id for the conversation a request belongs to.
 // It is the agent's own session id when it sends one; otherwise it is derived
 // from the conversation's first user message, which every later turn repeats.
 func conversationID(in http.Header, body []byte) string {
-	if v := sessionHeaderID(in); v != "" {
-		return v
+	for _, h := range sessionHeaders {
+		if v := strings.TrimSpace(in.Get(h)); v != "" {
+			return v
+		}
 	}
 	var m struct {
 		Messages []json.RawMessage `json:"messages"`

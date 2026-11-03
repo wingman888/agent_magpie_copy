@@ -3,7 +3,6 @@ package gui
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -71,21 +70,5 @@ func importRoutes(mux *http.ServeMux) {
 			}
 		}
 		writeJSON(rw, in)
-	})
-	// fetch the picture a link named, once the user has the dialog open. The
-	// URL is validated again in provider.FetchIcon: this handler only ever
-	// fetches into the icons folder and answers with the reference.
-	mux.HandleFunc("POST /api/import/icon", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct{ URL string }
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			fail(rw, err)
-			return
-		}
-		icon, err := provider.FetchIcon(r.Context(), in.URL)
-		if err != nil {
-			fail(rw, err)
-			return
-		}
-		writeJSON(rw, map[string]string{"icon": icon})
 	})
 }
