@@ -1,0 +1,92 @@
+package provider
+
+// How much of its allowance each of an agent's accounts has used, the one
+// the agent is signed in to and every saved one, so picking which to use
+// next is a look at the list, not a guess.
+
+import (
+	"context"
+	"strings"
+	"sync"
+	"time"
+)
+
+var loginUsageCache struct {
+	sync.Mutex
+	m map[string]loginUsageEntry // agent/user
+}
+
+type loginUsageEntry struct {
+	at time.Time
+	q  SubscriptionQuota
+}
+
+// LoginUsage is the allowance used by each of an agent's accounts, by
+// user. What was fetched less than a minute ago comes from the cache; the
+// rest is asked for at once, as long as ctx allows.
+func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota {
+	out := map[string]SubscriptionQuota{}
+	if agent != "claude" && agent != "codex" {
+		return out
+	}
+	c := &loginUsageCache
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, l := range Logins(agent) {
+		key := agent + "/" + strings.ToLower(l.User)
+		c.Lock()
+		e, ok := c.m[key]
+		c.Unlock()
+		if ok && time.Since(e.at) < time.Minute {
+			out[l.User] = e.q
+			continue
+		}
+		wg.Add(1)
+		go func(l Login) {
+			defer wg.Done()
+			q := loginQuota(ctx, l)
+			if q.Error != "" && ok {
+				q = e.q // a hiccup keeps what was known
+			}
+			c.Lock()
+			if c.m == nil {
+				c.m = map[string]loginUsageEntry{}
+			}
+			c.m[key] = loginUsageEntry{time.Now(), q}
+			c.Unlock()
+			mu.Lock()
+			out[l.User] = q
+			mu.Unlock()
+		}(l)
+	}
+	wg.Wait()
+	return out
+}
+
+func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
+	q := SubscriptionQuota{Provider: l.Agent, Plan: l.Plan, Windows: []QuotaWindow{}}
+	var tok, accountID string
+	var err error
+	switch {
+	case l.Active && l.Agent == "claude":
+		tok, err = claudeToken(ctx)
+	case l.Active:
+		tok, accountID, err = codexToken(ctx, codexAuthPath())
+	default:
+		tok, accountID, err = savedLoginToken(ctx, l.Agent, l.User)
+	}
+	if err == nil {
+		if l.Agent == "claude" {
+			q.Windows, err = claudeWindows(ctx, tok)
+		} else {
+			var plan string
+			if plan, q.Windows, err = codexWindows(ctx, tok, accountID); plan != "" {
+				q.Plan = plan
+			}
+		}
+	}
+	if err != nil {
+		q.Error = err.Error()
+	}
+	return q
+}
