@@ -486,9 +486,11 @@ func (r *subscriptionRun) continueWith(results []Part) (<-chan Event, error) {
 			r.abort()
 			return nil, fmt.Errorf("the agent is not waiting for tool result %s", p.CallID)
 		}
-		r.bridge.mu.Lock()
-		delete(r.bridge.calls, p.CallID)
-		r.bridge.mu.Unlock()
+		if r.bridge != nil {
+			r.bridge.mu.Lock()
+			delete(r.bridge.calls, p.CallID)
+			r.bridge.mu.Unlock()
+		}
 		content := []map[string]any{{"type": "text", "text": p.Text}}
 		waiter <- mcpToolResult{Content: content, IsError: p.IsError}
 		close(waiter)
@@ -627,15 +629,21 @@ func (r *subscriptionRun) abort() {
 }
 
 func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
-	b.mu.Lock()
-	delete(b.runs, run.token)
-	for id, owner := range b.calls {
-		if owner == run {
-			delete(b.calls, id)
+	// A run built without a bridge (test fixtures) has no routing entries to
+	// drop; its abort timers may still fire after the caller has returned.
+	if b != nil {
+		b.mu.Lock()
+		delete(b.runs, run.token)
+		for id, owner := range b.calls {
+			if owner == run {
+				delete(b.calls, id)
+			}
 		}
+		b.mu.Unlock()
 	}
-	b.mu.Unlock()
-	_ = os.RemoveAll(run.tmp)
+	if run.tmp != "" {
+		_ = os.RemoveAll(run.tmp)
+	}
 }
 
 func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, usage *Usage) (int, string) {
