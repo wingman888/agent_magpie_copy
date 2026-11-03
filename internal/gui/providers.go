@@ -40,14 +40,17 @@ type providerJSON struct {
 		Masked   string `json:"masked"`
 		Optional bool   `json:"optional"`
 	} `json:"key"`
-	Ready     bool              `json:"ready"`
-	Chosen    []string          `json:"chosen"`  // the user's explicit picks, if any
-	Models    []modelJSON       `json:"models"`  // everything the vendor lists, exposed ones flagged
-	Exposed   int               `json:"exposed"` // how many reach the agents
-	Fetched   string            `json:"fetched"` // "3h ago" when the list came from the vendor
-	Agents    []providerAgent   `json:"agents"`  // detected agents, current ones flagged
-	Sponsored bool              `json:"sponsored"`
-	Account   *provider.Account `json:"account,omitempty"` // sign-in providers: whose login supplies the models
+	Ready     bool            `json:"ready"`
+	Chosen    []string        `json:"chosen"`  // the user's explicit picks, if any
+	Models    []modelJSON     `json:"models"`  // everything the vendor lists, exposed ones flagged
+	Exposed   int             `json:"exposed"` // how many reach the agents
+	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
+	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
+	Sponsored bool            `json:"sponsored"`
+
+	// Account is set when the provider rides on an agent's login. It holds
+	// who and which plan, never a token.
+	Account *provider.Account `json:"account,omitempty"`
 }
 
 type providerAgent struct {
@@ -72,11 +75,10 @@ type gatewayJSON struct {
 }
 
 type providersJSON struct {
-	Providers []providerJSON `json:"providers"`
-	Presets   []presetJSON   `json:"presets"`
-	Gateway   gatewayJSON    `json:"gateway"`
-	// Notices are agent logins dial sees but does not offer, e.g. Claude Code.
-	Notices []provider.Notice `json:"notices"`
+	Providers  []providerJSON       `json:"providers"`
+	Presets    []presetJSON         `json:"presets"`
+	Gateway    gatewayJSON          `json:"gateway"`
+	Exclusions []provider.Exclusion `json:"exclusions"` // logins recognised but not offered, e.g. Claude Code
 }
 
 // currentProvider reads which provider (and model) an agent is routed to now.
@@ -141,10 +143,8 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 
 func providersState(gw *gateway.Server) providersJSON {
 	agents := agent.Detected()
-	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Notices: provider.Notices()}
-	if s.Notices == nil {
-		s.Notices = []provider.Notice{}
-	}
+	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Exclusions: []provider.Exclusion{}}
+	s.Exclusions = append(s.Exclusions, provider.Excluded()...)
 	have := map[string]bool{}
 	for _, p := range provider.All() {
 		have[p.ID] = true

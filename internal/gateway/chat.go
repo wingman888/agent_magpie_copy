@@ -175,6 +175,7 @@ func buildChat(r *Request, model, host string) []byte {
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
 	}
+	deepseek := strings.Contains(host, "deepseek")
 	for _, m := range r.Messages {
 		if m.Role == "assistant" {
 			am := map[string]any{"role": "assistant"}
@@ -200,9 +201,7 @@ func buildChat(r *Request, model, host string) []byte {
 			if len(calls) > 0 {
 				am["tool_calls"] = calls
 			}
-			// Reasoning goes back on every Chat upstream; OpenAI-compatible
-			// servers that do not know the field ignore it.
-			if think != "" {
+			if deepseek && think != "" {
 				am["reasoning_content"] = think
 			}
 			msgs = append(msgs, am)
