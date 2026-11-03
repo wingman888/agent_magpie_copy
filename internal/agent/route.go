@@ -19,9 +19,27 @@ const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
 func viaDial(prefix string) []Option {
+	return viaDialExcept(prefix, nil)
+}
+
+// viaDialExcept is viaDial without the providers skip reports. A signed-in
+// account provider is noted by its user (the login's email or GitHub name)
+// rather than the vendor's name.
+func viaDialExcept(prefix string, skip func(provider.Provider) bool) []Option {
+	users := map[string]string{}
+	for _, a := range provider.Accounts() {
+		users[a.Provider] = a.User
+	}
 	var out []Option
 	for _, e := range provider.Catalog() {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
+		if skip != nil && skip(e.Provider) {
+			continue
+		}
+		who := e.Provider.Name
+		if u := users[e.Provider.ID]; u != "" {
+			who = u
+		}
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: who + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out

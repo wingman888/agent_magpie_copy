@@ -175,7 +175,9 @@ func buildChat(r *Request, model, host string) []byte {
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
 	}
-	deepseek := strings.Contains(host, "deepseek")
+	// Reasoning goes back to every Chat upstream except OpenAI's own, which
+	// does not take the field; history thinking is otherwise lost.
+	carryThinking := !strings.HasSuffix(host, "openai.com")
 	for _, m := range r.Messages {
 		if m.Role == "assistant" {
 			am := map[string]any{"role": "assistant"}
@@ -201,7 +203,7 @@ func buildChat(r *Request, model, host string) []byte {
 			if len(calls) > 0 {
 				am["tool_calls"] = calls
 			}
-			if deepseek && think != "" {
+			if carryThinking && think != "" {
 				am["reasoning_content"] = think
 			}
 			msgs = append(msgs, am)

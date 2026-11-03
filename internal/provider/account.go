@@ -57,6 +57,25 @@ var ErrCodexSignedOut = errors.New("Codex 登录已失效，已登出，请运�
 // ErrCopilotSignedOut is what the user sees when a Copilot session is rejected.
 var ErrCopilotSignedOut = errors.New("GitHub Copilot 会话已失效，请重新登录 Copilot")
 
+// SignedOut is the sign-in advice for an account provider whose login was rejected.
+func SignedOut(id string) error {
+	if id == CopilotID {
+		return ErrCopilotSignedOut
+	}
+	return ErrCodexSignedOut
+}
+
+// IsSignedOut reports whether err says an account login was rejected.
+func IsSignedOut(err error) bool {
+	return errors.Is(err, ErrCodexSignedOut) || errors.Is(err, ErrCopilotSignedOut)
+}
+
+// rejected reports whether an agent's auth endpoint refused the login. Only
+// these statuses mean the user has to sign in again; others are real errors.
+func rejected(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
+}
+
 // claudeReason says why Claude Code is shown but never offered.
 const claudeReason = "Claude Code 的订阅令牌只供 Claude Code 自己使用，Anthropic 不允许把它交给其他工具，所以 dial 不把它作为 Provider 提供。"
 
@@ -127,13 +146,30 @@ func accountProviders(picks map[string][]string) []Provider {
 // accountAvailable is the model list of an account provider: the last live
 // Copilot list when one was saved, else the built-in list.
 func accountAvailable(p Provider) []catalog.Model {
-	if live, _, ok := catalog.Live(p.ID); ok {
+	if p.ID == CopilotID {
+		// without a login there is no account to own a saved list
+		if _, ok := copilotUser(); !ok {
+			return copilotBuiltin()
+		}
+	}
+	if live, _, ok := catalog.Live(liveKey(p)); ok {
 		return live
 	}
 	if p.ID == CopilotID {
 		return copilotBuiltin()
 	}
 	return codexBuiltin()
+}
+
+// liveKey names the saved model list of a provider. A Copilot list belongs
+// to the GitHub login it was fetched for, so another login never reuses it.
+func liveKey(p Provider) string {
+	if p.ID == CopilotID {
+		if u, ok := copilotUser(); ok {
+			return CopilotID + "-" + Slug(u)
+		}
+	}
+	return p.ID
 }
 
 // fetchAccount refreshes an account provider's model list. Codex has no list
@@ -151,7 +187,18 @@ func fetchAccount(ctx context.Context, p Provider) ([]catalog.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ms, catalog.SaveLive(CopilotID, api, ms)
+	// Saved under the login's own key, which is the only one read back for
+	// that login. The plain key is kept too, as the list of the current
+	// account; it is never read on its own while signed out.
+	if err := catalog.SaveLive(liveKey(p), api, ms); err != nil {
+		return nil, err
+	}
+	if liveKey(p) != p.ID {
+		if err := catalog.SaveLive(p.ID, api, ms); err != nil {
+			return nil, err
+		}
+	}
+	return ms, nil
 }
 
 func codexBuiltin() []catalog.Model {
@@ -197,6 +244,35 @@ func claudeCredentialsPath() string {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// writeAtomic replaces a file in one step: the bytes go to a temp file beside
+// it, which is then renamed over the old one, so a crash never leaves a
+// half-written login file behind.
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, perm); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // jwtClaims reads the payload of a JWT without checking its signature; dial
@@ -323,12 +399,15 @@ func refreshCodex(ctx context.Context, doc map[string]any, tk map[string]string)
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w（%v）", ErrCodexSignedOut, err)
+		return nil, fmt.Errorf("Codex 令牌刷新失败：%w", err)
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode != http.StatusOK {
-		return nil, ErrCodexSignedOut
+		if rejected(res.StatusCode) {
+			return nil, ErrCodexSignedOut
+		}
+		return nil, fmt.Errorf("Codex 令牌刷新失败：%s", APIError(b, res.Status))
 	}
 	var r struct {
 		IDToken      string `json:"id_token"`
@@ -336,7 +415,7 @@ func refreshCodex(ctx context.Context, doc map[string]any, tk map[string]string)
 		RefreshToken string `json:"refresh_token"`
 	}
 	if json.Unmarshal(b, &r) != nil || r.AccessToken == "" {
-		return nil, ErrCodexSignedOut
+		return nil, errors.New("Codex 令牌刷新返回的内容不对")
 	}
 
 	t, _ := doc["tokens"].(map[string]any)
@@ -356,7 +435,7 @@ func refreshCodex(ctx context.Context, doc map[string]any, tk map[string]string)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(codexAuthPath(), append(out, '\n'), 0o600); err != nil {
+	if err := writeAtomic(codexAuthPath(), append(out, '\n'), 0o600); err != nil {
 		return nil, err
 	}
 
@@ -381,48 +460,82 @@ type copilotApp struct {
 	OAuth string `json:"oauth_token"`
 }
 
-// copilotLogin reads the GitHub token the editor or Copilot CLI stored.
+// copilotLogin reads the GitHub token the editor or Copilot CLI stored. Each
+// entry is read on its own, so one malformed entry does not hide the others.
 func copilotLogin() (user, oauth string, ok bool) {
 	b, err := os.ReadFile(copilotAppsPath())
 	if err != nil {
 		return "", "", false
 	}
-	var apps map[string]copilotApp
-	if json.Unmarshal(b, &apps) != nil {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(b, &raw) != nil {
 		return "", "", false
 	}
-	keys := make([]string, 0, len(apps))
-	for k := range apps {
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		if strings.HasPrefix(k, "github.com") && apps[k].OAuth != "" {
-			return apps[k].User, apps[k].OAuth, true
+		if !strings.HasPrefix(k, "github.com") {
+			continue
 		}
+		var app copilotApp
+		if json.Unmarshal(raw[k], &app) != nil || app.OAuth == "" {
+			continue
+		}
+		return app.User, app.OAuth, true
 	}
 	return "", "", false
 }
 
-func copilotAccount() (Account, bool) {
+// copilotUser is the GitHub login of the signed-in Copilot account.
+func copilotUser() (string, bool) {
 	user, _, ok := copilotLogin()
 	if !ok {
-		return Account{}, false
+		return "", false
 	}
 	if user == "" {
 		user = "github"
 	}
+	return user, true
+}
+
+func copilotAccount() (Account, bool) {
+	user, ok := copilotUser()
+	if !ok {
+		return Account{}, false
+	}
 	return Account{Provider: CopilotID, Agent: "copilot", User: user}, true
+}
+
+// CopilotHeaders are the headers the Copilot API expects from an editor,
+// for the given session token.
+func CopilotHeaders(token string) map[string]string {
+	return map[string]string{
+		"Authorization":          "Bearer " + token,
+		"Editor-Version":         "vscode/1.99.0",
+		"Editor-Plugin-Version":  "copilot-chat/0.26.0",
+		"Copilot-Integration-Id": "vscode-chat",
+	}
 }
 
 // setCopilotHeaders sends the headers the Copilot API expects from an editor.
 func setCopilotHeaders(req *http.Request, token string) {
-	req.Header.Set("Authorization", "Bearer "+token)
+	for k, v := range CopilotHeaders(token) {
+		req.Header.Set(k, v)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "dial")
-	req.Header.Set("Editor-Version", "vscode/1.99.0")
-	req.Header.Set("Editor-Plugin-Version", "copilot-chat/0.26.0")
-	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
+}
+
+// copilotStatus is the error for a Copilot reply that was not 200. Only a
+// rejected login asks the user to sign in again.
+func copilotStatus(res *http.Response, b []byte, what string) error {
+	if rejected(res.StatusCode) {
+		return ErrCopilotSignedOut
+	}
+	return fmt.Errorf("%s：%s", what, APIError(b, res.Status))
 }
 
 // CopilotSession trades the GitHub token for a short-lived Copilot session
@@ -448,7 +561,7 @@ func CopilotSession(ctx context.Context) (token, api string, err error) {
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode != http.StatusOK {
-		return "", "", ErrCopilotSignedOut
+		return "", "", copilotStatus(res, b, "GitHub Copilot 会话获取失败")
 	}
 	var r struct {
 		Token     string `json:"token"`
@@ -457,7 +570,7 @@ func CopilotSession(ctx context.Context) (token, api string, err error) {
 		} `json:"endpoints"`
 	}
 	if json.Unmarshal(b, &r) != nil || r.Token == "" {
-		return "", "", ErrCopilotSignedOut
+		return "", "", errors.New("GitHub Copilot 会话返回的内容不对")
 	}
 	api = strings.TrimRight(r.Endpoints.API, "/")
 	if api == "" {
@@ -496,7 +609,7 @@ func copilotModelList(ctx context.Context, token, api string) ([]catalog.Model, 
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 	if res.StatusCode != http.StatusOK {
-		return nil, ErrCopilotSignedOut
+		return nil, copilotStatus(res, b, "GitHub Copilot 模型列表获取失败")
 	}
 	var v struct {
 		Data []copilotRow `json:"data"`

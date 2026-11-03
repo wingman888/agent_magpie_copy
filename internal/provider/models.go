@@ -36,7 +36,7 @@ func (p Provider) Available() []catalog.Model {
 
 // Fetched reports when the vendor's own list was last fetched.
 func (p Provider) Fetched() (time.Time, bool) {
-	_, t, ok := catalog.Live(p.ID)
+	_, t, ok := catalog.Live(liveKey(p))
 	return t, ok
 }
 

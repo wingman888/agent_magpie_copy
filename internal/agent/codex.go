@@ -9,6 +9,7 @@ import (
 	"github.com/yetone/dial/internal/catalog"
 	"github.com/yetone/dial/internal/edit"
 	"github.com/yetone/dial/internal/gateway"
+	"github.com/yetone/dial/internal/provider"
 )
 
 // Codex talks the OpenAI Responses API to whichever provider config.toml
@@ -126,11 +127,9 @@ func codex(home string) *Agent {
 				Get: func() string { return get("model") },
 				Set: set,
 				Options: func(map[string]string) []Option {
-					own := group("OpenAI", options(catalog.Codex(), ""))
-					if p := get("model_provider"); p != "" && p != dialID {
-						own = group(p, own)
-					}
-					return append(own, viaDial("")...)
+					// Codex's own ChatGPT models are left out: reaching them
+					// through dial would only add a hop.
+					return viaDialExcept("", func(p provider.Provider) bool { return p.ID == provider.CodexID })
 				},
 			},
 			{

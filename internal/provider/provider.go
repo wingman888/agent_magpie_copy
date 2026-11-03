@@ -23,6 +23,11 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
+
+	// Gemini is Google's generateContent API. dial serves it to clients
+	// only; it is deliberately absent from Protocols, so no provider is
+	// ever called over it.
+	Gemini Protocol = "gemini"
 )
 
 // Protocols in the order dial prefers them when it has to translate.
