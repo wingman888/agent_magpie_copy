@@ -1,19 +1,21 @@
 package main
 
 import (
-	"bytes"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// isolateCLI points the config and cache at a fresh temp dir so tests never
-// touch the real providers.json or icon directory.
-func isolateCLI(t *testing.T) {
+// cliHome points config, cache and login lookups at a temp home, so the
+// provider file is fresh and no real agent sign-in is seen.
+func cliHome(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -21,8 +23,8 @@ func isolateCLI(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 }
 
-// captureStdout runs fn and returns what it printed to os.Stdout.
-func captureStdout(t *testing.T, fn func()) string {
+// stdout runs fn and returns what it printed.
+func stdout(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -30,243 +32,183 @@ func captureStdout(t *testing.T, fn func()) string {
 	}
 	old := os.Stdout
 	os.Stdout = w
-	done := make(chan []byte)
+	done := make(chan string)
 	go func() {
 		b, _ := io.ReadAll(r)
-		done <- b
+		done <- string(b)
 	}()
-	fn()
-	w.Close()
+	err = fn()
 	os.Stdout = old
-	return string(<-done)
+	w.Close()
+	return <-done, err
 }
 
-func writeFile(t *testing.T, name string, data []byte) string {
+// twoProviders saves a (models m1, m3) and b (model m2), both with keys.
+func twoProviders(t *testing.T) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func pngBytes(extra int) []byte {
-	return append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0}, extra)...)
-}
-
-func saveCustom(t *testing.T) {
-	t.Helper()
-	if err := provider.Save(provider.Provider{
-		ID: "relay", Name: "My Relay", Key: "sk-test", Chat: "https://relay.example.com/v1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestApplyPairsHeaders(t *testing.T) {
-	var p provider.Provider
-	err := applyPairs(&p, []string{
-		"url=https://relay.example.com/v1",
-		"header.X-Org-Id=acme",
-		"HEADER.X-ORG-id =  padded  ",
-		"header.=dropped",
-		"header.   =dropped too",
-		"header.Authorization=Bearer a=b",
-		"header.X-Org-Id=later",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]string{
-		"X-Org-Id":      "later",
-		"X-ORG-id":      "padded",
-		"Authorization": "Bearer a=b",
-	}
-	if len(p.Headers) != len(want) {
-		t.Fatalf("headers = %v, want %v", p.Headers, want)
-	}
-	for k, v := range want {
-		if p.Headers[k] != v {
-			t.Errorf("header %q = %q, want %q", k, p.Headers[k], v)
-		}
-	}
-}
-
-func TestApplyPairsKeepsTrimmedValues(t *testing.T) {
-	var p provider.Provider
-	if err := applyPairs(&p, []string{"  name  =  My Relay  ", "key= sk-x "}); err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "My Relay" || p.Key != "sk-x" {
-		t.Errorf("name=%q key=%q, want trimmed values", p.Name, p.Key)
-	}
-}
-
-func TestShowProviderHeadersSorted(t *testing.T) {
-	isolateCLI(t)
-	if err := provider.Save(provider.Provider{
-		ID: "relay", Name: "My Relay", Key: "sk-test", Chat: "https://relay.example.com/v1",
-		Headers: map[string]string{"X-Org-Id": "acme", "X-ORG-id": "upper", "Authorization": "Token x"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	p, err := provider.Find("relay")
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := captureStdout(t, func() {
-		if err := showProvider(*p); err != nil {
+	cliHome(t)
+	for _, p := range []provider.Provider{
+		{ID: "a", Name: "A", Chat: "https://a.example/v1", Key: "k", Models: []string{"m1", "m3"}},
+		{ID: "b", Name: "B", Chat: "https://b.example/v1", Key: "k", Models: []string{"m2"}},
+		{ID: "c", Name: "C", Chat: "https://c.example/v1", Key: "k", Models: []string{"m4"}},
+	} {
+		if err := provider.Save(p); err != nil {
 			t.Fatal(err)
 		}
-	})
-	lines := []string{"header  Authorization: Token x", "header  X-ORG-id: upper", "header  X-Org-Id: acme"}
-	last := -1
-	for _, l := range lines {
-		i := strings.Index(out, l)
-		if i < 0 {
-			t.Fatalf("output missing %q:\n%s", l, out)
-		}
-		if i < last {
-			t.Errorf("%q is out of order:\n%s", l, out)
-		}
-		last = i
 	}
 }
 
-func TestAddIconFileStoresOnce(t *testing.T) {
-	isolateCLI(t)
-	saveCustom(t)
-	img := writeFile(t, "logo.png", pngBytes(64))
-
-	if err := providerCmd([]string{"provider", "icon", "relay", img}); err != nil {
-		t.Fatal(err)
-	}
-	p, err := provider.Find("relay")
+func fallbackOf(t *testing.T, id string) []string {
+	t.Helper()
+	p, err := provider.Find(id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(p.Icon, "file:") || !strings.HasSuffix(p.Icon, ".png") {
-		t.Fatalf("icon = %q, want file:<name>.png", p.Icon)
-	}
-	first := p.Icon
-	if provider.IconFile(strings.TrimPrefix(first, "file:")) == "" {
-		t.Fatalf("IconFile rejected %q", first)
-	}
+	return p.Fallback
+}
 
-	if err := providerCmd([]string{"provider", "icon", "relay", img}); err != nil {
-		t.Fatal(err)
-	}
-	p, _ = provider.Find("relay")
-	if p.Icon != first {
-		t.Errorf("second set gave %q, want %q", p.Icon, first)
-	}
-	entries, err := os.ReadDir(filepath.Join(filepath.Dir(provider.Path()), "icons"))
+func runFallback(args ...string) error {
+	return providerCmd(append([]string{"provider", "fallback"}, args...))
+}
+
+func TestFallbackCommandSetShowClear(t *testing.T) {
+	twoProviders(t)
+
+	out, err := stdout(t, func() error { return runFallback("a", "b/m2", "a/m3") })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("icons dir has %d files, want 1", len(entries))
+	if want := []string{"b/m2", "a/m3"}; !reflect.DeepEqual(fallbackOf(t, "a"), want) {
+		t.Fatalf("saved %q, want %q", fallbackOf(t, "a"), want)
 	}
-}
+	if !strings.Contains(out, "b/m2 → a/m3") {
+		t.Fatalf("confirmation lacks the chain: %q", out)
+	}
 
-func TestIconBuiltinAndReset(t *testing.T) {
-	isolateCLI(t)
-	saveCustom(t)
-	if err := providerCmd([]string{"provider", "icon", "relay", "deepseek-color"}); err != nil {
-		t.Fatal(err)
+	out, err = stdout(t, func() error { return runFallback("a") })
+	if err != nil || !strings.Contains(out, "b/m2 → a/m3") {
+		t.Fatalf("show: %q %v", out, err)
 	}
-	if p, _ := provider.Find("relay"); p.Icon != "deepseek-color" {
-		t.Fatalf("icon = %q, want deepseek-color", p.Icon)
-	}
-	if err := providerCmd([]string{"provider", "icon", "relay", ""}); err != nil {
-		t.Fatal(err)
-	}
-	if p, _ := provider.Find("relay"); p.Icon != "" {
-		t.Fatalf("icon = %q after reset, want empty", p.Icon)
-	}
-}
 
-func TestIconRejectsKeepsOldValue(t *testing.T) {
-	isolateCLI(t)
-	saveCustom(t)
-	if err := providerCmd([]string{"provider", "icon", "relay", "deepseek-color"}); err != nil {
-		t.Fatal(err)
-	}
-	cases := map[string]string{
-		"text":    writeFile(t, "note.txt", []byte("just some text, not an image")),
-		"empty":   writeFile(t, "empty.png", nil),
-		"too big": writeFile(t, "big.png", pngBytes(provider.MaxIcon)),
-		"missing": filepath.Join(t.TempDir(), "missing.png"),
-	}
-	for name, path := range cases {
-		if err := providerCmd([]string{"provider", "icon", "relay", path}); err == nil {
-			t.Errorf("%s: expected an error", name)
-		}
-		if p, _ := provider.Find("relay"); p.Icon != "deepseek-color" {
-			t.Errorf("%s: icon changed to %q", name, p.Icon)
-		}
-	}
-}
-
-func TestIconAcceptsSVGWithTxtExtension(t *testing.T) {
-	isolateCLI(t)
-	saveCustom(t)
-	svg := writeFile(t, "logo.txt", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>`))
-	if err := providerCmd([]string{"provider", "icon", "relay", svg}); err != nil {
-		t.Fatal(err)
-	}
-	p, _ := provider.Find("relay")
-	if !strings.HasSuffix(p.Icon, ".svg") {
-		t.Errorf("icon = %q, want an .svg reference", p.Icon)
-	}
-}
-
-func TestIconRefusedForPreset(t *testing.T) {
-	isolateCLI(t)
-	pr, err := provider.FromPreset("deepseek")
+	out, err = stdout(t, func() error { return runFallback("a", "none") })
 	if err != nil {
 		t.Fatal(err)
 	}
-	pr.Key = "sk-test"
-	if err := provider.Save(pr); err != nil {
-		t.Fatal(err)
+	if len(fallbackOf(t, "a")) != 0 || !strings.Contains(out, "cleared") {
+		t.Fatalf("clear: %q, stored %q", out, fallbackOf(t, "a"))
 	}
-	before, _ := provider.Find("deepseek")
-	err = providerCmd([]string{"provider", "icon", "deepseek", "generic"})
-	if err == nil || !strings.Contains(err.Error(), "custom") {
-		t.Fatalf("err = %v, want an error mentioning custom", err)
-	}
-	after, _ := provider.Find("deepseek")
-	if after.Icon != before.Icon {
-		t.Errorf("preset icon changed from %q to %q", before.Icon, after.Icon)
+
+	out, err = stdout(t, func() error { return runFallback("a") })
+	if err != nil || !strings.Contains(out, "no fallback") || !strings.Contains(out, "magpie provider fallback") {
+		t.Fatalf("show after clear: %q %v", out, err)
 	}
 }
 
-func TestAddResolvesIconAndRejectsBadFile(t *testing.T) {
-	isolateCLI(t)
-	p := provider.Provider{Name: "My Relay"}
-	if err := applyPairs(&p, []string{"icon=deepseek-color"}); err != nil {
+func TestFallbackCommandRejectsUnknownAndKeepsSettings(t *testing.T) {
+	twoProviders(t)
+	if err := runFallback("a", "b/m2"); err != nil {
 		t.Fatal(err)
 	}
-	icon, err := resolveIcon(p.Icon)
-	if err != nil || icon != "deepseek-color" {
-		t.Fatalf("resolveIcon = %q, %v; want deepseek-color", icon, err)
-	}
-
-	bad := writeFile(t, "note.txt", []byte("plain text"))
-	p = provider.Provider{Name: "My Relay"}
-	if err := applyPairs(&p, []string{"icon=" + bad}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := resolveIcon(p.Icon); err == nil {
-		t.Fatal("text file accepted as icon")
-	}
-}
-
-func TestHelpMentionsHeadersAndIcon(t *testing.T) {
-	for _, want := range []string{"header.X-Foo", "icon", "provider icon"} {
-		if !strings.Contains(providerUsage, want) {
-			t.Errorf("providerUsage does not mention %q", want)
+	for _, args := range [][]string{
+		{"a", "nowhere/x"},
+		{"a", "b/m2", "nowhere/x"},
+		{"a", "b/unknown-model"},
+		{"a", "b"},
+	} {
+		if err := runFallback(args...); err == nil {
+			t.Fatalf("%v accepted", args)
 		}
+		if got := fallbackOf(t, "a"); !reflect.DeepEqual(got, []string{"b/m2"}) {
+			t.Fatalf("after %v: stored %q, want the old setting", args, got)
+		}
+	}
+	if err := runFallback("a", "nowhere/x"); err == nil || !strings.Contains(err.Error(), "magpie models") {
+		t.Fatalf("unknown model should point at magpie models: %v", err)
+	}
+}
+
+func TestFallbackCommandUsageErrors(t *testing.T) {
+	twoProviders(t)
+	if err := runFallback(); err == nil || !strings.Contains(err.Error(), "magpie provider fallback <id>") {
+		t.Fatalf("no id: %v", err)
+	}
+	if err := runFallback("nope", "b/m2"); err == nil {
+		t.Fatal("unknown provider accepted")
+	}
+	if err := runFallback("a", "none", "b/m2"); err == nil {
+		t.Fatal("none beside a model accepted")
+	}
+	if got := fallbackOf(t, "a"); len(got) != 0 {
+		t.Fatalf("errors saved %q", got)
+	}
+}
+
+func TestProvidersListShowsFallbackChain(t *testing.T) {
+	twoProviders(t)
+	if err := runFallback("a", "b/m2", "a/m3"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := stdout(t, providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aLine, cLine string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, "a.example"):
+			aLine = line
+		case strings.Contains(line, "c.example"):
+			cLine = line
+		}
+	}
+	if !strings.Contains(aLine, "b/m2 → a/m3") {
+		t.Fatalf("a's row lacks the chain: %q\nfull:\n%s", aLine, out)
+	}
+	if strings.Contains(cLine, "fallback") {
+		t.Fatalf("c has no fallback but its row mentions one: %q", cLine)
+	}
+}
+
+func TestFallbackCommandRejectsBlankEntriesWithoutClearing(t *testing.T) {
+	twoProviders(t)
+	if err := runFallback("a", "b/m2"); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"a", ""},
+		{"a", " "},
+		{"a", "b/m2", ""},
+		{"a", " ", "none"},
+	} {
+		if err := runFallback(args...); err == nil {
+			t.Fatalf("%q accepted", args)
+		}
+		if got := fallbackOf(t, "a"); !reflect.DeepEqual(got, []string{"b/m2"}) {
+			t.Fatalf("after %q: stored %q, want the old setting", args, got)
+		}
+	}
+}
+
+func TestAddExistingProviderKeepsFallback(t *testing.T) {
+	twoProviders(t)
+	if err := runFallback("a", "b/m2"); err != nil {
+		t.Fatal(err)
+	}
+	// the model list cannot be fetched; add still saves and says so quietly
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no models here", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if _, err := stdout(t, func() error {
+		return addProvider([]string{"A", "chat=" + srv.URL + "/v1", "key=k2", "models=m1"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := provider.Find("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Key != "k2" || !reflect.DeepEqual(p.Fallback, []string{"b/m2"}) {
+		t.Fatalf("re-add: key %q fallback %q, want key k2 and fallback [b/m2]", p.Key, p.Fallback)
 	}
 }

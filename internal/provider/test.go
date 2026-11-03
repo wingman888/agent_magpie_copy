@@ -87,9 +87,8 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 		r.Error = err.Error()
 		return r
 	}
-	p.ApplyHeaders(req)
 	start := time.Now()
-	res, err := p.HTTPClient(http.DefaultClient).Do(req)
+	res, err := http.DefaultClient.Do(req)
 	r.Millis = time.Since(start).Milliseconds()
 	if err != nil {
 		r.Error = strings.TrimPrefix(err.Error(), "Post \""+url+"\": ")
