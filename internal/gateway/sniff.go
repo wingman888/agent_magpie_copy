@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // usageSniffer picks the usage block out of a provider reply that is being
