@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yetone/dial/internal/catalog"
 )
 
 // fakeCopilot stands in for GitHub's token exchange and the Copilot API. It
@@ -325,7 +327,7 @@ func TestCopilotFetchAsksModelsWithSessionAndKeepsList(t *testing.T) {
 			t.Error("auto must not be offered")
 		}
 	}
-	raw, _ := os.ReadFile(LivePath("copilot"))
+	raw, _ := os.ReadFile(catalog.LivePath("copilot"))
 	if strings.Contains(string(raw), "sess-1") || strings.Contains(string(raw), "gho_secret") {
 		t.Errorf("saved model list holds a token: %s", raw)
 	}
