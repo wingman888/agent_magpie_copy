@@ -12,8 +12,8 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// stdoutOf runs fn and returns what it printed to stdout.
-func stdoutOf(t *testing.T, fn func()) string {
+// cliStdoutOf runs fn and returns what it printed to stdout.
+func cliStdoutOf(t *testing.T, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -31,7 +31,7 @@ func stdoutOf(t *testing.T, fn func()) string {
 
 // With no providers at all, `dial providers` still says that a signed-in
 // Claude Code is not offered, and why.
-func TestProvidersShowsClaudeNoteWithNoProviders(t *testing.T) {
+func TestCliProvidersShowsClaudeNoteWithNoProviders(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg-config"))
@@ -49,7 +49,7 @@ func TestProvidersShowsClaudeNoteWithNoProviders(t *testing.T) {
 	}
 
 	var err error
-	out := stdoutOf(t, func() { err = providers() })
+	out := cliStdoutOf(t, func() { err = providers() })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestProvidersShowsClaudeNoteWithNoProviders(t *testing.T) {
 
 // A Gemini CLI routed through dial lists under the provider it routes to: its
 // first field is the auth choice, so the provider comes from its own field.
-func TestUsesByProviderCountsRoutedGemini(t *testing.T) {
+func TestCliUsesByProviderCountsRoutedGemini(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg-config"))

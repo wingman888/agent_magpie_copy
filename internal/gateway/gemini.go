@@ -407,14 +407,28 @@ func (e *geminiEncoder) send(part map[string]any) {
 	e.pending = part
 }
 
-// flush writes the held-back part, if any, without a finish reason.
+// respID is the response id every event of this stream carries. The upstream's
+// message id is used when it has one; otherwise one is made once and kept.
+func (e *geminiEncoder) respID() string {
+	if e.id == "" {
+		e.id = newID()
+	}
+	return e.id
+}
+
+// flush writes the held-back part, if any, without a finish reason. It carries
+// the model and response id, as the final event does.
 func (e *geminiEncoder) flush() {
 	if e.pending == nil {
 		return
 	}
-	e.w.event("", map[string]any{"candidates": []map[string]any{{
-		"content": map[string]any{"role": "model", "parts": []map[string]any{e.pending}},
-	}}})
+	e.w.event("", map[string]any{
+		"candidates": []map[string]any{{
+			"content": map[string]any{"role": "model", "parts": []map[string]any{e.pending}},
+		}},
+		"modelVersion": e.model,
+		"responseId":   e.respID(),
+	})
 	e.pending = nil
 }
 
@@ -480,10 +494,7 @@ func (e *geminiEncoder) finish() {
 		return
 	}
 	e.closeCall()
-	id := e.id
-	if id == "" {
-		id = newID()
-	}
+	id := e.respID()
 	parts := []map[string]any{}
 	if e.pending != nil {
 		parts = append(parts, e.pending)
@@ -553,10 +564,11 @@ func geminiFinish(stop string) string {
 	return "STOP"
 }
 
-// geminiUsage reports the prompt side as the total the provider counted, and
-// the thinking tokens apart.
+// geminiUsage reports the prompt side as the total the provider counted (fresh,
+// cache read and cache write alike), with the cached part called out and the
+// thinking tokens apart.
 func geminiUsage(u Usage) map[string]any {
-	in := u.Input + u.CacheRead
+	in := u.Input + u.CacheRead + u.CacheWrite
 	m := map[string]any{"promptTokenCount": in, "candidatesTokenCount": u.Output,
 		"totalTokenCount": in + u.Output, "thoughtsTokenCount": u.Reasoning}
 	if u.CacheRead > 0 {

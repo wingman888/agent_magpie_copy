@@ -17,9 +17,9 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// fakeUp is an upstream that records what it was sent and answers with a
+// gwAcctUp is an upstream that records what it was sent and answers with a
 // fixed reply. ctype "" sends no Content-Type at all.
-type fakeUp struct {
+type gwAcctUp struct {
 	path  string
 	head  http.Header
 	body  []byte
@@ -28,7 +28,7 @@ type fakeUp struct {
 	code  int
 }
 
-func (u *fakeUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (u *gwAcctUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.path, u.head = r.URL.Path, r.Header.Clone()
 	u.body, _ = io.ReadAll(r.Body)
 	if u.ctype == "" {
@@ -43,15 +43,15 @@ func (u *fakeUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // signedJWT is an unsigned JWT with the given claims; the gateway only reads them.
-func signedJWT(claims map[string]any) string {
+func gwAcctJWT(claims map[string]any) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	b, _ := json.Marshal(claims)
 	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
-// codexLogin signs Codex in with a ChatGPT account under a fresh HOME. The
+// gwAcctLogin signs Codex in with a ChatGPT account under a fresh HOME. The
 // access token expires at exp. It returns the access token and the login file.
-func codexLogin(t *testing.T, exp int64) (string, string) {
+func gwAcctLogin(t *testing.T, exp int64) (string, string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -60,8 +60,8 @@ func codexLogin(t *testing.T, exp int64) (string, string) {
 	oldBase, oldRefresh := provider.CodexBase, provider.CodexRefreshURL
 	t.Cleanup(func() { provider.CodexBase, provider.CodexRefreshURL = oldBase, oldRefresh })
 
-	access := signedJWT(map[string]any{"exp": exp})
-	id := signedJWT(map[string]any{
+	access := gwAcctJWT(map[string]any{"exp": exp})
+	id := gwAcctJWT(map[string]any{
 		"email":                       "me@example.com",
 		"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"},
 	})
@@ -82,15 +82,24 @@ func codexLogin(t *testing.T, exp int64) (string, string) {
 	return access, path
 }
 
-// codexReply is a full Responses stream that says "Hello".
-var codexReply = sse(
+// gwAcctSSE joins lines into an SSE body (a private copy of the package helper).
+func gwAcctSSE(lines ...string) string {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l + "\n\n")
+	}
+	return b.String()
+}
+
+// gwAcctReply is a full Responses stream that says "Hello".
+var gwAcctReply = gwAcctSSE(
 	`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5","status":"in_progress"}}`,
 	`data: {"type":"response.output_text.delta","delta":"Hello"}`,
 	`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-5.5","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9}}}`,
 )
 
 // serveCodex points the Codex backend at a fake and returns the fake.
-func serveCodex(t *testing.T, up *fakeUp) {
+func gwAcctServe(t *testing.T, up *gwAcctUp) {
 	t.Helper()
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
@@ -98,7 +107,7 @@ func serveCodex(t *testing.T, up *fakeUp) {
 }
 
 // postRec sends one request through a fresh gateway and keeps the recorder.
-func postRec(t *testing.T, path, body string) *httptest.ResponseRecorder {
+func gwAcctPost(t *testing.T, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))
@@ -106,7 +115,7 @@ func postRec(t *testing.T, path, body string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func sentJSON(t *testing.T, b []byte) map[string]any {
+func gwAcctSentJSON(t *testing.T, b []byte) map[string]any {
 	t.Helper()
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
@@ -115,8 +124,8 @@ func sentJSON(t *testing.T, b []byte) map[string]any {
 	return m
 }
 
-func TestCodexBodyShape(t *testing.T) {
-	got := sentJSON(t, codexBody([]byte(`{"model":"codex/gpt-5.5","input":"hi","stream":false,"store":true,"temperature":1,"top_p":1,"max_output_tokens":9,"max_tokens":9,"tools":[]}`)))
+func TestGwAcctCodexBodyShape(t *testing.T) {
+	got := gwAcctSentJSON(t, codexBody([]byte(`{"model":"codex/gpt-5.5","input":"hi","stream":false,"store":true,"temperature":1,"top_p":1,"max_output_tokens":9,"max_tokens":9,"tools":[]}`)))
 	if got["model"] != "gpt-5.5" || got["stream"] != true || got["store"] != false {
 		t.Errorf("model/stream/store: %v", got)
 	}
@@ -130,7 +139,7 @@ func TestCodexBodyShape(t *testing.T) {
 		t.Errorf("string input not turned into a list: %v", got["input"])
 	}
 	// a list input is left as a list, and a bare model name is left alone
-	got = sentJSON(t, codexBody([]byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":"x"}]}`)))
+	got = gwAcctSentJSON(t, codexBody([]byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":"x"}]}`)))
 	if got["model"] != "gpt-5.5" {
 		t.Errorf("model = %v", got["model"])
 	}
@@ -139,12 +148,12 @@ func TestCodexBodyShape(t *testing.T) {
 	}
 }
 
-func TestCodexNonStreamReturnsWholeReply(t *testing.T) {
-	access, _ := codexLogin(t, time.Now().Add(time.Hour).Unix())
-	up := &fakeUp{reply: codexReply, ctype: "text/event-stream"}
-	serveCodex(t, up)
+func TestGwAcctCodexNonStreamReturnsWholeReply(t *testing.T) {
+	access, _ := gwAcctLogin(t, time.Now().Add(time.Hour).Unix())
+	up := &gwAcctUp{reply: gwAcctReply, ctype: "text/event-stream"}
+	gwAcctServe(t, up)
 
-	rec := postRec(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","temperature":0.2,"max_output_tokens":50}`)
+	rec := gwAcctPost(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","temperature":0.2,"max_output_tokens":50}`)
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
@@ -159,7 +168,7 @@ func TestCodexNonStreamReturnsWholeReply(t *testing.T) {
 	if !strings.HasSuffix(up.path, "/responses") {
 		t.Errorf("upstream path = %s", up.path)
 	}
-	sent := sentJSON(t, up.body)
+	sent := gwAcctSentJSON(t, up.body)
 	if sent["stream"] != true || sent["store"] != false || sent["model"] != "gpt-5.5" {
 		t.Errorf("upstream stream/store/model: %v", sent)
 	}
@@ -177,12 +186,12 @@ func TestCodexNonStreamReturnsWholeReply(t *testing.T) {
 	}
 }
 
-func TestCodexStreamWithoutContentType(t *testing.T) {
-	codexLogin(t, time.Now().Add(time.Hour).Unix())
-	up := &fakeUp{reply: codexReply} // no Content-Type at all
-	serveCodex(t, up)
+func TestGwAcctCodexStreamWithoutContentType(t *testing.T) {
+	gwAcctLogin(t, time.Now().Add(time.Hour).Unix())
+	up := &gwAcctUp{reply: gwAcctReply} // no Content-Type at all
+	gwAcctServe(t, up)
 
-	rec := postRec(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":[{"role":"user","content":"hi"}],"stream":true,"top_p":0.9}`)
+	rec := gwAcctPost(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":[{"role":"user","content":"hi"}],"stream":true,"top_p":0.9}`)
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
@@ -192,7 +201,7 @@ func TestCodexStreamWithoutContentType(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "response.completed") {
 		t.Errorf("stream not relayed: %s", rec.Body)
 	}
-	sent := sentJSON(t, up.body)
+	sent := gwAcctSentJSON(t, up.body)
 	if sent["stream"] != true {
 		t.Errorf("stream not forced on: %v", sent)
 	}
@@ -201,17 +210,17 @@ func TestCodexStreamWithoutContentType(t *testing.T) {
 	}
 }
 
-func TestCodexRefreshFailureAsksForLogin(t *testing.T) {
-	codexLogin(t, time.Now().Add(-time.Hour).Unix()) // already expired
+func TestGwAcctCodexRefreshFailureAsksForLogin(t *testing.T) {
+	gwAcctLogin(t, time.Now().Add(-time.Hour).Unix()) // already expired
 	refresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid_grant"}`, http.StatusUnauthorized)
 	}))
 	t.Cleanup(refresh.Close)
 	provider.CodexRefreshURL = refresh.URL
-	up := &fakeUp{reply: codexReply, ctype: "text/event-stream"}
-	serveCodex(t, up)
+	up := &gwAcctUp{reply: gwAcctReply, ctype: "text/event-stream"}
+	gwAcctServe(t, up)
 
-	rec := postRec(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+	rec := gwAcctPost(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
 	if rec.Code != 502 {
 		t.Errorf("status %d, want 502: %s", rec.Code, rec.Body)
 	}
@@ -223,9 +232,9 @@ func TestCodexRefreshFailureAsksForLogin(t *testing.T) {
 	}
 }
 
-func TestCodexRefreshWritesBackAndKeepsOtherFields(t *testing.T) {
-	_, file := codexLogin(t, time.Now().Add(-time.Hour).Unix())
-	newAccess := signedJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+func TestGwAcctCodexRefreshWritesBackAndKeepsOtherFields(t *testing.T) {
+	_, file := gwAcctLogin(t, time.Now().Add(-time.Hour).Unix())
+	newAccess := gwAcctJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
 	var sentRefresh map[string]any
 	refresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&sentRefresh)
@@ -234,10 +243,10 @@ func TestCodexRefreshWritesBackAndKeepsOtherFields(t *testing.T) {
 	}))
 	t.Cleanup(refresh.Close)
 	provider.CodexRefreshURL = refresh.URL
-	up := &fakeUp{reply: codexReply, ctype: "text/event-stream"}
-	serveCodex(t, up)
+	up := &gwAcctUp{reply: gwAcctReply, ctype: "text/event-stream"}
+	gwAcctServe(t, up)
 
-	rec := postRec(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+	rec := gwAcctPost(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
@@ -279,7 +288,7 @@ func TestCodexRefreshWritesBackAndKeepsOtherFields(t *testing.T) {
 
 // copilotServer signs Copilot in and serves its token exchange and chat API
 // from one fake. tokenStatus is the answer to the exchange; api receives chat.
-func copilotServer(t *testing.T, tokenStatus int, api *fakeUp) {
+func gwAcctCopilotServer(t *testing.T, tokenStatus int, api *gwAcctUp) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	xdg := t.TempDir()
@@ -311,15 +320,15 @@ func copilotServer(t *testing.T, tokenStatus int, api *fakeUp) {
 	provider.CopilotTokenURL = srv.URL + "/token"
 }
 
-func TestCopilotUsesSessionAndTurnHeaders(t *testing.T) {
-	api := &fakeUp{ctype: "application/json", reply: `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"a cat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`}
-	copilotServer(t, http.StatusOK, api)
+func TestGwAcctCopilotUsesSessionAndTurnHeaders(t *testing.T) {
+	api := &gwAcctUp{ctype: "application/json", reply: `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"a cat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`}
+	gwAcctCopilotServer(t, http.StatusOK, api)
 
 	body := `{"model":"copilot/gpt-4o","messages":[` +
 		`{"role":"user","content":[{"type":"text","text":"what is this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]},` +
 		`{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"look","arguments":"{}"}}]},` +
 		`{"role":"tool","tool_call_id":"c1","content":"a cat"}]}`
-	rec := postRec(t, "/v1/chat/completions", body)
+	rec := gwAcctPost(t, "/v1/chat/completions", body)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "a cat") {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
@@ -339,16 +348,16 @@ func TestCopilotUsesSessionAndTurnHeaders(t *testing.T) {
 	if h.Get("Copilot-Integration-Id") != "vscode-chat" {
 		t.Errorf("Copilot-Integration-Id = %q", h.Get("Copilot-Integration-Id"))
 	}
-	if sent := sentJSON(t, api.body); sent["model"] != "gpt-4o" {
+	if sent := gwAcctSentJSON(t, api.body); sent["model"] != "gpt-4o" {
 		t.Errorf("upstream model = %v", sent["model"])
 	}
 }
 
-func TestCopilotRejectedSessionAsksForLogin(t *testing.T) {
-	api := &fakeUp{reply: `{}`, ctype: "application/json"}
-	copilotServer(t, http.StatusUnauthorized, api)
+func TestGwAcctCopilotRejectedSessionAsksForLogin(t *testing.T) {
+	api := &gwAcctUp{reply: `{}`, ctype: "application/json"}
+	gwAcctCopilotServer(t, http.StatusUnauthorized, api)
 
-	rec := postRec(t, "/v1/chat/completions", `{"model":"copilot/gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	rec := gwAcctPost(t, "/v1/chat/completions", `{"model":"copilot/gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
 	if rec.Code != 502 {
 		t.Errorf("status %d, want 502: %s", rec.Code, rec.Body)
 	}
@@ -362,7 +371,7 @@ func TestCopilotRejectedSessionAsksForLogin(t *testing.T) {
 
 // sniffEventStream must look past leading blank lines (a stream may open with
 // \r\n\r\n) and must hand the whole body on to the reader afterwards.
-func TestSniffEventStreamSkipsLeadingBlankLines(t *testing.T) {
+func TestGwAcctSniffEventStreamSkipsLeadingBlankLines(t *testing.T) {
 	cases := []struct {
 		body string
 		want bool

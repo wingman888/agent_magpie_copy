@@ -12,8 +12,8 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// isolateGemini points HOME and dial's config and cache at a fresh temp tree.
-func isolateGemini(t *testing.T) string {
+// agmIsolate points HOME and dial's config and cache at a fresh temp tree.
+func agmIsolate(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -23,7 +23,7 @@ func isolateGemini(t *testing.T) string {
 	return home
 }
 
-func writeGeminiFile(t *testing.T, path, body string) {
+func agmWriteFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -33,8 +33,8 @@ func writeGeminiFile(t *testing.T, path, body string) {
 	}
 }
 
-// saveFakeProvider adds a key-bearing provider "fake" with two models.
-func saveFakeProvider(t *testing.T) {
+// agmSaveFake adds a key-bearing provider "fake" with two models.
+func agmSaveFake(t *testing.T) {
 	t.Helper()
 	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k",
 		Chat: "http://127.0.0.1:9/v1", Models: []string{"m1", "m2"}}); err != nil {
@@ -43,7 +43,7 @@ func saveFakeProvider(t *testing.T) {
 }
 
 // envVars parses a dotenv file the simple way: KEY=value per line.
-func envVars(t *testing.T, path string) map[string]string {
+func agmEnvVars(t *testing.T, path string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
 	b, err := os.ReadFile(path)
@@ -59,7 +59,7 @@ func envVars(t *testing.T, path string) map[string]string {
 }
 
 // settingsAt reads settings.json and returns the value at a dotted path.
-func settingsAt(t *testing.T, path, dotted string) (string, bool) {
+func agmSettingsAt(t *testing.T, path, dotted string) (string, bool) {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -83,25 +83,25 @@ func settingsAt(t *testing.T, path, dotted string) (string, bool) {
 	return s, ok
 }
 
-func hasKey(m map[string]string, k string) bool {
+func agmHasKey(m map[string]string, k string) bool {
 	_, ok := m[k]
 	return ok
 }
 
-func TestGeminiRoutesCatalogModelAndRestoresNative(t *testing.T) {
-	home := isolateGemini(t)
-	saveFakeProvider(t)
+func TestAgmGeminiRoutesCatalogModelAndRestoresNative(t *testing.T) {
+	home := agmIsolate(t)
+	agmSaveFake(t)
 	dir := filepath.Join(home, ".gemini")
 	env := filepath.Join(dir, ".env")
 	settings := filepath.Join(dir, "settings.json")
-	writeGeminiFile(t, env, "FOO=bar\nGEMINI_API_KEY=oldkey\nGOOGLE_GEMINI_BASE_URL=https://old.example/\n")
-	writeGeminiFile(t, settings, `{"other":"x","security":{"auth":{"selectedType":"oauth-personal"}},"model":{"name":"gemini-2.5-pro"}}`)
+	agmWriteFile(t, env, "FOO=bar\nGEMINI_API_KEY=oldkey\nGOOGLE_GEMINI_BASE_URL=https://old.example/\n")
+	agmWriteFile(t, settings, `{"other":"x","security":{"auth":{"selectedType":"oauth-personal"}},"model":{"name":"gemini-2.5-pro"}}`)
 
 	g := gemini(home)
 	if err := g.Field("model").Set("fake/m1"); err != nil {
 		t.Fatal(err)
 	}
-	ev := envVars(t, env)
+	ev := agmEnvVars(t, env)
 	if ev["GOOGLE_GEMINI_BASE_URL"] != gateway.URL() {
 		t.Errorf("GOOGLE_GEMINI_BASE_URL = %q, want %q", ev["GOOGLE_GEMINI_BASE_URL"], gateway.URL())
 	}
@@ -111,13 +111,13 @@ func TestGeminiRoutesCatalogModelAndRestoresNative(t *testing.T) {
 	if ev["FOO"] != "bar" {
 		t.Errorf("unrelated .env line lost: FOO = %q", ev["FOO"])
 	}
-	if v, _ := settingsAt(t, settings, "security.auth.selectedType"); v != "gemini-api-key" {
+	if v, _ := agmSettingsAt(t, settings, "security.auth.selectedType"); v != "gemini-api-key" {
 		t.Errorf("selectedType = %q, want gemini-api-key", v)
 	}
-	if v, _ := settingsAt(t, settings, "model.name"); v != "fake/m1" {
+	if v, _ := agmSettingsAt(t, settings, "model.name"); v != "fake/m1" {
 		t.Errorf("model.name = %q, want fake/m1", v)
 	}
-	if v, _ := settingsAt(t, settings, "other"); v != "x" {
+	if v, _ := agmSettingsAt(t, settings, "other"); v != "x" {
 		t.Errorf("unrelated settings field lost: other = %q", v)
 	}
 	if got := g.Field("auth").Get(); got != "dial" {
@@ -131,7 +131,7 @@ func TestGeminiRoutesCatalogModelAndRestoresNative(t *testing.T) {
 	if err := g.Field("model").Set("gemini-2.5-flash"); err != nil {
 		t.Fatal(err)
 	}
-	ev = envVars(t, env)
+	ev = agmEnvVars(t, env)
 	if ev["GEMINI_API_KEY"] != "oldkey" {
 		t.Errorf("GEMINI_API_KEY not restored: %q", ev["GEMINI_API_KEY"])
 	}
@@ -141,10 +141,10 @@ func TestGeminiRoutesCatalogModelAndRestoresNative(t *testing.T) {
 	if ev["FOO"] != "bar" {
 		t.Errorf("unrelated .env line lost after restore: FOO = %q", ev["FOO"])
 	}
-	if v, _ := settingsAt(t, settings, "security.auth.selectedType"); v != "oauth-personal" {
+	if v, _ := agmSettingsAt(t, settings, "security.auth.selectedType"); v != "oauth-personal" {
 		t.Errorf("selectedType not restored: %q", v)
 	}
-	if v, _ := settingsAt(t, settings, "model.name"); v != "gemini-2.5-flash" {
+	if v, _ := agmSettingsAt(t, settings, "model.name"); v != "gemini-2.5-flash" {
 		t.Errorf("model.name = %q, want the native pick gemini-2.5-flash", v)
 	}
 	if got := g.Field("auth").Get(); got != "custom" {
@@ -152,14 +152,14 @@ func TestGeminiRoutesCatalogModelAndRestoresNative(t *testing.T) {
 	}
 }
 
-func TestGeminiDefaultDropsWhatWasAbsent(t *testing.T) {
-	home := isolateGemini(t)
-	saveFakeProvider(t)
+func TestAgmGeminiDefaultDropsWhatWasAbsent(t *testing.T) {
+	home := agmIsolate(t)
+	agmSaveFake(t)
 	dir := filepath.Join(home, ".gemini")
 	env := filepath.Join(dir, ".env")
 	settings := filepath.Join(dir, "settings.json")
-	writeGeminiFile(t, env, "FOO=bar\n")
-	writeGeminiFile(t, settings, `{"other":"x"}`)
+	agmWriteFile(t, env, "FOO=bar\n")
+	agmWriteFile(t, settings, `{"other":"x"}`)
 
 	g := gemini(home)
 	if err := g.Field("model").Set("fake/m2"); err != nil {
@@ -168,22 +168,22 @@ func TestGeminiDefaultDropsWhatWasAbsent(t *testing.T) {
 	if err := g.Field("model").Set(""); err != nil {
 		t.Fatal(err)
 	}
-	ev := envVars(t, env)
+	ev := agmEnvVars(t, env)
 	for _, k := range []string{"GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"} {
-		if hasKey(ev, k) {
+		if agmHasKey(ev, k) {
 			t.Errorf("%s should be gone after Default, got %q", k, ev[k])
 		}
 	}
 	if ev["FOO"] != "bar" {
 		t.Errorf("unrelated .env line lost: FOO = %q", ev["FOO"])
 	}
-	if _, ok := settingsAt(t, settings, "security.auth.selectedType"); ok {
+	if _, ok := agmSettingsAt(t, settings, "security.auth.selectedType"); ok {
 		t.Error("selectedType should be removed after Default")
 	}
-	if _, ok := settingsAt(t, settings, "model.name"); ok {
+	if _, ok := agmSettingsAt(t, settings, "model.name"); ok {
 		t.Error("model.name should be removed after Default")
 	}
-	if v, _ := settingsAt(t, settings, "other"); v != "x" {
+	if v, _ := agmSettingsAt(t, settings, "other"); v != "x" {
 		t.Errorf("unrelated settings field lost: other = %q", v)
 	}
 	if got := g.Field("auth").Get(); got != "google" {
@@ -191,13 +191,13 @@ func TestGeminiDefaultDropsWhatWasAbsent(t *testing.T) {
 	}
 }
 
-func TestGeminiDefaultOnAuthRestoresKeyless(t *testing.T) {
-	home := isolateGemini(t)
-	saveFakeProvider(t)
+func TestAgmGeminiDefaultOnAuthRestoresKeyless(t *testing.T) {
+	home := agmIsolate(t)
+	agmSaveFake(t)
 	env := filepath.Join(home, ".gemini", ".env")
 	settings := filepath.Join(home, ".gemini", "settings.json")
-	writeGeminiFile(t, env, "FOO=bar\n")
-	writeGeminiFile(t, settings, `{}`)
+	agmWriteFile(t, env, "FOO=bar\n")
+	agmWriteFile(t, settings, `{}`)
 
 	g := gemini(home)
 	if err := g.Field("model").Set("fake/m1"); err != nil {
@@ -207,18 +207,18 @@ func TestGeminiDefaultOnAuthRestoresKeyless(t *testing.T) {
 	if err := g.Field("auth").Set(""); err != nil {
 		t.Fatal(err)
 	}
-	if hasKey(envVars(t, env), "GEMINI_API_KEY") {
+	if agmHasKey(agmEnvVars(t, env), "GEMINI_API_KEY") {
 		t.Error("GEMINI_API_KEY should not remain when none was there before routing")
 	}
-	if _, ok := settingsAt(t, filepath.Join(home, ".gemini", "settings.json"), "model.name"); ok {
+	if _, ok := agmSettingsAt(t, filepath.Join(home, ".gemini", "settings.json"), "model.name"); ok {
 		t.Error("model.name should be removed by Default")
 	}
 }
 
-func TestGeminiAuthDialOnlyViaModel(t *testing.T) {
-	home := isolateGemini(t)
-	saveFakeProvider(t)
-	writeGeminiFile(t, filepath.Join(home, ".gemini", "settings.json"), `{}`)
+func TestAgmGeminiAuthDialOnlyViaModel(t *testing.T) {
+	home := agmIsolate(t)
+	agmSaveFake(t)
+	agmWriteFile(t, filepath.Join(home, ".gemini", "settings.json"), `{}`)
 
 	g := gemini(home)
 	if err := g.Field("auth").Set("dial"); err == nil {
@@ -238,8 +238,8 @@ func TestGeminiAuthDialOnlyViaModel(t *testing.T) {
 	}
 }
 
-func TestGeminiFieldsByKeyAndLabel(t *testing.T) {
-	home := isolateGemini(t)
+func TestAgmGeminiFieldsByKeyAndLabel(t *testing.T) {
+	home := agmIsolate(t)
 	g := gemini(home)
 	for _, key := range []string{"auth", "model", "provider"} {
 		if g.Field(key) == nil {
@@ -257,10 +257,10 @@ func TestGeminiFieldsByKeyAndLabel(t *testing.T) {
 	}
 }
 
-func TestGeminiProviderFieldRejectsUnknown(t *testing.T) {
-	home := isolateGemini(t)
-	saveFakeProvider(t)
-	writeGeminiFile(t, filepath.Join(home, ".gemini", "settings.json"), `{}`)
+func TestAgmGeminiProviderFieldRejectsUnknown(t *testing.T) {
+	home := agmIsolate(t)
+	agmSaveFake(t)
+	agmWriteFile(t, filepath.Join(home, ".gemini", "settings.json"), `{}`)
 	g := gemini(home)
 	if err := g.Field("provider").Set("nope"); err == nil {
 		t.Error("an unknown provider should fail")
@@ -280,35 +280,35 @@ func TestGeminiProviderFieldRejectsUnknown(t *testing.T) {
 	}
 }
 
-func TestGeminiNativeModelWithoutRouting(t *testing.T) {
-	home := isolateGemini(t)
+func TestAgmGeminiNativeModelWithoutRouting(t *testing.T) {
+	home := agmIsolate(t)
 	settings := filepath.Join(home, ".gemini", "settings.json")
-	writeGeminiFile(t, settings, `{"model":{"name":"gemini-2.5-pro"}}`)
+	agmWriteFile(t, settings, `{"model":{"name":"gemini-2.5-pro"}}`)
 	g := gemini(home)
 	if err := g.Field("model").Set("gemini-2.5-flash"); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := settingsAt(t, settings, "model.name"); v != "gemini-2.5-flash" {
+	if v, _ := agmSettingsAt(t, settings, "model.name"); v != "gemini-2.5-flash" {
 		t.Errorf("model.name = %q", v)
 	}
 }
 
-// fakeJWT is an unsigned JWT with the given payload; dial only reads claims.
-func fakeJWT(claims map[string]any) string {
+// agmFakeJWT is an unsigned JWT with the given payload; dial only reads claims.
+func agmFakeJWT(claims map[string]any) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	b, _ := json.Marshal(claims)
 	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
-func TestAccountNoteAndCodexOwnModelsHidden(t *testing.T) {
-	home := isolateGemini(t)
-	id := fakeJWT(map[string]any{"email": "dev@example.com"})
-	acc := fakeJWT(map[string]any{"exp": 4102444800})
+func TestAgmAccountNoteAndCodexOwnModelsHidden(t *testing.T) {
+	home := agmIsolate(t)
+	id := agmFakeJWT(map[string]any{"email": "dev@example.com"})
+	acc := agmFakeJWT(map[string]any{"exp": 4102444800})
 	body, _ := json.Marshal(map[string]any{
 		"auth_mode": "chatgpt",
 		"tokens":    map[string]any{"id_token": id, "access_token": acc, "refresh_token": "r", "account_id": "acct"},
 	})
-	writeGeminiFile(t, filepath.Join(home, ".codex", "auth.json"), string(body))
+	agmWriteFile(t, filepath.Join(home, ".codex", "auth.json"), string(body))
 
 	// the picker of another agent credits the account, not the vendor; Pi
 	// spells catalog values as dial/<provider>/<model>
@@ -336,35 +336,35 @@ func TestAccountNoteAndCodexOwnModelsHidden(t *testing.T) {
 
 // A bare catalog id, one that is not Gemini's own name, routes when exactly one
 // catalog entry has it: the CLI ends up on provider/model, as if it had been named.
-func TestGeminiBareCatalogIDRoutesWhenUnique(t *testing.T) {
-	home := isolateGemini(t)
-	saveFakeProvider(t)
+func TestAgmGeminiBareCatalogIDRoutesWhenUnique(t *testing.T) {
+	home := agmIsolate(t)
+	agmSaveFake(t)
 	settings := filepath.Join(home, ".gemini", "settings.json")
-	writeGeminiFile(t, settings, `{}`)
+	agmWriteFile(t, settings, `{}`)
 
 	g := gemini(home)
 	if err := g.Field("model").Set("m1"); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := settingsAt(t, settings, "model.name"); v != "fake/m1" {
+	if v, _ := agmSettingsAt(t, settings, "model.name"); v != "fake/m1" {
 		t.Errorf("model.name = %q, want fake/m1", v)
 	}
-	if v, _ := settingsAt(t, settings, "security.auth.selectedType"); v != "gemini-api-key" {
+	if v, _ := agmSettingsAt(t, settings, "security.auth.selectedType"); v != "gemini-api-key" {
 		t.Errorf("selectedType = %q, want gemini-api-key", v)
 	}
 }
 
 // A bare id that two providers serve is refused and names both; an id nobody
 // serves is refused too. Neither is written as a native model.
-func TestGeminiBareCatalogIDAmbiguousOrUnknownIsRefused(t *testing.T) {
-	home := isolateGemini(t)
-	saveFakeProvider(t)
+func TestAgmGeminiBareCatalogIDAmbiguousOrUnknownIsRefused(t *testing.T) {
+	home := agmIsolate(t)
+	agmSaveFake(t)
 	if err := provider.Save(provider.Provider{ID: "other", Name: "Other", Key: "k",
 		Chat: "http://127.0.0.1:9/v1", Models: []string{"m1"}}); err != nil {
 		t.Fatal(err)
 	}
 	settings := filepath.Join(home, ".gemini", "settings.json")
-	writeGeminiFile(t, settings, `{"model":{"name":"gemini-2.5-pro"}}`)
+	agmWriteFile(t, settings, `{"model":{"name":"gemini-2.5-pro"}}`)
 
 	g := gemini(home)
 	err := g.Field("model").Set("m1")
@@ -374,10 +374,10 @@ func TestGeminiBareCatalogIDAmbiguousOrUnknownIsRefused(t *testing.T) {
 	if err := g.Field("model").Set("no-such-model"); err == nil {
 		t.Error("unknown bare id was accepted")
 	}
-	if v, _ := settingsAt(t, settings, "model.name"); v != "gemini-2.5-pro" {
+	if v, _ := agmSettingsAt(t, settings, "model.name"); v != "gemini-2.5-pro" {
 		t.Errorf("refused picks changed model.name to %q", v)
 	}
-	if _, ok := settingsAt(t, settings, "security.auth.selectedType"); ok {
+	if _, ok := agmSettingsAt(t, settings, "security.auth.selectedType"); ok {
 		t.Error("refused pick routed the CLI anyway")
 	}
 }

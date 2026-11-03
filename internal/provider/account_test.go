@@ -15,9 +15,9 @@ import (
 	"time"
 )
 
-// isolate points HOME, dial's config and cache, and Claude's config dir at a
+// acctIsolate points HOME, dial's config and cache, and Claude's config dir at a
 // fresh temp tree, so nothing on the test machine leaks into the results.
-func isolate(t *testing.T) string {
+func acctIsolate(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -31,7 +31,7 @@ func isolate(t *testing.T) string {
 	return home
 }
 
-func writeFile(t *testing.T, path, body string) {
+func acctWriteFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -41,40 +41,40 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
-// fakeJWT is an unsigned JWT with the given payload; dial only reads claims.
-func fakeJWT(claims map[string]any) string {
+// acctFakeJWT is an unsigned JWT with the given payload; dial only reads claims.
+func acctFakeJWT(claims map[string]any) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	b, _ := json.Marshal(claims)
 	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
 // writeCodex writes Codex's login file in the given auth mode.
-func writeCodex(t *testing.T, home, mode, email, plan string, exp int64) string {
+func acctWriteCodex(t *testing.T, home, mode, email, plan string, exp int64) string {
 	t.Helper()
 	path := filepath.Join(home, ".codex", "auth.json")
-	id := fakeJWT(map[string]any{
+	id := acctFakeJWT(map[string]any{
 		"email":                       email,
 		"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": plan},
 	})
-	acc := fakeJWT(map[string]any{"exp": exp})
+	acc := acctFakeJWT(map[string]any{"exp": exp})
 	body, _ := json.Marshal(map[string]any{
 		"auth_mode": mode,
 		"tokens": map[string]any{
 			"id_token": id, "access_token": acc, "refresh_token": "rt-secret", "account_id": "acct-1",
 		},
 	})
-	writeFile(t, path, string(body))
+	acctWriteFile(t, path, string(body))
 	return path
 }
 
 // writeCopilot writes the GitHub sign-in Copilot keeps in apps.json.
-func writeCopilot(t *testing.T, xdg, user, token string) {
+func acctWriteCopilot(t *testing.T, xdg, user, token string) {
 	t.Helper()
 	body := `{"github.com:1":{"user":"` + user + `","oauth_token":"` + token + `"},"other.example:2":{"user":"nobody","oauth_token":"x"}}`
-	writeFile(t, filepath.Join(xdg, "github-copilot", "apps.json"), body)
+	acctWriteFile(t, filepath.Join(xdg, "github-copilot", "apps.json"), body)
 }
 
-func ids(ms []Provider) []string {
+func acctIDs(ms []Provider) []string {
 	var out []string
 	for _, p := range ms {
 		out = append(out, p.ID)
@@ -82,24 +82,24 @@ func ids(ms []Provider) []string {
 	return out
 }
 
-func find(t *testing.T, ps []Provider, id string) Provider {
+func acctFind(t *testing.T, ps []Provider, id string) Provider {
 	t.Helper()
 	for _, p := range ps {
 		if p.ID == id {
 			return p
 		}
 	}
-	t.Fatalf("provider %q not in %v", id, ids(ps))
+	t.Fatalf("provider %q not in %v", id, acctIDs(ps))
 	return Provider{}
 }
 
-func TestCodexEmailFromIDToken(t *testing.T) {
-	home := isolate(t)
+func TestAcctCodexEmailFromIDToken(t *testing.T) {
+	home := acctIsolate(t)
 	exp := time.Now().Add(time.Hour).Unix()
-	writeCodex(t, home, "chatgpt", "me@example.com", "plus", exp)
+	acctWriteCodex(t, home, "chatgpt", "me@example.com", "plus", exp)
 	CodexBase = "http://127.0.0.1:9/backend-api/codex"
 
-	p := find(t, All(), codexID)
+	p := acctFind(t, All(), codexID)
 	if p.Account == nil || p.Account.User != "me@example.com" || p.Account.Plan != "plus" || p.Account.Source != "Codex" {
 		t.Fatalf("account = %+v", p.Account)
 	}
@@ -128,9 +128,9 @@ func TestCodexEmailFromIDToken(t *testing.T) {
 	}
 }
 
-func TestAPIKeyModeIsNotAnAccount(t *testing.T) {
-	home := isolate(t)
-	writeCodex(t, home, "apikey", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
+func TestAcctAPIKeyModeIsNotAnAccount(t *testing.T) {
+	home := acctIsolate(t)
+	acctWriteCodex(t, home, "apikey", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
 	for _, p := range All() {
 		if p.ID == codexID {
 			t.Fatalf("apikey-mode Codex listed as a provider: %+v", p)
@@ -141,9 +141,9 @@ func TestAPIKeyModeIsNotAnAccount(t *testing.T) {
 	}
 }
 
-func TestCopilotLoginAndModelFilter(t *testing.T) {
-	isolate(t)
-	writeCopilot(t, os.Getenv("XDG_CONFIG_HOME"), "octocat", "gho_secret")
+func TestAcctCopilotLoginAndModelFilter(t *testing.T) {
+	acctIsolate(t)
+	acctWriteCopilot(t, os.Getenv("XDG_CONFIG_HOME"), "octocat", "gho_secret")
 
 	var tokenAuth, modelsAuth string
 	mux := http.NewServeMux()
@@ -167,7 +167,7 @@ func TestCopilotLoginAndModelFilter(t *testing.T) {
 	defer srv.Close()
 	CopilotTokenURL = srv.URL + "/token"
 
-	p := find(t, All(), copilotID)
+	p := acctFind(t, All(), copilotID)
 	if p.Account == nil || p.Account.User != "octocat" || p.Account.Source != "Copilot CLI" {
 		t.Fatalf("account = %+v", p.Account)
 	}
@@ -199,7 +199,7 @@ func TestCopilotLoginAndModelFilter(t *testing.T) {
 		t.Errorf("filtered = %v, want %v", got, want)
 	}
 	// the refreshed list is what the account offers from now on
-	p = find(t, All(), copilotID)
+	p = acctFind(t, All(), copilotID)
 	if n := len(p.Available()); n != 2 {
 		t.Errorf("after refresh Available has %d models, want 2", n)
 	}
@@ -214,9 +214,9 @@ func TestCopilotLoginAndModelFilter(t *testing.T) {
 	}
 }
 
-func TestCopilotSessionRejectionAsksForLogin(t *testing.T) {
-	isolate(t)
-	writeCopilot(t, os.Getenv("XDG_CONFIG_HOME"), "octocat", "gho_old")
+func TestAcctCopilotSessionRejectionAsksForLogin(t *testing.T) {
+	acctIsolate(t)
+	acctWriteCopilot(t, os.Getenv("XDG_CONFIG_HOME"), "octocat", "gho_old")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -228,34 +228,34 @@ func TestCopilotSessionRejectionAsksForLogin(t *testing.T) {
 	}
 }
 
-func TestCopilotHomeFallback(t *testing.T) {
-	home := isolate(t)
+func TestAcctCopilotHomeFallback(t *testing.T) {
+	home := acctIsolate(t)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	writeCopilot(t, filepath.Join(home, ".config"), "fallback-user", "gho_x")
-	p := find(t, All(), copilotID)
+	acctWriteCopilot(t, filepath.Join(home, ".config"), "fallback-user", "gho_x")
+	p := acctFind(t, All(), copilotID)
 	if p.Account.User != "fallback-user" {
 		t.Errorf("user = %q", p.Account.User)
 	}
 }
 
-func TestStaleAccountPicksIgnored(t *testing.T) {
-	home := isolate(t)
-	writeFile(t, Path(), `{"providers":[{"id":"codex","models":["gpt-5.5"]},{"id":"copilot","models":["gpt-5.5"]}]}`)
+func TestAcctStaleAccountPicksIgnored(t *testing.T) {
+	home := acctIsolate(t)
+	acctWriteFile(t, Path(), `{"providers":[{"id":"codex","models":["gpt-5.5"]},{"id":"copilot","models":["gpt-5.5"]}]}`)
 	for _, p := range All() {
 		if IsAccount(p.ID) {
 			t.Fatalf("signed-out account listed: %s", p.ID)
 		}
 	}
 	// signing in brings the picks back, and they are the only thing stored
-	writeCodex(t, home, "chatgpt", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
-	if got := find(t, All(), codexID).Models; !reflect.DeepEqual(got, []string{"gpt-5.5"}) {
+	acctWriteCodex(t, home, "chatgpt", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
+	if got := acctFind(t, All(), codexID).Models; !reflect.DeepEqual(got, []string{"gpt-5.5"}) {
 		t.Errorf("picks = %v", got)
 	}
 }
 
-func TestSaveAccountWritesOnlyModels(t *testing.T) {
-	home := isolate(t)
-	writeCodex(t, home, "chatgpt", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
+func TestAcctSaveAccountWritesOnlyModels(t *testing.T) {
+	home := acctIsolate(t)
+	acctWriteCodex(t, home, "chatgpt", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
 	// a key, a name or a base URL has no place on an account: Save ignores them and keeps only the picks
 	err := Save(Provider{ID: codexID, Name: "Codex", Key: "sk-secret", Chat: "https://x.example/v1", Models: []string{"gpt-5.5", "gpt-5.5", " "}})
 	if err != nil {
@@ -278,12 +278,12 @@ func TestSaveAccountWritesOnlyModels(t *testing.T) {
 	if len(entry) != 2 || entry["id"] != codexID {
 		t.Errorf("stored entry = %v, want only id and models", entry)
 	}
-	if got := find(t, All(), codexID); !reflect.DeepEqual(got.Models, []string{"gpt-5.5"}) || got.Key != "" {
+	if got := acctFind(t, All(), codexID); !reflect.DeepEqual(got.Models, []string{"gpt-5.5"}) || got.Key != "" {
 		t.Errorf("after save: models=%v key=%q", got.Models, got.Key)
 	}
 	// a provider read back with Find carries the sign-in's own base URL; saving
 	// it again with new picks is the normal "dial provider models" path
-	found := find(t, All(), codexID)
+	found := acctFind(t, All(), codexID)
 	found.Models = []string{"gpt-5.5"}
 	if err := Save(found); err != nil {
 		t.Errorf("re-saving a found account with picks: %v", err)
@@ -292,17 +292,17 @@ func TestSaveAccountWritesOnlyModels(t *testing.T) {
 
 // An account with no picks offers everything its sign-in can use, even when
 // that is more than the picker would show for an ordinary vendor.
-func TestAccountWithoutPicksIsNeverCapped(t *testing.T) {
-	home := isolate(t)
-	writeCodex(t, home, "chatgpt", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
+func TestAcctAccountWithoutPicksIsNeverCapped(t *testing.T) {
+	home := acctIsolate(t)
+	acctWriteCodex(t, home, "chatgpt", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
 	var models []map[string]any
 	for i := 0; i < manyModels+6; i++ {
 		models = append(models, map[string]any{"slug": fmt.Sprintf("model-%02d", i), "display_name": "M", "priority": i})
 	}
 	b, _ := json.Marshal(map[string]any{"models": models})
-	writeFile(t, filepath.Join(home, ".codex", "models_cache.json"), string(b))
+	acctWriteFile(t, filepath.Join(home, ".codex", "models_cache.json"), string(b))
 
-	p := find(t, All(), codexID)
+	p := acctFind(t, All(), codexID)
 	if n, want := len(p.Exposed()), len(p.Available()); n != want || n <= manyModels {
 		t.Fatalf("exposed %d of %d available; an account with no picks should expose all of them", n, want)
 	}
@@ -310,14 +310,14 @@ func TestAccountWithoutPicksIsNeverCapped(t *testing.T) {
 	if err := Save(Provider{ID: codexID, Models: []string{"model-00"}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := find(t, All(), codexID).Exposed(); len(got) != 1 || got[0].ID != "model-00" {
+	if got := acctFind(t, All(), codexID).Exposed(); len(got) != 1 || got[0].ID != "model-00" {
 		t.Errorf("picked exposure = %v", got)
 	}
 }
 
-func TestDeleteAccountClearsPicksOnly(t *testing.T) {
-	home := isolate(t)
-	authPath := writeCodex(t, home, "chatgpt", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
+func TestAcctDeleteAccountClearsPicksOnly(t *testing.T) {
+	home := acctIsolate(t)
+	authPath := acctWriteCodex(t, home, "chatgpt", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
 	before, _ := os.ReadFile(authPath)
 	if err := Save(Provider{ID: codexID, Models: []string{"gpt-5.5"}}); err != nil {
 		t.Fatal(err)
@@ -325,7 +325,7 @@ func TestDeleteAccountClearsPicksOnly(t *testing.T) {
 	if err := Delete(codexID); err != nil {
 		t.Fatal(err)
 	}
-	p := find(t, All(), codexID)
+	p := acctFind(t, All(), codexID)
 	if len(p.Models) != 0 {
 		t.Errorf("picks survived delete: %v", p.Models)
 	}
@@ -339,11 +339,11 @@ func TestDeleteAccountClearsPicksOnly(t *testing.T) {
 	}
 }
 
-func TestClaudeNeverAProvider(t *testing.T) {
-	home := isolate(t)
-	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{"claudeAiOauth":{"accessToken":"SECRET-TOKEN"}}`)
+func TestAcctClaudeNeverAProvider(t *testing.T) {
+	home := acctIsolate(t)
+	acctWriteFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{"claudeAiOauth":{"accessToken":"SECRET-TOKEN"}}`)
 	// a stale custom entry called claude must not come back either
-	writeFile(t, Path(), `{"providers":[{"id":"claude","name":"Claude","key":"k","anthropic":"https://api.anthropic.com"}]}`)
+	acctWriteFile(t, Path(), `{"providers":[{"id":"claude","name":"Claude","key":"k","anthropic":"https://api.anthropic.com"}]}`)
 
 	for _, p := range All() {
 		if p.ID == claudeID {
@@ -364,12 +364,12 @@ func TestClaudeNeverAProvider(t *testing.T) {
 	}
 }
 
-func TestClaudeNoteWhenSignedIn(t *testing.T) {
-	home := isolate(t)
+func TestAcctClaudeNoteWhenSignedIn(t *testing.T) {
+	home := acctIsolate(t)
 	if n := Notes(); len(n) != 0 {
 		t.Fatalf("notes without a sign-in: %v", n)
 	}
-	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{}`)
+	acctWriteFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{}`)
 	n := Notes()
 	if len(n) != 1 || n[0].Name != "Claude Code" || !strings.Contains(n[0].Note, "已登录但不提供") {
 		t.Fatalf("notes = %+v", n)
@@ -384,7 +384,7 @@ func TestClaudeNoteWhenSignedIn(t *testing.T) {
 	}
 }
 
-func TestCopilotTurnHeaders(t *testing.T) {
+func TestAcctCopilotTurnHeaders(t *testing.T) {
 	cases := []struct {
 		toolReturn, image bool
 		want              map[string]string
