@@ -11,6 +11,8 @@
 	<key>CFBundleShortVersionString</key><string>@VERSION@</string>
 	<key>CFBundleVersion</key><string>@VERSION@</string>
 	<key>LSMinimumSystemVersion</key><string>11.0</string>
+	<key>LSUIElement</key><true/>
+	<key>NSHighResolutionCapable</key><true/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -18,8 +20,6 @@
 			<key>CFBundleURLSchemes</key><array><string>magpie</string></array>
 		</dict>
 	</array>
-	<key>LSUIElement</key><true/>
-	<key>NSHighResolutionCapable</key><true/>
 	<key>NSHumanReadableCopyright</key><string>yetone</string>
 </dict>
 </plist>
