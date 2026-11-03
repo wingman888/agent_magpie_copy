@@ -177,11 +177,7 @@ func Decorate(live []Model, known []Model) []Model {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
-			// a reasoning list the vendor sent itself wins over the built-in one
-			if len(m.Efforts) == 0 {
-				m.Efforts = k.Efforts
-			}
-			m.Released, m.Provider = k.Released, k.Provider
+			m.Efforts, m.Released, m.Provider = k.Efforts, k.Released, k.Provider
 		}
 		out = append(out, m)
 	}
