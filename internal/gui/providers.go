@@ -45,6 +45,7 @@ type providerJSON struct {
 	} `json:"key"`
 	Ready     bool            `json:"ready"`
 	Chosen    []string        `json:"chosen"`  // the user's explicit picks, if any
+	Fallback  []string        `json:"fallback"` // models the gateway tries when this one can't answer
 	Models    []modelJSON     `json:"models"`  // everything the vendor lists, exposed ones flagged
 	Exposed   int             `json:"exposed"` // how many reach the agents
 	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
@@ -120,6 +121,10 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
+	}
+	out.Fallback = p.Fallback
+	if out.Fallback == nil {
+		out.Fallback = []string{}
 	}
 	if pr := provider.Preset(p.Preset); pr != nil {
 		out.Sponsored = pr.Sponsored
@@ -246,7 +251,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			// a preset needs nothing but the key; a saved provider keeps
 			// its key when the form left it blank
 			if pr, err := provider.FromPreset(in.Preset); err == nil && in.Chat == "" && in.Responses == "" && in.Anthropic == "" {
-				pr.Key, pr.Models = in.Key, in.Models
+				pr.Key, pr.Models, pr.Fallback = in.Key, in.Models, in.Fallback
 				if in.Name != "" {
 					pr.Name = in.Name
 				}
@@ -258,6 +263,10 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			old, _ := provider.Find(in.ID)
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
+			}
+			// a form that leaves the fallback out keeps the saved list
+			if in.Fallback == nil && old != nil {
+				in.Fallback = old.Fallback
 			}
 			if in.Icon == "" && old != nil && in.Preset == "" {
 				in.Icon = old.Icon

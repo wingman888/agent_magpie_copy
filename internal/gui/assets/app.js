@@ -1423,7 +1423,7 @@ function renderEditor(p, presetID) {
     const cancel = el("button", "text", t("Cancel"));
     cancel.onclick = cancelEdit;
     const saveBtn = el("button", "text primary", t("Save"));
-    saveBtn.onclick = () => { saveBtn.classList.add("busy"); providerAction("save", { id: p.id, models: draft.chosen }, t("{name} saved", { name: p.name })); };
+    saveBtn.onclick = () => { saveBtn.classList.add("busy"); providerAction("save", { id: p.id, models: draft.chosen, fallback: p.fallback || [] }, t("{name} saved", { name: p.name })); };
     bar.append(cancel, saveBtn);
     ed.append(bar);
     return ed;
@@ -1533,7 +1533,7 @@ function renderEditor(p, presetID) {
   cancel.onclick = cancelEdit;
   const saveBtn = el("button", "text primary", t(isNew ? "Add" : "Save"));
   const save = () => {
-    const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra };
+    const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra, fallback: p?.fallback || [] };
     if (custom) { body.headers = headersOf(draft.headers); body.icon = draft.icon || "generic"; }
     if (isNew && custom && !body.name) { name.focus(); return editorError(t("Give it a name"), "warn"); }
     if (isNew && custom && !body.chat && !body.anthropic) { url.focus(); return editorError(t("A base URL is needed"), "warn"); }
