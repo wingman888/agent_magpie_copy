@@ -311,7 +311,7 @@ func TestF09AffinityWhy(t *testing.T) {
 		kept     bool
 	}{
 		{"off", "off", convo{within: true}, ans(a, 0, fresh), true, 0, false, nil, "off", false},
-		{"first", "auto", convo{within: true}, answer{}, false, 0, false, nil, "first", false},
+		{"first", "auto", convo{within: true}, affAnswer{}, false, 0, false, nil, "first", false},
 		{"gone", "auto", convo{within: true}, ans(candidate{rest: "p#z", model: "m"}, 0, fresh), true, -1, false, nil, "gone", false},
 		{"spent", "auto", convo{within: true}, ans(a, 0, fresh), true, 0, false, map[string]left{candKey(a): {used: 99}}, "spent", false},
 		{"session", "session", convo{}, ans(a, 0, fresh), true, 0, false, nil, "session", true},
