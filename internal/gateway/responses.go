@@ -297,16 +297,12 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 				Reason string `json:"reason"`
 			} `json:"incomplete_details"`
 			Error *struct {
-				Message string          `json:"message"`
-				Type    string          `json:"type"`
-				Code    json.RawMessage `json:"code"`
+				Message string `json:"message"`
 			} `json:"error"`
 			Output []rItem `json:"output"`
 		} `json:"response"`
 		Error *struct {
-			Message string          `json:"message"`
-			Type    string          `json:"type"`
-			Code    json.RawMessage `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 		Message string `json:"message"`
 	}
@@ -337,7 +333,7 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		}
 	case "response.completed", "response.incomplete", "response.failed":
 		if ev.Response.Error != nil {
-			emit(Event{Kind: KError, Text: ev.Response.Error.Message, ErrType: errKind(ev.Response.Error.Type, ev.Response.Error.Code)})
+			emit(Event{Kind: KError, Text: ev.Response.Error.Message})
 			return nil
 		}
 		stop := "stop"
@@ -356,12 +352,11 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStop, Stop: stop})
 		emit(Event{Kind: KUsage, Usage: ev.Response.Usage.usage()})
 	case "error":
-		msg, typ := ev.Message, ""
-		var code json.RawMessage
+		msg := ev.Message
 		if ev.Error != nil {
-			msg, typ, code = ev.Error.Message, ev.Error.Type, ev.Error.Code
+			msg = ev.Error.Message
 		}
-		emit(Event{Kind: KError, Text: msg, ErrType: errKind(typ, code)})
+		emit(Event{Kind: KError, Text: msg})
 	}
 	return nil
 }
@@ -495,8 +490,10 @@ func (e *responsesEncoder) event(ev Event) {
 		if ev.ID == "" {
 			ev.ID = "call_" + newID()
 		}
-		e.col.add(ev)
+		// Open (and so close the previous item) before recording this call:
+		// closeItem reads the call ID from e.col.last(ToolCall).
 		e.openItem(ToolCall, "fc_", map[string]any{"type": "function_call", "call_id": ev.ID, "name": ev.Name, "arguments": ""})
+		e.col.add(ev)
 		return
 	case KToolArgs:
 		if e.open == ToolCall && ev.Text != "" {
