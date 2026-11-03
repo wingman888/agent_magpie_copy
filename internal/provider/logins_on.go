@@ -1,0 +1,148 @@
+package provider
+
+// Several subscriptions in use at once. The agent is signed in to one
+// account; any other saved account that's on stands behind it, and the
+// gateway sends a request there when the first is out of quota or rate
+// limited. Such an account is never put into the agent's own store: its
+// tokens stay in logins.json, refreshed there, so each refresh token still
+// has exactly one holder.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+)
+
+// savedTokenMu keeps two requests from refreshing one saved account at
+// once: the second would spend a refresh token the first just rotated.
+var savedTokenMu sync.Mutex
+
+// SetLoginOn puts a saved account in use beside the agent's own, or takes
+// it out. The account the agent is signed in to is always in use.
+func SetLoginOn(agent, user string, on bool) error {
+	loginsMu.Lock()
+	defer loginsMu.Unlock()
+	if live, ok := liveLogin(agent); ok && strings.EqualFold(live.User, user) {
+		if on {
+			return nil
+		}
+		return fmt.Errorf("%s is signed in to %s; make another account first to stop using it", agent, user)
+	}
+	ls := readLogins()
+	for i := range ls {
+		if ls[i].Agent == agent && strings.EqualFold(ls[i].User, user) {
+			ls[i].On = on
+			return writeLogins(ls)
+		}
+	}
+	return fmt.Errorf("no saved %s account %q", agent, user)
+}
+
+// AlsoOn is a signed-in agent's other accounts that are on, each as a
+// provider of its own, in the order they were saved.
+func (p Provider) AlsoOn() []Provider {
+	if p.Account == nil || p.Account.token != nil || (p.Account.Agent != "claude" && p.Account.Agent != "codex") {
+		return nil
+	}
+	var out []Provider
+	for _, l := range Logins(p.Account.Agent) {
+		if l.Active || !l.On {
+			continue
+		}
+		agent, user := l.Agent, l.User
+		a := *p.Account
+		a.User, a.Plan = user, l.Plan
+		a.token = func(ctx context.Context) (string, error) {
+			tok, _, err := savedLoginToken(ctx, agent, user)
+			return tok, err
+		}
+		if agent == "codex" {
+			a.sign = codexSign(func(ctx context.Context) (string, string, error) { return savedLoginToken(ctx, agent, user) })
+		}
+		q := p
+		q.Account = &a
+		out = append(out, q)
+	}
+	return out
+}
+
+// Token is the access token of a saved account in use beside the agent's
+// own; ok is false for the agent's own, which the agent signs itself.
+func (a *Account) Token(ctx context.Context) (tok string, ok bool, err error) {
+	if a == nil || a.token == nil {
+		return "", false, nil
+	}
+	tok, err = a.token(ctx)
+	return tok, true, err
+}
+
+// savedLoginToken is a usable access token for a saved account, refreshed
+// when it's about to expire and written back to logins.json.
+func savedLoginToken(ctx context.Context, agent, user string) (tok, accountID string, err error) {
+	savedTokenMu.Lock()
+	defer savedTokenMu.Unlock()
+	loginsMu.Lock()
+	var l *savedLogin
+	for _, x := range readLogins() {
+		if x.Agent == agent && strings.EqualFold(x.User, user) {
+			x := x
+			l = &x
+		}
+	}
+	loginsMu.Unlock()
+	if l == nil {
+		return "", "", fmt.Errorf("no saved %s account %q", agent, user)
+	}
+	var auth []byte
+	switch agent {
+	case "claude":
+		c, ok := parseClaudeCredentials(l.Auth)
+		if !ok {
+			return "", "", errors.New("the saved Claude sign-in of " + user + " is unreadable")
+		}
+		if claudeFresh(c) {
+			return c.OAuth.AccessToken, "", nil
+		}
+		if err := claudeRefresh(ctx, &c); err != nil {
+			return "", "", fmt.Errorf("%s: %w", user, err)
+		}
+		tok = c.OAuth.AccessToken
+		if auth, err = c.marshal(); err != nil {
+			return "", "", err
+		}
+	case "codex":
+		var raw map[string]any
+		var a codexAuth
+		if json.Unmarshal(l.Auth, &raw) != nil || json.Unmarshal(l.Auth, &a) != nil || a.Tokens.AccessToken == "" {
+			return "", "", errors.New("the saved ChatGPT sign-in of " + user + " is unreadable")
+		}
+		accountID = a.Tokens.AccountID
+		if accountID == "" {
+			accountID = claimString(jwtClaims(a.Tokens.IDToken), "https://api.openai.com/auth", "chatgpt_account_id")
+		}
+		if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
+			return a.Tokens.AccessToken, accountID, nil
+		}
+		if tok, err = codexRefresh(ctx, raw); err != nil {
+			return "", "", fmt.Errorf("%s: %w", user, err)
+		}
+		if auth, err = json.MarshalIndent(raw, "", "  "); err != nil {
+			return "", "", err
+		}
+	default:
+		return "", "", fmt.Errorf("%s accounts can't be used side by side", agent)
+	}
+	loginsMu.Lock()
+	defer loginsMu.Unlock()
+	ls := readLogins()
+	for i := range ls {
+		if ls[i].Agent == agent && strings.EqualFold(ls[i].User, user) {
+			ls[i].Auth = auth
+		}
+	}
+	return tok, accountID, writeLogins(ls)
+}

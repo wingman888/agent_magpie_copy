@@ -37,11 +37,14 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName names the front key (the one in Key), when the user gave it one.
-	// Keys are the provider's other keys, in the order the gateway tries them
-	// after the front one; Off keeps a key on file without using it. See keys.go.
-	KeyName string    `json:"keyName,omitempty"`
-	Keys    []KeySlot `json:"keys,omitempty"`
+	// KeyName names the key in use, and Keys are the provider's other
+	// accounts: keys saved to switch to (see keys.go).
+	KeyName string       `json:"keyName,omitempty"`
+	Keys    []KeyAccount `json:"keys,omitempty"`
+
+	// KeyProtocol limits the key in use to one protocol's endpoint, when the
+	// vendor issues keys per protocol (empty: the key works for all of them).
+	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -185,9 +188,6 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
-	// an edit that carries no key list (only a name, models, ...) keeps the
-	// keys already saved; see keepKeys
-	carries := len(p.Keys) > 0 || strings.TrimSpace(p.KeyName) != ""
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -201,17 +201,19 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	f := load()
+	if !validKeyProtocol(p.KeyProtocol) {
+		return fmt.Errorf("%s: the key can only be limited to chat, responses or anthropic, not %q", p.Name, p.KeyProtocol)
+	}
+	for _, k := range p.Keys {
+		if !validKeyProtocol(k.Protocol) {
+			return fmt.Errorf("%s: a key can only be limited to chat, responses or anthropic, not %q", p.Name, k.Protocol)
+		}
+	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
 		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
-		if !carries {
-			if i := storedIndex(f, p.ID); i >= 0 {
-				p = keepKeys(f.Providers[i], p)
-			}
-		}
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
@@ -219,6 +221,7 @@ func Save(p Provider) error {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
+	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
@@ -273,7 +276,6 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.setSlots(cleanSlots(p.slots()))
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -401,19 +403,12 @@ func HostOf(u string) string {
 	return strings.ToLower(u)
 }
 
-// Mask hides all but the ends of a secret. The shorter the secret, the less
-// of each end is shown: up to 8 characters nothing is shown, under 16 only
-// two characters at each end, and longer secrets get four at each end.
+// Mask hides all but the ends of a secret.
 func Mask(s string) string {
-	r := []rune(s) // cut by characters, never through a multi-byte one
-	n := 4
-	switch {
-	case len(r) <= 8:
-		return strings.Repeat("•", len(r))
-	case len(r) < 16:
-		n = 2
+	if len(s) <= 8 {
+		return strings.Repeat("•", len(s))
 	}
-	return string(r[:n]) + "…" + string(r[len(r)-n:])
+	return s[:4] + "…" + s[len(s)-4:]
 }
 
 // Ready reports whether the provider can be used: it has a key, needs
