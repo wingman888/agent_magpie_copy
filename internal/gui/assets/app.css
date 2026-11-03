@@ -582,6 +582,9 @@ body.window .foot { padding-left: 18px; }
 .editor .more[open] summary::before { content: "▾"; }
 .editor .more summary:hover { color: var(--fg); }
 .editor .more .inner { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px 14px; align-items: start; padding-top: 8px; }
+.editor .warnbox { grid-column: 1 / -1; font-size: 12px; line-height: 1.5; color: var(--fg); background: color-mix(in srgb, var(--amber) 12%, transparent); border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent); border-radius: 8px; padding: 8px 10px; }
+.editor .warnbox.soft { background: none; color: var(--amber); border: 0; padding: 0 0 0 86px; }
+.editor.import .mchips .mchip { cursor: default; }
 .editor .bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 4px; padding-top: 10px; border-top: 1px solid var(--line-2); margin-top: 2px; }
 .editor .bar .danger { margin-left: -7px; }
 .busy { opacity: .55; pointer-events: none; }

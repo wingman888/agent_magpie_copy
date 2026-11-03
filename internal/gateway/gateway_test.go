@@ -56,10 +56,20 @@ func sse(lines ...string) string {
 	return b.String()
 }
 
+// clearProxyEnv empties every proxy variable for the duration of the test, so
+// a proxy configured in the host environment cannot change where requests go.
+func clearProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(k, "")
+	}
+}
+
 // setup points magpie's provider file at a temp dir and adds one provider
 // speaking only the given protocol, backed by the fake.
 func setup(t *testing.T, proto provider.Protocol, f *fake) *httptest.Server {
 	t.Helper()
+	clearProxyEnv(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	up := httptest.NewServer(f)
@@ -130,6 +140,7 @@ func (f *fallbackFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestAnthropicClientFallsBackFromChatToResponses(t *testing.T) {
+	clearProxyEnv(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	f := &fallbackFake{}
@@ -488,6 +499,7 @@ func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 // the sampling knobs, so a plain non-streaming Responses call is
 // translated, signed with the account's tokens, and answered as JSON.
 func TestCodexAccountUpstream(t *testing.T) {
+	clearProxyEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
