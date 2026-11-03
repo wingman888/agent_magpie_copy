@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -110,6 +112,10 @@ func listAccounts(agent string) error {
 		fmt.Println(muted.Render("  no sign-ins remembered yet; sign in with " + accountTitles[agent] + " and magpie remembers it, or run magpie accounts add " + agent))
 		return nil
 	}
+	// the vendors answer slowly; a listing should not wait on them for long
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	usage := provider.LoginUsage(ctx, agent)
 	for _, a := range accts {
 		mark := faint.Render("○")
 		state := ""
@@ -124,7 +130,26 @@ func listAccounts(agent string) error {
 		if a.Plan != "" {
 			plan = "  " + a.Plan
 		}
-		fmt.Printf("  %s %s%s  %s\n", mark, a.User, muted.Render(plan), muted.Render(state))
+		q, ok := usage[a.User]
+		fmt.Printf("  %s %s%s  %s%s\n", mark, a.User, muted.Render(plan), muted.Render(state), muted.Render(quotaText(q, ok)))
 	}
 	return nil
+}
+
+// quotaText sums up a sign-in's usage windows, e.g. "  5 hours 12% · 7 days 40%".
+func quotaText(q provider.SubscriptionQuota, ok bool) string {
+	if !ok {
+		return ""
+	}
+	if len(q.Windows) == 0 {
+		if q.Error != "" {
+			return "  usage unavailable"
+		}
+		return ""
+	}
+	parts := make([]string, 0, len(q.Windows))
+	for _, w := range q.Windows {
+		parts = append(parts, fmt.Sprintf("%s %.0f%%", w.Name, w.Used))
+	}
+	return "  " + strings.Join(parts, " · ")
 }

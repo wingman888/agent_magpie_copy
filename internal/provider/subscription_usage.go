@@ -163,13 +163,23 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	}
 	_, plan, _ := claudeIdentity()
 	q.Plan = plan
+	return claudeWindows(ctx, token, q)
+}
+
+// claudeUsageURL is Anthropic's usage endpoint for a Claude Code sign-in; a var
+// so tests can stand in for it.
+var claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
+
+// claudeWindows asks the usage endpoint about the sign-in holding token and
+// fills in q's windows (or q's error).
+func claudeWindows(ctx context.Context, token string, q SubscriptionQuota) SubscriptionQuota {
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
+	err := accountJSON(ctx, claudeUsageURL, token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
@@ -207,6 +217,12 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		q.Error = err.Error()
 		return q
 	}
+	return codexWindows(ctx, token, accountID, q)
+}
+
+// codexWindows asks the ChatGPT backend about the sign-in holding token and
+// fills in q's plan and windows (or q's error).
+func codexWindows(ctx context.Context, token, accountID string, q SubscriptionQuota) SubscriptionQuota {
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -215,7 +231,7 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	err := accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
 	if err != nil {
 		q.Error = err.Error()
 		return q
