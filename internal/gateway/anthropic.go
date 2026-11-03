@@ -200,8 +200,7 @@ func buildAnthropic(r *Request, model string) []byte {
 	if maxTokens <= 0 {
 		maxTokens = 16384
 	}
-	thinking := r.Thinking || r.Effort != ""
-	if thinking {
+	if r.Thinking || r.Effort != "" {
 		budget := budgetOf(r.Effort)
 		if maxTokens < budget+4096 {
 			maxTokens = budget + 4096
@@ -226,24 +225,18 @@ func buildAnthropic(r *Request, model string) []byte {
 			tools = append(tools, map[string]any{"name": t.Name, "description": t.Description, "input_schema": schema})
 		}
 		out["tools"] = tools
-		// Anthropic refuses a forced tool choice while thinking is on, so a
-		// forced choice becomes auto then. The model still sees the tools.
-		choice := r.ToolChoice
-		if thinking && (choice == "required" || strings.HasPrefix(choice, "name:")) {
-			choice = "auto"
-		}
 		var tc map[string]any
 		switch {
-		case choice == "auto" || choice == "":
+		case r.ToolChoice == "auto" || r.ToolChoice == "":
 			if r.Parallel != nil && !*r.Parallel {
 				tc = map[string]any{"type": "auto"}
 			}
-		case choice == "required":
+		case r.ToolChoice == "required":
 			tc = map[string]any{"type": "any"}
-		case choice == "none":
+		case r.ToolChoice == "none":
 			tc = map[string]any{"type": "none"}
-		case strings.HasPrefix(choice, "name:"):
-			tc = map[string]any{"type": "tool", "name": strings.TrimPrefix(choice, "name:")}
+		case strings.HasPrefix(r.ToolChoice, "name:"):
+			tc = map[string]any{"type": "tool", "name": strings.TrimPrefix(r.ToolChoice, "name:")}
 		}
 		if tc != nil {
 			if r.Parallel != nil && !*r.Parallel && tc["type"] != "none" {
