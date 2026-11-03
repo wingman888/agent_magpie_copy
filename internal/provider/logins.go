@@ -437,6 +437,9 @@ func SwitchLogin(agent, user string) error {
 	if !knownAgent(agent) {
 		return unknownAgent(agent)
 	}
+	// the copy kept of the current sign-in must be the agent's latest: Claude Code
+	// may have rotated its refresh token within the cache's window
+	forgetClaudeCredential()
 	remember(agent)
 	live, present := currentLogin(agent)
 	if present && live.user == "" {
