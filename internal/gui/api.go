@@ -1,3 +1,5 @@
+//go:build !nogui
+
 // Package gui hosts the desktop app: a tray panel and a regular window that
 // share one small web UI. The UI talks to Go over a tiny JSON API served by
 // the same handler that serves the static assets, so no binding generator or

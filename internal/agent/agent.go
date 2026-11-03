@@ -78,8 +78,8 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key, or failing that by the label the picker
-// shows ("auth" for Gemini's provider field), ignoring case.
+// Field looks a field up by key, or failing that by the label the agent's
+// own UI shows for it ("auth" for a key of "provider", say).
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
@@ -87,7 +87,7 @@ func (a *Agent) Field(key string) *Field {
 		}
 	}
 	for i := range a.Fields {
-		if a.Fields[i].Label != "" && strings.EqualFold(a.Fields[i].Label, key) {
+		if a.Fields[i].Label == key {
 			return &a.Fields[i]
 		}
 	}
