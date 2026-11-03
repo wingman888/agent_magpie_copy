@@ -241,7 +241,7 @@ func TestRememberedAccountWorksAlongside(t *testing.T) {
 	}))
 	defer srv.Close()
 	claudeTokenURL = srv.URL
-	expireStored("claude", "a@example.com")
+	expireStored(t, "claude", "a@example.com")
 
 	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
 	if err := cands[1].Sign(context.Background(), req, Anthropic, nil); err != nil {
