@@ -177,6 +177,74 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 `auth` to API key with the gateway token, and names the model in
 `settings.json`; a native model puts the previous auth back.
 
+### Import links
+
+A provider can be shared as a link. `magpie://import?<parameters>` describes
+one provider, either a preset or a fully custom one, and adds nothing by
+itself. Values must be URL-encoded:
+
+```sh
+magpie import 'magpie://import?preset=deepseek&key=sk-…'
+magpie import 'magpie://import?name=My%20Relay&chat=https://relay.example/v1&anthropic=https://relay.example&key=sk-…&models=gpt-5.5,claude-sonnet-5'
+```
+
+These equivalent forms are accepted too: `magpie:import?…`,
+`magpie:///import?…` and `MAGPIE://import/?…`. The scheme name is
+case-insensitive and `import` may have a trailing slash.
+
+| Parameter   | Meaning |
+| ----------- | ------- |
+| `preset`    | A preset id (see `magpie presets`); its endpoints are used. |
+| `region`    | Picks one of the preset's regions. An unknown region is an error. |
+| `name`      | Provider name. Required without `preset`; with a preset it overrides the preset's name. Names longer than 80 characters are truncated. |
+| `id`        | Provider id. Defaults to a slug of the name, or to the preset id for a preset link. |
+| `key`       | API key. Without it, you add the key later. |
+| `chat`      | OpenAI Chat Completions base URL (`…/v1`). |
+| `responses` | OpenAI Responses base URL (`…/v1`). |
+| `anthropic` | Anthropic Messages base URL (root, without `/v1`). |
+| `models`    | Model ids to expose, comma-separated. Empty items and surrounding spaces are ignored. At most 200. |
+| `catalog`   | A models.dev provider id, used for model names and reasoning efforts. An invalid value is ignored. |
+| `website`, `keys` | The vendor's website and its API key page. Only `https` is kept; anything else is ignored. |
+
+With `preset`, the endpoints come from the preset (and the chosen region), and
+`chat`, `responses`, `anthropic`, `catalog`, `website` and `keys` have no
+effect. Without `preset`, give at least one of `chat`, `responses` or
+`anthropic`.
+
+Base URLs must be `https`. Plain `http` is accepted only for `localhost`,
+loopback addresses, private-network IP addresses and `.local` hosts. A base
+URL may not contain a user name, password, query string or fragment, and a
+trailing `/` is removed. Links that break these rules, or that have an
+empty id after normalizing, a reserved id (`magpie`), or a key with control
+characters or more than 4096 bytes, are rejected with an error and nothing is
+saved.
+
+**Confirmation.** Importing never saves on its own. `magpie import` first
+prints a summary: the provider's name and id, the hosts that will receive your
+prompts and your key, and the models. It then asks `Add it? [y/N]`, and only
+`y` or `yes` saves. When the id matches an existing provider, the summary also
+warns that this will replace the existing provider, and the existing key and
+settings are discarded. An id that belongs to a signed-in agent account is
+refused before the summary. If the link has no key and the provider is not
+ready yet, the output tells you to run `magpie provider key <id> <key>`.
+
+Without a terminal (stdin is not a TTY, for example in a script or pipe),
+`magpie import` refuses to ask and exits with "nothing added". Add `-y` or
+`--yes` to skip the question:
+
+```sh
+magpie import -y 'magpie://import?preset=ollama'
+```
+
+Running `magpie 'magpie://…'` with a link as the first argument does the same
+as `magpie import`. Registering `magpie://` with the operating system is a
+packaging and installation step and is not part of this build.
+
+**Hosting a link on a web page.** A relay can offer a button or a copyable
+link at `https://usemagpie.ai/import#<the same parameters>`. The parameters are
+in the URL fragment after `#`, so the browser does not send them to the
+server.
+
 ## Install
 
 Download the app for macOS, Windows or Linux from
