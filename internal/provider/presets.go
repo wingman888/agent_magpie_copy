@@ -118,12 +118,12 @@ var presets = []PresetDef{
 		}},
 
 	{ID: "opencode-go", Name: "OpenCode Go", Icon: "opencode", Kind: KindRelay,
-			Chat: "https://opencode.ai/zen/go/v1", Responses: "https://opencode.ai/zen/go/v1", Anthropic: "https://opencode.ai/zen/go",
-			Note:    "monthly subscription · open models",
-			Website: "https://opencode.ai/docs/go", KeysURL: "https://opencode.ai/auth"},
-		{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindRelay,
-			Chat: "https://opencode.ai/zen/v1", Responses: "https://opencode.ai/zen/v1", Anthropic: "https://opencode.ai/zen",
-			Website: "https://opencode.ai/docs/zen", KeysURL: "https://opencode.ai/auth"},
+		Chat: "https://opencode.ai/zen/go/v1", Responses: "https://opencode.ai/zen/go/v1", Anthropic: "https://opencode.ai/zen/go",
+		Note:    "monthly subscription · open models",
+		Website: "https://opencode.ai/docs/go", KeysURL: "https://opencode.ai/auth"},
+	{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindRelay,
+		Chat: "https://opencode.ai/zen/v1", Responses: "https://opencode.ai/zen/v1", Anthropic: "https://opencode.ai/zen",
+		Website: "https://opencode.ai/docs/zen", KeysURL: "https://opencode.ai/auth"},
 
 	{ID: "ollama", Name: "Ollama", Icon: "ollama", Kind: KindLocal, NoKey: true,
 		Chat: "http://localhost:11434/v1", Anthropic: "http://localhost:11434",
