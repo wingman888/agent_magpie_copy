@@ -85,21 +85,17 @@ clean:
 	rm -rf magpie magpie.exe magpie.app dist rsrc_windows_*.syso
 
 # Development: the UI is served from internal/gui/assets and the window
-# reloads itself when a file there is saved; with fswatch installed, Go
-# changes rebuild and relaunch the app. Uses its own gateway port so a
-# running magpie keeps serving the agents. Ctrl-C ends the loop: fswatch
-# swallows the interrupt, so without the trap the shell would just go round
-# again.
+# reloads itself when a file there is saved. With fswatch installed, the
+# windows stay up and a Go change rebuilds and restarts only the backend
+# behind them (build/dev.sh); without it, dev-once runs the app as one
+# process. Uses its own ports so a running magpie keeps serving the agents.
 DEV_ADDR ?= 127.0.0.1:3426
 DEV_UI ?= 127.0.0.1:3427
+DEV_BACKEND ?= 127.0.0.1:3428
+DEV_CONTROL ?= 127.0.0.1:3429
 dev:
 	@if command -v fswatch >/dev/null; then \
-	  trap 'pkill -P $$pid 2>/dev/null; kill $$pid 2>/dev/null; wait $$pid 2>/dev/null; exit 0' INT TERM; \
-	  while true; do \
-	    $(MAKE) --no-print-directory dev-once & pid=$$!; \
-	    fswatch -1 -r -e '.*' -i '\.go$$' -i '\.md$$' . >/dev/null; \
-	    echo "  go changed · rebuilding"; pkill -P $$pid 2>/dev/null; kill $$pid 2>/dev/null; wait $$pid 2>/dev/null; \
-	  done; \
+	  MAGPIE_ADDR=$(DEV_ADDR) MAGPIE_DEV_UI=$(DEV_UI) MAGPIE_DEV_BACKEND=$(DEV_BACKEND) MAGPIE_DEV_CONTROL=$(DEV_CONTROL) build/dev.sh; \
 	else $(MAKE) --no-print-directory dev-once; fi
 
 dev-once:

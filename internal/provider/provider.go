@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -62,7 +63,7 @@ type Provider struct {
 	// Routing is how requests spread over the keys or accounts it has on:
 	// "" smart, the first while it has quota to spare, then whichever has
 	// the most; "order" in order, the next one only when the one before
-	// can't take it; "rotate" each in turn; "usage" the least used first.
+	// can't take it; "rotate" each in turn; "least-used" the least used first.
 	// Whichever it is, one out of credit, out of quota, rate limited or
 	// failing is passed over for as long as that lasts.
 	Routing string `json:"routing,omitempty"`
@@ -74,6 +75,13 @@ type Provider struct {
 	// when a gateway insists on a private scheme. Signed-in agent accounts
 	// ignore them: their auth is the agent's own.
 	Headers map[string]string `json:"headers,omitempty"`
+
+	// BalanceURL, when set, is where the vendor tells what is left on a
+	// key, asked with the key the way a chat request carries it; BalancePath
+	// picks the amount out of the JSON reply (see balance.go). The vendors
+	// magpie knows need neither.
+	BalanceURL  string `json:"balanceURL,omitempty"`
+	BalancePath string `json:"balancePath,omitempty"`
 
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
@@ -220,6 +228,10 @@ func Save(p Provider) error {
 		// agent's own sign-in. Saving it again brings a removed one back.
 		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing}
 	} else {
+		if slices.Contains(accountIDs, p.ID) && !stored(p.ID) {
+			// taken, it would hide that subscription once signed in
+			return fmt.Errorf("%q is the id of the %s subscription; pick another name", p.ID, p.ID)
+		}
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
@@ -236,6 +248,31 @@ func Save(p Provider) error {
 	}
 	f.Providers = append(f.Providers, p)
 	return store(f)
+}
+
+// accountIDs are the ids of the subscriptions magpie can list (account.go).
+var accountIDs = []string{"claude", "codex", "copilot", "cursor", "grok"}
+
+func stored(id string) bool {
+	for _, p := range load().Providers {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// ShowAccount brings back the signed-in account of an agent the user had
+// removed from magpie.
+func ShowAccount(id string) error {
+	f := load()
+	for i := range f.Providers {
+		if f.Providers[i].ID == id && f.Providers[i].Hidden {
+			f.Providers[i].Hidden = false
+			return store(f)
+		}
+	}
+	return nil
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -269,37 +306,6 @@ func Delete(id string) error {
 	return store(f)
 }
 
-// Stored lists the providers exactly as providers.json holds them: no
-// signed-in accounts, nothing derived. Backups read from here.
-func Stored() []Provider { return load().Providers }
-
-// Put writes p as it is, replacing the stored provider with the same id or
-// adding it. Unlike Save it accepts a provider without a key or a URL, so a
-// backup can be restored as it was taken. replaced reports whether an entry
-// with that id already existed.
-func Put(p Provider) (replaced bool, err error) {
-	p = normalize(p)
-	p.IconURL = ""
-	if p.ID == "" || p.ID != Slug(p.ID) {
-		return false, fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
-	}
-	if p.ID == "magpie" {
-		return false, errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
-	}
-	if p.Name == "" {
-		p.Name = p.ID
-	}
-	f := load()
-	for i := range f.Providers {
-		if f.Providers[i].ID == p.ID {
-			f.Providers[i] = p
-			return true, store(f)
-		}
-	}
-	f.Providers = append(f.Providers, p)
-	return false, store(f)
-}
-
 // keyOptional is true for local servers, which usually have no key.
 func keyOptional(p Provider) bool {
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
@@ -321,9 +327,7 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
-		p.Routing = ""
-	}
+	p.Routing = NormalizeRouting(p.Routing)
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
