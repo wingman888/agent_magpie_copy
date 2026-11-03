@@ -176,15 +176,9 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1beta/models/{model}:generateContent"}})
 }
 
-// modelObject describes a model. A routing group answers as its first usable
-// member does, the one whose provider it is owned by.
 func modelObject(e provider.Entry) map[string]any {
-	owner := e.Provider.ID
-	if e.Group != nil && len(e.Members) > 0 {
-		owner = e.Members[0].Provider
-	}
 	return map[string]any{"id": e.ID, "object": "model", "type": "model", "created": 0, "created_at": "2025-01-01T00:00:00Z",
-		"owned_by": owner, "display_name": e.Name}
+		"owned_by": e.Provider.ID, "display_name": e.Name}
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
@@ -355,62 +349,24 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	var (
-		cands    []candidate
-		pl       planned
-		head     Route
-		model    string
-		mode     string // the provider's or group's affinity
-		rotating bool   // its routing is a rotation
-	)
-	// the conversation a request belongs to, when its agent names it: who
-	// answered it last, and where its rotations stand
-	var (
-		cv     *convo
-		turn   *sessionTurn
-		turns  int
-		within bool
-	)
-	if session := sessionOf(r.Header); session != "" {
-		turns, within = turnsOf(from, body)
-		cv = convoOf(session, call.Model, start)
-		turn = &sessionTurn{c: cv, newTurn: !within}
-	}
-	if isGroupModel(call.Model) {
-		// a routing group: any of its members' keys and accounts
-		g, ms, found := provider.FindGroup(call.Model)
-		if found && len(ms) == 0 {
-			call.Status, call.Error = 404, "no model ready"
-			writeError(w, from, 404, noModelReady(g.ID))
-			finishCapture()
-			s.record(call)
-			return
+	p, model, ok := provider.Resolve(call.Model)
+	if !ok {
+		call.Status, call.Error = 404, "unknown model"
+		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
+		if ids := provider.IDs(); len(ids) > 0 {
+			msg += "; it has " + strings.Join(ids, ", ")
+		} else {
+			msg += "; add a provider in magpie first"
 		}
-		if !found {
-			s.unknownModel(w, from, &call, finishCapture)
-			return
-		}
-		cands, pl = s.planGroup(g, ms, from, turn)
-		head = Route{Time: start, Agent: call.Agent, Model: call.Model, Group: groupTrace(g, ms), Order: pl.order, Left: pl.left}
-		mode, rotating = g.Affinity, groupRotates(g, ms)
-	} else {
-		p, m, ok := provider.Resolve(call.Model)
-		if !ok {
-			s.unknownModel(w, from, &call, finishCapture)
-			return
-		}
-		model = m
-		// the primary, then its fallbacks while it can't take the request and
-		// nothing has been sent yet
-		cands, pl = s.planFor(p, model, from, turn)
-		head = Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left}
-		mode, rotating = p.Affinity, p.Routing == provider.Rotate
+		writeError(w, from, 404, msg)
+		finishCapture()
+		s.record(call)
+		return
 	}
-	// a conversation's last answerer goes first, when it may; the rest keep their order
-	if cv != nil && len(cands) > 1 {
-		cands, pl, head.Affinity = keepTo(cands, pl, mode, rotating, cv, turns, within, start)
-	}
-	tr := s.trace.begin(head)
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
+	cands, pl := s.plan(p, model, from)
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
@@ -427,23 +383,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
-		// the main pool's last key failed with an error no other provider may
-		// do better with (say a 400 for the protocol): the key aside from the
-		// pool still gets its try, as it is the one that may suit the request.
-		// Nothing rests for it, since the main pool's key did nothing wrong.
-		if !last && call.Status >= 400 && !hw.passing && i+1 < len(pl.order) && !pl.order[i].Aside && pl.order[i+1].Aside {
-			try.Fail = failure(hw.status, hw.held.Bytes())
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			skipped = append(skipped, c.label()+": "+call.Error)
-			continue
-		}
 		hw.release()
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			if cv != nil {
-				cv.answered(answer{rest: c.rest, model: c.model, provider: c.p.ID, at: time.Now(), cacheRead: call.Usage.CacheRead})
-			}
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}
@@ -462,23 +405,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	s.record(call)
 	if call.To != "" {
 		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
-			Via: viaGroup(call.Model), Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 	}
-}
-
-// unknownModel answers a request for a model magpie has no provider for.
-func (s *Server) unknownModel(w http.ResponseWriter, from provider.Protocol, call *Call, finish func()) {
-	call.Status, call.Error = 404, "unknown model"
-	msg := fmt.Sprintf("magpie knows no model %q", call.Model)
-	if ids := provider.IDs(); len(ids) > 0 {
-		msg += "; it has " + strings.Join(ids, ", ")
-	} else {
-		msg += "; add a provider in magpie first"
-	}
-	writeError(w, from, 404, msg)
-	finish()
-	s.record(*call)
 }
 
 // attempt sends a request to one provider. call.To stays empty when the

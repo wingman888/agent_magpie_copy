@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"slices"
@@ -150,54 +149,28 @@ func models() error {
 		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
 	}
-	listModels(os.Stdout, entries)
-	fmt.Fprintln(os.Stdout, faint.Render("  "+gateway.URL()+"/v1"))
-	return nil
-}
-
-// listModels writes the catalog: the routing groups in their own section,
-// first, then each provider's models under its name.
-func listModels(out io.Writer, entries []provider.Entry) {
-	var groups, byProvider []provider.Entry
-	for _, e := range entries {
-		if e.Group != nil {
-			groups = append(groups, e)
-		} else {
-			byProvider = append(byProvider, e)
-		}
-	}
 	w := 0
 	for _, e := range entries {
 		w = max(w, len(e.ID))
 	}
-	line := func(e provider.Entry) {
-		s := "  " + pad(e.ID, w)
-		if e.Name != "" && e.Name != e.Model {
-			s += "  " + muted.Render(e.Name)
-		}
-		if len(e.Efforts) > 0 {
-			s += faint.Render("  " + strings.Join(e.Efforts, "/"))
-		}
-		fmt.Fprintln(out, s)
-	}
-	if len(groups) > 0 {
-		fmt.Fprintln(out, faint.Render("  "+routingGroupsSection))
-		for _, e := range groups {
-			line(e)
-		}
-	}
 	last := ""
-	for _, e := range byProvider {
+	for _, e := range entries {
 		if e.Provider.ID != last {
 			last = e.Provider.ID
-			fmt.Fprintln(out, faint.Render("  "+e.Provider.Name))
+			fmt.Println(faint.Render("  " + e.Provider.Name))
 		}
-		line(e)
+		line := "  " + pad(e.ID, w)
+		if e.Name != "" && e.Name != e.Model {
+			line += "  " + muted.Render(e.Name)
+		}
+		if len(e.Efforts) > 0 {
+			line += faint.Render("  " + strings.Join(e.Efforts, "/"))
+		}
+		fmt.Println(line)
 	}
+	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
+	return nil
 }
-
-// routingGroupsSection is the heading of the routing groups in `magpie models`.
-const routingGroupsSection = "Routing groups"
 
 // providerCmd: `magpie provider <verb> …`
 func providerCmd(args []string) error {

@@ -35,32 +35,6 @@ type Route struct {
 	Error    string    `json:"error,omitempty"`
 	Millis   int64     `json:"ms,omitempty"`
 	Tokens   int       `json:"tokens,omitempty"`
-	// Group is set when the request was for a routing group: Order then
-	// spans the keys and accounts of all its members.
-	Group    *GroupTrace    `json:"group,omitempty"`
-	Affinity *AffinityTrace `json:"affinity,omitempty"`
-}
-
-// GroupTrace is the routing group a request was for.
-type GroupTrace struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Routing  string   `json:"routing"`  // "", order, rotate, least-used
-	Affinity string   `json:"affinity"` // "" automatic, session, turn, off
-	Auto     bool     `json:"auto"`     // found by magpie, not made by the user
-	Members  []string `json:"members"`  // the usable ones: "provider/model"
-}
-
-// AffinityTrace is how a request was kept to the key or account that answered
-// the conversation last (see Provider.Affinity).
-type AffinityTrace struct {
-	Mode      string `json:"mode"`      // session, turn, off, or auto
-	Turn      int    `json:"turn"`      // user turns the conversation has had
-	Within    bool   `json:"within"`    // a tool result sent back within the turn
-	Last      string `json:"last"`      // who answered last: its rest id
-	CacheRead int    `json:"cacheRead"` // cache tokens that answer read
-	Kept      bool   `json:"kept"`      // whether it was put first for that reason
-	Why       string `json:"why"`       // session, turn, cache; or off, first, new-turn, no-cache, cold, resting, spent, gone
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -75,7 +49,7 @@ type Weighed struct {
 	Agent    string            `json:"agent,omitempty"`
 	Plan     string            `json:"plan,omitempty"`
 	Model    string            `json:"model"`
-	Routing  string            `json:"routing"` // its provider's: "", order, rotate, least-used
+	Routing  string            `json:"routing"` // its provider's: "", order, rotate, usage
 	Fallback bool              `json:"fallback,omitempty"`
 	Shared   bool              `json:"shared,omitempty"` // its provider has more than one on
 	Known    bool              `json:"known,omitempty"`  // the vendor said what the account has left
@@ -85,7 +59,6 @@ type Weighed struct {
 	Turn     bool              `json:"turn,omitempty"`   // in turn: it was this one's turn
 	Fit      int               `json:"fit,omitempty"`    // keyFit
 	Speaks   provider.Protocol `json:"speaks,omitempty"` // a key made for one protocol only
-	Aside    bool              `json:"aside,omitempty"`  // made for another protocol than the request's: tried after the main pool
 	Rest     *Rest             `json:"rest,omitempty"`   // resting after a failure, when the request came
 	Unlisted bool              `json:"unlisted,omitempty"`
 }
@@ -118,7 +91,6 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 			w.Who = provider.Mask(c.p.Key)
 		}
 		w.Fit, w.Speaks = keyFit(c.p, c.model, from), c.p.KeyProtocol
-		w.Aside = wg.aside[c.rest]
 	default:
 		w.Kind = "provider"
 	}

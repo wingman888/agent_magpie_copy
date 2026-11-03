@@ -8,16 +8,23 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 )
 
-// codexClientVersion is the Codex CLI version the models list is asked for
-// when Codex CLI has not asked itself yet: the list leaves out models newer
-// than the client asking.
+// codexClientVersion is the built-in Codex CLI version the models list is
+// asked for, the floor when neither the installed CLI nor its cache says
+// newer: the list leaves out models newer than the client asking.
 const codexClientVersion = "0.154.0"
 
 // codexModels asks the ChatGPT backend which Codex models the account's own
@@ -26,7 +33,7 @@ const codexClientVersion = "0.154.0"
 // models_cache.json, but that one is of whichever account Codex CLI last
 // asked with, if it ran at all.
 func codexModels(ctx context.Context, sign func(context.Context, *http.Request, []byte) error) ([]catalog.Model, error) {
-	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexRequestVersion())
+	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexClientVersionNow())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -48,6 +55,108 @@ func codexModels(ctx context.Context, sign func(context.Context, *http.Request, 
 		return nil, errors.New("ChatGPT listed no Codex models")
 	}
 	return ms, nil
+}
+
+// codexVersionCache holds the client version chosen, for a few minutes, so
+// the installed CLI isn't run on every request.
+var codexVersionCache struct {
+	sync.Mutex
+	at  time.Time
+	ver string
+}
+
+const codexVersionTTL = 10 * time.Minute
+
+// codexExecutable finds the codex CLI; a var so tests can fake it.
+var codexExecutable = func() string {
+	if p, err := exec.LookPath("codex"); err == nil {
+		return p
+	}
+	return ""
+}
+
+var (
+	codexSemverRE     = regexp.MustCompile(`\d+\.\d+\.\d+`)
+	codexSemverFullRE = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+)
+
+// codexClientVersionNow is the client version to ask the models list with: the
+// newest of the installed Codex CLI's version, the version its cache records,
+// and the built-in one. Without the CLI, the last two.
+func codexClientVersionNow() string {
+	c := &codexVersionCache
+	c.Lock()
+	defer c.Unlock()
+	if c.ver != "" && time.Since(c.at) < codexVersionTTL {
+		return c.ver
+	}
+	c.ver = newestCodexVersion(codexInstalledVersion(), codexCacheVersion(), codexClientVersion)
+	c.at = time.Now()
+	return c.ver
+}
+
+// codexInstalledVersion asks the installed Codex CLI its version, or "" when
+// there is no CLI or it does not say.
+func codexInstalledVersion() string {
+	path := codexExecutable()
+	if path == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return codexSemverRE.FindString(string(out))
+}
+
+// codexCacheVersion is the client version Codex CLI last asked with, or ""
+// when its cache is absent or unreadable.
+func codexCacheVersion() string {
+	home, _ := os.UserHomeDir()
+	var c struct {
+		ClientVersion string `json:"client_version"`
+	}
+	if b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json")); err == nil && json.Unmarshal(b, &c) == nil {
+		return c.ClientVersion
+	}
+	return ""
+}
+
+// newestCodexVersion is the highest of the candidates that are plain x.y.z
+// versions; a candidate that isn't one is ignored, and the built-in version
+// stands when none is.
+func newestCodexVersion(cands ...string) string {
+	best := ""
+	for _, v := range cands {
+		if !codexSemverFullRE.MatchString(v) {
+			continue
+		}
+		if best == "" || compareCodexVersion(v, best) > 0 {
+			best = v
+		}
+	}
+	if best == "" {
+		return codexClientVersion
+	}
+	return best
+}
+
+// compareCodexVersion compares two x.y.z versions numerically: -1, 0 or 1.
+func compareCodexVersion(a, b string) int {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < 3; i++ {
+		av, _ := strconv.Atoi(pa[i])
+		bv, _ := strconv.Atoi(pb[i])
+		if av != bv {
+			if av < bv {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // parseCodexModels reads the backend's list, the listed ones in its order.

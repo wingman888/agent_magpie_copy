@@ -18,28 +18,8 @@ import (
 const (
 	Ordered   = "order"
 	Rotate    = "rotate"
-	LeastUsed = "least-used"
+	LeastUsed = "usage"
 )
-
-// NormalizeRouting is the routing a written value stands for: the three
-// above, and "" (smart) for anything else.
-func NormalizeRouting(s string) string {
-	switch s = strings.ToLower(strings.TrimSpace(s)); s {
-	case Ordered, Rotate, LeastUsed:
-		return s
-	}
-	return ""
-}
-
-// migrateRouting renames a routing value an older magpie saved to the name it
-// has now: "usage" was the name of least-used. It runs where configuration is
-// loaded and saved, before NormalizeRouting; any other value is returned as is.
-func migrateRouting(s string) string {
-	if strings.ToLower(strings.TrimSpace(s)) == "usage" {
-		return LeastUsed
-	}
-	return s
-}
 
 // SetRouting changes how a provider's requests spread over its keys or
 // accounts.

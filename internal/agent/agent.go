@@ -19,9 +19,6 @@ type Option struct {
 	Icon  string `json:"icon,omitempty"`  // bundled icon name
 	Group string `json:"group,omitempty"` // section header in the picker
 	Ref   string `json:"ref,omitempty"`   // the catalog model, the same in every agent
-	// Icons are a routing group's: the icon of each provider among its
-	// members, once each. Icon is the first of them.
-	Icons []string `json:"icons,omitempty"`
 }
 
 // Field is one tunable setting of an agent. Set with an empty value puts

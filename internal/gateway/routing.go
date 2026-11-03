@@ -216,7 +216,7 @@ const (
 
 // route orders one provider's candidates as its routing says.
 func route(p provider.Provider, cs []candidate, model string, from provider.Protocol) []candidate {
-	cs, _ = weigh(p, cs, model, from, nil)
+	cs, _ = weigh(p, cs, model, from)
 	return cs
 }
 
@@ -227,8 +227,6 @@ type weighing struct {
 	lefts map[string]left // the accounts the vendor said what they have left of
 
 	tokens map[string]float64 // least used: tokens each served lately
-
-	aside map[string]bool // keys made for a protocol the request doesn't suit: tried after the main pool
 }
 
 type left struct {
@@ -237,103 +235,29 @@ type left struct {
 }
 
 // weigh orders one provider's candidates as its routing says, and tells
-// what it went by. Keys are in two pools by how well they suit the request
-// (see pools): the routing works within the main one, and the keys aside
-// from it are tried after, in order of fit.
-// turn is the request's place in its conversation, for a rotation (nil when
-// the request has no conversation: see sessionTurn).
-func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol, turn *sessionTurn) ([]candidate, weighing) {
-	if len(cs) < 2 {
-		return cs, weighing{}
-	}
-	main, aside := pools(p, cs, model, from)
-	out, wg := routeMain(p, main, model, turn)
-	if len(aside) > 0 {
-		wg.aside = map[string]bool{}
-		for _, c := range aside {
-			wg.aside[c.rest] = true
-		}
-		out = append(out, aside...)
-	}
-	return out, wg
-}
-
-// pools splits one provider's keys by how well they suit the request: the
-// main pool is those that fit best, in their order, and aside are the rest,
-// best fit first. Accounts have no protocol to suit, so they are all main.
-func pools(p provider.Provider, cs []candidate, model string, from provider.Protocol) (main, aside []candidate) {
-	if p.Account != nil {
-		return cs, nil
-	}
-	sorted := append([]candidate(nil), cs...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return keyFit(sorted[i].p, model, from) < keyFit(sorted[j].p, model, from)
-	})
-	top := keyFit(sorted[0].p, model, from)
-	for _, c := range sorted {
-		if keyFit(c.p, model, from) == top {
-			main = append(main, c)
-		} else {
-			aside = append(aside, c)
-		}
-	}
-	return main, aside
-}
-
-// pick is the candidates in the order of the positions given.
-func pick(cs []candidate, idx []int) []candidate {
-	out := make([]candidate, 0, len(idx))
-	for _, i := range idx {
-		out = append(out, cs[i])
-	}
-	return out
-}
-
-// merge adds what another weighing went by to w, which must have its maps.
-func (w *weighing) merge(o weighing) {
-	for k, v := range o.lefts {
-		w.lefts[k] = v
-	}
-	for k, v := range o.tokens {
-		if w.tokens == nil {
-			w.tokens = map[string]float64{}
-		}
-		w.tokens[k] = v
-	}
-}
-
-// routeMain orders the main pool of one provider's candidates as its routing
-// says, and tells what it went by. A rotation moves on a turn at a time (see
-// sessionTurn), so the turn says where it stands.
-func routeMain(p provider.Provider, cs []candidate, model string, turn *sessionTurn) ([]candidate, weighing) {
+// what it went by.
+func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
 	}
+	var known map[string]provider.Allowance
+	if p.Account != nil {
+		known = allowances(p.Account.Agent)
+	}
 	now := time.Now()
 	wg.lefts = map[string]left{}
-	// what each candidate has left, by position: the candidates of a routing
-	// group may be accounts of several agents, and two models of one account
-	// may count different windows
-	ls := make([]left, len(cs))
-	known := map[string]map[string]provider.Allowance{}
-	for i, c := range cs {
+	for _, c := range cs {
 		if c.p.Account == nil {
 			continue
 		}
-		agent := c.p.Account.Agent
-		k, ok := known[agent]
-		if !ok {
-			k = allowances(agent)
-			known[agent] = k
-		}
-		if a, ok := k[c.p.Account.User]; ok {
+		if a, ok := known[c.p.Account.User]; ok {
 			u, r := a.For(c.model, now)
-			ls[i] = left{u, r} // one not known counts as unused
-			wg.lefts[c.rest] = ls[i]
+			wg.lefts[c.rest] = left{u, r} // one not known counts as unused
 		}
 	}
-	shareOf := func(i int) float64 { return ls[i].used }
+	lefts := wg.lefts
+	shareOf := func(c candidate) float64 { return lefts[c.rest].used }
 	switch p.Routing {
 	case "":
 		// of those with quota to spare, the one whose allowance renews
@@ -345,19 +269,19 @@ func routeMain(p provider.Provider, cs []candidate, model string, turn *sessionT
 		// one all but used up only when nothing else can take it. Only the
 		// windows that count the model do: Opus's own weekly allowance
 		// being used up leaves Sonnet alone.
-		var fine, low, spent []int
-		for i := range cs {
-			switch v := shareOf(i); {
+		var fine, low, spent []candidate
+		for _, c := range cs {
+			switch v := shareOf(c); {
 			case v >= usedShare:
-				spent = append(spent, i)
+				spent = append(spent, c)
 			case v >= lowShare:
-				low = append(low, i)
+				low = append(low, c)
 			default:
-				fine = append(fine, i)
+				fine = append(fine, c)
 			}
 		}
 		sort.SliceStable(fine, func(i, j int) bool {
-			ri, rj := ls[fine[i]].renews, ls[fine[j]].renews
+			ri, rj := lefts[fine[i].rest].renews, lefts[fine[j].rest].renews
 			for k := 0; k < len(ri) || k < len(rj); k++ {
 				var a, b time.Time // to the hour, so a few minutes don't reorder
 				if k < len(ri) {
@@ -376,16 +300,19 @@ func routeMain(p provider.Provider, cs []candidate, model string, turn *sessionT
 			}
 			return false
 		})
-		for _, l := range [][]int{low, spent} {
+		for _, l := range [][]candidate{low, spent} {
 			sort.SliceStable(l, func(i, j int) bool {
 				return shareOf(l[i]) < shareOf(l[j])
 			})
 		}
-		cs = pick(cs, append(append(fine, low...), spent...))
+		cs = append(append(fine, low...), spent...)
 	case provider.Ordered:
 		return cs, wg
 	case provider.Rotate:
-		n := turn.position(p.ID, len(cs))
+		routed.Lock()
+		n := routed.turn[p.ID] % len(cs)
+		routed.turn[p.ID]++
+		routed.Unlock()
 		cs = append(append([]candidate{}, cs[n:]...), cs[:n]...)
 	case provider.LeastUsed:
 		// a subscription by the share of its allowance used, as the vendor
@@ -403,14 +330,22 @@ func routeMain(p provider.Provider, cs []candidate, model string, turn *sessionT
 			idx[i] = i
 		}
 		sort.SliceStable(idx, func(a, b int) bool {
-			if sa, sb := shareOf(idx[a]), shareOf(idx[b]); sa != sb {
+			ca, cb := cs[idx[a]], cs[idx[b]]
+			if sa, sb := shareOf(ca), shareOf(cb); sa != sb {
 				return sa < sb
 			}
 			return tokens[idx[a]] < tokens[idx[b]]
 		})
-		cs = pick(cs, idx)
+		out := make([]candidate, len(cs))
+		for i, j := range idx {
+			out[i] = cs[j]
+		}
+		cs = out
 	default:
 		return cs, wg
+	}
+	if p.Account == nil {
+		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, model, from) < keyFit(cs[j].p, model, from) })
 	}
 	return cs, wg
 }
