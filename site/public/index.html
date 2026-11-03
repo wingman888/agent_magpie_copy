@@ -120,7 +120,7 @@ nav .links a:hover { color: var(--ink); }
 .btn.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
 .btn svg { width: 16px; height: 16px; }
 
-.hero { padding: 88px 0 40px; display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center; }
+.hero { padding: 80px 0 32px; display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center; }
 .hero h1 { font-size: clamp(40px, 6vw, 64px); line-height: 1.04; letter-spacing: -.035em; font-weight: 700; margin: 0 0 22px; }
 .hero h1 span { color: var(--ink3); }
 .hero p.lede { font-size: 19px; color: var(--ink2); margin: 0 0 32px; max-width: 30em; }
@@ -129,6 +129,18 @@ nav .links a:hover { color: var(--ink); }
 .meta a { color: var(--ink2); }
 .shot { position: relative; }
 .shot picture img { width: 100%; height: auto; height: auto; max-width: 440px; display: block; margin: 0 auto; border-radius: 14px; box-shadow: var(--shadow); border: 1px solid var(--line); }
+
+.sponsor { padding: 24px 0 8px; text-align: center; }
+.sponsor p { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink3); margin: 0 0 14px; }
+.sponsor .card { display: inline-flex; align-items: center; gap: 20px; max-width: 100%; padding: 12px 20px 12px 22px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; text-decoration: none; text-align: left; transition: border-color .2s, box-shadow .2s, transform .2s; }
+.sponsor .card:hover { border-color: color-mix(in srgb, var(--ink) 18%, var(--line)); box-shadow: var(--shadow); transform: translateY(-1px); }
+.sponsor .card img { flex: none; width: 124px; height: auto; opacity: .92; }
+.sponsor .card hr { flex: none; width: 1px; height: 28px; margin: 0; border: 0; background: var(--line); }
+.sponsor .card span { font-size: 14px; line-height: 1.5; color: var(--ink2); }
+.sponsor .card i { flex: none; font-style: normal; color: var(--ink3); transition: color .2s, transform .2s; }
+.sponsor .card:hover i { color: var(--ink); transform: translateX(2px); }
+.sponsor .more { display: inline-block; margin-top: 10px; font-size: 12.5px; color: var(--ink3); text-decoration: none; }
+.sponsor .more:hover { color: var(--ink2); }
 
 .agents { padding: 40px 0 16px; text-align: center; }
 .agents p { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink3); margin: 0 0 22px; }
@@ -230,6 +242,8 @@ footer a:hover { color: var(--ink); }
 @media (max-width: 560px) {
   .wrap { padding: 0 16px; }
   .grid { grid-template-columns: 1fr; }
+  .sponsor .card { flex-direction: column; gap: 10px; padding: 16px 20px; text-align: center; }
+  .sponsor .card hr, .sponsor .card i { display: none; }
   nav .links { gap: 16px; }
   nav .wrap { gap: 14px; }
   nav .links a.hide-sm { display: none; }
@@ -247,6 +261,7 @@ footer a:hover { color: var(--ink); }
     <a class="hide" href="#how">How it works</a>
     <a class="hide" href="#providers">Providers</a>
     <a href="#cli">CLI</a>
+    <a class="hide-sm" href="/docs/import">Docs</a>
     <a class="hide-sm" href="https://github.com/yetone/magpie-releases/releases">Releases</a>
   </div>
   <a class="theme gh" href="https://github.com/yetone/magpie" aria-label="magpie on GitHub" title="Source on GitHub"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg></a>
@@ -280,6 +295,17 @@ footer a:hover { color: var(--ink); }
         <img loading="lazy" class="pick for-dark" src="/img/picker-dark.png" width="440" height="555" alt="Codex's model picker in magpie, listing DeepSeek, Kimi and GLM models">
     </div>
   </header>
+
+  <aside class="sponsor" aria-label="Sponsor">
+    <p>Sponsored by</p>
+    <a class="card" href="https://yylx.io" target="_blank" rel="noopener sponsored">
+      <img class="bird" src="/img/sponsor-yylx.png" width="640" height="184" alt="鱼鱼连线 YYLX.IO AI Router">
+      <hr>
+      <span>One API gateway for Claude and GPT, tuned for Claude Code.</span>
+      <i aria-hidden="true">→</i>
+    </a>
+    <br><a class="more" href="mailto:yetoneful@gmail.com?subject=Sponsoring%20magpie">Become a sponsor</a>
+  </aside>
 
   <div class="agents">
     <p>Every agent</p>
@@ -442,6 +468,7 @@ magpie tui                             <span class="c"># the whole app, in the t
 <footer><div class="wrap">
   <span>© 2026 magpie · MIT</span>
   <div class="links">
+    <a href="/docs/import">Add to magpie</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
     <a href="/api/latest">Update feed</a>
