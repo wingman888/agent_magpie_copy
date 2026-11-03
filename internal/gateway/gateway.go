@@ -349,22 +349,31 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary, then its fallbacks while it can't take the request and
-	// nothing has been sent yet
-	cands := s.candidates(p, model)
-	var skipped []string
-	for i, c := range cands {
+	// the primary's keys, then its fallbacks' keys, while the request can't
+	// be taken and nothing has been sent yet
+	cands, skipped := s.candidates(p, model)
+	if len(cands) == 0 {
+		msg := p.Name + " has no enabled key"
+		call.Provider, call.Status, call.Error = p.ID, writeError(w, from, 502, msg), msg
+		call.Fallback = strings.Join(skipped, "; ")
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		return
+	}
+	for i, a := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
 		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+		call.Provider, call.To, call.Usage = a.p.ID, "", Usage{}
+		status, msg := s.attempt(hw, r, from, a.p, a.model, body, &call)
+		call.Status, call.Error = status, scrub(msg, a.cred.Key)
 		if !last && hw.failed() {
-			s.rest(c.p.ID)
-			skipped = append(skipped, c.p.ID+": "+call.Error)
+			s.rest(restKey(a.p.ID, a.cred))
+			skipped = append(skipped, a.label()+": "+call.Error)
 			continue
 		}
 		hw.release()
-		model = c.model
+		model = a.model
 		break
 	}
 	if len(skipped) > 0 {

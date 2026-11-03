@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,10 +25,31 @@ type candidate struct {
 	model string
 }
 
-// candidates is the primary and then its fallbacks, those resting after a
-// recent failure moved behind the rest.
-func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := []candidate{{p, model}}
+// attempt is one try at a request: a provider, sending with one of its keys.
+type attempt struct {
+	p     provider.Provider // p.Key is the key this try sends
+	model string
+	cred  provider.Credential
+	// named says the call record names the account: the provider has several
+	// enabled keys. A provider with one keeps the plain record.
+	named bool
+}
+
+// label names the try in the call record.
+func (a attempt) label() string {
+	if a.named {
+		return a.cred.Label(a.p.ID)
+	}
+	return a.p.ID
+}
+
+// candidates lists the tries in order: the primary's enabled keys, then each
+// fallback's. Within a provider, keys resting after a recent failure move
+// behind the rest; a provider with no ready key moves behind the others.
+// A provider whose keys are all off is reported in skipped, never sent
+// unkeyed.
+func (s *Server) candidates(p provider.Provider, model string) (out []attempt, skipped []string) {
+	provs := []candidate{{p, model}}
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -35,20 +57,54 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, candidate{fp, fm})
+		provs = append(provs, candidate{fp, fm})
 	}
-	if len(out) == 1 {
-		return out
-	}
-	var ready, resting []candidate
-	for _, c := range out {
-		if s.resting(c.p.ID) {
-			resting = append(resting, c)
-		} else {
-			ready = append(ready, c)
+	var ready, resting []attempt
+	for _, c := range provs {
+		creds := c.p.KeysOn()
+		if len(creds) == 0 {
+			skipped = append(skipped, c.p.ID+": no enabled key")
+			continue
 		}
+		var rdy, rst []attempt
+		for _, cred := range creds {
+			a := attempt{p: withKey(c.p, cred), model: c.model, cred: cred, named: len(creds) > 1 && cred.ID != ""}
+			if s.resting(restKey(c.p.ID, cred)) {
+				rst = append(rst, a)
+			} else {
+				rdy = append(rdy, a)
+			}
+		}
+		if len(rdy) == 0 {
+			resting = append(resting, rst...)
+			continue
+		}
+		ready = append(ready, rdy...)
+		ready = append(ready, rst...)
 	}
-	return append(ready, resting...)
+	return append(ready, resting...), skipped
+}
+
+// withKey is the provider as it is when sending with the credential's key.
+func withKey(p provider.Provider, c provider.Credential) provider.Provider {
+	if c.Key != "" {
+		p.Key = c.Key
+	}
+	return p
+}
+
+// restKey is where a failed try rests: under its own key, so the provider's
+// other keys are not held back with it.
+func restKey(providerID string, c provider.Credential) string {
+	return providerID + "\x00" + c.ID
+}
+
+// scrub keeps a key out of a message: it appears masked, as everywhere else.
+func scrub(msg, key string) string {
+	if key == "" || !strings.Contains(msg, key) {
+		return msg
+	}
+	return strings.ReplaceAll(msg, key, provider.Mask(key))
 }
 
 var restingUntil = struct {
@@ -56,15 +112,15 @@ var restingUntil = struct {
 	m map[string]time.Time
 }{m: map[string]time.Time{}}
 
-func (s *Server) resting(id string) bool {
+func (s *Server) resting(key string) bool {
 	restingUntil.Lock()
 	defer restingUntil.Unlock()
-	return time.Now().Before(restingUntil.m[id])
+	return time.Now().Before(restingUntil.m[key])
 }
 
-func (s *Server) rest(id string) {
+func (s *Server) rest(key string) {
 	restingUntil.Lock()
-	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
+	restingUntil.m[key] = time.Now().Add(fallbackCooldown)
 	restingUntil.Unlock()
 }
 
