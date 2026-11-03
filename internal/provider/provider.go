@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -23,26 +24,30 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
+	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
 // Protocols in the order dial prefers them when it has to translate.
 var Protocols = []Protocol{Chat, Responses, Anthropic}
 
-// Gemini is Google's Gemini REST API. The gateway serves it to clients only,
-// so it is not in Protocols: dial never reaches a provider over it.
-const Gemini Protocol = "gemini"
-
 // Provider is one configured vendor.
 type Provider struct {
 	ID     string `json:"id"`
-	Name   string `json:"name"`
+	Name   string `json:"name,omitempty"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key,omitempty"`    // API key, as typed by the user
 
-	// Account is set only on sign-in providers (codex, copilot) that the
-	// agent's login makes available. It is derived at read time, never saved.
+	// Account is set for providers that ride on an agent's login (see
+	// Accounts). Such a provider needs no key and stores no credentials.
+	// In dial's config an account provider holds only Models, and for Copilot
+	// the Listed/Efforts it last fetched; Account itself is never saved.
 	Account *Account `json:"account,omitempty"`
+
+	// Listed is the model list an account provider's login last offered
+	// (Copilot refresh); Efforts maps its models to their reasoning levels.
+	Listed  []string            `json:"listed,omitempty"`
+	Efforts map[string][]string `json:"efforts,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -62,9 +67,6 @@ type Provider struct {
 
 type file struct {
 	Providers []Provider `json:"providers"`
-	// SignIns holds the user's model picks for sign-in providers (codex,
-	// copilot), keyed by provider id. Nothing else about them is stored.
-	SignIns map[string][]string `json:"signins,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -99,20 +101,20 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added, then the
-// sign-in providers whose agent is currently signed in. Claude Code never
-// appears.
+// All lists the configured providers in the order they were added, followed
+// by the account providers whose logins are present (see Accounts). A stored
+// selection for an account id with no address is not a provider by itself:
+// it only counts while the login exists.
 func All() []Provider {
-	f := load()
 	var out []Provider
-	for _, p := range f.Providers {
+	for _, p := range load().Providers {
 		p = normalize(p)
-		if IsAccount(p.ID) || p.ID == claudeID {
+		if isAccountID(p.ID) && !hasAddress(p) {
 			continue
 		}
 		out = append(out, p)
 	}
-	return append(out, accountProviders(f)...)
+	return append(out, Accounts()...)
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -139,18 +141,14 @@ func Save(p Provider) error {
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
-	if p.ID == claudeID {
-		return errClaudeReserved
-	}
-	if IsAccount(p.ID) {
-		return saveSignIn(p)
-	}
-	p.Account = nil
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
 	if p.ID == "dial" {
 		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
+	}
+	if isAccountID(p.ID) && !storedHasAddress(p.ID) {
+		return saveSelection(p)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
@@ -161,6 +159,9 @@ func Save(p Provider) error {
 	if p.Key == "" && !keyOptional(p) {
 		return fmt.Errorf("%s needs an API key", p.Name)
 	}
+	// Only a self-built provider reaches here, so none of the account
+	// fields belong in the config.
+	p.Account, p.Listed, p.Efforts = nil, nil, nil
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
@@ -172,13 +173,23 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider.
+// Delete removes a provider. For an account provider it only clears the
+// model selection: the provider stays, because logging out is the agent's job.
 func Delete(id string) error {
-	if IsAccount(id) {
-		// Only the model picks go; the login stays with its agent.
-		return clearSignIn(id)
-	}
 	f := load()
+	if isAccountID(id) {
+		i := slices.IndexFunc(f.Providers, func(p Provider) bool { return p.ID == id })
+		if i < 0 || !hasAddress(f.Providers[i]) {
+			if i >= 0 {
+				f.Providers[i].Models = nil
+				return store(f)
+			}
+			if _, ok := accountSpecFor(id).detect(); ok {
+				return nil
+			}
+			return fmt.Errorf("no provider %q", id)
+		}
+	}
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -197,9 +208,6 @@ func Delete(id string) error {
 
 // keyOptional is true for local servers, which usually have no key.
 func keyOptional(p Provider) bool {
-	if IsAccount(p.ID) {
-		return true // the agent's login stands in for a key
-	}
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
 		return true
 	}
@@ -309,4 +317,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
