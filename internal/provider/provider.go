@@ -48,17 +48,9 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Headers are extra request headers sent on every request to a custom
-	// provider (see headers.go). Name → value; names keep their case.
-	Headers map[string]string `json:"headers,omitempty"`
-
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
-
-	// Hidden is set on an account the user removed from magpie; the
-	// agent stays signed in, magpie just leaves it alone.
-	Hidden bool `json:"hidden,omitempty"`
 
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
@@ -106,35 +98,22 @@ func store(f file) error {
 // model picks for one of those accounts.
 func All() []Provider {
 	stored := load().Providers
-	picks := map[string]Provider{}
+	picks := map[string][]string{}
 	var out []Provider
 	for _, p := range stored {
 		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			picks[p.ID] = p
+			picks[p.ID] = p.Models
 			continue
 		}
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
+		if _, taken := find(out, a.ID); taken {
 			continue
 		}
-		a.Models = picks[a.ID].Models
+		a.Models = picks[a.ID]
 		out = append(out, a)
-	}
-	return out
-}
-
-// Hidden lists the signed-in accounts the user removed from magpie.
-func Hidden() []Provider {
-	var out []Provider
-	for _, a := range Accounts() {
-		for _, p := range load().Providers {
-			if p.ID == a.ID && p.Hidden {
-				out = append(out, a)
-			}
-		}
 	}
 	return out
 }
@@ -166,8 +145,15 @@ func Slug(name string) string {
 	return strings.Trim(idRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-// Save adds or replaces a provider.
-func Save(p Provider) error {
+// Save adds or replaces a provider. A remote provider needs an API key.
+func Save(p Provider) error { return save(p, true) }
+
+// SaveImported adds or replaces a provider from an import link. Unlike Save it
+// accepts a remote provider with no key yet: the user adds the key afterwards
+// with `magpie provider key`. Everything else Save checks still applies.
+func SaveImported(p Provider) error { return save(p, false) }
+
+func save(p Provider, needKey bool) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -183,17 +169,14 @@ func Save(p Provider) error {
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in. Saving it again brings a removed one back.
+		// agent's own sign-in
 		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
-		if p.Key == "" && !keyOptional(p) {
+		if needKey && p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
-		}
-		if err := checkHeaders(p.Headers); err != nil {
-			return err
 		}
 	}
 	f := load()
@@ -207,18 +190,18 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider. An account is only hidden from magpie (its
-// model picks kept); signing out is the agent's job.
+// Delete removes a provider. For an account it forgets the model picks;
+// signing out is the agent's job.
 func Delete(id string) error {
 	if _, ok := find(Accounts(), id); ok {
 		f := load()
-		for i := range f.Providers {
-			if f.Providers[i].ID == id {
-				f.Providers[i].Hidden = true
-				return store(f)
+		keep := f.Providers[:0]
+		for _, p := range f.Providers {
+			if p.ID != id {
+				keep = append(keep, p)
 			}
 		}
-		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
+		f.Providers = keep
 		return store(f)
 	}
 	f := load()
@@ -258,10 +241,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Headers = normalizeHeaders(p.Headers)
-	if p.Preset != "" {
-		p.Headers = nil // a preset vendor sends no custom headers
-	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
