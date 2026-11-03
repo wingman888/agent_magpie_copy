@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -22,17 +21,6 @@ func groupPicker(t *testing.T) {
 		{ID: "b", Name: "B", Chat: "https://b.example/v1", Key: "kb", Icon: "openai", Models: []string{"vendor/m"}},
 	} {
 		if err := provider.Save(p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// what each provider serves, as a fetch from the vendor would record it:
-	// auto-m is built from the models served, not only the ones exposed
-	for id, ms := range map[string][]string{"a": {"m", "only-a"}, "b": {"vendor/m"}} {
-		var models []catalog.Model
-		for _, m := range ms {
-			models = append(models, catalog.Model{ID: m})
-		}
-		if err := catalog.SaveLive(id, "", models); err != nil {
 			t.Fatal(err)
 		}
 	}

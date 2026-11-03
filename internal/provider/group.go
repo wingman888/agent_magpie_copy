@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/yetone/magpie/internal/catalog"
 )
 
 // groupWord is the provider-like word that prefixes a group's model id.
@@ -220,15 +222,14 @@ func isAutoGroupID(id string, all []Provider) bool {
 }
 
 // autoGroupList builds the automatic groups now, from the models each ready
-// provider actually serves (Available, not only what is exposed or picked).
-// Nothing about them is stored.
+// provider serves or is configured to serve. Nothing about them is stored.
 func autoGroupList(all []Provider) []Group {
 	var src []ProviderModels
 	for _, p := range all {
 		if !p.Ready() {
 			continue
 		}
-		src = append(src, ProviderModels{Provider: p.ID, Models: p.Available()})
+		src = append(src, ProviderModels{Provider: p.ID, Models: candidateModels(p)})
 	}
 	var out []Group
 	for _, a := range AutoGroups(src) {
@@ -237,6 +238,30 @@ func autoGroupList(all []Provider) []Group {
 			g.Members = append(g.Members, m.Provider+"/"+m.Model)
 		}
 		out = append(out, g)
+	}
+	return out
+}
+
+// candidateModels is the models a provider can take part in an automatic
+// group with: everything it serves (Available, which covers the whole vendor
+// list even past manyModels, and the configured models when there is no
+// list yet) plus whatever it exposes, which includes the user's picks. Each
+// model id appears once, in Available's order and then the rest.
+func candidateModels(p Provider) []catalog.Model {
+	avail := p.Available()
+	seen := make(map[string]bool, len(avail))
+	out := make([]catalog.Model, 0, len(avail))
+	for _, m := range avail {
+		if !seen[m.ID] {
+			seen[m.ID] = true
+			out = append(out, m)
+		}
+	}
+	for _, m := range p.Exposed() {
+		if !seen[m.ID] {
+			seen[m.ID] = true
+			out = append(out, m)
+		}
 	}
 	return out
 }

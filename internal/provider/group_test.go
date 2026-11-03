@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -30,8 +31,6 @@ func twoProviders(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seedLive(t, "a", "m", "only-a")
-	seedLive(t, "b", "vendor/m")
 }
 
 // seedLive records the model list a provider serves, as a fetch from the
@@ -68,6 +67,62 @@ func TestAutoGroupFollowsServedModels(t *testing.T) {
 	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(memberIDs(ms), want) {
 		t.Errorf("auto-m members = %v, want %v", memberIDs(ms), want)
 	}
+}
+
+// With no list fetched from the vendor yet, the models the provider is
+// configured to serve are what it groups by.
+func TestAutoGroupWithoutLiveList(t *testing.T) {
+	groupSetup(t)
+	twoProviders(t)
+	g, ms, ok := FindGroup("group/auto-m")
+	if !ok || !g.Auto {
+		t.Fatalf("auto-m not found without a live list: ok=%v auto=%v", ok, g.Auto)
+	}
+	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(memberIDs(ms), want) {
+		t.Errorf("auto-m members = %v, want %v", memberIDs(ms), want)
+	}
+}
+
+// A vendor list longer than manyModels is shown only in part by Exposed, but
+// the group still sees every model the vendor serves.
+func TestAutoGroupPastManyModels(t *testing.T) {
+	groupSetup(t)
+	if err := Save(Provider{ID: "a", Name: "A", Chat: "https://a.example/v1", Key: "ka"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(Provider{ID: "b", Name: "B", Chat: "https://b.example/v1", Key: "kb", Models: []string{"vendor/m"}}); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for i := 0; i < manyModels+5; i++ {
+		ids = append(ids, fmt.Sprintf("filler-%02d", i))
+	}
+	// m comes after the first manyModels, so only Available reaches it
+	ids = append(ids, "m")
+	seedLive(t, "a", ids...)
+	seedLive(t, "b", "vendor/m")
+	if got := len(exposedOf(t, "a")); got != manyModels {
+		t.Fatalf("a exposes %d models, want %d", got, manyModels)
+	}
+	g, ms, ok := FindGroup("group/auto-m")
+	if !ok || !g.Auto {
+		t.Fatalf("auto-m not found past %d models: ok=%v auto=%v", manyModels, ok, g.Auto)
+	}
+	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(memberIDs(ms), want) {
+		t.Errorf("auto-m members = %v, want %v", memberIDs(ms), want)
+	}
+}
+
+// exposedOf is the models the provider with the given id exposes to agents.
+func exposedOf(t *testing.T, id string) []catalog.Model {
+	t.Helper()
+	for _, p := range All() {
+		if p.ID == id {
+			return p.Exposed()
+		}
+	}
+	t.Fatalf("no provider %q", id)
+	return nil
 }
 
 // A user may take over an automatic group whose id carries a dot or a colon,
