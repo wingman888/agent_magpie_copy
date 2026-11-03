@@ -26,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // Site is magpie's home; its /api/latest is the update feed.
@@ -55,7 +57,7 @@ type Asset struct {
 	SHA256 string `json:"sha256"`
 }
 
-var client = &http.Client{Timeout: 10 * time.Minute}
+var client = &http.Client{Timeout: 10 * time.Minute, Transport: netproxy.Transport()}
 
 // Latest asks the feed for the newest release.
 func Latest(ctx context.Context) (*Release, error) {
