@@ -1,9 +1,9 @@
-// Package provider holds the model vendors magpie can reach: where each one
+// Package provider holds the model vendors dial can reach: where each one
 // lives, which protocols it speaks, the API key the user typed in, and which
 // of its models should show up in the agents' pickers.
 //
 // Nothing here reads environment variables. A provider is exactly what the
-// user entered, kept in ~/.config/magpie/providers.json (mode 0600).
+// user entered, kept in ~/.config/dial/providers.json (mode 0600).
 package provider
 
 import (
@@ -16,17 +16,16 @@ import (
 	"strings"
 )
 
-// Protocol is a wire API magpie can speak to an upstream.
+// Protocol is a wire API dial can speak to an upstream.
 type Protocol string
 
 const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
-// Protocols in the order magpie prefers them when it has to translate.
+// Protocols in the order dial prefers them when it has to translate.
 var Protocols = []Protocol{Chat, Responses, Anthropic}
 
 // Provider is one configured vendor.
@@ -37,7 +36,7 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// Base URLs, one per protocol the vendor serves natively. magpie appends
+	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
 	Chat      string `json:"chat,omitempty"`
@@ -48,30 +47,26 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
+	// Account is set for providers backed by an agent's login (codex,
+	// copilot). It is filled in by All() and never stored.
+	Account *Account `json:"account,omitempty"`
+
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
-
-	// Account is set when the provider is an agent the user signed in to
-	// (see account.go); it is derived, never stored.
-	Account *Account `json:"-"`
 }
 
 type file struct {
 	Providers []Provider `json:"providers"`
-
-	// Removed lists the signed-in accounts the user took out of magpie. Their
-	// model picks stay in Providers, so adding one back restores its picks.
-	Removed []string `json:"removed,omitempty"`
 }
 
 // Path is the file the user's providers live in.
 func Path() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "magpie", "providers.json")
+		return filepath.Join(x, "dial", "providers.json")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "magpie", "providers.json")
+	return filepath.Join(home, ".config", "dial", "providers.json")
 }
 
 func load() file {
@@ -97,38 +92,30 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added, then
-// the signed-in agents. An entry in the file with no URL is only the
-// model picks for one of those accounts.
+// All lists the configured providers in the order they were added, then each
+// agent login dial can offer. An agent-backed provider appears only while that
+// agent is signed in; its stored entry then holds just the user's model picks.
+// A Claude Code login is never offered.
 func All() []Provider {
-	f := load()
-	picks := map[string][]string{}
 	var out []Provider
-	for _, p := range f.Providers {
+	picks := map[string][]string{}
+	for _, p := range load().Providers {
 		p = normalize(p)
-		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+		switch {
+		case p.ID == claudeID:
+			continue
+		case IsAccount(p.ID):
 			picks[p.ID] = p.Models
 			continue
 		}
 		out = append(out, p)
 	}
-	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken || contains(f.Removed, a.ID) {
-			continue
+	for _, id := range accountIDs {
+		if acc, ok := signedInAs(id); ok {
+			out = append(out, accountProvider(acc, picks[id]))
 		}
-		a.Models = picks[a.ID]
-		out = append(out, a)
 	}
 	return out
-}
-
-func find(ps []Provider, id string) (Provider, bool) {
-	for _, p := range ps {
-		if p.ID == id {
-			return p, true
-		}
-	}
-	return Provider{}, false
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -139,7 +126,7 @@ func Find(id string) (*Provider, error) {
 			return &p, nil
 		}
 	}
-	return nil, fmt.Errorf("no provider %q — magpie providers lists them", id)
+	return nil, fmt.Errorf("no provider %q — dial providers lists them", id)
 }
 
 var idRe = regexp.MustCompile(`[^a-z0-9]+`)
@@ -150,14 +137,7 @@ func Slug(name string) string {
 }
 
 // Save adds or replaces a provider.
-func Save(p Provider) error { return save(p, true) }
-
-// SaveImported adds or replaces a provider from an import link. Unlike Save it
-// accepts a provider with no key yet: the user supplies one later with
-// `magpie provider key`.
-func SaveImported(p Provider) error { return save(p, false) }
-
-func save(p Provider, needKey bool) error {
+func Save(p Provider) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -165,31 +145,26 @@ func save(p Provider, needKey bool) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
-	if p.ID == "magpie" {
-		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
+	if p.ID == claudeID {
+		return errors.New("claude is Claude Code's login, not a provider dial offers")
+	}
+	if IsAccount(p.ID) {
+		// The agent's login is never stored here; only the model picks are.
+		return setAccountModels(p.ID, p.Models)
+	}
+	if p.ID == "dial" {
+		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	f := load()
-	if a, ok := find(Accounts(), p.ID); ok {
-		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in. Adding a removed account back keeps the picks
-		// it had unless the caller names new ones.
-		picks := p.Models
-		if contains(f.Removed, a.ID) && picks == nil {
-			picks = picksOf(f, a.ID)
-		}
-		p = Provider{ID: a.ID, Models: picks}
-		f.Removed = without(f.Removed, a.ID)
-	} else {
-		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			return errors.New("a provider needs a base URL")
-		}
-		if needKey && p.Key == "" && !keyOptional(p) {
-			return fmt.Errorf("%s needs an API key", p.Name)
-		}
+	if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+		return errors.New("a provider needs a base URL")
 	}
+	if p.Key == "" && !keyOptional(p) {
+		return fmt.Errorf("%s needs an API key", p.Name)
+	}
+	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
@@ -200,17 +175,13 @@ func save(p Provider, needKey bool) error {
 	return store(f)
 }
 
-// Delete removes a provider. For a signed-in account it only hides it: the
-// agent keeps its sign-in, the model picks are kept, and `provider add` brings
-// it back.
+// Delete removes a provider. For an agent-backed provider it only clears the
+// model picks: the agent stays signed in and its login is left alone.
 func Delete(id string) error {
-	f := load()
-	if _, ok := find(Accounts(), id); ok {
-		if !contains(f.Removed, id) {
-			f.Removed = append(f.Removed, id)
-		}
-		return store(f)
+	if IsAccount(id) {
+		return setAccountModels(id, nil)
 	}
+	f := load()
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -227,27 +198,6 @@ func Delete(id string) error {
 	return store(f)
 }
 
-// picksOf returns the model picks stored for an account.
-func picksOf(f file, id string) []string {
-	for _, p := range f.Providers {
-		if p.ID == id && p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			return p.Models
-		}
-	}
-	return nil
-}
-
-// without returns xs with x removed.
-func without(xs []string, x string) []string {
-	var out []string
-	for _, v := range xs {
-		if v != x {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
 // keyOptional is true for local servers, which usually have no key.
 func keyOptional(p Provider) bool {
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
@@ -258,6 +208,7 @@ func keyOptional(p Provider) bool {
 }
 
 func normalize(p Provider) Provider {
+	p.Account = nil // only All() sets this; a stored value is never trusted
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
@@ -358,6 +309,6 @@ func Mask(s string) string {
 	return s[:4] + "…" + s[len(s)-4:]
 }
 
-// Ready reports whether the provider can be used: it has a key, needs
-// none, or is a signed-in agent.
+// Ready reports whether the provider can be used: it has a key, needs none,
+// or is an agent login that is signed in.
 func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
