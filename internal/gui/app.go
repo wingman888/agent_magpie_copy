@@ -3,8 +3,8 @@ package gui
 import (
 	"context"
 	"crypto/sha256"
-	_ "embed"
 	"encoding/hex"
+	_ "embed"
 	"log"
 	"os"
 	"runtime"
@@ -57,7 +57,6 @@ func (h *host) ShowMain(view string) {
 	h.main.Show()
 	h.main.Focus()
 }
-
 // Import opens the window on an import link, for the user to confirm.
 func (h *host) Import(link string) {
 	id := stashImport(link)
@@ -150,12 +149,12 @@ func Run(version string, showMain bool, link string) error {
 		// second launch); it hands its arguments to the running one and quits.
 		// The Mac sends the link to the running app itself.
 		SingleInstance: singleInstance(h),
-		Name:           "magpie",
-		Description:    "one place to pick every agent's model",
-		Icon:           appIcon,
-		Assets:         application.AssetOptions{Handler: Handler(h, gw)},
-		Mac:            application.MacOptions{ActivationPolicy: application.ActivationPolicyAccessory},
-		Windows:        application.WindowsOptions{DisableQuitOnLastWindowClosed: true},
+		Name:        "magpie",
+		Description: "one place to pick every agent's model",
+		Icon:        appIcon,
+		Assets:      application.AssetOptions{Handler: Handler(h, gw)},
+		Mac:         application.MacOptions{ActivationPolicy: application.ActivationPolicyAccessory},
+		Windows:     application.WindowsOptions{DisableQuitOnLastWindowClosed: true},
 		// A version downloaded but not restarted into is installed on the
 		// way out, so the next launch is the new one.
 		OnShutdown: func() { updates.install() },
@@ -193,9 +192,8 @@ func Run(version string, showMain bool, link string) error {
 		MinHeight: 420,
 		Hidden:    true,
 		Mac: application.MacWindow{
-			// no InvisibleTitleBarHeight: that strip drags from anywhere in
-			// it, tabs included; the header marks what drags instead
-			TitleBar: application.MacTitleBarHiddenInset,
+			TitleBar:                application.MacTitleBarHiddenInset,
+			InvisibleTitleBarHeight: 50,
 		},
 	})
 	// Closing the window keeps the tray alive; quitting is a menu action.
