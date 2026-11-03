@@ -3,6 +3,8 @@ package provider
 // A backup carries providers.json's entries as they are stored, and puts
 // them back on another machine (see internal/backup).
 
+import "fmt"
+
 // Stored is the providers as providers.json keeps them: keys included,
 // signed-in accounts only as the model picks the user made for them.
 func Stored() []Provider { return load().Providers }
@@ -10,10 +12,16 @@ func Stored() []Provider { return load().Providers }
 // Restore puts providers from a backup in. Each replaces the one here with
 // its id; one that came without keys keeps the keys already here. It
 // returns how many were new and how many replaced one here.
+//
+// A provider with the id "group" is refused, as Save refuses it: that id is
+// the prefix of routing groups. Nothing is stored when one is refused.
 func Restore(ps []Provider) (added, replaced int, err error) {
 	f := load()
 	for _, p := range ps {
 		p.IconURL = ""
+		if p.ID == groupProvider {
+			return 0, 0, fmt.Errorf(`"group" is the prefix of routing groups (group/…); pick another id`)
+		}
 		if p.ID == "" || p.ID != Slug(p.ID) || p.ID == "magpie" {
 			continue
 		}

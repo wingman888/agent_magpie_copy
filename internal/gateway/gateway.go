@@ -390,6 +390,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			fail(msg, msg)
 			return
 		}
+		tn.rotating = g.Routing == provider.Rotate
 		members := make([]memberOf, 0, len(ms))
 		names := make([]string, 0, len(ms))
 		for _, m := range ms {
@@ -426,6 +427,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			return
 		}
 		model = m
+		tn.rotating = p.Routing == provider.Rotate
 		cands, pl = s.planIn(p, model, from, tn)
 		mode, providerName = p.Affinity, p.ID
 	}

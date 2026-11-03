@@ -188,6 +188,10 @@ func affine(cands []candidate, session, model, mode string, tn turnRef, now time
 		switch {
 		case tn.within:
 			at.Why = "turn"
+		case tn.rotating:
+			// a rotating pool hands a new turn to the next key; keeping to
+			// the last answerer would undo that
+			at.Why = "new-turn"
 		case last.cacheRead < cacheMinimum:
 			at.Why = "no-cache"
 		case now.Sub(last.at) > cacheWarm:

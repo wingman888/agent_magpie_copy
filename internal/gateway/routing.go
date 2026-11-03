@@ -230,6 +230,10 @@ type turnRef struct {
 	model   string
 	turn    int
 	within  bool
+	// rotating says the pool the request goes to routes in turn (provider.Rotate
+	// or a group's). Across turns, automatic affinity then does not keep to
+	// the last answerer: a new turn takes the next key.
+	rotating bool
 }
 
 // turnState is where a session's turn stands in one pool: the user turn it
