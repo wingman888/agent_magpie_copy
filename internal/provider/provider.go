@@ -44,22 +44,14 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
-	// Headers are extra HTTP request headers sent to the vendor, exactly as
-	// the user typed them. They ride on every request magpie makes to a plain
-	// key+URL provider — forwarded calls, connectivity tests, and model-list
-	// fetches — applied after the auth headers, so the user can override those
-	// when a gateway insists on a private scheme. Signed-in agent accounts
-	// ignore them: their auth is the agent's own.
-	Headers map[string]string `json:"headers,omitempty"`
-
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Fallback is the ordered list of "provider/model" ids the gateway tries
-	// when this provider cannot answer (quota spent, rate limited, overloaded
-	// or down). Saved trimmed, without blanks or repeats.
-	Fallback []string `json:"fallback,omitempty"`
+	// Headers are extra HTTP headers sent on every request to a custom
+	// provider (name → value). Names keep the case the user typed. Presets
+	// and signed-in agents ignore them.
+	Headers map[string]string `json:"headers,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
@@ -107,8 +99,11 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	pruneIcons(f)
-	return os.Chmod(p, 0o600)
+	if err := os.Chmod(p, 0o600); err != nil {
+		return err
+	}
+	gcIcons(f)
+	return nil
 }
 
 // All lists the configured providers in the order they were added, then
@@ -131,7 +126,6 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -195,7 +189,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -213,53 +207,6 @@ func Save(p Provider) error {
 	}
 	f.Providers = append(f.Providers, p)
 	return store(f)
-}
-
-// SetFallback replaces a provider's fallback list with refs, in order. Each ref
-// must be a provider/model magpie knows; if one is not, nothing is saved. An
-// empty refs clears the list.
-func SetFallback(id string, refs []string) (Provider, error) {
-	p, err := Find(id)
-	if err != nil {
-		return Provider{}, err
-	}
-	var chain []string
-	for _, ref := range refs {
-		ref = strings.TrimSpace(ref)
-		if ref == "" {
-			continue // blanks are dropped, as they are when the config is read
-		}
-		pid, model, ok := strings.Cut(ref, "/")
-		if !ok || strings.TrimSpace(pid) == "" || strings.TrimSpace(model) == "" {
-			return Provider{}, fmt.Errorf("%q is not provider/model", ref)
-		}
-		fp, err := Find(pid)
-		if err != nil || !fp.Knows(model) {
-			return Provider{}, fmt.Errorf("magpie doesn't know the model %q · magpie models lists them", ref)
-		}
-		chain = append(chain, fp.ID+"/"+model)
-	}
-	p.Fallback = cleanList(chain)
-	if err := Save(*p); err != nil {
-		return Provider{}, err
-	}
-	return *p, nil
-}
-
-// Knows reports whether magpie knows the model: it is exposed to agents or
-// listed by the vendor (or the signed-in agent).
-func (p Provider) Knows(model string) bool {
-	for _, m := range p.Exposed() {
-		if m.ID == model {
-			return true
-		}
-	}
-	for _, m := range p.Available() {
-		if m.ID == model {
-			return true
-		}
-	}
-	return false
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -313,14 +260,9 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Fallback = cleanList(p.Fallback)
 	p.Headers = cleanHeaders(p.Headers)
-	if p.Preset != "" {
-		// Presets own their request shape; custom headers are supported only
-		// for user-defined providers.
-		p.Headers = nil
-	}
 	if pr := Preset(p.Preset); pr != nil {
+		p.Headers = nil // presets keep their own headers; user headers are dropped
 		if p.Icon == "" {
 			p.Icon = pr.Icon
 		}
@@ -348,16 +290,18 @@ func cleanList(xs []string) []string {
 }
 
 // cleanHeaders trims header names and values and drops entries with an empty
-// name, returning nil when nothing is left so the field stays out of the JSON.
+// name. It returns nil when nothing is left, so the field is not written out.
 func cleanHeaders(h map[string]string) map[string]string {
-	out := make(map[string]string, len(h))
+	var out map[string]string
 	for k, v := range h {
-		if k = strings.TrimSpace(k); k != "" {
-			out[k] = strings.TrimSpace(v)
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" {
+			continue
 		}
-	}
-	if len(out) == 0 {
-		return nil
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = v
 	}
 	return out
 }
