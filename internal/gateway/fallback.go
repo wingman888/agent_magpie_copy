@@ -164,22 +164,38 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 // did by, and those left out.
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
 	var pl planned
-	add := func(q provider.Provider, m string, fallback bool) []candidate {
+	// a candidate with its trace entry, kept apart as main pool or aside
+	type slot struct {
+		c candidate
+		w Weighed
+	}
+	var main, aside []slot
+	add := func(q provider.Provider, m string, fallback bool) {
 		cs, left := perKeyOf(q, m, from)
 		cs, wg := weigh(q, cs, m, from)
+		// turn is among the main pool only: keys aside don't count
+		nMain := 0
+		for _, c := range cs {
+			if !wg.aside[c.rest] {
+				nMain++
+			}
+		}
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
-			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
-			pl.order = append(pl.order, w)
+			w.Turn = i == 0 && q.Routing == provider.Rotate && nMain > 1
+			if w.Aside {
+				aside = append(aside, slot{c, w})
+			} else {
+				main = append(main, slot{c, w})
+			}
 		}
 		for _, c := range left {
 			w := weighed(c, q, weighing{}, fallback, from)
 			w.Unlisted = true
 			pl.left = append(pl.left, w)
 		}
-		return cs
 	}
-	out := add(p, model, false)
+	add(p, model, false)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -187,37 +203,59 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, add(fp, fm, true)...)
+		add(fp, fm, true)
 	}
-	if len(out) == 1 {
-		if r, ok := restOf(out[0].rest); ok {
+	// every main pool, the primary's and the fallbacks', comes before any key
+	// aside from one; the aside keys follow, best fit first
+	sort.SliceStable(aside, func(i, j int) bool {
+		return keyFit(aside[i].c.p, aside[i].c.model, from) < keyFit(aside[j].c.p, aside[j].c.model, from)
+	})
+	if len(main)+len(aside) == 1 {
+		only := append(append([]slot{}, main...), aside...)[0]
+		pl.order = []Weighed{only.w}
+		if r, ok := restOf(only.c.rest); ok {
 			pl.order[0].Rest = &r // tried all the same: there is no other
 		}
-		return out, pl
+		return []candidate{only.c}, pl
 	}
 	// a key aside from its provider's main pool waits behind that pool, even
 	// one that is ready, while any of the main pool is resting
 	held := map[string]bool{}
-	for i, c := range out {
-		if _, ok := restOf(c.rest); ok && !pl.order[i].Aside {
-			held[poolOf(c)] = true
+	for _, s := range main {
+		if _, ok := restOf(s.c.rest); ok {
+			held[poolOf(s.c)] = true
 		}
 	}
-	var ready, resting []candidate
-	var wReady, wResting []Weighed
-	for i, c := range out {
-		r, ok := restOf(c.rest)
-		if ok {
-			pl.order[i].Rest = &r
-		}
-		if ok || pl.order[i].Aside && held[poolOf(c)] {
-			resting, wResting = append(resting, c), append(wResting, pl.order[i])
+	// the main pool's ready keys, then its resting ones, then the aside
+	// ready, then the aside resting
+	var mainReady, mainResting, asideReady, asideResting []slot
+	for _, s := range main {
+		if r, ok := restOf(s.c.rest); ok {
+			s.w.Rest = &r
+			mainResting = append(mainResting, s)
 		} else {
-			ready, wReady = append(ready, c), append(wReady, pl.order[i])
+			mainReady = append(mainReady, s)
 		}
 	}
-	pl.order = append(wReady, wResting...)
-	return append(ready, resting...), pl
+	for _, s := range aside {
+		r, ok := restOf(s.c.rest)
+		if ok {
+			s.w.Rest = &r
+		}
+		if ok || held[poolOf(s.c)] {
+			asideResting = append(asideResting, s)
+		} else {
+			asideReady = append(asideReady, s)
+		}
+	}
+	var out []candidate
+	for _, group := range [][]slot{mainReady, mainResting, asideReady, asideResting} {
+		for _, s := range group {
+			out = append(out, s.c)
+			pl.order = append(pl.order, s.w)
+		}
+	}
+	return out, pl
 }
 
 var restingUntil = struct {

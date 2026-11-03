@@ -383,6 +383,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
+		// the main pool's last key failed with an error no other provider may
+		// do better with (say a 400 for the protocol): the key aside from the
+		// pool still gets its try, as it is the one that may suit the request.
+		// Nothing rests for it, since the main pool's key did nothing wrong.
+		if !last && call.Status >= 400 && !hw.passing && i+1 < len(pl.order) && !pl.order[i].Aside && pl.order[i+1].Aside {
+			try.Fail = failure(hw.status, hw.held.Bytes())
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			skipped = append(skipped, c.label()+": "+call.Error)
+			continue
+		}
 		hw.release()
 		model = c.model
 		if call.Status < 400 {
