@@ -1,5 +1,3 @@
-//go:build !nogui
-
 package gui
 
 import (
@@ -49,6 +47,10 @@ type providerJSON struct {
 	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
 	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
 	Sponsored bool            `json:"sponsored"`
+
+	// Account is set when the provider rides on an agent's login. It holds
+	// who and which plan, never a token.
+	Account *provider.Account `json:"account,omitempty"`
 }
 
 type providerAgent struct {
@@ -73,9 +75,10 @@ type gatewayJSON struct {
 }
 
 type providersJSON struct {
-	Providers []providerJSON `json:"providers"`
-	Presets   []presetJSON   `json:"presets"`
-	Gateway   gatewayJSON    `json:"gateway"`
+	Providers  []providerJSON       `json:"providers"`
+	Presets    []presetJSON         `json:"presets"`
+	Gateway    gatewayJSON          `json:"gateway"`
+	Exclusions []provider.Exclusion `json:"exclusions"` // logins recognised but not offered, e.g. Claude Code
 }
 
 // currentProvider reads which provider (and model) an agent is routed to now.
@@ -98,6 +101,7 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
+		Account: p.Account,
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
@@ -139,7 +143,8 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 
 func providersState(gw *gateway.Server) providersJSON {
 	agents := agent.Detected()
-	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}}
+	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Exclusions: []provider.Exclusion{}}
+	s.Exclusions = append(s.Exclusions, provider.Excluded()...)
 	have := map[string]bool{}
 	for _, p := range provider.All() {
 		have[p.ID] = true
