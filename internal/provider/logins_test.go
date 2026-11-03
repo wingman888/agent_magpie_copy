@@ -56,8 +56,8 @@ func claudeAs(t *testing.T, home, email, access, refresh string) {
 		"mcpOAuth": map[string]any{"plugin:slack": map[string]any{"serverName": "Slack"}},
 	})
 	writeFile(t, filepath.Join(home, ".claude.json"), map[string]any{
-		"numStartups": 7,
-		"projects":    map[string]any{"/work": map[string]any{"allowedTools": []string{"Bash"}}},
+		"numStartups":  7,
+		"projects":     map[string]any{"/work": map[string]any{"allowedTools": []string{"Bash"}}},
 		"oauthAccount": map[string]any{"emailAddress": email, "accountUuid": "uuid-" + email},
 	})
 	forgetClaudeCredential()

@@ -298,7 +298,7 @@ func TestStreamOpeningOverloadIsRerouted(t *testing.T) {
 	rc, url := newUpstream(t, func(key, path string) (int, string, string) {
 		if key == "sk-personal" {
 			return 200, streamType, sse(
-				`event: error`+"\n"+`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+				`event: error` + "\n" + `data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
 		}
 		return 200, streamType, anthropicReply
 	})
