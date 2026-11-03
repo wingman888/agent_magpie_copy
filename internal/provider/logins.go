@@ -1,177 +1,200 @@
 package provider
 
-// Several subscriptions per agent. magpie keeps following each agent's own
-// sign-in; it also remembers every Codex and Claude Code account it has
-// seen signed in, so the user can switch back to one without signing in
-// again. A switch moves the saved credentials into the agent's own store
-// and saves the ones they replace, so each account's refresh token lives in
-// exactly one place: the vendor rotates it on every refresh, and two holders
-// of the same one would sign each other out.
+// Remembered logins: the sign-ins of Claude Code and Codex magpie keeps, so the
+// user can switch between them, or let several serve the gateway at once.
+//
+// An agent holds one login at a time, in its own files. magpie keeps a copy of
+// every account it has seen in accounts.json next to providers.json (mode 0600).
+// Refresh tokens have one holder at a time: while an account is the agent's
+// current login, the agent's files are the only copy that refreshes, and the
+// copy magpie keeps is a snapshot replaced on every look. An account that is
+// not current refreshes from its copy, and only there. An "on" account serves
+// the gateway alongside the current one and never touches the agent's files.
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/catalog"
 )
 
-// Login is a remembered subscription account, without its secrets.
+// rememberedLogin is one signed-in account magpie keeps.
+type rememberedLogin struct {
+	Agent string         `json:"agent"`
+	User  string         `json:"user"`
+	Plan  string         `json:"plan,omitempty"`
+	On    bool           `json:"on,omitempty"` // serves the gateway alongside the current login
+	Added time.Time      `json:"added"`
+	Cred  map[string]any `json:"credential,omitempty"` // the sign-in as the agent keeps it, see codexLoginKeys
+}
+
+type loginsFile struct {
+	Logins []rememberedLogin `json:"logins"`
+}
+
+// Login is a signed-in account magpie remembers.
 type Login struct {
-	Agent  string    `json:"agent"`
-	User   string    `json:"user"`
-	Plan   string    `json:"plan,omitempty"`
-	Seen   time.Time `json:"seen"`
-	Active bool      `json:"active"` // the agent is signed in to this one now
-	On     bool      `json:"on"`     // in use: the active one, or next in line
+	Agent   string    `json:"agent"`
+	User    string    `json:"user"`
+	Plan    string    `json:"plan,omitempty"`
+	Current bool      `json:"current"` // the agent is signed in as this one now
+	On      bool      `json:"on"`      // serves the gateway alongside the current login; the current one always does
+	Added   time.Time `json:"added"`
 }
 
-type savedLogin struct {
-	Agent string    `json:"agent"`
-	User  string    `json:"user"`
-	Plan  string    `json:"plan,omitempty"`
-	Seen  time.Time `json:"seen"`
-	// On puts the account in use beside the one the agent is signed in to:
-	// requests go to it when that one is out of quota (see logins_on.go).
-	On bool `json:"on,omitempty"`
-	// Auth is the agent's credential blob as the agent stores it: Codex's
-	// auth.json, Claude Code's keychain item / .credentials.json.
-	Auth json.RawMessage `json:"auth"`
-	// Profile is Claude Code's oauthAccount from .claude.json, which says
-	// whose credentials those are.
-	Profile json.RawMessage `json:"profile,omitempty"`
-	// Home is where a Grok account magpie signed in keeps its sign-in; the
-	// Grok CLI's own account has none (see grok_accounts.go). First puts a
-	// Grok or Copilot account ahead of the agent's own (side_logins.go).
-	Home  string `json:"home,omitempty"`
-	First bool   `json:"first,omitempty"`
-}
+var loginsMu sync.Mutex
 
-var (
-	loginsMu     sync.Mutex
-	loginsSeenAt time.Time
-)
+// codexLoginKeys are the auth.json fields that make up a Codex sign-in. The
+// rest of the file is Codex CLI's own and is left alone.
+var codexLoginKeys = []string{"auth_mode", "OPENAI_API_KEY", "tokens", "last_refresh"}
 
-// switchable agents: those whose sign-in magpie can save and put back.
-var loginAgents = []string{"claude", "codex"}
-
-func loginsPath() string { return filepath.Join(filepath.Dir(Path()), "logins.json") }
-
-func readLogins() []savedLogin {
-	var out []savedLogin
-	b, err := os.ReadFile(loginsPath())
-	if err == nil {
-		_ = json.Unmarshal(b, &out)
-	}
-	return out
-}
-
-func writeLogins(ls []savedLogin) error {
-	sort.SliceStable(ls, func(i, j int) bool {
-		if ls[i].Agent != ls[j].Agent {
-			return ls[i].Agent < ls[j].Agent
+// loginCommand runs the agent's own sign-in, which opens the vendor's login
+// page and returns when it is done. A var so tests never start an agent.
+var loginCommand = func(agent string) error {
+	var bin string
+	var args []string
+	switch agent {
+	case "claude":
+		bin, args = claudeExecutable(), []string{"auth", "login"}
+	case "codex":
+		if p, err := exec.LookPath("codex"); err == nil {
+			bin = p
 		}
-		return strings.ToLower(ls[i].User) < strings.ToLower(ls[j].User)
-	})
-	b, err := json.MarshalIndent(ls, "", "  ")
+		args = []string{"login"}
+	}
+	if bin == "" {
+		return fmt.Errorf("%s is not installed", agentName(agent))
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
+func loginsPath() string { return filepath.Join(filepath.Dir(Path()), "accounts.json") }
+
+func loadLogins() loginsFile {
+	var f loginsFile
+	if b, err := os.ReadFile(loginsPath()); err == nil {
+		json.Unmarshal(b, &f)
+	}
+	return f
+}
+
+// editLogins runs fn on the stored logins under a lock and saves them when fn
+// reports a change. The file is written 0600: it holds refresh tokens.
+func editLogins(fn func(f *loginsFile) (bool, error)) error {
+	loginsMu.Lock()
+	defer loginsMu.Unlock()
+	f := loadLogins()
+	changed, err := fn(&f)
+	if err != nil || !changed {
+		return err
+	}
+	p := loginsPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writePrivate(loginsPath(), append(b, '\n'))
-}
-
-// writePrivate replaces a file readable by the user alone, atomically, so
-// an agent reading it at that moment sees either version, never half.
-func writePrivate(path string, b []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return os.Chmod(p, 0o600)
 }
 
-func upsertLogin(ls []savedLogin, l savedLogin) []savedLogin {
-	for i := range ls {
-		if sameLogin(ls[i], l) {
-			l.On = l.On || ls[i].On
-			ls[i] = l
-			return ls
-		}
-	}
-	return append(ls, l)
+// liveLogin is the sign-in the agent itself uses now.
+type liveLogin struct {
+	user, plan string // user is "" when the sign-in names no email
+	cred       map[string]any
 }
 
-// sameLogin says whether two saved logins are one account. A Claude
-// account is its email within an organization: one email can be a personal
-// Pro or Max and a seat on a Team, two subscriptions side by side.
-func sameLogin(a, b savedLogin) bool {
-	if a.Agent != b.Agent {
-		return false
+func knownAgent(agent string) bool { return agent == "claude" || agent == "codex" }
+
+func agentName(agent string) string {
+	if agent == "claude" {
+		return "Claude Code"
 	}
-	if a.Agent == "claude" {
-		ea, oa := claudeWho(a.Profile)
-		eb, ob := claudeWho(b.Profile)
-		if ea != "" && eb != "" && oa != "" && ob != "" {
-			return strings.EqualFold(ea, eb) && oa == ob
-		}
-	}
-	return strings.EqualFold(a.User, b.User)
+	return "Codex"
 }
 
-// claudeWho reads the email and organization of Claude Code's oauthAccount.
-func claudeWho(profile json.RawMessage) (email, org string) {
-	var acct struct {
-		Email string `json:"emailAddress"`
-		Org   string `json:"organizationUuid"`
-	}
-	if json.Unmarshal(profile, &acct) != nil {
-		return "", ""
-	}
-	return acct.Email, acct.Org
+func unknownAgent(agent string) error {
+	return fmt.Errorf("unknown agent %q: magpie remembers claude (cc) and codex accounts", agent)
 }
 
-// claudeUser names a Claude account: its email, and for a seat on a Team
-// or Enterprise the organization too, so it reads apart from a personal
-// subscription of the same email.
-func claudeUser(email, plan string, acct map[string]any) string {
-	if email == "" || (plan != "team" && plan != "enterprise") {
-		return email
+// currentLogin reads the sign-in the agent uses now. present is false when
+// nobody is signed in.
+func currentLogin(agent string) (live liveLogin, present bool) {
+	switch agent {
+	case "claude":
+		return currentClaudeLogin()
+	case "codex":
+		return currentCodexLogin()
 	}
-	org, _ := acct["organizationName"].(string)
-	if org = strings.TrimSpace(org); org == "" || strings.Contains(org, email) {
-		org = strings.ToUpper(plan[:1]) + plan[1:]
-	}
-	return email + " · " + org
+	return liveLogin{}, false
 }
 
-func codexAuthPath() string {
+func currentClaudeLogin() (liveLogin, bool) {
+	c, _, ok := claudeCredential()
+	if !ok {
+		return liveLogin{}, false
+	}
+	user, plan, signedOut := claudeIdentity()
+	if signedOut {
+		return liveLogin{}, false
+	}
+	if email := claudeFileEmail(); email != "" {
+		user = email
+	}
+	if plan == "" {
+		plan = c.OAuth.SubscriptionType
+	}
+	cred := map[string]any{"claudeAiOauth": c.raw["claudeAiOauth"]}
+	if oa := claudeFileAccount(); oa != nil {
+		cred["oauthAccount"] = oa
+	}
+	return liveLogin{user: strings.TrimSpace(user), plan: plan, cred: cred}, true
+}
+
+func currentCodexLogin() (liveLogin, bool) {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".codex", "auth.json")
+	raw, err := readJSONMap(codexAuthPath(home))
+	if err != nil {
+		return liveLogin{}, false
+	}
+	var a codexAuth
+	b, _ := json.Marshal(raw)
+	json.Unmarshal(b, &a)
+	if a.Tokens.AccessToken == "" || a.AuthMode == "apikey" {
+		return liveLogin{}, false
+	}
+	id := jwtClaims(a.Tokens.IDToken)
+	cred := map[string]any{}
+	for _, k := range codexLoginKeys {
+		if v, ok := raw[k]; ok {
+			cred[k] = v
+		}
+	}
+	return liveLogin{user: claimString(id, "email"), plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type"), cred: cred}, true
 }
 
-// claudeProfilePath is Claude Code's global state file, which holds the
-// signed-in account's identity next to much else.
-func claudeProfilePath() string {
+func codexAuthPath(home string) string { return filepath.Join(home, ".codex", "auth.json") }
+
+// claudeStateFile is Claude Code's settings-and-state file. oauthAccount in it
+// names the account the credentials belong to.
+func claudeStateFile() string {
 	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
 		return filepath.Join(dir, ".claude.json")
 	}
@@ -179,274 +202,439 @@ func claudeProfilePath() string {
 	return filepath.Join(home, ".claude.json")
 }
 
-func readClaudeProfile() (map[string]any, error) {
-	b, err := os.ReadFile(claudeProfilePath())
+func claudeCredentialsFile() string {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return filepath.Join(dir, ".credentials.json")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", ".credentials.json")
+}
+
+// claudeFileAccount is the oauthAccount object Claude Code wrote at sign-in, or nil.
+func claudeFileAccount() map[string]any {
+	var raw map[string]any
+	if !readJSON(claudeStateFile(), &raw) {
+		return nil
+	}
+	oa, _ := raw["oauthAccount"].(map[string]any)
+	return oa
+}
+
+// claudeFileEmail is the email of the account Claude Code signed in with, or "".
+func claudeFileEmail() string {
+	s, _ := claudeFileAccount()["emailAddress"].(string)
+	return strings.TrimSpace(s)
+}
+
+// readJSONMap reads a JSON object; a missing file is an empty object. A file
+// that is not a JSON object is an error, so nothing is overwritten by accident.
+func readJSONMap(path string) (map[string]any, error) {
+	raw := map[string]any{}
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return raw, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.UseNumber() // numbers go back exactly as they came
-	var m map[string]any
-	if err := d.Decode(&m); err != nil {
-		return nil, err
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, fmt.Errorf("%s is not a JSON object; magpie leaves it alone", path)
 	}
-	return m, nil
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	return raw, nil
 }
 
-// liveLogin reads the account an agent is signed in to now.
-func liveLogin(agent string) (savedLogin, bool) {
-	switch agent {
-	case "codex":
-		b, err := os.ReadFile(codexAuthPath())
-		if err != nil {
-			return savedLogin{}, false
-		}
-		var a codexAuth
-		if json.Unmarshal(b, &a) != nil || a.Tokens.AccessToken == "" || a.AuthMode == "apikey" {
-			return savedLogin{}, false
-		}
-		id := jwtClaims(a.Tokens.IDToken)
-		user := claimString(id, "email")
-		if user == "" {
-			user = a.Tokens.AccountID
-		}
-		if user == "" {
-			return savedLogin{}, false
-		}
-		return savedLogin{Agent: agent, User: user, Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type"),
-			Auth: json.RawMessage(bytes.TrimSpace(b))}, true
-	case "claude":
-		c, _, ok := claudeCredential()
-		if !ok {
-			return savedLogin{}, false
-		}
-		b, err := c.marshal()
-		if err != nil {
-			return savedLogin{}, false
-		}
-		// credentials a logout left behind are not a sign-in: Claude Code
-		// says so, and the account is not a provider either (claudeAccount)
-		user, _, signedOut := claudeIdentity()
-		if signedOut {
-			return savedLogin{}, false
-		}
-		l := savedLogin{Agent: agent, Plan: c.OAuth.SubscriptionType, Auth: b}
-		if m, err := readClaudeProfile(); err == nil {
-			if acct, ok := m["oauthAccount"].(map[string]any); ok {
-				email, _ := acct["emailAddress"].(string)
-				l.User = claudeUser(email, l.Plan, acct)
-				l.Profile, _ = json.Marshal(acct)
-			}
-		}
-		if l.User == "" {
-			l.User = user
-		}
-		if l.User == "" {
-			return savedLogin{}, false
-		}
-		return l, true
-	}
-	return savedLogin{}, false
-}
-
-// rememberLogins saves the accounts the agents are signed in to now. The
-// copy of an active account is only a bookmark: the agent keeps refreshing
-// its own, and a switch saves that fresher one first.
-func rememberLogins(force bool) {
-	loginsMu.Lock()
-	defer loginsMu.Unlock()
-	if !force && time.Since(loginsSeenAt) < 30*time.Second {
-		return
-	}
-	loginsSeenAt = time.Now()
-	ls := readLogins()
-	changed := false
-	for _, agent := range loginAgents {
-		l, ok := liveLogin(agent)
-		if !ok {
-			continue
-		}
-		l.Seen = time.Now().UTC().Truncate(time.Second)
-		ls = upsertLogin(ls, l)
-		changed = true
-	}
-	if changed {
-		_ = writeLogins(ls)
-	}
-}
-
-// Logins lists the remembered accounts of an agent ("" for every one),
-// the active one flagged.
-func Logins(agent string) []Login {
-	var side []Login
-	switch agent {
-	case "grok":
-		return grokLoginList()
-	case "copilot":
-		return copilotLoginList()
-	case "":
-		side = append(grokLoginList(), copilotLoginList()...)
-	}
-	rememberLogins(false)
-	loginsMu.Lock()
-	defer loginsMu.Unlock()
-	active := map[string]string{}
-	for _, a := range loginAgents {
-		if l, ok := liveLogin(a); ok {
-			active[a] = l.User
-		}
-	}
-	var out []Login
-	for _, l := range readLogins() {
-		if (agent != "" && l.Agent != agent) || l.Agent == "grok" || l.Agent == "copilot" {
-			continue
-		}
-		using := strings.EqualFold(active[l.Agent], l.User)
-		out = append(out, Login{Agent: l.Agent, User: l.User, Plan: l.Plan, Seen: l.Seen,
-			Active: using, On: using || l.On})
-	}
-	return append(out, side...)
-}
-
-// SwitchLogin signs an agent in to a remembered account. Sessions of the
-// agent that are already running keep the account they started with until
-// they restart.
-func SwitchLogin(agent, user string) error {
-	switch agent {
-	case "grok":
-		return switchGrokLogin(user)
-	case "copilot":
-		return switchCopilotLogin(user)
-	}
-	loginsMu.Lock()
-	defer loginsMu.Unlock()
-	ls := readLogins()
-	var target *savedLogin
-	for i := range ls {
-		if ls[i].Agent == agent && strings.EqualFold(ls[i].User, user) {
-			target = &ls[i]
-		}
-	}
-	if target == nil {
-		return fmt.Errorf("no saved %s account %q", agent, user)
-	}
-	want := *target
-	if live, ok := liveLogin(agent); ok {
-		if strings.EqualFold(live.User, want.User) {
-			return nil
-		}
-		// the credentials being replaced, as fresh as the agent has them;
-		// in use still if the one taking over was: it is next in line now
-		live.Seen = time.Now().UTC().Truncate(time.Second)
-		ls = upsertLogin(ls, live)
-		for i := range ls {
-			if ls[i].Agent == agent && strings.EqualFold(ls[i].User, live.User) {
-				ls[i].On = want.On
-			}
-		}
-		if err := writeLogins(ls); err != nil {
-			return err
-		}
-	}
-	var err error
-	switch agent {
-	case "codex":
-		err = writePrivate(codexAuthPath(), append(bytes.TrimSpace(want.Auth), '\n'))
-	case "claude":
-		err = putClaudeLogin(want)
-	default:
-		err = fmt.Errorf("%s accounts can't be switched", agent)
-	}
+func writeJSONMap(path string, raw map[string]any) error {
+	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err
 	}
-	loginsSeenAt = time.Time{}
-	forgetAccountCaches()
-	return nil
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(out, '\n'), 0o600)
 }
 
-func putClaudeLogin(l savedLogin) error {
-	c, ok := parseClaudeCredentials(l.Auth)
-	if !ok {
-		return errors.New("the saved Claude Code sign-in is unreadable")
+// writeLogin puts a remembered sign-in into the agent's own files, changing
+// only the fields that make up the sign-in.
+func writeLogin(agent string, cred map[string]any) error {
+	switch agent {
+	case "claude":
+		return writeClaudeLogin(cred)
+	case "codex":
+		return writeCodexLogin(cred)
 	}
-	_, loc, found := readClaudeCredential()
-	if !found {
-		// signed out: put it where Claude Code keeps it on this system
-		dir := os.Getenv("CLAUDE_CONFIG_DIR")
-		if dir == "" {
-			home, _ := os.UserHomeDir()
-			dir = filepath.Join(home, ".claude")
+	return unknownAgent(agent)
+}
+
+func writeClaudeLogin(cred map[string]any) error {
+	oauth := cred["claudeAiOauth"]
+	if oauth == nil {
+		return errors.New("the saved Claude Code sign-in is empty")
+	}
+	raw := map[string]any{}
+	cur, loc, have := readClaudeCredential()
+	if have && cur.raw != nil {
+		raw = cur.raw
+	} else {
+		// no current sign-in to build on: keep every field the credentials
+		// file already holds, and replace only claudeAiOauth
+		loc = claudeCredentialLocation{path: claudeCredentialsFile()}
+		existing, err := readJSONMap(loc.path)
+		if err != nil {
+			return err
 		}
-		loc = claudeCredentialLocation{path: filepath.Join(dir, ".credentials.json")}
-		if claudeKeychain {
-			loc = claudeCredentialLocation{keychain: true, account: os.Getenv("USER")}
-		}
+		raw = existing
+	}
+	raw["claudeAiOauth"] = oauth
+	b, _ := json.Marshal(raw)
+	c, ok := parseClaudeCredentials(b)
+	if !ok {
+		return errors.New("the saved Claude Code sign-in is not valid")
 	}
 	if err := saveClaudeCredential(loc, c); err != nil {
 		return err
 	}
-	if len(l.Profile) == 0 {
-		return nil
-	}
-	m, err := readClaudeProfile()
+	// the identity follows the sign-in: an account without one leaves none
+	// behind from the account it replaces
+	state, err := readJSONMap(claudeStateFile())
 	if err != nil {
-		if !os.IsNotExist(err) {
+		return err
+	}
+	if oa := cred["oauthAccount"]; oa != nil {
+		state["oauthAccount"] = oa
+	} else if _, ok := state["oauthAccount"]; ok {
+		delete(state, "oauthAccount")
+	} else {
+		state = nil
+	}
+	if state != nil {
+		if err := writeJSONMap(claudeStateFile(), state); err != nil {
 			return err
 		}
-		m = map[string]any{}
 	}
-	d := json.NewDecoder(bytes.NewReader(l.Profile))
-	d.UseNumber()
-	var acct map[string]any
-	if err := d.Decode(&acct); err != nil {
-		return err
-	}
-	m["oauthAccount"] = acct
-	b, err := json.MarshalIndent(m, "", "  ")
+	forgetClaudeCredential()
+	forgetClaudeStatus()
+	return nil
+}
+
+func writeCodexLogin(cred map[string]any) error {
+	home, _ := os.UserHomeDir()
+	path := codexAuthPath(home)
+	raw, err := readJSONMap(path)
 	if err != nil {
 		return err
 	}
-	return writePrivate(claudeProfilePath(), append(b, '\n'))
+	for _, k := range codexLoginKeys {
+		delete(raw, k)
+	}
+	for _, k := range codexLoginKeys {
+		if v, ok := cred[k]; ok {
+			raw[k] = v
+		}
+	}
+	return writeJSONMap(path, raw)
 }
 
-// ForgetLogin drops a remembered account. The one an agent is signed in to
-// now can't be forgotten; it would only be remembered again.
-func ForgetLogin(agent, user string) error {
-	switch agent {
-	case "grok":
-		return forgetGrokLogin(user)
-	case "copilot":
-		return forgetCopilotLogin(user)
+func sameUser(a, b string) bool {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	return a != "" && strings.EqualFold(a, b)
+}
+
+func sameJSON(a, b map[string]any) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return bytes.Equal(x, y)
+}
+
+func findLogin(f *loginsFile, agent, user string) int {
+	for i, l := range f.Logins {
+		if l.Agent == agent && sameUser(l.User, user) {
+			return i
+		}
 	}
-	loginsMu.Lock()
-	defer loginsMu.Unlock()
-	if live, ok := liveLogin(agent); ok && strings.EqualFold(live.User, user) {
-		return fmt.Errorf("%s is signed in to %s now; switch to another account first", agent, user)
+	return -1
+}
+
+func countLogins(f *loginsFile, agent string) int {
+	n := 0
+	for _, l := range f.Logins {
+		if l.Agent == agent {
+			n++
+		}
 	}
-	ls := readLogins()
-	out := ls[:0]
-	found := false
-	for _, l := range ls {
-		if l.Agent == agent && strings.EqualFold(l.User, user) {
-			found = true
+	return n
+}
+
+func storedLogin(agent, user string) (rememberedLogin, bool) {
+	f := loadLogins()
+	i := findLogin(&f, agent, user)
+	if i < 0 {
+		return rememberedLogin{}, false
+	}
+	return f.Logins[i], true
+}
+
+// remember records the agent's current sign-in, or refreshes the copy kept of
+// it. An account recorded while another one is already remembered is on by
+// default: that is how the second account comes to serve alongside the first.
+func remember(agent string) {
+	live, ok := currentLogin(agent)
+	if !ok || live.user == "" {
+		return
+	}
+	editLogins(func(f *loginsFile) (bool, error) {
+		i := findLogin(f, agent, live.user)
+		if i < 0 {
+			f.Logins = append(f.Logins, rememberedLogin{Agent: agent, User: live.user, Plan: live.plan,
+				On: countLogins(f, agent) > 0, Added: time.Now(), Cred: live.cred})
+			return true, nil
+		}
+		l := &f.Logins[i]
+		if l.Plan == live.plan && sameJSON(l.Cred, live.cred) {
+			return false, nil
+		}
+		l.Plan, l.Cred = live.plan, live.cred
+		return true, nil
+	})
+}
+
+// Logins lists the remembered accounts of an agent, the current one first, then
+// in the order they were remembered. It first records the agent's sign-in.
+func Logins(agent string) []Login {
+	if !knownAgent(agent) {
+		return nil
+	}
+	remember(agent)
+	cur, present := currentLogin(agent)
+	var out []Login
+	for _, l := range loadLogins().Logins {
+		if l.Agent != agent {
 			continue
 		}
-		out = append(out, l)
+		isCur := present && sameUser(cur.user, l.User)
+		out = append(out, Login{Agent: agent, User: l.User, Plan: l.Plan, Current: isCur, On: l.On || isCur, Added: l.Added})
 	}
-	if !found {
-		return fmt.Errorf("no saved %s account %q", agent, user)
-	}
-	return writeLogins(out)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Current && !out[j].Current })
+	return out
 }
 
-// forgetAccountCaches makes the next look at the accounts read them afresh.
-func forgetAccountCaches() {
+// SetLoginOn makes a remembered account serve the gateway alongside the current
+// login, or stops it. The current login always serves, so it cannot be turned off.
+func SetLoginOn(agent, user string, on bool) error {
+	if !knownAgent(agent) {
+		return unknownAgent(agent)
+	}
+	if agent == "claude" {
+		// a Claude Code subscription runs through its own binary, one sign-in
+		// at a time; the gateway cannot serve a second one alongside it
+		return errors.New("Claude 账号暂不支持同时生效")
+	}
+	remember(agent)
+	if cur, present := currentLogin(agent); !on && present && sameUser(cur.user, user) {
+		return fmt.Errorf("%s is the account %s is signed in as now, and it always serves", agentName(agent), user)
+	}
+	return editLogins(func(f *loginsFile) (bool, error) {
+		i := findLogin(f, agent, user)
+		if i < 0 {
+			return false, fmt.Errorf("no remembered %s account %q", agentName(agent), user)
+		}
+		if f.Logins[i].On == on {
+			return false, nil
+		}
+		f.Logins[i].On = on
+		return true, nil
+	})
+}
+
+// SwitchLogin makes the agent sign in as a remembered account. The account it
+// replaces is kept with its latest sign-in and takes over the on state of the
+// account it is replaced by. Agent sessions already running keep the old login
+// until they restart.
+func SwitchLogin(agent, user string) error {
+	if !knownAgent(agent) {
+		return unknownAgent(agent)
+	}
+	// the copy kept of the current sign-in must be the agent's latest: Claude Code
+	// may have rotated its refresh token within the cache's window
+	forgetClaudeCredential()
+	remember(agent)
+	live, present := currentLogin(agent)
+	if present && live.user == "" {
+		return fmt.Errorf("the %s sign-in in use names no email, so magpie cannot keep it; sign in again first", agentName(agent))
+	}
+	target, ok := storedLogin(agent, user)
+	if !ok {
+		return fmt.Errorf("no remembered %s account %q; magpie accounts %s lists them", agentName(agent), user, agent)
+	}
+	if present && sameUser(live.user, target.User) {
+		return nil
+	}
+	if target.Cred == nil {
+		return fmt.Errorf("magpie has no saved sign-in for %s; sign in as it again", target.User)
+	}
+	if err := writeLogin(agent, target.Cred); err != nil {
+		return err
+	}
+	return editLogins(func(f *loginsFile) (bool, error) {
+		on := false
+		if t := findLogin(f, agent, target.User); t >= 0 {
+			on = f.Logins[t].On
+		}
+		if present {
+			if j := findLogin(f, agent, live.user); j >= 0 {
+				f.Logins[j].Plan, f.Logins[j].Cred, f.Logins[j].On = live.plan, live.cred, on
+			} else {
+				f.Logins = append(f.Logins, rememberedLogin{Agent: agent, User: live.user, Plan: live.plan,
+					On: on, Added: time.Now(), Cred: live.cred})
+			}
+		}
+		return true, nil
+	})
+}
+
+// ForgetLogin drops a remembered account. The one the agent is signed in as
+// cannot be forgotten.
+func ForgetLogin(agent, user string) error {
+	if !knownAgent(agent) {
+		return unknownAgent(agent)
+	}
+	remember(agent)
+	if cur, present := currentLogin(agent); present && sameUser(cur.user, user) {
+		return fmt.Errorf("%s is signed in as %s now; switch to another account before forgetting it", agentName(agent), user)
+	}
+	return editLogins(func(f *loginsFile) (bool, error) {
+		i := findLogin(f, agent, user)
+		if i < 0 {
+			return false, fmt.Errorf("no remembered %s account %q", agentName(agent), user)
+		}
+		f.Logins = append(f.Logins[:i], f.Logins[i+1:]...)
+		return true, nil
+	})
+}
+
+// AddLogin runs the agent's own sign-in, then remembers the account it ends up
+// signed in as, and returns that account's email. The copy of the previous
+// sign-in is taken first, so it is not lost when the agent replaces it.
+func AddLogin(agent string) (string, error) {
+	if !knownAgent(agent) {
+		return "", unknownAgent(agent)
+	}
+	remember(agent)
+	if err := loginCommand(agent); err != nil {
+		return "", err
+	}
 	forgetClaudeCredential()
 	forgetClaudeStatus()
-	forgetCursorStatus()
-	subscriptionUsageCache.Lock()
-	subscriptionUsageCache.at = time.Time{}
-	subscriptionUsageCache.data = nil
-	subscriptionUsageCache.Unlock()
+	live, present := currentLogin(agent)
+	if !present || live.user == "" {
+		return "", fmt.Errorf("no %s sign-in with an email was recorded; the login did not finish", agentName(agent))
+	}
+	remember(agent)
+	return live.user, nil
+}
+
+// storedClaudeToken returns a usable access token for a remembered Claude
+// account that is not the current login, refreshing it from its own copy.
+func storedClaudeToken(ctx context.Context, user string) (string, error) {
+	claudeMu.Lock()
+	defer claudeMu.Unlock()
+	l, ok := storedLogin("claude", user)
+	if !ok || l.Cred == nil {
+		return "", fmt.Errorf("no saved Claude Code sign-in for %s", user)
+	}
+	b, _ := json.Marshal(l.Cred)
+	c, ok := parseClaudeCredentials(b)
+	if !ok {
+		return "", errors.New("Claude Code is signed out; run claude auth login")
+	}
+	if claudeFresh(c) {
+		return c.OAuth.AccessToken, nil
+	}
+	if err := claudeRefresh(ctx, &c); err != nil {
+		return "", err
+	}
+	raw, err := c.marshal()
+	if err != nil {
+		return "", err
+	}
+	var m map[string]any
+	json.Unmarshal(raw, &m)
+	if err := editLogins(func(f *loginsFile) (bool, error) {
+		i := findLogin(f, "claude", user)
+		if i < 0 {
+			return false, fmt.Errorf("no remembered Claude Code account %q", user)
+		}
+		f.Logins[i].Cred = m
+		return true, nil
+	}); err != nil {
+		return "", err
+	}
+	return c.OAuth.AccessToken, nil
+}
+
+// storedCodexToken returns a usable token for a remembered ChatGPT account that
+// is not the current login, refreshing it from its own copy.
+func storedCodexToken(ctx context.Context, user string) (string, string, error) {
+	return codexTokenFrom(ctx, loginSource{
+		read: func() (map[string]any, bool) {
+			l, ok := storedLogin("codex", user)
+			if !ok || l.Cred == nil {
+				return nil, false
+			}
+			return l.Cred, true
+		},
+		write: func(raw map[string]any) error {
+			return editLogins(func(f *loginsFile) (bool, error) {
+				i := findLogin(f, "codex", user)
+				if i < 0 {
+					return false, fmt.Errorf("no remembered Codex account %q", user)
+				}
+				f.Logins[i].Cred = raw
+				return true, nil
+			})
+		},
+	})
+}
+
+// storedAccount is a remembered account that is not the current login, as a
+// signed-in Account whose requests use its own copy of the sign-in.
+func storedAccount(l rememberedLogin) *Account {
+	user := l.User
+	acct := &Account{Agent: l.Agent, User: l.User, Plan: l.Plan}
+	switch l.Agent {
+	case "codex":
+		acct.Stream = true
+		acct.sign = codexSigner(func(ctx context.Context) (string, string, error) { return storedCodexToken(ctx, user) })
+		acct.body = codexBody
+		acct.models = catalog.Codex
+		acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
+	case "claude":
+		acct.sign = claudeSigner(func(ctx context.Context) (string, error) { return storedClaudeToken(ctx, user) })
+		acct.body = claudeBody
+		acct.models = func() []catalog.Model { return catalog.Provider("anthropic") }
+	}
+	return acct
+}
+
+// LoginTargets lists the sign-ins a request to this account may use, in the
+// order to try them: the agent's current login first, then the other logins that
+// are on, in the order they were remembered. A provider that is not an account
+// has none.
+func (p Provider) LoginTargets() []Provider {
+	if p.Account == nil {
+		return nil
+	}
+	out := []Provider{p}
+	for _, l := range loadLogins().Logins {
+		if l.Agent != p.Account.Agent || !l.On || l.Cred == nil || sameUser(l.User, p.Account.User) {
+			continue
+		}
+		v := p
+		v.Account = storedAccount(l)
+		out = append(out, v)
+	}
+	return out
 }
