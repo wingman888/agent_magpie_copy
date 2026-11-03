@@ -282,5 +282,6 @@ func TestOldSingleKeyFileStillLoads(t *testing.T) {
 		t.Fatalf("old file loaded as %+v", p)
 	}
 	mustOK(t, AddKey("relay", "team", "sk-team-0002", ""))
-	checkList(t, []string{"", ""})
+	// the old key has no name; the added one is enabled and comes second
+	checkList(t, []string{"", "team"})
 }
