@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -89,7 +90,7 @@ func TestAsideKeyTakenWhenThePoolFails(t *testing.T) {
 	var seen []string
 	limited := map[string]bool{"k1": true, "k2": true}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body)
+		b, _ := io.ReadAll(r.Body)
 		key := r.Header.Get("x-api-key")
 		if key == "" {
 			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -103,6 +104,15 @@ func TestAsideKeyTakenWhenThePoolFails(t *testing.T) {
 		}
 		if r.URL.Path == "/v1/messages" {
 			io.WriteString(w, `{"id":"m1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"from-`+key+`"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+			return
+		}
+		// a translated request is streamed upstream, whatever the agent asked
+		if bytes.Contains(b, []byte(`"stream":true`)) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, sse(
+				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"from-`+key+`"},"finish_reason":null}]}`,
+				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+				`data: [DONE]`))
 			return
 		}
 		io.WriteString(w, `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"from-`+key+`"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
