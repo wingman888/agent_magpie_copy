@@ -1,177 +1,139 @@
-// Package netproxy decides which proxy, if any, a request to a provider or
-// any other outside host should use.
+// Package netproxy decides which proxy magpie's own requests to vendors go
+// through. An app started from the Dock or the Start menu has no
+// HTTPS_PROXY in its environment, so without this every call to a vendor
+// that is only reachable through a proxy hangs until the agent gives up.
 //
-// The order is: the magpie setting (settings.json "proxy"), then the
-// environment (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY and NO_PROXY, in either
-// case), then the operating system's network settings. Loopback addresses
-// never use a proxy.
+// In order: the proxy set in magpie's settings (or "direct" for none), the
+// usual *_PROXY variables, then the system's proxy (macOS network
+// settings, Windows Internet Options). Loopback is never proxied.
 package netproxy
 
 import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"path"
-	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// For returns the proxy a request to u should go through; nil means connect
-// directly. An error means the configured proxy is unusable.
-func For(u *url.URL) (*url.URL, error) {
-	if u == nil || u.Hostname() == "" {
-		return nil, nil
+// Install routes http.DefaultTransport (and so http.DefaultClient) through
+// Func.
+func Install() {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		t.Proxy = Func
 	}
-	host := strings.ToLower(u.Hostname())
-	if isLoopback(host) {
-		return nil, nil
-	}
+}
 
-	s := settings.Load()
-	switch s.Proxy {
-	case settings.ProxyDirect:
+// Func is an http.Transport Proxy function.
+func Func(req *http.Request) (*url.URL, error) {
+	if loopback(req.URL.Hostname()) {
+		return nil, nil
+	}
+	return For(req.URL)
+}
+
+// For is the proxy a request to u goes through; nil means direct.
+func For(u *url.URL) (*url.URL, error) {
+	switch s := strings.TrimSpace(settings.Load().Proxy); s {
+	case "direct":
 		return nil, nil
 	case "":
-		// follow the environment and the system below
 	default:
-		return settings.ParseProxy(s.Proxy)
+		return Parse(s)
 	}
-
-	if raw := envProxy(u.Scheme); raw != "" {
-		if excluded(host, getenv("NO_PROXY")) {
-			return nil, nil
-		}
-		return parseEnvProxy(raw)
+	if p, err := fromEnv(u); p != nil || err != nil {
+		return p, err
 	}
-	return systemFor(host), nil
+	sys := System()
+	if sys.URL == "" || bypassed(u.Hostname(), sys.Bypass) {
+		return nil, nil
+	}
+	return Parse(sys.URL)
 }
 
-// ForRequest is For for the Proxy field of an http.Transport.
-func ForRequest(r *http.Request) (*url.URL, error) { return For(r.URL) }
-
-// Transport is the default transport with the proxy rule above.
-func Transport() *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.Proxy = ForRequest
-	return t
-}
-
-// shared is the client for magpie's outside requests that need no timeout.
-var shared = &http.Client{Transport: Transport()}
-
-// Client returns the shared client for outside requests. It follows For.
-func Client() *http.Client { return shared }
-
-// getenv reads NAME, then name, ignoring empty values.
-func getenv(name string) string {
-	if v := os.Getenv(strings.ToUpper(name)); v != "" {
-		return v
+// Parse reads a proxy address; a bare host:port is an HTTP proxy.
+func Parse(s string) (*url.URL, error) {
+	s = strings.TrimSpace(s)
+	if !strings.Contains(s, "://") {
+		s = "http://" + s
 	}
-	return os.Getenv(strings.ToLower(name))
+	return url.Parse(s)
 }
 
-// envProxy returns the proxy variable for a scheme, "" when none is set.
-// HTTPS_PROXY serves https and HTTP_PROXY serves http; ALL_PROXY is the fallback.
-func envProxy(scheme string) string {
-	switch scheme {
-	case "https":
-		if v := getenv("HTTPS_PROXY"); v != "" {
-			return v
-		}
-	case "http":
-		if v := getenv("HTTP_PROXY"); v != "" {
-			return v
-		}
+// Describe says, for the settings page, what a request to u would use.
+func Describe() (proxy, source string) {
+	switch s := strings.TrimSpace(settings.Load().Proxy); s {
+	case "direct":
+		return "", "off"
+	case "":
+	default:
+		return s, "settings"
 	}
-	return getenv("ALL_PROXY")
-}
-
-// parseEnvProxy reads a proxy variable; a bare host:port is an HTTP proxy.
-func parseEnvProxy(raw string) (*url.URL, error) {
-	return settings.ParseProxy(raw)
-}
-
-// excluded reports whether host matches a NO_PROXY list.
-func excluded(host, list string) bool {
-	for _, rule := range strings.Split(list, ",") {
-		rule = stripPort(strings.TrimSpace(rule))
-		if matches(host, rule) {
-			return true
-		}
+	u, _ := url.Parse("https://chatgpt.com")
+	if p, _ := fromEnv(u); p != nil {
+		return p.String(), "environment"
 	}
-	return false
+	if sys := System(); sys.URL != "" {
+		return sys.URL, "system"
+	}
+	return "", "none"
 }
 
-// stripPort drops a trailing ":port" from a NO_PROXY entry such as example.com:8080.
-func stripPort(rule string) string {
-	if strings.Count(rule, ":") != 1 {
-		return rule
-	}
-	h, _, ok := strings.Cut(rule, ":")
-	if !ok {
-		return rule
-	}
-	return h
+func fromEnv(u *url.URL) (*url.URL, error) { return http.ProxyFromEnvironment(&http.Request{URL: u}) }
+
+// Proxy is the system's proxy: one address, and the hosts that skip it.
+type Proxy struct {
+	URL    string
+	Bypass []string
 }
 
-// isLoopback is true for localhost and 127.0.0.0/8 and ::1.
-func isLoopback(host string) bool {
-	if host == "localhost" {
+var sysCache struct {
+	sync.Mutex
+	at time.Time
+	p  Proxy
+}
+
+// System reads the system proxy, at most every 15 seconds.
+func System() Proxy {
+	sysCache.Lock()
+	defer sysCache.Unlock()
+	if time.Since(sysCache.at) > 15*time.Second {
+		sysCache.p, sysCache.at = system(), time.Now()
+	}
+	return sysCache.p
+}
+
+func loopback(host string) bool {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
 
-// matches reports whether host is covered by one exception rule. The rules
-// are the forms NO_PROXY and the OS lists use: "*", ".example.com",
-// "*.example.com", "example.com", "10.0.0.0/8", "169.254/16", "192.168.*".
-func matches(host, rule string) bool {
-	rule = strings.ToLower(strings.TrimSpace(rule))
-	if rule == "" {
-		return false
-	}
-	if rule == "*" {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if n, ok := parseNet(rule); ok {
-			return n.Contains(ip)
+// bypassed matches the system's exception list: exact hosts, "*.example.com"
+// or ".example.com" suffixes, and "<local>" for dotless names.
+func bypassed(host string, list []string) bool {
+	host = strings.ToLower(host)
+	for _, b := range list {
+		b = strings.ToLower(strings.TrimSpace(b))
+		switch {
+		case b == "":
+		case b == "<local>":
+			if !strings.Contains(host, ".") {
+				return true
+			}
+		case strings.HasPrefix(b, "*."), strings.HasPrefix(b, "."):
+			suf := strings.TrimPrefix(b, "*")
+			if strings.HasSuffix(host, suf) || host == suf[1:] {
+				return true
+			}
+		case host == b:
+			return true
 		}
 	}
-	if strings.Contains(rule, "*") {
-		ok, _ := path.Match(rule, host)
-		return ok
-	}
-	if strings.HasPrefix(rule, ".") {
-		return host == rule[1:] || strings.HasSuffix(host, rule)
-	}
-	return host == rule
-}
-
-// parseNet reads a CIDR rule, including the short form 169.254/16 that
-// scutil prints, which means 169.254.0.0/16.
-func parseNet(rule string) (*net.IPNet, bool) {
-	if _, n, err := net.ParseCIDR(rule); err == nil {
-		return n, true
-	}
-	addr, bits, ok := strings.Cut(rule, "/")
-	if !ok {
-		return nil, false
-	}
-	parts := strings.Split(addr, ".")
-	if len(parts) > 4 {
-		return nil, false
-	}
-	for len(parts) < 4 {
-		parts = append(parts, "0")
-	}
-	if _, err := strconv.Atoi(bits); err != nil {
-		return nil, false
-	}
-	_, n, err := net.ParseCIDR(strings.Join(parts, ".") + "/" + bits)
-	return n, err == nil
+	return false
 }

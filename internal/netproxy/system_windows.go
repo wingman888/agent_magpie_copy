@@ -1,23 +1,21 @@
 package netproxy
 
-import (
-	"os/exec"
-	"syscall"
-)
+import "golang.org/x/sys/windows/registry"
 
-const internetSettings = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-
-// readSystem reads the Internet Options values with reg.exe, which keeps
-// magpie free of a registry dependency. The console window stays hidden.
-func readSystem() system {
-	get := func(name string) string {
-		cmd := exec.Command("reg", "query", internetSettings, "/v", name)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		out, err := cmd.Output()
-		if err != nil {
-			return ""
-		}
-		return regValue(string(out))
+// system reads Internet Options' manual proxy (what most proxy clients set).
+func system() Proxy {
+	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.QUERY_VALUE)
+	if err != nil {
+		return Proxy{}
 	}
-	return parseWindows(get("ProxyEnable"), get("ProxyServer"), get("ProxyOverride"))
+	defer k.Close()
+	if on, _, err := k.GetIntegerValue("ProxyEnable"); err != nil || on == 0 {
+		return Proxy{}
+	}
+	server, _, err := k.GetStringValue("ProxyServer")
+	if err != nil {
+		return Proxy{}
+	}
+	override, _, _ := k.GetStringValue("ProxyOverride")
+	return parseWindows(server, override)
 }
