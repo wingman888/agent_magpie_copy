@@ -142,7 +142,12 @@ func TestGeminiStreamOverChatUpstream(t *testing.T) {
 
 func TestGeminiGenerateContentReturnsWholeReply(t *testing.T) {
 	f := &fake{t: t, reply: chatUpstreamReply}
-	setup(t, provider.Chat, f)
+	up := setup(t, provider.Chat, f)
+	// the catalog must hold a model whose id contains a colon
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k",
+		Chat: up.URL + "/v1", Models: []string{"m1", "m:1"}}); err != nil {
+		t.Fatal(err)
+	}
 	// a model id with a colon: the method is what follows the last colon
 	code, body := post(t, "/v1beta/models/fake/m:1:generateContent", geminiChatBody)
 	if code != 200 {
