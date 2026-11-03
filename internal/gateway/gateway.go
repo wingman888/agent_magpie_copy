@@ -486,18 +486,17 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// the first API that takes the request answers it; one that turns the
 	// model away is passed over, and nothing of its reply reaches the agent
 	// while another API is left to try
-	var status int
-	var msg string
-	for i, api := range apis {
-		more := i < len(apis)-1
+	var rej *rejection
+	for _, api := range apis {
 		call.To = api
-		var refused bool
+		var status int
+		var msg string
 		if api == from && relay {
-			status, msg, refused = s.passthrough(w, r, p, api, model, body, &call.Usage, more)
+			status, msg, rej = s.passthrough(w, r, p, api, model, body, &call.Usage)
 		} else {
-			status, msg, refused = s.translate(w, r, p, from, api, model, body, &call.Usage, more)
+			status, msg, rej = s.translate(w, r, p, from, api, model, body, &call.Usage)
 		}
-		if !refused {
+		if rej == nil {
 			if status < 400 {
 				s.setRefused(p.ID, model, api, false) // it serves the model after all
 			}
@@ -505,7 +504,23 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		}
 		s.setRefused(p.ID, model, api, true)
 	}
-	return status, msg
+	// the last API turned the model away too: its reply is the answer
+	return rej.deliver(w, from)
+}
+
+// rejection is an upstream's 4xx turning a model away on one API. It is held
+// back, nothing written, until the API proves to be the last one left: while
+// another is left, the agent sees none of it.
+type rejection struct {
+	status int
+	msg    string
+	header http.Header // the upstream's headers worth passing on
+}
+
+// deliver writes the rejection to the agent as the upstream gave it.
+func (x *rejection) deliver(w http.ResponseWriter, from provider.Protocol) (int, string) {
+	keepRetry(w.Header(), x.header)
+	return writeError(w, from, x.status, x.msg), x.msg
 }
 
 // forward sends a request to the provider.
@@ -537,26 +552,26 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
-// more says another API is left to try: a reply turning the model away on
-// this one is then reported as refused (true), with nothing written.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, more bool) (int, string, bool) {
+// A reply turning the model away on this API is returned as a rejection
+// (nothing written); attempt decides whether it is the last word.
+func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string, *rejection) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
 	}
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
 	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), false
+		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), nil
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		if more && notChatModel(res.StatusCode, b) {
-			return 0, "", true
-		}
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		if notChatModel(res.StatusCode, b) {
+			return 0, "", &rejection{res.StatusCode, msg, res.Header}
+		}
 		keepRetry(w.Header(), res.Header)
-		return writeError(w, proto, res.StatusCode, msg), msg, false
+		return writeError(w, proto, res.StatusCode, msg), msg, nil
 	}
 	rd, sse := eventStream(res)
 	h := w.Header()
@@ -579,7 +594,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if n > 0 {
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return res.StatusCode, "", false
+				return res.StatusCode, "", nil
 			}
 			if f != nil {
 				f.Flush()
@@ -589,7 +604,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			break
 		}
 	}
-	return res.StatusCode, "", false
+	return res.StatusCode, "", nil
 }
 
 // eventStream reports whether a reply is server-sent events. The header
@@ -641,8 +656,6 @@ func notChatModel(status int, body []byte) bool {
 		"not supported in /v1/chat/completions",
 		"not supported in the v1/responses",
 		"not supported in /v1/responses",
-		"use v1/completions",
-		"use /v1/completions",
 		"use v1/responses",
 		"use /v1/responses",
 		"use v1/chat/completions",
@@ -662,27 +675,27 @@ var notOnEndpoint = regexp.MustCompile(`not accessible via the .{1,40}endpoint`)
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-// more and refused are as in passthrough.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, more bool) (int, string, bool) {
+// A turned-away model is returned as a rejection, as in passthrough.
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string, *rejection) {
 	request, err := parse(from, body)
 	if err != nil {
-		return writeError(w, from, 400, err.Error()), err.Error(), false
+		return writeError(w, from, 400, err.Error()), err.Error(), nil
 	}
 	stream := request.Stream
 	request.Stream = true
 	res, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
 	if err != nil {
-		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error(), false
+		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error(), nil
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		if more && notChatModel(res.StatusCode, b) {
-			return 0, "", true
-		}
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		if notChatModel(res.StatusCode, b) {
+			return 0, "", &rejection{res.StatusCode, msg, res.Header}
+		}
 		keepRetry(w.Header(), res.Header)
-		return writeError(w, from, res.StatusCode, msg), msg, false
+		return writeError(w, from, res.StatusCode, msg), msg, nil
 	}
 	dec := decoder(to)
 	rd, sse := eventStream(res)
@@ -691,7 +704,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		// event stream would be wrong, so give up cleanly
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
-		return writeError(w, from, 502, msg), msg, false
+		return writeError(w, from, 502, msg), msg, nil
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), request.Model)
@@ -708,14 +721,14 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 			})
 		})
 		enc.finish()
-		return 200, failed, false
+		return 200, failed, nil
 	}
 	var col collector
 	readSSE(rd, func(_, data string) error {
 		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {
-		return writeError(w, from, 502, p.Name+": "+col.err), col.err, false
+		return writeError(w, from, 502, p.Name+": "+col.err), col.err, nil
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)
@@ -723,7 +736,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(out)
-	return 200, col.err, false
+	return 200, col.err, nil
 }
 
 // ---- protocol tables --------------------------------------------------------

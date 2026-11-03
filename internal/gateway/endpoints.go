@@ -52,9 +52,13 @@ func declares(p provider.Provider, model string, api provider.Protocol) bool {
 
 // preferred is the order a request is translated to APIs in. Models of
 // OpenAI's family (gpt-*, codex*, o-series) on OpenAI's own API, or on
-// Copilot, go to /responses first; anything else to Chat Completions
-// first, Responses after it.
+// Copilot, go to /responses first, since that is where OpenAI's newer
+// models are served. Anything else goes to Chat Completions first, with
+// Responses after it. The order only decides which API is asked first when
+// translating, among the APIs the model is declared on.
 func preferred(p provider.Provider, model string) []provider.Protocol {
+	// modelFamily names the OpenAI family by Chat, the API its models were
+	// first served on; here it only says the model is one of those.
 	openAI := modelFamily(model) == provider.Chat
 	if p.Host() == "api.openai.com" || openAI && p.Account != nil && p.Account.Agent == "copilot" {
 		return []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
@@ -65,9 +69,12 @@ func preferred(p provider.Provider, model string) []provider.Protocol {
 // endpoints lists the APIs a model's request is sent to, in the order to try
 // them: the agent's own first when the provider serves the model on it and
 // relay allows (sent as-is), then the translations in preferred order.
-// Those refused before for the model come last, and are dropped when
-// others are left; when every one was refused before, all are tried again,
-// so the upstream's word stays the answer. Empty when none serves it.
+// Those refused before for the model are dropped when others are left. When
+// every one was refused before, the request is not sent to each again: the
+// first in preferred order is asked once, so the agent gets the upstream's
+// own answer. That is the one exception to not retrying a remembered
+// refusal; a 200 from it lifts the refusal, and a refusal again is the
+// answer. Empty when none serves it.
 func (s *Server) endpoints(p provider.Provider, model string, from provider.Protocol, relay bool) []provider.Protocol {
 	var all []provider.Protocol
 	if relay && declares(p, model, from) {
@@ -84,10 +91,15 @@ func (s *Server) endpoints(p provider.Provider, model string, from provider.Prot
 			ready = append(ready, api)
 		}
 	}
-	if len(ready) == 0 {
-		return all
+	if len(ready) > 0 {
+		return ready
 	}
-	return ready
+	for _, api := range preferred(p, model) {
+		if slices.Contains(all, api) {
+			return []provider.Protocol{api}
+		}
+	}
+	return nil
 }
 
 // refusedKey names a (provider, model, API) triple: a refusal holds for that
