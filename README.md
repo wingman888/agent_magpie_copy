@@ -62,7 +62,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 
 | Agent        | File                              | Fields          |
 | ------------ | --------------------------------- | --------------- |
-| Claude Code  | `~/.claude/settings.json`         | provider, model |
+| Claude Code  | `~/.claude/settings.json`         | provider, model, opus/sonnet/haiku/fable (through magpie) |
 | Codex        | `~/.codex/config.toml`            | provider, model, effort |
 | Gemini CLI   | `~/.gemini/settings.json`, `~/.gemini/.env` | auth, model |
 | OpenCode     | `~/.config/opencode/opencode.json(c)` | model, small |
@@ -179,71 +179,37 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 
 ### Import links
 
-A provider can be shared as a link. `magpie://import?<parameters>` describes
-one provider, either a preset or a fully custom one, and adds nothing by
-itself. Values must be URL-encoded:
+A vendor or relay can hand its users a ready-made provider as a link:
 
-```sh
-magpie import 'magpie://import?preset=deepseek&key=sk-…'
-magpie import 'magpie://import?name=My%20Relay&chat=https://relay.example/v1&anthropic=https://relay.example&key=sk-…&models=gpt-5.5,claude-sonnet-5'
+```
+magpie://import?preset=deepseek&key=sk-…
+magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&anthropic=https://api.acme.example&key=sk-…&models=gpt-5.5,claude-sonnet-5
 ```
 
-These equivalent forms are accepted too: `magpie:import?…`,
-`magpie:///import?…` and `MAGPIE://import/?…`. The scheme name is
-case-insensitive and `import` may have a trailing slash.
+Opening one brings up magpie with what the link would add: the name, the
+hosts your prompts and key would go to, the models. Nothing is saved until
+you press *Add*. `magpie import <link>` does the same in a terminal.
 
-| Parameter   | Meaning |
-| ----------- | ------- |
-| `preset`    | A preset id (see `magpie presets`); its endpoints are used. |
-| `region`    | Picks one of the preset's regions. An unknown region is an error. |
-| `name`      | Provider name. Required without `preset`; with a preset it overrides the preset's name. Names longer than 80 characters are truncated. |
-| `id`        | Provider id. Defaults to a slug of the name, or to the preset id for a preset link. |
-| `key`       | API key. Without it, you add the key later. |
-| `chat`      | OpenAI Chat Completions base URL (`…/v1`). |
-| `responses` | OpenAI Responses base URL (`…/v1`). |
-| `anthropic` | Anthropic Messages base URL (root, without `/v1`). |
-| `models`    | Model ids to expose, comma-separated. Empty items and surrounding spaces are ignored. At most 200. |
-| `catalog`   | A models.dev provider id, used for model names and reasoning efforts. An invalid value is ignored. |
-| `website`, `keys` | The vendor's website and its API key page. Only `https` is kept; anything else is ignored. |
+| Parameter   | Meaning                                                            |
+| ----------- | ------------------------------------------------------------------ |
+| `preset`    | a preset id (`magpie presets`); its endpoints are used             |
+| `region`    | with a preset that has regions, which one                          |
+| `name`      | the provider's name; required without a preset                     |
+| `id`        | its id; derived from the name when absent                          |
+| `key`       | the API key; the user pastes one when absent                       |
+| `chat`      | OpenAI Chat Completions base URL (`…/v1`)                          |
+| `responses` | OpenAI Responses base URL (`…/v1`)                                 |
+| `anthropic` | Anthropic Messages base URL (the root, without `/v1`)              |
+| `models`    | model ids to expose, comma separated                               |
+| `catalog`   | models.dev provider id, for model names and reasoning levels       |
+| `website`, `keys` | the vendor's site and its API-key page (https)               |
 
-With `preset`, the endpoints come from the preset (and the chosen region), and
-`chat`, `responses`, `anthropic`, `catalog`, `website` and `keys` have no
-effect. Without `preset`, give at least one of `chat`, `responses` or
-`anthropic`.
-
-Base URLs must be `https`. Plain `http` is accepted only for `localhost`,
-loopback addresses, private-network IP addresses and `.local` hosts. A base
-URL may not contain a user name, password, query string or fragment, and a
-trailing `/` is removed. Links that break these rules, or that have an
-empty id after normalizing, a reserved id (`magpie`), or a key with control
-characters or more than 4096 bytes, are rejected with an error and nothing is
-saved.
-
-**Confirmation.** Importing never saves on its own. `magpie import` first
-prints a summary: the provider's name and id, the hosts that will receive your
-prompts and your key, and the models. It then asks `Add it? [y/N]`, and only
-`y` or `yes` saves. When the id matches an existing provider, the summary also
-warns that this will replace the existing provider, and the existing key and
-settings are discarded. An id that belongs to a signed-in agent account is
-refused before the summary. If the link has no key and the provider is not
-ready yet, the output tells you to run `magpie provider key <id> <key>`.
-
-Without a terminal (stdin is not a TTY, for example in a script or pipe),
-`magpie import` refuses to ask and exits with "nothing added". Add `-y` or
-`--yes` to skip the question:
-
-```sh
-magpie import -y 'magpie://import?preset=ollama'
-```
-
-Running `magpie 'magpie://…'` with a link as the first argument does the same
-as `magpie import`. Registering `magpie://` with the operating system is a
-packaging and installation step and is not part of this build.
-
-**Hosting a link on a web page.** A relay can offer a button or a copyable
-link at `https://usemagpie.ai/import#<the same parameters>`. The parameters are
-in the URL fragment after `#`, so the browser does not send them to the
-server.
+Base URLs must be https (plain http only to this machine or the local
+network). Web pages and GitHub don't link custom schemes reliably, so link
+to `https://usemagpie.ai/import#<same parameters>` instead: it opens
+magpie, and offers the download when it is not installed. The parameters
+stay in the fragment, which browsers never send to a server. The full guide,
+with a link builder: <https://usemagpie.ai/docs/import>.
 
 ## Install
 
@@ -319,6 +285,8 @@ magpie codex effort high        # other fields
 magpie codex xhigh              # bare effort levels are recognised too
 magpie codex deepseek/deepseek-chat   # any catalog model, through the gateway
 magpie claude moonshot/kimi-k2.5
+magpie claude haiku deepseek/deepseek-v4-flash   # one tier on its own model
+magpie claude haiku ""          # back to the main model
 magpie gemini auth api-key
 magpie opencode anthropic/claude-sonnet-5
 magpie oc small anthropic/claude-haiku-4-5
