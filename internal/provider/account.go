@@ -41,6 +41,14 @@ type Account struct {
 	// a non-streaming request instead of relaying it.
 	Stream bool `json:"-"`
 
+	// Home is where a Grok account keeps its sign-in: the CLI's own home,
+	// or one of magpie's for a further account (see grok_accounts.go).
+	Home string `json:"-"`
+
+	// token is set on a saved sign-in in use beside the agent's own (see
+	// logins_on.go): the access token to run the agent's binary with.
+	token func(ctx context.Context) (string, error)
+
 	sign   func(ctx context.Context, req *http.Request, body []byte) error
 	body   func(body []byte) []byte // request tweaks the backend insists on
 	models func() []catalog.Model
@@ -55,6 +63,13 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	}
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
+	}
+	// The user's own headers ride on plain key+URL providers, after auth so
+	// they can override a default when a gateway insists on a private scheme.
+	// Written to the map directly, not via Set, so the name keeps the exact
+	// case the user typed — some gateways match header names case-sensitively.
+	for k, v := range p.Headers {
+		req.Header[k] = []string{v}
 	}
 	return nil
 }
@@ -339,6 +354,13 @@ func claudeAccount() (Provider, bool) {
 	if statusPlan != "" {
 		plan = statusPlan
 	}
+	if m, err := readClaudeProfile(); err == nil && user != "" {
+		if acct, ok := m["oauthAccount"].(map[string]any); ok {
+			if email, _ := acct["emailAddress"].(string); strings.EqualFold(email, user) {
+				user = claudeUser(user, plan, acct)
+			}
+		}
+	}
 	if user == "" {
 		user = "Claude account"
 		if plan != "" {
@@ -468,19 +490,30 @@ func claudeToken(ctx context.Context) (string, error) {
 	if claudeFresh(c) {
 		return c.OAuth.AccessToken, nil
 	}
+	if err := claudeRefresh(ctx, &c); err != nil {
+		return "", err
+	}
+	if err := saveClaudeCredential(loc, c); err != nil {
+		return "", err
+	}
+	return c.OAuth.AccessToken, nil
+}
+
+// claudeRefresh trades a sign-in's refresh token for a new pair.
+func claudeRefresh(ctx context.Context, c *claudeCredentials) error {
 	if c.OAuth.RefreshToken == "" {
-		return "", errors.New("Claude Code OAuth token expired; run claude auth login")
+		return errors.New("Claude Code OAuth token expired; run claude auth login")
 	}
 	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": c.OAuth.RefreshToken,
 		"client_id": claudeClientID})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeTokenURL, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", errors.New("Claude Code token refresh: " + err.Error())
+		return errors.New("Claude Code token refresh: " + err.Error())
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -490,7 +523,7 @@ func claudeToken(ctx context.Context) (string, error) {
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if res.StatusCode != http.StatusOK || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return "", errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
+		return errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
 	}
 	c.OAuth.AccessToken = fresh.AccessToken
 	if fresh.RefreshToken != "" {
@@ -499,14 +532,12 @@ func claudeToken(ctx context.Context) (string, error) {
 	if fresh.ExpiresIn > 0 {
 		c.OAuth.ExpiresAt = time.Now().Add(time.Duration(fresh.ExpiresIn) * time.Second).UnixMilli()
 	}
-	if err := saveClaudeCredential(loc, c); err != nil {
-		return "", err
-	}
-	return fresh.AccessToken, nil
+	return nil
 }
 
 // Accounts lists the signed-in agents as providers.
 func Accounts() []Provider {
+	rememberLogins(false)
 	home, _ := os.UserHomeDir()
 	cfg := os.Getenv("XDG_CONFIG_HOME")
 	if cfg == "" {
@@ -520,6 +551,12 @@ func Accounts() []Provider {
 		out = append(out, p)
 	}
 	if p, ok := copilotAccount(cfg); ok {
+		out = append(out, p)
+	}
+	if p, ok := cursorAccount(); ok {
+		out = append(out, p)
+	}
+	if p, ok := grokAccount(); ok {
 		out = append(out, p)
 	}
 	return out
@@ -566,10 +603,11 @@ func claimString(m map[string]any, keys ...string) string {
 
 // ---- Codex CLI: a ChatGPT account ----------------------------------------------
 
-const (
-	codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
-	codexTokenURL = "https://auth.openai.com/oauth/token"
-)
+const codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
+
+// codexTokenURL is where ChatGPT's tokens are issued and refreshed; a var
+// so tests can point it elsewhere.
+var codexTokenURL = "https://auth.openai.com/oauth/token"
 
 // CodexBase is where a ChatGPT account's Codex requests go; a var so tests
 // can point it elsewhere.
@@ -599,8 +637,26 @@ func codexAccount(home string) (Provider, bool) {
 	if acct.User == "" {
 		acct.User = "ChatGPT"
 	}
-	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
-		tok, accountID, err := codexToken(ctx, path)
+	acct.sign = codexSign(func(ctx context.Context) (string, string, error) { return codexToken(ctx, path) })
+	acct.body = codexBody
+	acct.models = catalog.Codex
+	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
+		ms, err := codexModels(ctx, acct.sign)
+		if err != nil {
+			return nil, err
+		}
+		catalog.SaveLive(accountModels("codex", acct.User), CodexBase, ms)
+		codexFetchSaved(ctx)
+		return ms, catalog.SaveLive("codex", CodexBase, ms)
+	}
+	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
+}
+
+// codexSign authenticates a request to the ChatGPT backend with the
+// tokens token hands out.
+func codexSign(token func(context.Context) (tok, accountID string, err error)) func(context.Context, *http.Request, []byte) error {
+	return func(ctx context.Context, req *http.Request, _ []byte) error {
+		tok, accountID, err := token(ctx)
 		if err != nil {
 			return err
 		}
@@ -612,10 +668,6 @@ func codexAccount(home string) (Provider, bool) {
 		req.Header.Set("originator", "magpie")
 		return nil
 	}
-	acct.body = codexBody
-	acct.models = catalog.Codex
-	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI
@@ -635,16 +687,39 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 	if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
 		return a.Tokens.AccessToken, accountID, nil
 	}
-	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
-		"refresh_token": a.Tokens.RefreshToken, "scope": "openid profile email"})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, bytes.NewReader(body))
+	var raw map[string]any
+	if !readJSON(path, &raw) {
+		return "", "", errors.New("Codex is signed out; run codex login")
+	}
+	tok, err = codexRefresh(ctx, raw)
 	if err != nil {
 		return "", "", err
+	}
+	// keep every other field of the file as Codex CLI wrote it
+	if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
+		os.WriteFile(path, append(out, '\n'), 0o600)
+	}
+	return tok, accountID, nil
+}
+
+// codexRefresh renews the tokens of an auth.json-shaped sign-in in place,
+// every other field left as it was, and returns the new access token.
+func codexRefresh(ctx context.Context, raw map[string]any) (string, error) {
+	toks, _ := raw["tokens"].(map[string]any)
+	if toks == nil {
+		toks = map[string]any{}
+	}
+	refresh, _ := toks["refresh_token"].(string)
+	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
+		"refresh_token": refresh, "scope": "openid profile email"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, bytes.NewReader(body))
+	if err != nil {
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "", errors.New("Codex token refresh: " + err.Error())
+		return "", errors.New("Codex token refresh: " + err.Error())
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -654,29 +729,18 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 		RefreshToken string `json:"refresh_token"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return "", "", errors.New("Codex is signed out (token refresh failed); run codex login")
+		return "", errors.New("Codex is signed out (token refresh failed); run codex login")
 	}
-	// keep every other field of the file as Codex CLI wrote it
-	var raw map[string]any
-	if readJSON(path, &raw) {
-		toks, _ := raw["tokens"].(map[string]any)
-		if toks == nil {
-			toks = map[string]any{}
-		}
-		toks["access_token"] = fresh.AccessToken
-		if fresh.IDToken != "" {
-			toks["id_token"] = fresh.IDToken
-		}
-		if fresh.RefreshToken != "" {
-			toks["refresh_token"] = fresh.RefreshToken
-		}
-		raw["tokens"] = toks
-		raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
-		if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
-			os.WriteFile(path, append(out, '\n'), 0o600)
-		}
+	toks["access_token"] = fresh.AccessToken
+	if fresh.IDToken != "" {
+		toks["id_token"] = fresh.IDToken
 	}
-	return fresh.AccessToken, accountID, nil
+	if fresh.RefreshToken != "" {
+		toks["refresh_token"] = fresh.RefreshToken
+	}
+	raw["tokens"] = toks
+	raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
+	return fresh.AccessToken, nil
 }
 
 // codexBody makes a Responses request acceptable to the ChatGPT backend:
@@ -697,6 +761,16 @@ func codexBody(body []byte) []byte {
 	if s, ok := m["input"].(string); ok {
 		m["input"] = []any{map[string]any{"type": "message", "role": "user",
 			"content": []any{map[string]any{"type": "input_text", "text": s}}}}
+	}
+	// Codex rejects system messages in input; developer preserves their
+	// instruction role without moving them out of conversation order.
+	if input, ok := m["input"].([]any); ok {
+		for _, item := range input {
+			msg, ok := item.(map[string]any)
+			if ok && msg["role"] == "system" && (msg["type"] == nil || msg["type"] == "message") {
+				msg["role"] = "developer"
+			}
+		}
 	}
 	out, err := json.Marshal(m)
 	if err != nil {
@@ -726,6 +800,15 @@ type copilotSession struct {
 	Endpoints struct {
 		API string `json:"api"`
 	} `json:"endpoints"`
+	direct bool // the Copilot CLI's token, sent as is
+}
+
+// headers are what a request with this session carries.
+func (s copilotSession) headers() map[string]string {
+	if s.direct {
+		return copilotCLIHeaders
+	}
+	return copilotHeaders
 }
 
 var (
@@ -736,6 +819,7 @@ var (
 type copilotApp struct {
 	User  string `json:"user"`
 	Token string `json:"oauth_token"`
+	cli   bool // the standalone Copilot CLI's sign-in
 }
 
 // copilotLogin finds the GitHub token Copilot's editors and CLI keep.
@@ -756,20 +840,25 @@ func copilotLogin(cfg string) (copilotApp, bool) {
 			}
 		}
 	}
-	return copilotApp{}, false
+	return copilotCLILogin()
 }
 
-func copilotAccount(cfg string) (Provider, bool) {
-	app, ok := copilotLogin(cfg)
-	if !ok {
-		return Provider{}, false
+// session is what this sign-in's requests carry.
+func (a copilotApp) session(ctx context.Context) (copilotSession, error) {
+	if a.cli {
+		return copilotDirect(ctx, a.Token)
 	}
-	acct := &Account{Agent: "copilot", User: app.User}
+	return copilotToken(ctx, a.Token)
+}
+
+// copilotProvider is Copilot as one GitHub account serves it.
+func copilotProvider(app copilotApp, plan string) Provider {
+	acct := &Account{Agent: "copilot", User: app.User, Plan: plan}
 	if acct.User == "" {
 		acct.User = "GitHub"
 	}
 	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
-		s, err := copilotToken(ctx, app.Token)
+		s, err := app.session(ctx)
 		if err != nil {
 			return err
 		}
@@ -779,7 +868,7 @@ func copilotAccount(cfg string) (Provider, bool) {
 			}
 		}
 		req.Header.Set("Authorization", "Bearer "+s.Token)
-		for k, v := range copilotHeaders {
+		for k, v := range s.headers() {
 			req.Header.Set(k, v)
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
@@ -794,13 +883,13 @@ func copilotAccount(cfg string) (Provider, bool) {
 		return nil
 	}
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := copilotModels(ctx, app.Token)
+		ms, err := copilotModels(ctx, app)
 		if err != nil {
 			return nil, err
 		}
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
-	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Website: "https://github.com/features/copilot", Account: acct}, true
+	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
 }
 
 // lastRole is the role of the last message in a chat request.
@@ -849,8 +938,8 @@ func copilotToken(ctx context.Context, github string) (copilotSession, error) {
 var copilotInternal = regexp.MustCompile(`^(copilot-search|exec-agent|trajectory)|-(secondary|tertiary|4th|free-auto)$`)
 
 // copilotModels asks Copilot which chat models this account may use.
-func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) {
-	s, err := copilotToken(ctx, github)
+func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error) {
+	s, err := app.session(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -863,7 +952,7 @@ func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) 
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.Token)
-	for k, v := range copilotHeaders {
+	for k, v := range s.headers() {
 		req.Header.Set(k, v)
 	}
 	res, err := http.DefaultClient.Do(req)
