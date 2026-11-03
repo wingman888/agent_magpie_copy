@@ -19,14 +19,12 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// Record is one call. Via, when set, is the routing group ("group/<id>") the
-// agent asked for; a call made for a group is not counted in usage summaries.
+// Record is one call.
 type Record struct {
 	Time       time.Time `json:"t"`
 	Agent      string    `json:"agent"` // magpie agent id, or the client's product name
 	Provider   string    `json:"provider"`
 	Model      string    `json:"model"` // the provider's model id
-	Via        string    `json:"via,omitempty"`
 	Input      int       `json:"in"`
 	Output     int       `json:"out"`
 	CacheRead  int       `json:"cache_read,omitempty"`
@@ -259,12 +257,9 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 		}
 		var pr *catalog.Price
 		for _, p := range provider.All() {
-			if p.ID == r.Provider {
-				for _, c := range p.Catalogs() {
-					if v, ok := catalog.PriceOf(c, r.Model); ok {
-						pr = &v
-						break
-					}
+			if p.ID == r.Provider && p.Catalog != "" {
+				if v, ok := catalog.PriceOf(p.Catalog, r.Model); ok {
+					pr = &v
 				}
 				break
 			}
@@ -275,9 +270,6 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 	agents := map[string]*Group{}
 	models := map[string]*Group{}
 	for _, r := range recs {
-		if r.Via != "" {
-			continue
-		}
 		t := r.Time.In(now.Location())
 		if t.Before(s.Since) {
 			continue

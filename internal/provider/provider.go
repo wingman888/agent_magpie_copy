@@ -10,10 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 )
 
@@ -36,16 +36,13 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key"`              // current API key, as typed by the user
 
-	// KeyName names the key in use, and Keys are the provider's other
-	// accounts: keys saved to switch to (see keys.go).
-	KeyName string       `json:"keyName,omitempty"`
-	Keys    []KeyAccount `json:"keys,omitempty"`
-	// KeyProtocol, when set, is the one protocol the first key is good
-	// for: a relay that hands out one key for Anthropic and another for
-	// OpenAI (see KeyAccount.Protocol).
-	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
+	// KeyName names the current key, KeyProtocol limits it to one protocol
+	// (empty: any). Keys holds the other keys, in order; see keys.go.
+	KeyName     string     `json:"keyName,omitempty"`
+	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
+	Keys        []KeyEntry `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -54,54 +51,23 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
-	// Fallback is where a request goes when this provider can't take it —
-	// out of quota, rate limited, overloaded or down — before any of the
-	// reply has been sent: models as agents pick them (provider/model),
-	// tried in order.
-	Fallback []string `json:"fallback,omitempty"`
-
-	// Routing is how requests spread over the keys or accounts it has on:
-	// "" smart, the first while it has quota to spare, then whichever has
-	// the most; "order" in order, the next one only when the one before
-	// can't take it; "rotate" each in turn; "least-used" the least used first.
-	// Whichever it is, one out of credit, out of quota, rate limited or
-	// failing is passed over for as long as that lasts.
-	Routing string `json:"routing,omitempty"`
-
-	// Affinity is whether a conversation keeps to the key or account that
-	// answered it last, so the vendor's prompt cache can hit: "" automatic
-	// (kept within a turn; across turns when the last answer cached enough
-	// and was recent), "session" the whole conversation, "turn" only within
-	// one user turn, "off" never. See groups.go.
-	Affinity string `json:"affinity,omitempty"`
-
-	// Headers are extra HTTP request headers sent to the vendor, exactly as
-	// the user typed them. They ride on every request magpie makes to a plain
-	// key+URL provider — forwarded calls, connectivity tests, and model-list
-	// fetches — applied after the auth headers, so the user can override those
-	// when a gateway insists on a private scheme. Signed-in agent accounts
-	// ignore them: their auth is the agent's own.
-	Headers map[string]string `json:"headers,omitempty"`
-
-	// BalanceURL, when set, is where the vendor tells what is left on a
-	// key, asked with the key the way a chat request carries it; BalancePath
-	// picks the amount out of the JSON reply (see balance.go). The vendors
-	// magpie knows need neither.
-	BalanceURL  string `json:"balanceURL,omitempty"`
-	BalancePath string `json:"balancePath,omitempty"`
-
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
+	// Fallback lists "provider/model" entries tried, in order, when this
+	// provider cannot serve a request (quota, rate limit, outage). See
+	// SetFallback and the gateway's candidate chain.
+	Fallback []string `json:"fallback,omitempty"`
+
+	// Headers are extra request headers sent with every request to a custom
+	// provider (forwarding, tests, model lists). Names keep the case the user
+	// typed. Presets and signed-in accounts ignore them; see ExtraHeaders.
+	Headers map[string]string `json:"headers,omitempty"`
+
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
-
-	// IconURL is a picture the vendor named in an import link, to be fetched
-	// once the user confirms. It is only a carrier between parsing and that
-	// fetch: Save drops it, so it never reaches providers.json.
-	IconURL string `json:"iconUrl,omitempty"`
 
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
@@ -110,14 +76,14 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
+
+	// FallbackModel is the model name a fallback candidate sends upstream in
+	// place of the request's. It is set on candidates only, never stored.
+	FallbackModel string `json:"-"`
 }
 
 type file struct {
 	Providers []Provider `json:"providers"`
-	// Groups are the routing groups the user made; HiddenGroups are the
-	// ids of the automatic groups the user removed (see groups.go).
-	Groups       []Group  `json:"groups,omitempty"`
-	HiddenGroups []string `json:"hiddenGroups,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -134,13 +100,6 @@ func load() file {
 	if b, err := os.ReadFile(Path()); err == nil {
 		json.Unmarshal(b, &f)
 	}
-	// configuration an older magpie saved may name a routing it no longer has
-	for i := range f.Providers {
-		f.Providers[i].Routing = migrateRouting(f.Providers[i].Routing)
-	}
-	for i := range f.Groups {
-		f.Groups[i].Routing = migrateRouting(f.Groups[i].Routing)
-	}
 	return f
 }
 
@@ -156,7 +115,6 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	pruneIcons(f)
 	return os.Chmod(p, 0o600)
 }
 
@@ -179,7 +137,8 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback, a.Routing, a.Affinity = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing, picks[a.ID].Affinity
+		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -228,7 +187,6 @@ func Slug(name string) string {
 // Save adds or replaces a provider.
 func Save(p Provider) error {
 	p = normalize(p)
-	p.IconURL = "" // import-only: never stored
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
@@ -238,61 +196,66 @@ func Save(p Provider) error {
 	if p.ID == "magpie" {
 		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
-	if p.ID == "group" {
-		return errors.New(`"group" is the prefix of routing groups ("group/<id>"); pick another id`)
-	}
 	if p.Name == "" {
 		p.Name = p.ID
+	}
+	if err := checkIcon(p.Icon); err != nil {
+		return err
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
-		if slices.Contains(accountIDs, p.ID) && !stored(p.ID) {
-			// taken, it would hide that subscription once signed in
-			return fmt.Errorf("%q is the id of the %s subscription; pick another name", p.ID, p.ID)
-		}
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
+		if !validKeyProtocol(p.KeyProtocol) {
+			return fmt.Errorf("key protocol must be chat, responses, anthropic or empty, not %q", p.KeyProtocol)
+		}
+		for _, k := range p.Keys {
+			if !validKeyProtocol(k.Protocol) {
+				return fmt.Errorf("key protocol must be chat, responses, anthropic or empty, not %q", k.Protocol)
+			}
+		}
 	}
 	f := load()
+	replaced := false
 	for i := range f.Providers {
-		if f.Providers[i].ID == p.ID {
+		if old := f.Providers[i]; old.ID == p.ID {
+			// Keys change through the key functions, so a save that does not
+			// name them keeps what is stored. The fallback list works the same
+			// way; SetFallback changes it.
+			if p.Keys == nil {
+				p.Keys = old.Keys
+			}
+			if p.Fallback == nil {
+				p.Fallback = old.Fallback
+			}
+			if p.Key == old.Key {
+				if p.KeyName == "" {
+					p.KeyName = old.KeyName
+				}
+				if p.KeyProtocol == "" {
+					p.KeyProtocol = old.KeyProtocol
+				}
+			}
+			normalizeKeys(&p)
 			f.Providers[i] = p
-			return store(f)
+			replaced = true
+			break
 		}
 	}
-	f.Providers = append(f.Providers, p)
-	return store(f)
-}
-
-// accountIDs are the ids of the subscriptions magpie can list (account.go).
-var accountIDs = []string{"claude", "codex", "copilot", "cursor", "grok"}
-
-func stored(id string) bool {
-	for _, p := range load().Providers {
-		if p.ID == id {
-			return true
-		}
+	if !replaced {
+		f.Providers = append(f.Providers, p)
 	}
-	return false
-}
-
-// ShowAccount brings back the signed-in account of an agent the user had
-// removed from magpie.
-func ShowAccount(id string) error {
-	f := load()
-	for i := range f.Providers {
-		if f.Providers[i].ID == id && f.Providers[i].Hidden {
-			f.Providers[i].Hidden = false
-			return store(f)
-		}
+	if err := store(f); err != nil {
+		return err
 	}
+	pruneIcons()
 	return nil
 }
 
@@ -348,15 +311,8 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	p.Routing = NormalizeRouting(migrateRouting(p.Routing))
-	p.Affinity = NormalizeAffinity(p.Affinity)
-	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
-	if p.Preset != "" {
-		// Presets own their request shape; custom headers are supported only
-		// for user-defined providers.
-		p.Headers = nil
-	}
+	normalizeKeys(&p)
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -374,13 +330,6 @@ func normalize(p Provider) Provider {
 	return p
 }
 
-// Catalogs are the models.dev ids the provider's models are looked up in,
-// first match wins: a gateway that resells several vendors names them all
-// ("openai, deepseek").
-func (p Provider) Catalogs() []string {
-	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
-}
-
 func cleanList(xs []string) []string {
 	var out []string
 	for _, x := range xs {
@@ -391,19 +340,41 @@ func cleanList(xs []string) []string {
 	return out
 }
 
-// cleanHeaders trims header names and values and drops entries with an empty
-// name, returning nil when nothing is left so the field stays out of the JSON.
-func cleanHeaders(h map[string]string) map[string]string {
-	out := make(map[string]string, len(h))
-	for k, v := range h {
-		if k = strings.TrimSpace(k); k != "" {
-			out[k] = strings.TrimSpace(v)
+// cleanHeaders trims names and values, drops entries with no name, and
+// returns nil for an empty map so nothing is written for it.
+func cleanHeaders(hs map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range hs {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" {
+			continue
 		}
-	}
-	if len(out) == 0 {
-		return nil
+		if out == nil {
+			out = make(map[string]string, len(hs))
+		}
+		out[k] = v
 	}
 	return out
+}
+
+// ExtraHeaders are the request headers the user set on a custom provider.
+// Presets and signed-in accounts send none.
+func (p Provider) ExtraHeaders() map[string]string {
+	if p.Preset != "" || p.Account != nil {
+		return nil
+	}
+	return p.Headers
+}
+
+// ApplyHeaders sets the provider's extra headers on req. Call it after
+// Sign, so a header the user sets can override a default. Names are written
+// exactly as given (no canonical case), replacing any default of the same
+// name.
+func (p Provider) ApplyHeaders(req *http.Request) {
+	for k, v := range p.ExtraHeaders() {
+		req.Header.Del(k)
+		req.Header[k] = []string{v}
+	}
 }
 
 func contains(xs []string, x string) bool {
@@ -480,3 +451,40 @@ func Mask(s string) string {
 // Ready reports whether the provider can be used: it has a key, needs
 // none, or is a signed-in agent.
 func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+
+// SetFallback replaces a provider's fallback list: the "provider/model"
+// entries tried, in order, when it cannot serve a request. Entries are
+// trimmed, and empty or repeated ones dropped; an empty list clears it.
+// Signed-in accounts keep a list too.
+func SetFallback(id string, refs []string) error {
+	id = strings.ToLower(strings.TrimSpace(id))
+	refs = cleanList(refs)
+	f := load()
+	if _, ok := find(Accounts(), id); ok {
+		for i := range f.Providers {
+			if f.Providers[i].ID == id {
+				f.Providers[i].Fallback = refs
+				return store(f)
+			}
+		}
+		f.Providers = append(f.Providers, Provider{ID: id, Fallback: refs})
+		return store(f)
+	}
+	for i := range f.Providers {
+		sp := &f.Providers[i]
+		if sp.ID == id && (sp.Chat != "" || sp.Responses != "" || sp.Anthropic != "") {
+			sp.Fallback = refs
+			return store(f)
+		}
+	}
+	return fmt.Errorf("no provider %q", id)
+}
+
+// SplitFallback reads a fallback entry, "provider/model". Provider ids have
+// no slash, so the first one ends the provider part and the model may hold
+// more. ok is false when either part is missing.
+func SplitFallback(ref string) (id, model string, ok bool) {
+	id, model, ok = strings.Cut(strings.TrimSpace(ref), "/")
+	id, model = strings.TrimSpace(id), strings.TrimSpace(model)
+	return id, model, ok && id != "" && model != ""
+}
