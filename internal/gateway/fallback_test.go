@@ -141,8 +141,10 @@ func TestLastCandidatesErrorIsReturned(t *testing.T) {
 	if code != 429 || !strings.Contains(body, "backup limit") || strings.Contains(body, "primary limit") {
 		t.Errorf("status %d: %s", code, body)
 	}
-	if c := s.Recent()[0]; c.Status != 429 || c.Provider != "backup" || c.Fallback != "main" {
-		t.Errorf("record: status %d provider %q fallback %q", c.Status, c.Provider, c.Fallback)
+	// both candidates failed for good: the record names both, and the provider
+	// is the last one tried, the one whose error the client got
+	if rec := s.Recent()[0]; rec.Status != 429 || rec.Provider != "backup" || rec.Fallback != "main, backup" {
+		t.Errorf("record: status %d provider %q fallback %q", rec.Status, rec.Provider, rec.Fallback)
 	}
 }
 
