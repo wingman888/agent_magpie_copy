@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestSetAffinity(t *testing.T) {
+func TestF09SetAffinity(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.example/v1", Key: "k"}); err != nil {
 		t.Fatal(err)
@@ -42,7 +42,7 @@ func TestSetAffinity(t *testing.T) {
 	}
 }
 
-func TestAffinityFromFile(t *testing.T) {
+func TestF09AffinityFromFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	os.MkdirAll(filepath.Join(dir, "magpie"), 0o755)
@@ -63,7 +63,7 @@ func TestAffinityFromFile(t *testing.T) {
 	}
 }
 
-func TestKeyTier(t *testing.T) {
+func TestF09KeyTier(t *testing.T) {
 	for _, c := range []struct {
 		key  Protocol
 		want []Protocol

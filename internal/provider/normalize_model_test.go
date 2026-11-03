@@ -8,7 +8,7 @@ import (
 )
 
 // The same model spelled by different providers has one key.
-func TestModelKeySameModel(t *testing.T) {
+func TestF09ModelKeySameModel(t *testing.T) {
 	same := []string{
 		"claude-opus-5-5",
 		"anthropic/claude-opus-5.5",
@@ -29,7 +29,7 @@ func TestModelKeySameModel(t *testing.T) {
 
 // A variant after the colon is a different model; the dot rules leave other
 // dots alone.
-func TestModelKeyKeepsVariantsAndOtherDots(t *testing.T) {
+func TestF09ModelKeyKeepsVariantsAndOtherDots(t *testing.T) {
 	if modelKey("x:batch") == modelKey("x") {
 		t.Errorf("x:batch and x must differ, both keyed %q", modelKey("x"))
 	}
@@ -42,7 +42,7 @@ func TestModelKeyKeepsVariantsAndOtherDots(t *testing.T) {
 }
 
 // Only an eight-digit date after a hyphen is dropped.
-func TestModelKeyDateSuffix(t *testing.T) {
+func TestF09ModelKeyDateSuffix(t *testing.T) {
 	cases := map[string]string{
 		"model-20260801":  "model",
 		"model-2026080":   "model-2026080",
@@ -57,7 +57,7 @@ func TestModelKeyDateSuffix(t *testing.T) {
 	}
 }
 
-func TestAutoGroupsFormsOnlySharedModels(t *testing.T) {
+func TestF09AutoGroupsFormsOnlySharedModels(t *testing.T) {
 	m := func(id, name string) catalog.Model { return catalog.Model{ID: id, Name: name} }
 	sources := []ProviderModels{
 		{Provider: "a", Models: []catalog.Model{m("claude-opus-5-5", "Claude Opus 5.5"), m("only-a", "")}},
@@ -83,7 +83,7 @@ func TestAutoGroupsFormsOnlySharedModels(t *testing.T) {
 // Without a formal display name the group takes its first member's id; a
 // provider's duplicate listing counts once; a name listed by one provider
 // only does not group.
-func TestAutoGroupsNameAndDuplicates(t *testing.T) {
+func TestF09AutoGroupsNameAndDuplicates(t *testing.T) {
 	sources := []ProviderModels{
 		{Provider: "a", Models: []catalog.Model{{ID: "m-1"}, {ID: "M-1"}, {ID: "solo"}}},
 		{Provider: "b", Models: []catalog.Model{{ID: "vendor/m-1", Name: "vendor/m-1"}}},
@@ -105,7 +105,7 @@ func TestAutoGroupsNameAndDuplicates(t *testing.T) {
 
 // Different names never group automatically, even when one is a prefix of
 // another.
-func TestAutoGroupsDifferentNamesStayApart(t *testing.T) {
+func TestF09AutoGroupsDifferentNamesStayApart(t *testing.T) {
 	sources := []ProviderModels{
 		{Provider: "a", Models: []catalog.Model{{ID: "claude-opus-5-5"}}},
 		{Provider: "b", Models: []catalog.Model{{ID: "claude-opus-5-5-mini"}}},

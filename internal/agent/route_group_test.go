@@ -8,9 +8,9 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// groupPicker gives a test its own config and two providers: a offers m and
+// f09GroupPicker gives a test its own config and two providers: a offers m and
 // only-a, b offers vendor/m, so magpie groups the two m's as auto-m.
-func groupPicker(t *testing.T) {
+func f09GroupPicker(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -28,8 +28,8 @@ func groupPicker(t *testing.T) {
 
 // The routing groups lead the picker in their own section, ahead of every
 // provider's section, and say they are routed by magpie.
-func TestPickerRoutingGroupsFirst(t *testing.T) {
-	groupPicker(t)
+func TestF09PickerRoutingGroupsFirst(t *testing.T) {
+	f09GroupPicker(t)
 	if err := provider.SaveGroup(provider.Group{ID: "mine", Name: "Mine", Members: []string{"a/m", "a/only-a", "b/vendor/m"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +80,8 @@ func TestPickerRoutingGroupsFirst(t *testing.T) {
 }
 
 // A group reference is a catalog model for every agent's own model files.
-func TestIsMagpieKnowsGroups(t *testing.T) {
-	groupPicker(t)
+func TestF09IsMagpieKnowsGroups(t *testing.T) {
+	f09GroupPicker(t)
 	if !isMagpie("group/auto-m") {
 		t.Error("auto group should be a magpie model")
 	}

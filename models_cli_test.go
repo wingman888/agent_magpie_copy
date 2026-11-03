@@ -9,7 +9,7 @@ import (
 )
 
 // The routing groups get their own section, ahead of every provider's.
-func TestPrintModelsGroupsBeforeProviders(t *testing.T) {
+func TestF09PrintModelsGroupsBeforeProviders(t *testing.T) {
 	a := provider.Provider{ID: "a", Name: "A"}
 	entries := []provider.Entry{
 		{ID: "a/m", Model: "m", Name: "m", Provider: a},
@@ -37,7 +37,7 @@ func TestPrintModelsGroupsBeforeProviders(t *testing.T) {
 }
 
 // With no groups there is no section header at all.
-func TestPrintModelsNoGroups(t *testing.T) {
+func TestF09PrintModelsNoGroups(t *testing.T) {
 	var buf bytes.Buffer
 	printModels(&buf, []provider.Entry{{ID: "a/m", Model: "m", Name: "m", Provider: provider.Provider{ID: "a", Name: "A"}}})
 	if strings.Contains(buf.String(), "Routing groups") {

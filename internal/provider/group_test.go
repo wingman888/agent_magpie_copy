@@ -9,8 +9,8 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 )
 
-// groupSetup gives a test its own config and cache, and no agent sign-ins.
-func groupSetup(t *testing.T) {
+// f09GroupSetup gives a test its own config and cache, and no agent sign-ins.
+func f09GroupSetup(t *testing.T) {
 	t.Helper()
 	isolate(t)
 	home := t.TempDir()
@@ -19,9 +19,9 @@ func groupSetup(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 }
 
-// twoProviders has provider a offering m and only-a, and b offering vendor/m:
+// f09TwoProviders has provider a offering m and only-a, and b offering vendor/m:
 // the same model under two spellings, so magpie groups them as auto-m.
-func twoProviders(t *testing.T) {
+func f09TwoProviders(t *testing.T) {
 	t.Helper()
 	for _, p := range []Provider{
 		{ID: "a", Name: "A", Chat: "https://a.example/v1", Key: "ka", Models: []string{"m", "only-a"}},
@@ -33,9 +33,9 @@ func twoProviders(t *testing.T) {
 	}
 }
 
-// seedLive records the model list a provider serves, as a fetch from the
+// f09SeedLive records the model list a provider serves, as a fetch from the
 // vendor would, so Available sees it.
-func seedLive(t *testing.T, provider string, ids ...string) {
+func f09SeedLive(t *testing.T, provider string, ids ...string) {
 	t.Helper()
 	var ms []catalog.Model
 	for _, id := range ids {
@@ -48,8 +48,8 @@ func seedLive(t *testing.T, provider string, ids ...string) {
 
 // Discovery follows the models a provider serves, not only the ones it
 // exposes: a exposes just only-a, yet serves m, so auto-m still gets a/m.
-func TestAutoGroupFollowsServedModels(t *testing.T) {
-	groupSetup(t)
+func TestF09AutoGroupFollowsServedModels(t *testing.T) {
+	f09GroupSetup(t)
 	for _, p := range []Provider{
 		{ID: "a", Name: "A", Chat: "https://a.example/v1", Key: "ka", Models: []string{"only-a"}},
 		{ID: "b", Name: "B", Chat: "https://b.example/v1", Key: "kb", Models: []string{"vendor/m"}},
@@ -58,35 +58,35 @@ func TestAutoGroupFollowsServedModels(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seedLive(t, "a", "m", "only-a")
-	seedLive(t, "b", "vendor/m")
+	f09SeedLive(t, "a", "m", "only-a")
+	f09SeedLive(t, "b", "vendor/m")
 	g, ms, ok := FindGroup("group/auto-m")
 	if !ok || !g.Auto {
 		t.Fatalf("auto-m not found: ok=%v auto=%v", ok, g.Auto)
 	}
-	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(memberIDs(ms), want) {
-		t.Errorf("auto-m members = %v, want %v", memberIDs(ms), want)
+	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(f09MemberIDs(ms), want) {
+		t.Errorf("auto-m members = %v, want %v", f09MemberIDs(ms), want)
 	}
 }
 
 // With no list fetched from the vendor yet, the models the provider is
 // configured to serve are what it groups by.
-func TestAutoGroupWithoutLiveList(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09AutoGroupWithoutLiveList(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 	g, ms, ok := FindGroup("group/auto-m")
 	if !ok || !g.Auto {
 		t.Fatalf("auto-m not found without a live list: ok=%v auto=%v", ok, g.Auto)
 	}
-	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(memberIDs(ms), want) {
-		t.Errorf("auto-m members = %v, want %v", memberIDs(ms), want)
+	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(f09MemberIDs(ms), want) {
+		t.Errorf("auto-m members = %v, want %v", f09MemberIDs(ms), want)
 	}
 }
 
 // A vendor list longer than manyModels is shown only in part by Exposed, but
 // the group still sees every model the vendor serves.
-func TestAutoGroupPastManyModels(t *testing.T) {
-	groupSetup(t)
+func TestF09AutoGroupPastManyModels(t *testing.T) {
+	f09GroupSetup(t)
 	if err := Save(Provider{ID: "a", Name: "A", Chat: "https://a.example/v1", Key: "ka"}); err != nil {
 		t.Fatal(err)
 	}
@@ -99,22 +99,22 @@ func TestAutoGroupPastManyModels(t *testing.T) {
 	}
 	// m comes after the first manyModels, so only Available reaches it
 	ids = append(ids, "m")
-	seedLive(t, "a", ids...)
-	seedLive(t, "b", "vendor/m")
-	if got := len(exposedOf(t, "a")); got != manyModels {
+	f09SeedLive(t, "a", ids...)
+	f09SeedLive(t, "b", "vendor/m")
+	if got := len(f09ExposedOf(t, "a")); got != manyModels {
 		t.Fatalf("a exposes %d models, want %d", got, manyModels)
 	}
 	g, ms, ok := FindGroup("group/auto-m")
 	if !ok || !g.Auto {
 		t.Fatalf("auto-m not found past %d models: ok=%v auto=%v", manyModels, ok, g.Auto)
 	}
-	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(memberIDs(ms), want) {
-		t.Errorf("auto-m members = %v, want %v", memberIDs(ms), want)
+	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(f09MemberIDs(ms), want) {
+		t.Errorf("auto-m members = %v, want %v", f09MemberIDs(ms), want)
 	}
 }
 
-// exposedOf is the models the provider with the given id exposes to agents.
-func exposedOf(t *testing.T, id string) []catalog.Model {
+// f09ExposedOf is the models the provider with the given id exposes to agents.
+func f09ExposedOf(t *testing.T, id string) []catalog.Model {
 	t.Helper()
 	for _, p := range All() {
 		if p.ID == id {
@@ -127,8 +127,8 @@ func exposedOf(t *testing.T, id string) []catalog.Model {
 
 // A user may take over an automatic group whose id carries a dot or a colon,
 // and the other automatic groups are left alone.
-func TestSaveGroupTakesOverDottedAutoGroup(t *testing.T) {
-	groupSetup(t)
+func TestF09SaveGroupTakesOverDottedAutoGroup(t *testing.T) {
+	f09GroupSetup(t)
 	for _, p := range []Provider{
 		{ID: "a", Name: "A", Chat: "https://a.example/v1", Key: "ka"},
 		{ID: "b", Name: "B", Chat: "https://b.example/v1", Key: "kb"},
@@ -137,8 +137,8 @@ func TestSaveGroupTakesOverDottedAutoGroup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seedLive(t, "a", "v1.beta", "claude-opus-5-5:batch")
-	seedLive(t, "b", "v1.beta", "claude-opus-5-5:batch")
+	f09SeedLive(t, "a", "v1.beta", "claude-opus-5-5:batch")
+	f09SeedLive(t, "b", "v1.beta", "claude-opus-5-5:batch")
 	if _, _, ok := FindGroup("group/auto-v1.beta"); !ok {
 		t.Fatal("auto-v1.beta not found as automatic")
 	}
@@ -150,14 +150,14 @@ func TestSaveGroupTakesOverDottedAutoGroup(t *testing.T) {
 		t.Fatalf("take over auto-v1.beta: %v", err)
 	}
 	g, ms, ok := FindGroup("group/auto-v1.beta")
-	if !ok || g.Auto || !reflect.DeepEqual(memberIDs(ms), []string{"b/v1.beta"}) {
-		t.Fatalf("taken over: ok=%v auto=%v members=%v", ok, g.Auto, memberIDs(ms))
+	if !ok || g.Auto || !reflect.DeepEqual(f09MemberIDs(ms), []string{"b/v1.beta"}) {
+		t.Fatalf("taken over: ok=%v auto=%v members=%v", ok, g.Auto, f09MemberIDs(ms))
 	}
 
 	// the colon group is still automatic and still has both members
 	g, ms, ok = FindGroup("group/auto-claude-opus-5-5:batch")
 	if !ok || !g.Auto || len(ms) != 2 {
-		t.Errorf("untouched colon group: ok=%v auto=%v members=%v", ok, g.Auto, memberIDs(ms))
+		t.Errorf("untouched colon group: ok=%v auto=%v members=%v", ok, g.Auto, f09MemberIDs(ms))
 	}
 
 	// an id that no automatic group has is still held to the plain form
@@ -169,7 +169,7 @@ func TestSaveGroupTakesOverDottedAutoGroup(t *testing.T) {
 	}
 }
 
-func entryIDs(es []Entry) []string {
+func f09EntryIDs(es []Entry) []string {
 	var out []string
 	for _, e := range es {
 		out = append(out, e.ID)
@@ -177,7 +177,7 @@ func entryIDs(es []Entry) []string {
 	return out
 }
 
-func memberIDs(ms []Member) []string {
+func f09MemberIDs(ms []Member) []string {
 	var out []string
 	for _, m := range ms {
 		out = append(out, m.Provider+"/"+m.Model)
@@ -185,9 +185,9 @@ func memberIDs(ms []Member) []string {
 	return out
 }
 
-func TestGroupNeedsAMember(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09GroupNeedsAMember(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 	if err := SaveGroup(Group{ID: "x"}); err == nil || err.Error() != "组里至少要有一个模型" {
 		t.Errorf("no members: err = %v", err)
 	}
@@ -200,16 +200,16 @@ func TestGroupNeedsAMember(t *testing.T) {
 	}
 }
 
-func TestProviderIDGroupRejected(t *testing.T) {
-	groupSetup(t)
+func TestF09ProviderIDGroupRejected(t *testing.T) {
+	f09GroupSetup(t)
 	if err := Save(Provider{ID: "group", Chat: "https://g.example/v1", Key: "k"}); err == nil {
 		t.Error(`provider id "group": want an error`)
 	}
 }
 
-func TestGroupInsideGroupIgnored(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09GroupInsideGroupIgnored(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 	err := SaveGroup(Group{ID: "mix", Members: []string{"group/auto-m", "b/vendor/m", "auto-m", "a/m", "b/vendor/m"}})
 	if err != nil {
 		t.Fatal(err)
@@ -221,14 +221,14 @@ func TestGroupInsideGroupIgnored(t *testing.T) {
 	if want := []string{"b/vendor/m", "a/m"}; !reflect.DeepEqual(g.Members, want) {
 		t.Errorf("stored members = %v, want %v", g.Members, want)
 	}
-	if want := []string{"b/vendor/m", "a/m"}; !reflect.DeepEqual(memberIDs(ms), want) {
-		t.Errorf("resolved members = %v, want %v", memberIDs(ms), want)
+	if want := []string{"b/vendor/m", "a/m"}; !reflect.DeepEqual(f09MemberIDs(ms), want) {
+		t.Errorf("resolved members = %v, want %v", f09MemberIDs(ms), want)
 	}
 }
 
-func TestDeleteMissingGroupFails(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09DeleteMissingGroupFails(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 	for _, id := range []string{"nope", "group/nope"} {
 		if err := DeleteGroup(id); err == nil {
 			t.Errorf("DeleteGroup(%q): want an error", id)
@@ -239,15 +239,15 @@ func TestDeleteMissingGroupFails(t *testing.T) {
 	}
 }
 
-func TestAutoGroupHiddenAndShown(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09AutoGroupHiddenAndShown(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 	g, ms, ok := FindGroup("group/auto-m")
 	if !ok || !g.Auto {
 		t.Fatalf("auto-m not found as automatic: ok=%v auto=%v", ok, g.Auto)
 	}
-	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(memberIDs(ms), want) {
-		t.Errorf("auto-m members = %v, want %v", memberIDs(ms), want)
+	if want := []string{"a/m", "b/vendor/m"}; !reflect.DeepEqual(f09MemberIDs(ms), want) {
+		t.Errorf("auto-m members = %v, want %v", f09MemberIDs(ms), want)
 	}
 
 	if err := DeleteGroup("group/auto-m"); err != nil {
@@ -256,7 +256,7 @@ func TestAutoGroupHiddenAndShown(t *testing.T) {
 	if _, _, ok := FindGroup("group/auto-m"); ok {
 		t.Error("hidden auto-m still found")
 	}
-	for _, id := range entryIDs(Catalog()) {
+	for _, id := range f09EntryIDs(Catalog()) {
 		if id == "group/auto-m" {
 			t.Error("hidden auto-m still in the catalog")
 		}
@@ -270,14 +270,14 @@ func TestAutoGroupHiddenAndShown(t *testing.T) {
 	}
 }
 
-func TestCatalogListsProvidersThenGroups(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09CatalogListsProvidersThenGroups(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 	if err := SaveGroup(Group{ID: "mine", Name: "Mine", Members: []string{"b/vendor/m", "a/only-a"}, Routing: "order"}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"a/m", "a/only-a", "b/vendor/m", "group/mine", "group/auto-m"}
-	if got := entryIDs(Catalog()); !reflect.DeepEqual(got, want) {
+	if got := f09EntryIDs(Catalog()); !reflect.DeepEqual(got, want) {
 		t.Errorf("catalog = %v, want %v", got, want)
 	}
 	for _, e := range Catalog() {
@@ -287,9 +287,9 @@ func TestCatalogListsProvidersThenGroups(t *testing.T) {
 	}
 }
 
-func TestSavedGroupKeepsMemberOrder(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09SavedGroupKeepsMemberOrder(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 	if err := SaveGroup(Group{ID: "mine", Members: []string{"b/vendor/m", "a/only-a", "b/vendor/m"}, Routing: "order"}); err != nil {
 		t.Fatal(err)
 	}
@@ -300,17 +300,17 @@ func TestSavedGroupKeepsMemberOrder(t *testing.T) {
 	if g.ID != "mine" || g.Routing != "order" || g.Auto {
 		t.Errorf("group = %+v", g)
 	}
-	if want := []string{"b/vendor/m", "a/only-a"}; !reflect.DeepEqual(memberIDs(ms), want) {
-		t.Errorf("members = %v, want %v", memberIDs(ms), want)
+	if want := []string{"b/vendor/m", "a/only-a"}; !reflect.DeepEqual(f09MemberIDs(ms), want) {
+		t.Errorf("members = %v, want %v", f09MemberIDs(ms), want)
 	}
 	if ms[0].Target.ID != "b" {
 		t.Errorf("first member's provider = %q, want b", ms[0].Target.ID)
 	}
 }
 
-func TestSaveGroupRules(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09SaveGroupRules(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 
 	if err := SaveGroup(Group{Name: "Mine Set", Members: []string{"a/m"}}); err != nil {
 		t.Fatal(err)
@@ -344,15 +344,15 @@ func TestSaveGroupRules(t *testing.T) {
 	}
 }
 
-func TestSaveGroupTakesOverAutoGroup(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09SaveGroupTakesOverAutoGroup(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 	if err := SaveGroup(Group{ID: "auto-m", Members: []string{"a/m"}}); err != nil {
 		t.Fatal(err)
 	}
 	g, ms, ok := FindGroup("auto-m")
 	if !ok || g.Auto || len(ms) != 1 {
-		t.Fatalf("taken over: ok=%v auto=%v members=%v", ok, g.Auto, memberIDs(ms))
+		t.Fatalf("taken over: ok=%v auto=%v members=%v", ok, g.Auto, f09MemberIDs(ms))
 	}
 
 	// removing the user's version hides the automatic group, which then
@@ -368,13 +368,13 @@ func TestSaveGroupTakesOverAutoGroup(t *testing.T) {
 	}
 	g, ms, ok = FindGroup("auto-m")
 	if !ok || !g.Auto || len(ms) != 2 {
-		t.Errorf("automatic group back: ok=%v auto=%v members=%v", ok, g.Auto, memberIDs(ms))
+		t.Errorf("automatic group back: ok=%v auto=%v members=%v", ok, g.Auto, f09MemberIDs(ms))
 	}
 }
 
-func TestDeleteUserGroup(t *testing.T) {
-	groupSetup(t)
-	twoProviders(t)
+func TestF09DeleteUserGroup(t *testing.T) {
+	f09GroupSetup(t)
+	f09TwoProviders(t)
 	if err := SaveGroup(Group{ID: "mine", Members: []string{"a/m"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestDeleteUserGroup(t *testing.T) {
 	}
 }
 
-func TestNormRouting(t *testing.T) {
+func TestF09NormRouting(t *testing.T) {
 	cases := map[string]string{
 		"order": Ordered, " Rotate ": Rotate, "least-used": LeastUsed,
 		"usage": LeastUsed, "bogus": "", "": "",

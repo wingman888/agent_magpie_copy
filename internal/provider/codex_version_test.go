@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// resetCodexVersion empties the version cache now and again after the test.
-func resetCodexVersion(t *testing.T) {
+// f09ResetCodexVersion empties the version cache now and again after the test.
+func f09ResetCodexVersion(t *testing.T) {
 	t.Helper()
 	empty := func() {
 		codexVersionCache.Lock()
@@ -20,9 +20,9 @@ func resetCodexVersion(t *testing.T) {
 	t.Cleanup(empty)
 }
 
-// fakeCodexCLI makes an executable that prints the given version output and
+// f09FakeCodexCLI makes an executable that prints the given version output and
 // points codexExecutable at it.
-func fakeCodexCLI(t *testing.T, out string) {
+func f09FakeCodexCLI(t *testing.T, out string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake CLI is a shell script")
@@ -38,17 +38,17 @@ func fakeCodexCLI(t *testing.T, out string) {
 	t.Cleanup(func() { codexExecutable = old })
 }
 
-// noCodexCLI makes the installed CLI look absent.
-func noCodexCLI(t *testing.T) {
+// f09NoCodexCLI makes the installed CLI look absent.
+func f09NoCodexCLI(t *testing.T) {
 	t.Helper()
 	old := codexExecutable
 	codexExecutable = func() string { return "" }
 	t.Cleanup(func() { codexExecutable = old })
 }
 
-// setCodexHome points HOME at a fresh directory, and writes Codex CLI's
+// f09SetCodexHome points HOME at a fresh directory, and writes Codex CLI's
 // models_cache.json with the given client version when it is not empty.
-func setCodexHome(t *testing.T, cacheVersion string) {
+func f09SetCodexHome(t *testing.T, cacheVersion string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -67,10 +67,10 @@ func setCodexHome(t *testing.T, cacheVersion string) {
 
 // The newest of the installed CLI and its cache is asked with: CLI 0.155.1
 // over a cache of 0.154.0.
-func TestCodexVersionPrefersNewerInstalledCLI(t *testing.T) {
-	resetCodexVersion(t)
-	setCodexHome(t, "0.154.0")
-	fakeCodexCLI(t, "codex-cli 0.155.1")
+func TestF09CodexVersionPrefersNewerInstalledCLI(t *testing.T) {
+	f09ResetCodexVersion(t)
+	f09SetCodexHome(t, "0.154.0")
+	f09FakeCodexCLI(t, "codex-cli 0.155.1")
 	if got := codexClientVersionNow(); got != "0.155.1" {
 		t.Fatalf("client version = %q, want 0.155.1", got)
 	}
@@ -78,20 +78,20 @@ func TestCodexVersionPrefersNewerInstalledCLI(t *testing.T) {
 
 // Without the CLI, only the cache's version and the built-in one are
 // candidates; here both are 0.154.0.
-func TestCodexVersionWithoutCLI(t *testing.T) {
-	resetCodexVersion(t)
-	setCodexHome(t, "0.154.0")
-	noCodexCLI(t)
+func TestF09CodexVersionWithoutCLI(t *testing.T) {
+	f09ResetCodexVersion(t)
+	f09SetCodexHome(t, "0.154.0")
+	f09NoCodexCLI(t)
 	if got := codexClientVersionNow(); got != "0.154.0" {
 		t.Fatalf("client version = %q, want 0.154.0", got)
 	}
 }
 
 // Without the CLI and without a cache, the built-in version is asked with.
-func TestCodexVersionBuiltinFallback(t *testing.T) {
-	resetCodexVersion(t)
-	setCodexHome(t, "")
-	noCodexCLI(t)
+func TestF09CodexVersionBuiltinFallback(t *testing.T) {
+	f09ResetCodexVersion(t)
+	f09SetCodexHome(t, "")
+	f09NoCodexCLI(t)
 	if got := codexClientVersionNow(); got != codexClientVersion {
 		t.Fatalf("client version = %q, want %q", got, codexClientVersion)
 	}
@@ -99,7 +99,7 @@ func TestCodexVersionBuiltinFallback(t *testing.T) {
 
 // Versions compare numerically, not as text: 0.156.0 beats 0.155.10 and
 // 0.155.10 beats 0.155.9.
-func TestCodexVersionNumericComparison(t *testing.T) {
+func TestF09CodexVersionNumericComparison(t *testing.T) {
 	cases := []struct {
 		a, b string
 		want int
@@ -125,14 +125,14 @@ func TestCodexVersionNumericComparison(t *testing.T) {
 
 // The choice is kept for about ten minutes: the CLI is not asked again in
 // that time.
-func TestCodexVersionIsCached(t *testing.T) {
-	resetCodexVersion(t)
-	setCodexHome(t, "0.154.0")
-	fakeCodexCLI(t, "codex-cli 0.155.1")
+func TestF09CodexVersionIsCached(t *testing.T) {
+	f09ResetCodexVersion(t)
+	f09SetCodexHome(t, "0.154.0")
+	f09FakeCodexCLI(t, "codex-cli 0.155.1")
 	if got := codexClientVersionNow(); got != "0.155.1" {
 		t.Fatalf("first call = %q", got)
 	}
-	noCodexCLI(t)
+	f09NoCodexCLI(t)
 	if got := codexClientVersionNow(); got != "0.155.1" {
 		t.Fatalf("second call within the cache window = %q, want 0.155.1", got)
 	}

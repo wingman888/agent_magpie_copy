@@ -41,17 +41,17 @@ func (cv convo) key() string { return cv.id + "\x00" + cv.model }
 
 // answer is who answered a conversation's request last, and what it read
 // from the vendor's cache.
-type answer struct {
+type affAnswer struct {
 	key       string // candKey of the candidate
 	rest      string
 	at        time.Time
 	cacheRead int
 }
 
-var affinity = struct {
+var affState = struct {
 	sync.Mutex
-	last map[string]answer // conversation and model → who answered last
-}{last: map[string]answer{}}
+	last map[string]affAnswer // conversation and model → who answered last
+}{last: map[string]affAnswer{}}
 
 // conversationOf is the conversation a request belongs to, and where in it.
 func conversationOf(h http.Header, body []byte, from provider.Protocol, model string) convo {
@@ -107,13 +107,13 @@ func affinityMode(modes ...string) string {
 }
 
 // lastAnswer is who answered the conversation's request last, if anyone.
-func lastAnswer(cv convo) (answer, bool) {
+func lastAnswer(cv convo) (affAnswer, bool) {
 	if cv.id == "" {
-		return answer{}, false
+		return affAnswer{}, false
 	}
-	affinity.Lock()
-	defer affinity.Unlock()
-	a, ok := affinity.last[cv.key()]
+	affState.Lock()
+	defer affState.Unlock()
+	a, ok := affState.last[cv.key()]
 	return a, ok
 }
 
@@ -124,14 +124,14 @@ func answered(cv convo, c candidate, cacheRead int) {
 		return
 	}
 	now := time.Now()
-	affinity.Lock()
-	defer affinity.Unlock()
-	for k, a := range affinity.last {
+	affState.Lock()
+	defer affState.Unlock()
+	for k, a := range affState.last {
 		if now.Sub(a.at) > affinityKeep {
-			delete(affinity.last, k)
+			delete(affState.last, k)
 		}
 	}
-	affinity.last[cv.key()] = answer{key: candKey(c), rest: c.rest, at: now, cacheRead: cacheRead}
+	affState.last[cv.key()] = affAnswer{key: candKey(c), rest: c.rest, at: now, cacheRead: cacheRead}
 }
 
 // affine orders a candidate list by the conversation's affinity, and tells
@@ -165,7 +165,7 @@ func affine(mode string, cs []candidate, ws []Weighed, lefts map[string]left, cv
 
 // affinityWhy is why affinity keeps (session, turn, cache) or lets go of
 // (the rest) the candidate at idx, which answered last when known.
-func affinityWhy(mode string, cs []candidate, idx int, known bool, last answer, lefts map[string]left, cv convo, rotating bool, now time.Time) string {
+func affinityWhy(mode string, cs []candidate, idx int, known bool, last affAnswer, lefts map[string]left, cv convo, rotating bool, now time.Time) string {
 	switch {
 	case mode == provider.AffinityOff:
 		return "off"

@@ -13,7 +13,7 @@ import (
 // only. A GPT request's pool is the Chat key; the others are asides, tried
 // after it. A Claude request's pool is the two unnamed keys, rotated; the
 // Chat key is the aside.
-func TestKeysMadeForAnotherProtocolAreAsides(t *testing.T) {
+func TestF09KeysMadeForAnotherProtocolAreAsides(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	restingUntil.Lock()
@@ -80,7 +80,7 @@ func TestKeysMadeForAnotherProtocolAreAsides(t *testing.T) {
 
 // When the whole pool fails, the asides are tried and can answer; the pool
 // rests, so the next request goes to an unnamed key without trying it again.
-func TestAsideAnswersWhenPoolFails(t *testing.T) {
+func TestF09AsideAnswersWhenPoolFails(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	restingUntil.Lock()
