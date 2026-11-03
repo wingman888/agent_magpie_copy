@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -32,9 +33,6 @@ func All() []*Agent {
 		cursor(home),
 		copilot(home),
 		crush(home, cfg),
-		dsh(home),
-		commandCode(home),
-		omp(home),
 	}
 }
 
@@ -134,17 +132,7 @@ func ownOptions(authFile string, cur string, extra ...string) []Option {
 	sort.Strings(providers)
 	var out []Option
 	for _, p := range providers {
-		name := catalog.ProviderName(p)
-		if name == "" {
-			name = p
-		}
-		opts := group(name, options(catalog.Provider(p), p+"/"))
-		if ic := providerIcon(p); ic != "" {
-			for i := range opts {
-				opts[i].GroupIcon = ic
-			}
-		}
-		out = append(out, opts...)
+		out = append(out, group(p, options(catalog.Provider(p), p+"/"))...)
 	}
 	return out
 }
@@ -173,37 +161,44 @@ func magpieProviderJSON(shape string) any {
 		}
 		return map[string]any{"type": "openai", "name": "magpie", "base_url": gatewayV1(), "api_key": gateway.Token, "models": ms}
 	case "pi":
-		var ms []map[string]any
-		for _, m := range models {
-			// reasoning lets Pi offer its thinking levels for the model
-			e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-			if levels := piThinkingLevels(m.Efforts); levels != nil {
-				e["thinkingLevelMap"] = levels
-			}
-			ms = append(ms, e)
-		}
-		if ms == nil {
-			ms = []map[string]any{}
-		}
-		return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
+		return piProviderJSON(models)
 	}
 	return nil
 }
 
-// piThinkingLevels is the thinkingLevelMap for a model's efforts. Pi offers
-// xhigh and max only for models that map them, so without it a model whose
-// top level is max stopped at high in Pi.
-func piThinkingLevels(efforts []string) map[string]any {
-	var levels map[string]any
-	for _, e := range efforts {
-		if e == "xhigh" || e == "max" {
-			if levels == nil {
-				levels = map[string]any{}
+// piProviderJSON is the provider block for Pi's models.json. Pi offers only
+// the thinking levels a model declares, so a model whose efforts include
+// xhigh or max gets a thinkingLevelMap naming them; the others get none.
+func piProviderJSON(models []catalog.Model) any {
+	var ms []map[string]any
+	for _, m := range models {
+		// reasoning lets Pi offer its thinking levels for the model
+		e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
+		if lv := piThinkingLevelMap(m.Efforts); lv != nil {
+			e["thinkingLevelMap"] = lv
+		}
+		ms = append(ms, e)
+	}
+	if ms == nil {
+		ms = []map[string]any{}
+	}
+	return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
+}
+
+// piThinkingLevelMap names the levels Pi does not know by default (xhigh,
+// max) so it offers them; level names pass through unchanged. nil when the
+// model declares neither.
+func piThinkingLevelMap(efforts []string) map[string]string {
+	var out map[string]string
+	for _, lv := range []string{"xhigh", "max"} {
+		if slices.Contains(efforts, lv) {
+			if out == nil {
+				out = map[string]string{}
 			}
-			levels[e] = e
+			out[lv] = lv
 		}
 	}
-	return levels
+	return out
 }
 
 func opencode(home, cfg string) *Agent {
