@@ -173,7 +173,9 @@ func TestImportCmdYesSavesAndReplaces(t *testing.T) {
 	}
 }
 
-// A link with no key is saved, and the provider is reported as not ready.
+// A link with no key is saved with an empty key. A local address needs no
+// key, so the provider is ready at once; that is what decides whether the
+// "add the key" hint is printed.
 func TestImportCmdYesWithoutKeySaves(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	if err := importCmd([]string{"-y", "magpie://import?name=No%20Key&chat=http://127.0.0.1:9/v1"}); err != nil {
@@ -183,7 +185,26 @@ func TestImportCmdYesWithoutKeySaves(t *testing.T) {
 	if got == nil {
 		t.Fatal("provider not saved")
 	}
-	if got.Ready() {
-		t.Errorf("keyless provider reports ready")
+	if got.Key != "" {
+		t.Errorf("key = %q, want empty", got.Key)
+	}
+	if !got.Ready() {
+		t.Errorf("local keyless provider should be ready")
+	}
+}
+
+// A keyless remote provider is saved but not ready, so the caller prints the
+// hint. The check is made without any network call.
+func TestSaveWithoutKeyKeepsRemoteProviderNotReady(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := provider.SaveWithoutKey(provider.Provider{ID: "remote", Name: "Remote", Chat: "https://remote.example/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	got := providerByID("remote")
+	if got == nil || got.Ready() {
+		t.Fatalf("provider = %+v, want saved and not ready", got)
+	}
+	if err := provider.Save(provider.Provider{ID: "remote2", Name: "R2", Chat: "https://remote.example/v1"}); err == nil {
+		t.Errorf("Save without a key should still refuse, as before")
 	}
 }
