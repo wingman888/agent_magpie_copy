@@ -192,6 +192,46 @@ func TestAnthropicStreamOverloadedBeforeContentTransfers(t *testing.T) {
 	}
 }
 
+// Chat and Responses streams that fail before any content hand the request
+// on the same way, and the agent sees the next member's stream only.
+func TestChatAndResponsesStreamErrorBeforeContentTransfers(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body string
+		a                scriptReply
+		b                scriptReply
+		want             string
+	}{
+		{"chat", "/v1/chat/completions", `{"model":"group/g","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+			scriptReply{ctype: "text/event-stream", body: sse(`data: {"error":{"message":"upstream hiccup"}}`, `data: [DONE]`)},
+			scriptReply{ctype: "text/event-stream", body: chatOK}, "chat ok"},
+		{"responses", "/v1/responses", `{"model":"group/g","stream":true,"input":"hi"}`,
+			scriptReply{ctype: "text/event-stream", body: sse(
+				`event: response.created`+"\n"+`data: {"type":"response.created","response":{"id":"r0","model":"m","usage":{"input_tokens":0,"output_tokens":0}}}`,
+				`event: response.failed`+"\n"+`data: {"type":"response.failed","response":{"id":"r0","status":"failed","error":{"code":"server_error","message":"upstream hiccup"}}}`)},
+			scriptReply{ctype: "text/event-stream", body: responsesOK}, "fallback ok"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fresh(t)
+			a := &scriptUp{answers: []scriptReply{tc.a}}
+			b := &scriptUp{answers: []scriptReply{tc.b}}
+			// each member speaks only the protocol the client does
+			if tc.name == "chat" {
+				saveProviderOrFail(t, provider.Provider{ID: "a", Name: "A", Key: "ka", Models: []string{"m"}, Chat: upstreamAt(t, a) + "/v1"})
+				saveProviderOrFail(t, provider.Provider{ID: "b", Name: "B", Key: "kb", Models: []string{"m"}, Chat: upstreamAt(t, b) + "/v1"})
+			} else {
+				saveProviderOrFail(t, provider.Provider{ID: "a", Name: "A", Key: "ka", Models: []string{"m"}, Responses: upstreamAt(t, a) + "/v1"})
+				saveProviderOrFail(t, provider.Provider{ID: "b", Name: "B", Key: "kb", Models: []string{"m"}, Responses: upstreamAt(t, b) + "/v1"})
+			}
+			saveFailoverGroup(t, "a/m", "b/m")
+			s := New()
+			code, body := serveTo(t, s, tc.path, tc.body)
+			if code != 200 || !strings.Contains(body, tc.want) || strings.Contains(body, "upstream hiccup") || a.calls() != 1 || b.calls() != 1 {
+				t.Fatalf("%d %s (a asked %d, b asked %d)", code, body, a.calls(), b.calls())
+			}
+		})
+	}
+}
+
 // Once content has gone out, an error is the agent's to see, and no other
 // member is asked.
 func TestAnthropicStreamErrorAfterContentIsNotTransferred(t *testing.T) {
