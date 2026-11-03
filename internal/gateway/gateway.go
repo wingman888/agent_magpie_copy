@@ -85,6 +85,7 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
+	trace        trace // what routing did with each request, for the Gateway view
 }
 
 // New makes a gateway.
@@ -161,6 +162,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("POST /_magpie/claude-mcp/{token}", s.subscription.mcpCall)
+	mux.HandleFunc(CodexPath+"/", s.codexBackend)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
 	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +215,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	p, model, ok := provider.Resolve(modelOf(body))
 	// Claude Subscription generations run through the Claude Code binary. Its
 	// OAuth token must not take a direct HTTP side path just for token counting.
-	if ok && p.Account != nil && p.Account.Agent == "claude" {
+	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok") {
 		req, err := parseAnthropic(body)
 		if err != nil {
 			writeError(w, provider.Anthropic, 400, err.Error())
@@ -223,12 +225,27 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ok {
-		if res := s.countUpstream(r.Context(), p, model, body, r.Header); res != nil {
+		// a relay's OpenAI-only key can't count Anthropic tokens
+		q := p
+		q.Anthropic = ""
+		for _, c := range perKey(p, model, provider.Anthropic) {
+			if c.p.Anthropic != "" {
+				q = c.p
+				break
+			}
+		}
+		p = q
+	}
+	if ok && p.Anthropic != "" {
+		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+		if err == nil {
 			defer res.Body.Close()
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(res.StatusCode)
-			io.Copy(w, res.Body)
-			return
+			if res.StatusCode < 400 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(res.StatusCode)
+				io.Copy(w, res.Body)
+				return
+			}
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -237,31 +254,6 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
-}
-
-// countUpstream asks the provider's Anthropic endpoint to count tokens, with
-// the best fitting key that may reach that endpoint. A key limited to another
-// protocol never does, so a provider with only such keys gets no request here
-// and nil comes back. nil too when no key gets an answer below 400.
-func (s *Server) countUpstream(ctx context.Context, p provider.Provider, model string, body []byte, in http.Header) *http.Response {
-	keys := p.KeysOn()
-	if len(keys) == 0 {
-		keys = []provider.KeyAccount{{}} // a keyless provider still has its endpoint
-	}
-	for _, k := range orderKeys(p, keys, model, provider.Anthropic) {
-		q := p.WithKey(k)
-		if q.Anthropic == "" {
-			continue
-		}
-		res, err := s.forward(ctx, q, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), in)
-		if err == nil && res.StatusCode < 400 {
-			return res
-		}
-		if err == nil {
-			res.Body.Close()
-		}
-	}
-	return nil
 }
 
 // handle is the request path of one client API.
@@ -373,20 +365,42 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands := s.candidates(p, model, from)
+	cands, pl := s.plan(p, model, from)
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
 		hw := newHoldWriter(w, !last)
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		began := time.Now()
+		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
 		if !last && hw.failed() {
-			s.rest(c.rest)
+			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
+			try.Fail, try.Rest = rest.Why, &rest
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			skipped = append(skipped, c.label()+": "+call.Error)
+			continue
+		}
+		// the main pool's last key failed with an error no other provider may
+		// do better with (say a 400 for the protocol): the key aside from the
+		// pool still gets its try, as it is the one that may suit the request.
+		// Nothing rests for it, since the main pool's key did nothing wrong.
+		if !last && call.Status >= 400 && !hw.passing && i+1 < len(pl.order) && !pl.order[i].Aside && pl.order[i+1].Aside {
+			try.Fail = failure(hw.status, hw.held.Bytes())
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
 		hw.release()
 		model = c.model
+		if call.Status < 400 {
+			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+		} else {
+			try.Fail = failure(call.Status, []byte(call.Error))
+		}
+		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 		break
 	}
 	if len(skipped) > 0 {
@@ -394,6 +408,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
+	s.trace.update(tr, func(t *Route) {
+		t.Done, t.Status, t.Error, t.Millis = true, call.Status, call.Error, call.Millis
+		t.Tokens = call.Usage.Input + call.Usage.Output + call.Usage.CacheRead + call.Usage.CacheWrite
+	})
 	s.record(call)
 	if call.To != "" {
 		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
@@ -411,6 +429,22 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
 		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
+	}
+	// Cursor's API belongs to its own clients: its CLI does the talking
+	if p.Account != nil && p.Account.Agent == "cursor" {
+		call.To = from
+		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+			return s.subscription.startCursor(ctx, req, model)
+		}
+		return s.serveSubscription(w, r, from, "Cursor", model, body, &call.Usage, start)
+	}
+	// and so does Grok's
+	if p.Account != nil && p.Account.Agent == "grok" {
+		call.To = from
+		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+			return s.subscription.startGrok(ctx, req, model, p.Account.Home)
+		}
+		return s.serveSubscription(w, r, from, "Grok", model, body, &call.Usage, start)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
@@ -470,6 +504,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		keepRetry(w.Header(), res.Header)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
 	rd, sse := eventStream(res)
@@ -612,6 +647,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		keepRetry(w.Header(), res.Header)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(actual)

@@ -10,12 +10,15 @@ package gateway
 // A provider with several keys on is several candidates, one per key, in
 // order, and so is a subscription with several accounts on: when one
 // account runs out, the next account of the same provider takes the
-// request before any fallback model does.
+// request before any fallback model does. A key can be made for one
+// protocol only, as some relays hand them out; see perKey.
 
 import (
 	"bytes"
 	"net/http"
 	"regexp"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,62 +48,154 @@ func (c candidate) label() string {
 	return c.p.ID + " (" + provider.Mask(c.p.Key) + ")"
 }
 
-// perKey is a provider once per key it has on, best fit for the request
-// first (see keyfit.go) — or, for a signed-in agent, once per account it has
-// on, its own first. A key limited to a protocol takes only that protocol's
-// endpoint, and a key the provider has no endpoint for is left out; when every
-// key is left out, the keys go as they always did.
+// perKey is a provider once per key it has on, in order — or, for a
+// signed-in agent, once per account it has on, its own first. A key made
+// for one protocol only serves on that one's endpoint, and the keys that
+// suit the request go first: the Anthropic key for a Claude model, the
+// OpenAI one for a GPT model, else the key that speaks what the agent
+// spoke, so nothing is translated that needn't be.
 func perKey(p provider.Provider, model string, from provider.Protocol) []candidate {
+	out, _ := perKeyOf(p, model, from)
+	return out
+}
+
+// perKeyOf is perKey, and the accounts or keys it left out as not listing
+// the model.
+func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, left []candidate) {
 	if p.Account != nil {
-		out := []candidate{{p, model, p.ID}}
+		all := []candidate{{p, model, p.ID}}
 		for _, q := range p.AlsoOn() {
-			out = append(out, candidate{q, model, p.ID + "@" + q.Account.User})
+			all = append(all, candidate{q, model, p.ID + "@" + q.Account.User})
 		}
-		return out
+		// an account whose plan lacks the model (a Free one behind a Plus)
+		// would only answer 400; it is tried only when none lists it
+		for _, c := range all {
+			if c.p.Account.Lists(model) {
+				out = append(out, c)
+			} else {
+				left = append(left, c)
+			}
+		}
+		if len(out) == 0 {
+			return all, nil
+		}
+		return out, left
 	}
 	keys := p.KeysOn()
-	if len(keys) == 0 {
-		return []candidate{{p, model, p.ID}}
-	}
-	var use []provider.KeyAccount
+	var unlisted []candidate
 	for _, k := range keys {
-		if usableKey(p, k) {
-			use = append(use, k)
+		q := p.WithKey(k)
+		if len(q.Speaks()) == 0 {
+			continue // made for a protocol this provider has no endpoint for
 		}
-	}
-	if len(use) == 0 {
-		return legacyPerKey(p, model, keys)
-	}
-	out := make([]candidate, 0, len(use))
-	for _, k := range orderKeys(p, use, model, from) {
-		rest := p.ID + "#" + provider.KeyID(k.Key)
-		if len(keys) < 2 {
-			rest = p.ID
+		rest := p.ID
+		if len(keys) > 1 {
+			rest += "#" + provider.KeyID(k.Key)
 		}
-		out = append(out, candidate{p.WithKey(k), model, rest})
+		if !p.Serves(k, model) {
+			// the vendor lists the model to another key only
+			unlisted = append(unlisted, candidate{q, model, rest})
+			continue
+		}
+		out = append(out, candidate{q, model, rest})
 	}
-	return out
+	if len(out) == 0 {
+		out, unlisted = unlisted, nil // no key lists it: try them all the same
+	}
+	if len(out) == 0 {
+		return []candidate{{p, model, p.ID}}, nil
+	}
+	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
+	return out, unlisted
 }
 
-// legacyPerKey is the candidates before keys were limited to protocols: each
-// key on the provider as it stands, in order.
-func legacyPerKey(p provider.Provider, model string, keys []provider.KeyAccount) []candidate {
-	if len(keys) < 2 {
-		return []candidate{{p, model, p.ID}}
+// keyFit ranks how well a key suits a request, best first: 0 a key made for
+// the protocol the request is in, 1 a key made for no protocol in particular,
+// 2 a key made for another one. The request's protocol is the model's own
+// when its name says (Claude is Anthropic's, GPT is OpenAI's), else the one
+// the agent spoke, so a Claude request on a Chat key is a translated one.
+func keyFit(q provider.Provider, model string, from provider.Protocol) int {
+	switch {
+	case q.KeyProtocol == "":
+		return 1
+	case q.KeyProtocol == requestProtocol(model, from):
+		return 0
 	}
-	out := make([]candidate, 0, len(keys))
-	for _, k := range keys {
-		q := p
-		q.Key, q.KeyName, q.KeyProtocol = k.Key, k.Name, ""
-		out = append(out, candidate{q, model, p.ID + "#" + provider.KeyID(k.Key)})
-	}
-	return out
+	return 2
 }
 
-// candidates is the primary and then its fallbacks, those resting after a
-// recent failure moved behind the rest. from is the protocol the client speaks.
+// requestProtocol is the protocol a request is in: the model's home protocol
+// when its name says, else the one the agent spoke.
+func requestProtocol(model string, from provider.Protocol) provider.Protocol {
+	if f := modelFamily(model); f != "" {
+		return f
+	}
+	return from
+}
+
+// poolOf names the candidates that share a main pool: one provider's keys for one model.
+func poolOf(c candidate) string { return c.p.ID + "\x00" + c.model }
+
+// modelFamily is the protocol a model is at home in, when its name says:
+// Anthropic for Claude, Chat (standing for OpenAI's) for GPT and the o-series.
+func modelFamily(model string) provider.Protocol {
+	m := strings.ToLower(model)
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	switch {
+	case strings.HasPrefix(m, "claude"):
+		return provider.Anthropic
+	case strings.HasPrefix(m, "gpt-"), strings.Contains(m, "codex"), len(m) > 1 && m[0] == 'o' && m[1] >= '1' && m[1] <= '9':
+		return provider.Chat
+	}
+	return ""
+}
+
+// candidates is the primary and then its fallbacks, each provider's keys
+// or accounts as its routing orders them, those resting after a recent
+// failure moved behind the rest.
 func (s *Server) candidates(p provider.Provider, model string, from provider.Protocol) []candidate {
-	out := perKey(p, model, from)
+	out, _ := s.plan(p, model, from)
+	return out
+}
+
+// plan is candidates, and for the routing trace what each stood where it
+// did by, and those left out.
+func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
+	var pl planned
+	// a candidate with its trace entry, kept apart as main pool or aside
+	type slot struct {
+		c candidate
+		w Weighed
+	}
+	var main, aside []slot
+	add := func(q provider.Provider, m string, fallback bool) {
+		cs, left := perKeyOf(q, m, from)
+		cs, wg := weigh(q, cs, m, from)
+		// turn is among the main pool only: keys aside don't count
+		nMain := 0
+		for _, c := range cs {
+			if !wg.aside[c.rest] {
+				nMain++
+			}
+		}
+		for i, c := range cs {
+			w := weighed(c, q, wg, fallback, from)
+			w.Turn = i == 0 && q.Routing == provider.Rotate && nMain > 1
+			if w.Aside {
+				aside = append(aside, slot{c, w})
+			} else {
+				main = append(main, slot{c, w})
+			}
+		}
+		for _, c := range left {
+			w := weighed(c, q, weighing{}, fallback, from)
+			w.Unlisted = true
+			pl.left = append(pl.left, w)
+		}
+	}
+	add(p, model, false)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -108,42 +203,88 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, perKey(fp, fm, from)...)
+		add(fp, fm, true)
 	}
-	if len(out) == 1 {
-		return out
+	// every main pool, the primary's and the fallbacks', comes before any key
+	// aside from one; the aside keys follow, best fit first
+	sort.SliceStable(aside, func(i, j int) bool {
+		return keyFit(aside[i].c.p, aside[i].c.model, from) < keyFit(aside[j].c.p, aside[j].c.model, from)
+	})
+	if len(main)+len(aside) == 1 {
+		only := append(append([]slot{}, main...), aside...)[0]
+		pl.order = []Weighed{only.w}
+		if r, ok := restOf(only.c.rest); ok {
+			pl.order[0].Rest = &r // tried all the same: there is no other
+		}
+		return []candidate{only.c}, pl
 	}
-	var ready, resting []candidate
-	for _, c := range out {
-		if s.resting(c.rest) {
-			resting = append(resting, c)
-		} else {
-			ready = append(ready, c)
+	// a key aside from its provider's main pool waits behind that pool, even
+	// one that is ready, while any of the main pool is resting
+	held := map[string]bool{}
+	for _, s := range main {
+		if _, ok := restOf(s.c.rest); ok {
+			held[poolOf(s.c)] = true
 		}
 	}
-	return append(ready, resting...)
+	// the main pool's ready keys, then its resting ones, then the aside
+	// ready, then the aside resting
+	var mainReady, mainResting, asideReady, asideResting []slot
+	for _, s := range main {
+		if r, ok := restOf(s.c.rest); ok {
+			s.w.Rest = &r
+			mainResting = append(mainResting, s)
+		} else {
+			mainReady = append(mainReady, s)
+		}
+	}
+	for _, s := range aside {
+		r, ok := restOf(s.c.rest)
+		if ok {
+			s.w.Rest = &r
+		}
+		if ok || held[poolOf(s.c)] {
+			asideResting = append(asideResting, s)
+		} else {
+			asideReady = append(asideReady, s)
+		}
+	}
+	var out []candidate
+	for _, group := range [][]slot{mainReady, mainResting, asideReady, asideResting} {
+		for _, s := range group {
+			out = append(out, s.c)
+			pl.order = append(pl.order, s.w)
+		}
+	}
+	return out, pl
 }
 
 var restingUntil = struct {
 	sync.Mutex
-	m map[string]time.Time
-}{m: map[string]time.Time{}}
+	m    map[string]time.Time
+	note map[string]Rest // why each rests
+}{m: map[string]time.Time{}, note: map[string]Rest{}}
 
 func (s *Server) resting(id string) bool {
-	restingUntil.Lock()
-	defer restingUntil.Unlock()
-	return time.Now().Before(restingUntil.m[id])
+	_, ok := restOf(id)
+	return ok
 }
 
-func (s *Server) rest(id string) {
+// restOf is why a candidate is resting, while it is.
+func restOf(id string) (Rest, bool) {
 	restingUntil.Lock()
-	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
-	restingUntil.Unlock()
+	defer restingUntil.Unlock()
+	until := restingUntil.m[id]
+	if !time.Now().Before(until) {
+		return Rest{}, false
+	}
+	r := restingUntil.note[id]
+	r.Until = until
+	return r, true
 }
 
 // quotaWords are how vendors say "out of quota" or "slow down" when their
 // status code doesn't: some answer 400 or 403 with it.
-var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
+var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
 
 // retryable says whether another provider may do better with a request
 // that failed this way.
