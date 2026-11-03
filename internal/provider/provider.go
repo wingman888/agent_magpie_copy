@@ -37,6 +37,12 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
+	// KeyName names the front key (Key). Keys are the other keys the provider
+	// holds, in the order magpie tries them after the front one. Key stays the
+	// front key, so anything that reads it sees the account magpie uses first.
+	KeyName string     `json:"keyName,omitempty"`
+	Keys    []KeyEntry `json:"keys,omitempty"`
+
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -44,14 +50,23 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
+	// Fallback is where a request goes when this provider can't take it —
+	// out of quota, rate limited, overloaded or down — before any of the
+	// reply has been sent: models as agents pick them (provider/model),
+	// tried in order.
+	Fallback []string `json:"fallback,omitempty"`
+
+	// Headers are extra HTTP request headers sent to the vendor, exactly as
+	// the user typed them. They ride on every request magpie makes to a plain
+	// key+URL provider — forwarded calls, connectivity tests, and model-list
+	// fetches — applied after the auth headers, so the user can override those
+	// when a gateway insists on a private scheme. Signed-in agent accounts
+	// ignore them: their auth is the agent's own.
+	Headers map[string]string `json:"headers,omitempty"`
+
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
-
-	// Headers are extra HTTP headers sent on every request to a custom
-	// provider (name → value). Names keep the case the user typed. Presets
-	// and signed-in agents ignore them.
-	Headers map[string]string `json:"headers,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
@@ -99,11 +114,8 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := os.Chmod(p, 0o600); err != nil {
-		return err
-	}
-	gcIcons(f)
-	return nil
+	pruneIcons(f)
+	return os.Chmod(p, 0o600)
 }
 
 // All lists the configured providers in the order they were added, then
@@ -114,7 +126,8 @@ func All() []Provider {
 	picks := map[string]Provider{}
 	var out []Provider
 	for _, p := range stored {
-		p = normalize(p)
+		// an unusable key list still lists (with no key in use); only Save refuses it
+		p, _ = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			picks[p.ID] = p
 			continue
@@ -125,7 +138,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models = picks[a.ID].Models
+		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -173,7 +186,10 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
-	p = normalize(p)
+	p, err := normalize(p)
+	if err != nil {
+		return err
+	}
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
@@ -189,7 +205,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -249,10 +265,39 @@ func keyOptional(p Provider) bool {
 	return strings.HasPrefix(h, "localhost") || strings.HasPrefix(h, "127.0.0.1") || strings.HasPrefix(h, "0.0.0.0")
 }
 
-func normalize(p Provider) Provider {
+// normalize tidies a provider as read from or written to the file. The error
+// is for a key list that cannot work: no front key, and every other key
+// disabled. The provider is returned unpromoted in that case.
+func normalize(p Provider) (Provider, error) {
+	var keyErr error
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
+	p.KeyName = strings.TrimSpace(p.KeyName)
+	p.Keys = cleanKeys(p.Key, p.Keys)
+	if p.Key == "" && len(p.Keys) > 0 {
+		// no front key but others: the first enabled one fronts; disabled
+		// ones ahead of it stay where they are, disabled
+		j := -1
+		for i, k := range p.Keys {
+			if !k.Off {
+				j = i
+				break
+			}
+		}
+		if j < 0 {
+			keyErr = fmt.Errorf("%s has no enabled key", p.Name)
+		} else {
+			front := p.Keys[j]
+			rest := make([]KeyEntry, 0, len(p.Keys)-1)
+			rest = append(rest, p.Keys[:j]...)
+			rest = append(rest, p.Keys[j+1:]...)
+			p.Key, p.KeyName, p.Keys = front.Key, strings.TrimSpace(front.Name), rest
+		}
+	}
+	if p.Key == "" {
+		p.KeyName = ""
+	}
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -260,9 +305,15 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
+	if p.Preset != "" {
+		// Presets own their request shape; custom headers are supported only
+		// for user-defined providers.
+		p.Headers = nil
+	}
 	if pr := Preset(p.Preset); pr != nil {
-		p.Headers = nil // presets keep their own headers; user headers are dropped
 		if p.Icon == "" {
 			p.Icon = pr.Icon
 		}
@@ -276,7 +327,14 @@ func normalize(p Provider) Provider {
 			p.KeysURL = pr.KeysURL
 		}
 	}
-	return p
+	return p, keyErr
+}
+
+// Catalogs are the models.dev ids the provider's models are looked up in,
+// first match wins: a gateway that resells several vendors names them all
+// ("openai, deepseek").
+func (p Provider) Catalogs() []string {
+	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
 }
 
 func cleanList(xs []string) []string {
@@ -290,18 +348,16 @@ func cleanList(xs []string) []string {
 }
 
 // cleanHeaders trims header names and values and drops entries with an empty
-// name. It returns nil when nothing is left, so the field is not written out.
+// name, returning nil when nothing is left so the field stays out of the JSON.
 func cleanHeaders(h map[string]string) map[string]string {
-	var out map[string]string
+	out := make(map[string]string, len(h))
 	for k, v := range h {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" {
-			continue
+		if k = strings.TrimSpace(k); k != "" {
+			out[k] = strings.TrimSpace(v)
 		}
-		if out == nil {
-			out = map[string]string{}
-		}
-		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -369,9 +425,10 @@ func HostOf(u string) string {
 	return strings.ToLower(u)
 }
 
-// Mask hides all but the ends of a secret.
+// Mask hides all but the ends of a secret. A secret under 16 characters is
+// hidden entirely; a longer one shows its first and last 4 characters.
 func Mask(s string) string {
-	if len(s) <= 8 {
+	if len(s) < 16 {
 		return strings.Repeat("•", len(s))
 	}
 	return s[:4] + "…" + s[len(s)-4:]

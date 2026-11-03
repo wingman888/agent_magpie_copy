@@ -56,6 +56,13 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
+	// The user's own headers ride on plain key+URL providers, after auth so
+	// they can override a default when a gateway insists on a private scheme.
+	// Written to the map directly, not via Set, so the name keeps the exact
+	// case the user typed — some gateways match header names case-sensitively.
+	for k, v := range p.Headers {
+		req.Header[k] = []string{v}
+	}
 	return nil
 }
 
@@ -507,6 +514,7 @@ func claudeToken(ctx context.Context) (string, error) {
 
 // Accounts lists the signed-in agents as providers.
 func Accounts() []Provider {
+	rememberLogins(false)
 	home, _ := os.UserHomeDir()
 	cfg := os.Getenv("XDG_CONFIG_HOME")
 	if cfg == "" {
@@ -566,10 +574,11 @@ func claimString(m map[string]any, keys ...string) string {
 
 // ---- Codex CLI: a ChatGPT account ----------------------------------------------
 
-const (
-	codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
-	codexTokenURL = "https://auth.openai.com/oauth/token"
-)
+const codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
+
+// codexTokenURL is where ChatGPT's tokens are issued and refreshed; a var
+// so tests can point it elsewhere.
+var codexTokenURL = "https://auth.openai.com/oauth/token"
 
 // CodexBase is where a ChatGPT account's Codex requests go; a var so tests
 // can point it elsewhere.
