@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = catalog.Provider(p.Catalog)
+		known = catalog.Union(p.Catalogs()...)
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -70,17 +70,14 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
-	byID := make(map[string]catalog.Model, len(avail))
-	for _, m := range avail {
-		byID[m.ID] = m
-	}
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
-			if m, ok := byID[id]; ok {
+			if m, ok := catalog.Find(avail, id); ok {
+				m.ID = id // keep the id the user asked for, prefix and all
 				out = append(out, m)
 			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
+				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.PrimaryCatalog()})
 			}
 		}
 		return out
@@ -102,10 +99,8 @@ func (p Provider) Exposed() []catalog.Model {
 // plus the vendor's own list — so a model released after this binary was
 // built is handled without a code change.
 func (p Provider) RejectsTemperature(model string) bool {
-	for _, m := range p.Available() {
-		if m.ID == model && m.Temperature != nil {
-			return !*m.Temperature
-		}
+	if m, ok := catalog.Find(p.Available(), model); ok && m.Temperature != nil {
+		return !*m.Temperature
 	}
 	return false
 }

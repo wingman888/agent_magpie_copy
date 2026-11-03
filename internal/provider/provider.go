@@ -65,7 +65,9 @@ type Provider struct {
 	// typed. Presets and signed-in accounts ignore them; see ExtraHeaders.
 	Headers map[string]string `json:"headers,omitempty"`
 
-	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
+	// Catalog is one or more models.dev ids, comma separated, searched in
+	// order for names and reasoning levels. See Catalogs.
+	Catalog string `json:"catalog,omitempty"`
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
@@ -311,6 +313,7 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = strings.Join(SplitCatalogs(p.Catalog), ",")
 	p.Headers = cleanHeaders(p.Headers)
 	normalizeKeys(&p)
 	if pr := Preset(p.Preset); pr != nil {
@@ -328,6 +331,30 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
+}
+
+// SplitCatalogs parses a `catalog=` value: comma separated models.dev ids.
+// Blanks are dropped, ids are lower-cased and duplicates removed, order kept.
+func SplitCatalogs(s string) []string {
+	var out []string
+	for _, x := range strings.Split(s, ",") {
+		if x = strings.ToLower(strings.TrimSpace(x)); x != "" && !contains(out, x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// Catalogs lists the models.dev catalogs the provider reads, in search order.
+func (p Provider) Catalogs() []string { return SplitCatalogs(p.Catalog) }
+
+// PrimaryCatalog is the first catalog, the one that names the vendor's icon
+// and price; "" when the provider has none.
+func (p Provider) PrimaryCatalog() string {
+	if c := p.Catalogs(); len(c) > 0 {
+		return c[0]
+	}
+	return ""
 }
 
 func cleanList(xs []string) []string {

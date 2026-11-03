@@ -297,10 +297,49 @@ func Codex() []Model {
 
 // Efforts returns the reasoning levels a model supports, if known.
 func Efforts(models []Model, id string) []string {
-	for _, m := range models {
-		if m.ID == id && len(m.Efforts) > 0 {
-			return m.Efforts
-		}
+	if m, ok := Find(models, id); ok && len(m.Efforts) > 0 {
+		return m.Efforts
 	}
 	return nil
+}
+
+// Base strips a relay's "vendor/" prefix: the part after the last "/" of a
+// model id, so "deepseek/deepseek-chat" names "deepseek-chat". An id with no
+// "/" is returned as it is.
+func Base(id string) string {
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		return id[i+1:]
+	}
+	return id
+}
+
+// Find returns the entry of models that id names. A prefixed id is matched
+// by its base first ("deepseek/deepseek-chat" finds "deepseek-chat"), then
+// by the full id, for catalogs whose own ids contain a slash. The returned
+// model keeps the catalog's id; ok is false when nothing matches.
+func Find(models []Model, id string) (Model, bool) {
+	for _, want := range []string{Base(id), id} {
+		for _, m := range models {
+			if m.ID == want {
+				return m, true
+			}
+		}
+	}
+	return Model{}, false
+}
+
+// Union lists the text models of several models.dev providers, in the order
+// given. A model id that appears in an earlier catalog wins over a later one.
+func Union(ids ...string) []Model {
+	var out []Model
+	seen := map[string]bool{}
+	for _, id := range ids {
+		for _, m := range Provider(id) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out = append(out, m)
+			}
+		}
+	}
+	return out
 }

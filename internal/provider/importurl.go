@@ -68,7 +68,7 @@ func ParseImport(link string) (Provider, error) {
 			p.Name = n
 		}
 	} else {
-		p = Provider{Name: get("name"), Catalog: strings.ToLower(get("catalog"))}
+		p = Provider{Name: get("name"), Catalog: strings.Join(SplitCatalogs(get("catalog")), ",")}
 		if p.Name == "" {
 			return Provider{}, errors.New("the link names no provider: it needs preset= or name=")
 		}
@@ -80,11 +80,14 @@ func ParseImport(link string) (Provider, error) {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return Provider{}, errors.New("the link gives no base URL: it needs chat=, responses= or anthropic=")
 		}
-		if p.Catalog != "" && p.Catalog != Slug(p.Catalog) {
-			p.Catalog = ""
+		for _, c := range p.Catalogs() {
+			if c != Slug(c) {
+				p.Catalog = ""
+				break
+			}
 		}
-		if p.Catalog != "" {
-			p.Icon = IconForCatalog(p.Catalog)
+		if c := p.PrimaryCatalog(); c != "" {
+			p.Icon = IconForCatalog(c)
 		}
 		p.Website = page(get("website"))
 		p.KeysURL = page(get("keys"))

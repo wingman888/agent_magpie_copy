@@ -181,14 +181,13 @@ type liveModel struct {
 
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
+//
+// A relay lists prefixed ids ("deepseek/deepseek-chat"); Find matches those
+// against the catalog's bare ids. The live id itself is kept.
 func Decorate(live []Model, known []Model) []Model {
-	byID := make(map[string]Model, len(known))
-	for _, m := range known {
-		byID[m.ID] = m
-	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := byID[m.ID]; ok {
+		if k, ok := Find(known, m.ID); ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
