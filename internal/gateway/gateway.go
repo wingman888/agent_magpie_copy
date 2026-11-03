@@ -67,7 +67,6 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
-	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
@@ -222,11 +221,6 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	// Deliberate simplification: token counting does not fail over across the
-	// provider's keys, and it uses only the front key. Resolve hands back the
-	// provider with Key set to its front key, which is always an enabled one
-	// (a switched-off key is never Key), so a disabled key is never sent here.
-	// A count is an estimate anyway; a failure falls through to the local one.
 	if ok && p.Anthropic != "" {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
@@ -354,66 +348,46 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary's keys in turn, then its fallbacks' keys, while one can't
-	// take the request and nothing has been sent yet
-	cands := s.candidates(p, model)
-	// every key in play is hidden from the caller, the call record and the log
-	keys := secretsOf(p, cands)
-	call.RequestBody = redact(call.RequestBody, keys)
-	out := &redactWriter{ResponseWriter: w, keys: keys}
-	var skipped []string
-	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(out, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		call.Error = redact(call.Error, keys)
-		if !last && hw.failed() {
-			s.rest(c.ref)
-			skipped = append(skipped, c.label+": "+call.Error)
-			continue
-		}
-		hw.release()
-		model = c.model
-		break
-	}
-	if len(skipped) > 0 {
-		call.Fallback = strings.Join(skipped, "; ")
-	}
-	call.Millis = time.Since(start).Milliseconds()
-	finishCapture()
-	s.record(call)
-	if call.To != "" {
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-	}
-}
-
-// attempt sends a request to one provider. call.To stays empty when the
-// provider has no endpoint to send it to.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
+	call.Provider = p.ID
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
 	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
 	if relay {
 		call.To = from
-		return s.passthrough(w, r, p, from, model, body, &call.Usage)
+		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+	} else {
+		to := p.Speaks()
+		if len(to) == 0 {
+			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
+			writeError(w, from, call.Status, call.Error)
+			call.Millis = time.Since(start).Milliseconds()
+			finishCapture()
+			s.record(call)
+			return
+		}
+		call.To = to[0]
+		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 	}
-	to := p.Speaks()
-	if len(to) == 0 {
-		msg := p.Name + " has no endpoint configured"
-		return writeError(w, from, 502, msg), msg
-	}
-	call.To = to[0]
-	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+	call.Millis = time.Since(start).Milliseconds()
+	finishCapture()
+	s.record(call)
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
 // forward sends a request to the provider.
@@ -439,7 +413,8 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
-	return s.client.Do(req)
+	p.ApplyHeaders(req)
+	return p.ClientFor(s.client).Do(req)
 }
 
 // passthrough relays a request the provider understands as-is, with the
