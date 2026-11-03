@@ -283,6 +283,9 @@ func keyOptional(p Provider) bool {
 }
 
 func normalize(p Provider) Provider {
+	// An Account is never read from or written to providers.json. It is
+	// always taken fresh from the agent's own sign-in (see signedIn).
+	p.Account = nil
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
