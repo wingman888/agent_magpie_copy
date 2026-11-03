@@ -31,21 +31,23 @@ func (p Provider) Test(ctx context.Context) []Result {
 	} else if ms := p.Available(); len(ms) > 0 {
 		model = ms[0].ID
 	}
+	// the key in use, on the endpoints it is for only
+	q := p.WithKey(KeyAccount{Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol})
 	var out []Result
-	for _, proto := range p.Speaks() {
+	for _, proto := range q.Speaks() {
 		var url, body string
 		switch proto {
 		case Chat:
-			url = p.Chat + "/chat/completions"
+			url = q.Chat + "/chat/completions"
 			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 		case Responses:
-			url = p.Responses + "/responses"
+			url = q.Responses + "/responses"
 			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
 		case Anthropic:
-			url = p.Anthropic + "/v1/messages"
+			url = q.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		}
-		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
+		out = append(out, probe(ctx, q, proto, url, q.Prepare([]byte(body)), model))
 	}
 	return out
 }
@@ -53,7 +55,8 @@ func (p Provider) Test(ctx context.Context) []Result {
 // AuthHeaders is how a request to the vendor proves who it is. Anthropic's
 // own API wants x-api-key alone; compatible vendors take either, so both.
 func AuthHeaders(p Provider, proto Protocol) map[string]string {
-	if p.Key == "" {
+	if p.Key == "" || (p.KeyProtocol != "" && p.KeyProtocol != proto) {
+		// a key limited to another protocol is not sent to this one
 		return map[string]string{}
 	}
 	if proto == Anthropic {

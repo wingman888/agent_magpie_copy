@@ -6,11 +6,17 @@ package gateway
 // been sent, so an agent sees one clean answer from whoever gave it, never a
 // half from each. A provider that just failed that way waits at the back of
 // the line for a minute, rather than costing every request a doomed try.
+//
+// A provider with several keys on is several candidates, one per key, in
+// order, and so is a subscription with several accounts on: when one
+// account runs out, the next account of the same provider takes the
+// request before any fallback model does.
 
 import (
 	"bytes"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,57 +26,139 @@ import (
 
 const fallbackCooldown = time.Minute
 
-// candidate is one attempt: a provider carrying only the key this attempt
-// uses, and the model to ask it for.
 type candidate struct {
 	p     provider.Provider
 	model string
-	ref   string // provider and key: what a failure rests under
-	label string // how a failure is named in the call record
+	rest  string // what rests after a failure: the provider, or one of its keys
 }
 
-// keyed expands a provider into one candidate per key the gateway may use,
-// in attempt order. Off keys are never among them. A provider with a single
-// enabled key keeps the record label it always had: just its ID.
-func keyed(p provider.Provider, model string) []candidate {
-	on := p.KeysOn()
-	if p.Account != nil || len(on) == 0 {
-		return []candidate{{p: p, model: model, ref: p.ID, label: p.ID}}
+// The vendor family a model belongs to, from its name alone.
+const (
+	familyAnthropic = "anthropic"
+	familyOpenAI    = "openai"
+	familyUnknown   = "unknown"
+)
+
+var openAIModelStart = regexp.MustCompile(`^o[1-9]`)
+
+// modelFamily says which family a model id belongs to. A "provider/" prefix
+// is ignored; a name that says neither Claude nor OpenAI is unknown.
+func modelFamily(model string) string {
+	name := model
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
 	}
-	out := make([]candidate, 0, len(on))
-	for _, k := range on {
-		q := p
-		q.Key, q.KeyName, q.Keys = k.Key, k.Name, nil
-		c := candidate{p: q, model: model, ref: p.ID + "/" + provider.KeyRef(k.Key), label: p.ID}
-		if len(on) > 1 {
-			who := k.Name
-			if who == "" {
-				who = provider.Mask(k.Key)
-			}
-			c.label = p.ID + "(" + who + ")"
-		}
-		out = append(out, c)
+	name = strings.ToLower(name)
+	switch {
+	case strings.HasPrefix(name, "claude"):
+		return familyAnthropic
+	case strings.HasPrefix(name, "gpt-"), strings.Contains(name, "codex"), openAIModelStart.MatchString(name):
+		return familyOpenAI
 	}
-	return out
+	return familyUnknown
 }
 
-// candidates is the primary's keys, then each fallback's keys, group by
-// group (one group per provider). Within a group, keys resting after a recent
-// failure move behind its ready keys but stay in the group, so they are spent
-// before the next provider is asked. A single-key provider with its key
-// resting goes behind the others, as a resting provider always has; a
-// multi-key provider with every key resting keeps its place in line, its keys
-// tried in order before the next provider.
-func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	var out, deferred []candidate
-	add := func(group []candidate) {
-		if len(group) == 1 && s.allResting(group) {
-			deferred = append(deferred, group...)
-			return
-		}
-		out = append(out, s.inOrder(group)...)
+// keyFamily is the model family a key limited to a protocol is for; empty
+// for a key that is for any.
+func keyFamily(proto provider.Protocol) string {
+	switch proto {
+	case provider.Anthropic:
+		return familyAnthropic
+	case provider.Chat, provider.Responses:
+		return familyOpenAI
 	}
-	add(keyed(p, model))
+	return ""
+}
+
+// keyTier ranks how well a key suits a request, 0 best: the key of the
+// model's own family first, then a key for any model, then a key for
+// another family. When the name says nothing, a key that speaks the client's
+// protocol directly is best and one that needs translating is not.
+func keyTier(from provider.Protocol, family string, p provider.Provider, k provider.KeyAccount) int {
+	if family != familyUnknown {
+		switch kf := keyFamily(k.Protocol); {
+		case kf == family:
+			return 0
+		case kf == "":
+			return 1
+		default:
+			return 2
+		}
+	}
+	if k.Protocol == from || (k.Protocol == "" && p.Base(from) != "") {
+		return 0
+	}
+	return 1
+}
+
+// label names a candidate in a call's record: the provider, and the key
+// when it has several on.
+func (c candidate) label() string {
+	if c.rest == c.p.ID {
+		return c.p.ID
+	}
+	if c.p.Account != nil {
+		return c.p.ID + " (" + c.p.Account.User + ")"
+	}
+	if c.p.KeyName != "" {
+		return c.p.ID + " (" + c.p.KeyName + ")"
+	}
+	return c.p.ID + " (" + provider.Mask(c.p.Key) + ")"
+}
+
+// perKey is a provider once per key it has on, in order — or, for a
+// signed-in agent, once per account it has on, its own first. A key limited
+// to one protocol is used on that protocol's endpoint only, and is left out
+// when the provider has no such endpoint. The keys that suit the model and
+// the client's protocol best go first; the others keep their order.
+func perKey(from provider.Protocol, p provider.Provider, model string) []candidate {
+	if p.Account != nil {
+		out := []candidate{{p, model, p.ID}}
+		for _, q := range p.AlsoOn() {
+			out = append(out, candidate{q, model, p.ID + "@" + q.Account.User})
+		}
+		return out
+	}
+	keys := p.KeysOn()
+	if len(keys) == 0 {
+		return []candidate{{p, model, p.ID}}
+	}
+	label := func(k provider.KeyAccount) string {
+		if len(keys) < 2 {
+			return p.ID
+		}
+		return p.ID + "#" + provider.KeyID(k.Key)
+	}
+	family := modelFamily(model)
+	type ranked struct {
+		c    candidate
+		tier int
+	}
+	var out []ranked
+	for _, k := range keys {
+		if k.Protocol != "" && p.Base(k.Protocol) == "" {
+			continue // limited to a protocol this provider lacks: not in use
+		}
+		out = append(out, ranked{candidate{p.WithKey(k), model, label(k)}, keyTier(from, family, p, k)})
+	}
+	if len(out) == 0 {
+		// every key is limited to a protocol this provider lacks: none of
+		// them may be sent to another protocol's endpoint, so there is no
+		// candidate from this provider
+		return nil
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].tier < out[j].tier })
+	cs := make([]candidate, len(out))
+	for i, r := range out {
+		cs[i] = r.c
+	}
+	return cs
+}
+
+// candidates is the primary and then its fallbacks, those resting after a
+// recent failure moved behind the rest.
+func (s *Server) candidates(from provider.Protocol, p provider.Provider, model string) []candidate {
+	out := perKey(from, p, model)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -78,20 +166,19 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		add(keyed(fp, fm))
+		out = append(out, perKey(from, fp, fm)...)
 	}
-	return append(out, deferred...)
+	return s.restLast(out)
 }
 
-// inOrder moves the keys of one provider that are resting behind the ready
-// ones. It only reorders: resting keys remain in the group, tried last.
-func (s *Server) inOrder(group []candidate) []candidate {
-	if len(group) <= 1 {
-		return group
+// restLast moves the candidates resting after a recent failure behind the rest.
+func (s *Server) restLast(out []candidate) []candidate {
+	if len(out) == 1 {
+		return out
 	}
 	var ready, resting []candidate
-	for _, c := range group {
-		if s.resting(c.ref) {
+	for _, c := range out {
+		if s.resting(c.rest) {
 			resting = append(resting, c)
 		} else {
 			ready = append(ready, c)
@@ -100,69 +187,16 @@ func (s *Server) inOrder(group []candidate) []candidate {
 	return append(ready, resting...)
 }
 
-// allResting says whether every key of a provider's group is resting.
-func (s *Server) allResting(group []candidate) bool {
-	for _, c := range group {
-		if !s.resting(c.ref) {
-			return false
+// anthropicKey is the provider as its best key sees it for counting tokens
+// with Anthropic's API: the first key, in the order requests try them, that
+// has an Anthropic endpoint. None when every key is for another protocol.
+func (s *Server) anthropicKey(p provider.Provider, model string) (provider.Provider, bool) {
+	for _, c := range s.restLast(perKey(provider.Anthropic, p, model)) {
+		if c.p.Anthropic != "" {
+			return c.p, true
 		}
 	}
-	return true
-}
-
-// minSecret is the shortest key redaction hides. Real API keys are far longer;
-// a short string would match ordinary words in a reply.
-const minSecret = 8
-
-// secretsOf lists the full keys a request may touch: the primary's keys and
-// the key of every candidate. Each is hidden wherever it could reach a
-// caller, a call record or a log.
-func secretsOf(p provider.Provider, cands []candidate) []string {
-	var keys []string
-	add := func(k string) {
-		if len(k) >= minSecret {
-			keys = append(keys, k)
-		}
-	}
-	add(p.Key)
-	for _, k := range p.Keys {
-		add(k.Key)
-	}
-	for _, c := range cands {
-		add(c.p.Key)
-	}
-	return keys
-}
-
-// redact hides every one of the keys wherever an error message repeats them.
-func redact(msg string, keys []string) string {
-	for _, k := range keys {
-		msg = strings.ReplaceAll(msg, k, provider.Mask(k))
-	}
-	return msg
-}
-
-// redactWriter hides the keys in everything written on its way to the
-// caller, so an upstream error that echoes a key never reaches the client
-// or the call record in full. Keys split across two writes are not caught;
-// error replies, which the gateway writes whole, always are.
-type redactWriter struct {
-	http.ResponseWriter
-	keys []string
-}
-
-func (r *redactWriter) Write(b []byte) (int, error) {
-	if len(r.keys) == 0 {
-		return r.ResponseWriter.Write(b)
-	}
-	_, err := r.ResponseWriter.Write([]byte(redact(string(b), r.keys)))
-	return len(b), err
-}
-
-func (r *redactWriter) Flush() {
-	if f, ok := r.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	return provider.Provider{}, false
 }
 
 var restingUntil = struct {

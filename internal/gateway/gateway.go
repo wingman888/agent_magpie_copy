@@ -222,20 +222,17 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	// Deliberate simplification: token counting does not fail over across the
-	// provider's keys, and it uses only the front key. Resolve hands back the
-	// provider with Key set to its front key, which is always an enabled one
-	// (a switched-off key is never Key), so a disabled key is never sent here.
-	// A count is an estimate anyway; a failure falls through to the local one.
-	if ok && p.Anthropic != "" {
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-		if err == nil {
-			defer res.Body.Close()
-			if res.StatusCode < 400 {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(res.StatusCode)
-				io.Copy(w, res.Body)
-				return
+	if ok {
+		if kp, found := s.anthropicKey(p, model); found {
+			res, err := s.forward(r.Context(), kp, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+			if err == nil {
+				defer res.Body.Close()
+				if res.StatusCode < 400 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(res.StatusCode)
+					io.Copy(w, res.Body)
+					return
+				}
 			}
 		}
 	}
@@ -354,23 +351,26 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary's keys in turn, then its fallbacks' keys, while one can't
-	// take the request and nothing has been sent yet
-	cands := s.candidates(p, model)
-	// every key in play is hidden from the caller, the call record and the log
-	keys := secretsOf(p, cands)
-	call.RequestBody = redact(call.RequestBody, keys)
-	out := &redactWriter{ResponseWriter: w, keys: keys}
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
+	cands := s.candidates(from, p, model)
+	if len(cands) == 0 {
+		// every key of the provider is limited to a protocol it lacks
+		msg := p.Name + " has no key for an endpoint this request can use"
+		call.Status, call.Error = writeError(w, from, 502, msg), msg
+		finishCapture()
+		s.record(call)
+		return
+	}
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(out, !last)
+		hw := newHoldWriter(w, !last)
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		call.Error = redact(call.Error, keys)
 		if !last && hw.failed() {
-			s.rest(c.ref)
-			skipped = append(skipped, c.label+": "+call.Error)
+			s.rest(c.rest)
+			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
 		hw.release()
@@ -398,7 +398,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
