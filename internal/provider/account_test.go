@@ -256,19 +256,10 @@ func TestStaleAccountPicksIgnored(t *testing.T) {
 func TestSaveAccountWritesOnlyModels(t *testing.T) {
 	home := isolate(t)
 	writeCodex(t, home, "chatgpt", "me@example.com", "plus", time.Now().Add(time.Hour).Unix())
-	// a key or a base URL has no place on an account: Save refuses, it does not drop them
-	if err := Save(Provider{ID: codexID, Name: "Codex", Key: "sk-secret", Models: []string{"gpt-5.5"}}); err == nil {
-		t.Error("Save with a key should fail")
-	}
-	if err := Save(Provider{ID: codexID, Name: "Codex", Chat: "https://x.example/v1", Models: []string{"gpt-5.5"}}); err == nil {
-		t.Error("Save with a base URL should fail")
-	}
-	if _, err := os.Stat(Path()); err == nil {
-		t.Fatal("a refused save still wrote providers.json")
-	}
-	err := Save(Provider{ID: codexID, Name: "Codex", Models: []string{"gpt-5.5", "gpt-5.5", " "}})
+	// a key, a name or a base URL has no place on an account: Save ignores them and keeps only the picks
+	err := Save(Provider{ID: codexID, Name: "Codex", Key: "sk-secret", Chat: "https://x.example/v1", Models: []string{"gpt-5.5", "gpt-5.5", " "}})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Save with a key/URL should succeed and ignore them: %v", err)
 	}
 	raw, err := os.ReadFile(Path())
 	if err != nil {

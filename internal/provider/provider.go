@@ -197,24 +197,10 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// saveAccount stores the model picks of an agent account. A key or a base URL
-// has no place on an account: the sign-in supplies both, so passing one is an
-// error rather than something dial quietly throws away. The account's own
-// base URL (the one the sign-in gives it) is allowed, so a provider read back
-// with Find can be saved again with new picks.
+// saveAccount stores the model picks of an agent account. The sign-in supplies
+// the key and the base URL, so any key, name or URL passed in is ignored: only
+// the id and the picks are written to the config file.
 func saveAccount(p Provider) error {
-	if p.Key != "" {
-		return fmt.Errorf("%s is signed in through its agent and takes no API key; sign in with the agent instead", p.ID)
-	}
-	own := Provider{}
-	for _, a := range accounts(nil) {
-		if a.ID == p.ID {
-			own = a
-		}
-	}
-	if (p.Chat != "" && p.Chat != own.Chat) || (p.Responses != "" && p.Responses != own.Responses) || (p.Anthropic != "" && p.Anthropic != own.Anthropic) {
-		return fmt.Errorf("%s is signed in through its agent and takes no base URL; only its model picks can be saved", p.ID)
-	}
 	f := load()
 	entry := Provider{ID: p.ID, Models: cleanList(p.Models)}
 	for i := range f.Providers {
