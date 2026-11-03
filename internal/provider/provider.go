@@ -23,7 +23,9 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
+	// Gemini is the Gemini API. Only agents speak it to dial; no vendor
+	// does, so it never appears in Protocols or in a provider's Speaks.
+	Gemini Protocol = "gemini"
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -32,15 +34,10 @@ var Protocols = []Protocol{Chat, Responses, Anthropic}
 // Provider is one configured vendor.
 type Provider struct {
 	ID     string `json:"id"`
-	Name   string `json:"name,omitempty"`
+	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key,omitempty"`    // API key, as typed by the user
-
-	// Account is set on a provider that is a sign-in the user already has in
-	// an agent (codex, copilot). Such a provider keeps no address or key; its
-	// Account is read from the agent's files and never stored.
-	Account *Account `json:"account,omitempty"`
+	Key    string `json:"key"`              // API key, as typed by the user
 
 	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -94,63 +91,13 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// hasAddress is true for a provider the user built with base URLs of its own.
-func (p Provider) hasAddress() bool {
-	return p.Chat != "" || p.Responses != "" || p.Anthropic != ""
-}
-
-// find returns the index of a stored record by id, or -1.
-func find(f file, id string) int {
-	for i := range f.Providers {
-		if f.Providers[i].ID == id {
-			return i
-		}
-	}
-	return -1
-}
-
-// All lists the configured providers in the order they were added, then the
-// signed-in account providers that have no record yet. A stored account
-// record is only a model choice; it is listed while its sign-in lasts.
+// All lists the configured providers in the order they were added.
 func All() []Provider {
-	recs := load().Providers
-	var out []Provider
-	seenAccount := map[string]bool{}
-	for _, r := range recs {
-		p := normalize(r)
-		if !isAccountID(p.ID) || p.hasAddress() {
-			out = append(out, p)
-			continue
-		}
-		if seenAccount[p.ID] {
-			continue
-		}
-		seenAccount[p.ID] = true
-		if acc, ok := signedIn(p.ID); ok {
-			acc.Models = p.Models
-			out = append(out, acc)
-		}
-	}
-	for _, id := range accountIDs {
-		if seenAccount[id] || hasSelfBuilt(recs, id) {
-			continue
-		}
-		if acc, ok := signedIn(id); ok {
-			out = append(out, acc)
-		}
+	out := load().Providers
+	for i := range out {
+		out[i] = normalize(out[i])
 	}
 	return out
-}
-
-// hasSelfBuilt reports whether the user built a provider with this id that
-// has addresses of its own; that one wins over the account.
-func hasSelfBuilt(recs []Provider, id string) bool {
-	for _, r := range recs {
-		if r.ID == id && normalize(r).hasAddress() {
-			return true
-		}
-	}
-	return false
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -171,18 +118,11 @@ func Slug(name string) string {
 	return strings.Trim(idRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-// Save adds or replaces a provider. For an account provider (codex, copilot)
-// only the model choice is kept; the address, key and other fields passed in
-// are ignored, unless the user already has their own provider with that id.
+// Save adds or replaces a provider.
 func Save(p Provider) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
-	}
-	// A user's own provider with this id is kept as it was saved; the
-	// account path only ever stores the model choice.
-	if isAccountID(p.ID) && !(p.hasAddress() && hasSelfBuilt(load().Providers, p.ID)) {
-		return saveAccount(p)
 	}
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
@@ -210,54 +150,9 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// saveAccount stores the model choice for an account provider. Only the
-// choice is written, never the address or key.
-func saveAccount(p Provider) error {
-	f := load()
-	if i := find(f, p.ID); i >= 0 && f.Providers[i].hasAddress() {
-		// the user's own provider with this id wins; only its models change,
-		// and its address and key are kept, whether or not the account is signed in
-		f.Providers[i].Models = p.Models
-		return store(f)
-	}
-	if _, ok := signedIn(p.ID); !ok {
-		return fmt.Errorf("%s is not signed in; sign in with its agent first", p.ID)
-	}
-	rec := Provider{ID: p.ID, Models: p.Models}
-	if i := find(f, p.ID); i >= 0 {
-		f.Providers[i] = rec
-	} else {
-		f.Providers = append(f.Providers, rec)
-	}
-	return store(f)
-}
-
-// deleteAccount clears an account provider's model choice; the provider stays
-// while its sign-in does. Once signed out, its record is dropped.
-func deleteAccount(f file, id string) error {
-	_, signed := signedIn(id)
-	i := find(f, id)
-	if !signed {
-		if i < 0 {
-			return fmt.Errorf("no provider %q", id)
-		}
-		f.Providers = append(f.Providers[:i], f.Providers[i+1:]...)
-		return store(f)
-	}
-	if i >= 0 {
-		f.Providers[i].Models = nil
-		return store(f)
-	}
-	return nil
-}
-
-// Delete removes a provider. For an account provider it only clears the
-// model choice.
+// Delete removes a provider.
 func Delete(id string) error {
 	f := load()
-	if i := find(f, id); isAccountID(id) && (i < 0 || !f.Providers[i].hasAddress()) {
-		return deleteAccount(f, id)
-	}
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -284,9 +179,6 @@ func keyOptional(p Provider) bool {
 }
 
 func normalize(p Provider) Provider {
-	// An Account is never read from or written to providers.json. It is
-	// always taken fresh from the agent's own sign-in (see signedIn).
-	p.Account = nil
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
@@ -388,5 +280,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-// An account provider is ready while its sign-in exists, which All checks.
-func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
