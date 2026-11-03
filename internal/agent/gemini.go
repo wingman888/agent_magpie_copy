@@ -7,6 +7,7 @@ import (
 
 	"github.com/yetone/dial/internal/catalog"
 	"github.com/yetone/dial/internal/edit"
+	"github.com/yetone/dial/internal/gateway"
 	"github.com/yetone/dial/internal/provider"
 )
 
@@ -14,12 +15,18 @@ import (
 // authenticates: Google sign-in, a Gemini API key, or Vertex AI. The choice
 // lives in settings.json (security.auth.selectedType). A Google provider
 // added in dial lends its key through ~/.gemini/.env, which the CLI loads.
+//
+// Picking a catalog model routes the CLI through the gateway: the endpoint
+// and key in .env, the auth type and model in settings.json. What those
+// settings said before is stashed so that choosing a native model or the
+// default puts them back exactly as they were.
 
 func gemini(home string) *Agent {
 	dir := filepath.Join(home, ".gemini")
 	path := filepath.Join(dir, "settings.json")
 	envPath := filepath.Join(dir, ".env")
 	auth := jsonGet(path, "security.auth.selectedType")
+	modelName := jsonGet(path, "model.name")
 	base := func() string { v, _ := edit.GetEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL"); return v }
 	envKey := func() string { v, _ := edit.GetEnvFile(envPath, "GEMINI_API_KEY"); return v }
 	dialKey := func() string {
@@ -30,8 +37,12 @@ func gemini(home string) *Agent {
 		}
 		return ""
 	}
+	routed := func() bool { return base() == gateway.URL() }
 
 	current := func() string {
+		if routed() {
+			return dialID
+		}
 		if base() != "" {
 			return "custom"
 		}
@@ -43,18 +54,120 @@ func gemini(home string) *Agent {
 		}
 		return "google"
 	}
-	use := func(id string) error {
+
+	// route points the CLI at the gateway with a catalog model. The first
+	// time, what the CLI had is stashed; while already routed the stash is
+	// left alone so it keeps the original values.
+	route := func(model string) error {
+		if !routed() {
+			stash(map[string]string{
+				"gemini.base_url": base(),
+				"gemini.api_key":  envKey(),
+				"gemini.auth":     auth(),
+				"gemini.model":    modelName(),
+			})
+		}
+		if err := edit.SetEnvFile(envPath,
+			edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: gateway.URL()},
+			edit.KV{Path: "GEMINI_API_KEY", Value: gateway.Token}); err != nil {
+			return err
+		}
+		return edit.SetJSON(path,
+			edit.KV{Path: "security.auth.selectedType", Value: "gemini-api-key"},
+			edit.KV{Path: "model.name", Value: model})
+	}
+
+	// unroute puts back each stashed value; a value that was absent before
+	// routing is removed again.
+	unroute := func() error {
+		var envSet []edit.KV
+		var envDel []string
+		for _, kv := range []struct{ key, stashKey string }{
+			{"GOOGLE_GEMINI_BASE_URL", "gemini.base_url"},
+			{"GEMINI_API_KEY", "gemini.api_key"},
+		} {
+			if v := unstash(kv.stashKey); v != "" {
+				envSet = append(envSet, edit.KV{Path: kv.key, Value: v})
+			} else {
+				envDel = append(envDel, kv.key)
+			}
+		}
+		var jsonSetKV []edit.KV
+		var jsonDel []string
+		for _, kv := range []struct{ key, stashKey string }{
+			{"security.auth.selectedType", "gemini.auth"},
+			{"model.name", "gemini.model"},
+		} {
+			if v := unstash(kv.stashKey); v != "" {
+				jsonSetKV = append(jsonSetKV, edit.KV{Path: kv.key, Value: v})
+			} else {
+				jsonDel = append(jsonDel, kv.key)
+			}
+		}
+		if len(envDel) > 0 {
+			if err := edit.DelEnvFile(envPath, envDel...); err != nil {
+				return err
+			}
+		}
+		if len(envSet) > 0 {
+			if err := edit.SetEnvFile(envPath, envSet...); err != nil {
+				return err
+			}
+		}
+		if len(jsonDel) > 0 {
+			if err := edit.DelJSON(path, jsonDel...); err != nil {
+				return err
+			}
+		}
+		if len(jsonSetKV) > 0 {
+			if err := edit.SetJSON(path, jsonSetKV...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	setAuth := func(id string) error {
 		switch id {
 		case "":
+			if routed() {
+				return unroute()
+			}
 			// back to the CLI's own first-run choice
 			if err := edit.DelJSON(path, "security.auth.selectedType"); err != nil {
 				return err
 			}
-		case "custom":
-			if current() != "custom" {
+			return edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL")
+		case dialID:
+			if routed() {
+				return nil
+			}
+			return fmt.Errorf("Gemini CLI is not routed through dial yet; choose a dial model for it instead (dial gemini <provider/model>, or from the model list)")
+		case "google", "vertex", "api-key", "custom":
+		default:
+			return fmt.Errorf("unknown provider %q", id)
+		}
+		// "custom" is checked before anything changes, so a refused choice
+		// leaves an existing route alone. While routed, the CLI's own base URL
+		// is the stashed one.
+		if id == "custom" {
+			orig := base()
+			if routed() {
+				orig = stashLoad()["gemini.base_url"]
+			}
+			if orig == "" {
 				return fmt.Errorf("custom means whatever GOOGLE_GEMINI_BASE_URL is already in %s; set it there", envPath)
 			}
-			return nil
+		}
+		wasRouted := routed()
+		if wasRouted {
+			// unroute puts back the user's own base URL and key; nothing
+			// below may clear the base URL again.
+			if err := unroute(); err != nil {
+				return err
+			}
+		}
+		switch id {
 		case "google":
 			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "oauth-personal"}); err != nil {
 				return err
@@ -72,10 +185,31 @@ func gemini(home string) *Agent {
 					return err
 				}
 			}
-		default:
-			return fmt.Errorf("unknown provider %q", id)
+		case "custom":
+			return nil
+		}
+		if wasRouted {
+			return nil
 		}
 		return edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL")
+	}
+
+	setModel := func(v string) error {
+		if v == "" {
+			if routed() {
+				return unroute()
+			}
+			return edit.DelJSON(path, "model.name")
+		}
+		if isDial(v) {
+			return route(v)
+		}
+		if routed() {
+			if err := unroute(); err != nil {
+				return err
+			}
+		}
+		return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
 	}
 
 	return &Agent{
@@ -91,7 +225,7 @@ func gemini(home string) *Agent {
 			{
 				Key: "provider", Label: "auth",
 				Get: current,
-				Set: use,
+				Set: setAuth,
 				Options: func(map[string]string) []Option {
 					key := Option{Value: "api-key", Label: "API key", Icon: "gemini-color"}
 					switch {
@@ -107,6 +241,9 @@ func gemini(home string) *Agent {
 						key,
 						{Value: "vertex", Label: "Vertex AI", Icon: "googlecloud-color", Note: "Vertex AI · $GOOGLE_CLOUD_PROJECT"},
 					}
+					if routed() {
+						out = append(out, Option{Value: dialID, Label: "dial", Note: "local gateway · models of every vendor"})
+					}
 					if current() == "custom" {
 						out = append(out, Option{Value: "custom", Note: hostOf(base()) + " (from .env)"})
 					}
@@ -115,8 +252,8 @@ func gemini(home string) *Agent {
 			},
 			{
 				Key: "model", Label: "model",
-				Get: jsonGet(path, "model.name"),
-				Set: jsonSet(path, "model.name"),
+				Get: modelName,
+				Set: setModel,
 				Options: func(map[string]string) []Option {
 					var ms []catalog.Model
 					for _, m := range catalog.Provider("google") {
@@ -124,7 +261,8 @@ func gemini(home string) *Agent {
 							ms = append(ms, m)
 						}
 					}
-					return options(ms, "")
+					out := group("Gemini CLI", options(ms, ""))
+					return append(out, viaDial("")...)
 				},
 			},
 		},
