@@ -86,7 +86,7 @@ func TestCodexAgentOffersNoOwnAccountModels(t *testing.T) {
 		t.Errorf("codex's list lost other providers' models: %v", codexVals)
 	}
 
-	other := optionValues(viaDial(dialID + "/"))
+	other := optionValues(viaDial(""))
 	if !contains(other, "codex/gpt-5.5") {
 		t.Errorf("another agent's list lacks codex/gpt-5.5: %v", other)
 	}

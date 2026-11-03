@@ -350,7 +350,7 @@ func showProvider(p provider.Provider) error {
 	}
 	fmt.Println(" ", name)
 	if p.Account != nil {
-		kv("account", accountLine(p))
+		fmt.Printf("  %s %s\n", muted.Render("account:"), accountLine(p))
 	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)

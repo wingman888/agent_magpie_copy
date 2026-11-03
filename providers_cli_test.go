@@ -177,7 +177,7 @@ func TestSavedAccountChoiceStoresOnlyModels(t *testing.T) {
 	home := cliSandbox(t)
 	signInCodex(t, home, "dev@example.com", "pro")
 	capture(t, func() error {
-		return providerCmd([]string{"dial", "provider", "models", "codex", "gpt-5.5"})
+		return providerCmd([]string{"provider", "models", "codex", "gpt-5.5"})
 	})
 	b, err := os.ReadFile(provider.Path())
 	if err != nil {
@@ -195,7 +195,7 @@ func TestSavedAccountChoiceStoresOnlyModels(t *testing.T) {
 func TestKeyCommandRefusesAccountProvider(t *testing.T) {
 	home := cliSandbox(t)
 	signInCodex(t, home, "dev@example.com", "pro")
-	err := providerCmd([]string{"dial", "provider", "key", "codex", "sk-should-not-store"})
+	err := providerCmd([]string{"provider", "key", "codex", "sk-should-not-store"})
 	if err == nil {
 		t.Fatal("setting a key on an account provider should fail")
 	}
