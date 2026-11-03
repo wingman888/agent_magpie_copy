@@ -105,6 +105,9 @@ func fetchSubscriptionUsage() []SubscriptionQuota {
 	if _, ok := claudeAccount(); ok && !hidden["claude"] {
 		fetches = append(fetches, func() SubscriptionQuota { return claudeSubscriptionUsage(ctx) })
 	}
+	if _, ok := grokAccount(); ok && !hidden["grok"] {
+		fetches = append(fetches, func() SubscriptionQuota { return grokSubscriptionUsage(ctx) })
+	}
 	if home, err := os.UserHomeDir(); err == nil {
 		if _, ok := codexAccount(home); ok && !hidden["codex"] {
 			auth := filepath.Join(home, ".codex", "auth.json")

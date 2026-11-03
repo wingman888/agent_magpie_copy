@@ -223,3 +223,80 @@ func TestSubscriptionAccountsTakeOver(t *testing.T) {
 		t.Fatalf("second request tried %v", tried)
 	}
 }
+
+// A relay that hands out one key for Anthropic and another for OpenAI:
+// each key is used on its own endpoint only, and the one that suits the
+// model goes first whatever the order.
+func TestKeysMadeForOneProtocol(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.Unlock()
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		key := r.Header.Get("x-api-key")
+		if key == "" {
+			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
+		seen = append(seen, r.URL.Path+" "+key)
+		if (r.URL.Path == "/v1/messages") != (key == "k-ant") {
+			w.WriteHeader(401)
+			io.WriteString(w, `{"error":{"message":"this key is for another protocol"}}`)
+			return
+		}
+		if bytes.Contains(b, []byte(`"stream":true`)) && r.URL.Path == "/v1/messages" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, sse(
+				`event: message_start`+"\n"+`data: {"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","model":"x","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`,
+				`event: content_block_start`+"\n"+`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`event: content_block_delta`+"\n"+`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+				`event: content_block_stop`+"\n"+`data: {"type":"content_block_stop","index":0}`,
+				`event: message_delta`+"\n"+`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
+				`event: message_stop`+"\n"+`data: {"type":"message_stop"}`))
+			return
+		}
+		if bytes.Contains(b, []byte(`"stream":true`)) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, sse(
+				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}`,
+				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+				`data: [DONE]`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/messages" {
+			io.WriteString(w, `{"id":"m1","type":"message","role":"assistant","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+			return
+		}
+		io.WriteString(w, `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer srv.Close()
+	p := provider.Provider{ID: "relay", Name: "Relay", Chat: srv.URL + "/v1", Anthropic: srv.URL,
+		Key: "k-oai", KeyProtocol: provider.Chat, Models: []string{"claude-opus-4-8", "gpt-5.5"},
+		Keys: []provider.KeyAccount{{Key: "k-ant", Protocol: provider.Anthropic}}}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range []struct{ path, body, want string }{
+		// Claude Code asking for Claude: the Anthropic key, relayed as-is
+		{"/v1/messages", `{"model":"relay/claude-opus-4-8","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
+		// an OpenAI agent asking for Claude: translated, to the Anthropic key
+		{"/v1/chat/completions", `{"model":"relay/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
+		// Claude Code asking for GPT: translated, to the OpenAI key
+		{"/v1/messages", `{"model":"relay/gpt-5.5","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
+	} {
+		seen = nil
+		code, body := post(t, x.path, x.body)
+		if code != 200 || len(seen) != 1 || seen[0] != x.want {
+			t.Fatalf("%s %s: %d %s, upstream saw %v", x.path, x.body, code, body, seen)
+		}
+	}
+	if got := modelFamily("openrouter/openai/o3-mini"); got != provider.Chat {
+		t.Errorf("o3: %q", got)
+	}
+	if got := modelFamily("deepseek-chat"); got != "" {
+		t.Errorf("deepseek: %q", got)
+	}
+}

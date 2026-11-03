@@ -25,6 +25,9 @@ type loginUsageEntry struct {
 // user. What was fetched less than a minute ago comes from the cache; the
 // rest is asked for at once, as long as ctx allows.
 func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota {
+	if agent == "grok" {
+		return grokLoginUsage(ctx)
+	}
 	out := map[string]SubscriptionQuota{}
 	if agent != "claude" && agent != "codex" {
 		return out
