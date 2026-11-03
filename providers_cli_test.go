@@ -66,7 +66,7 @@ func fallbackOf(t *testing.T, id string) []string {
 }
 
 func runFallback(args ...string) error {
-	return providerCmd(append([]string{"magpie", "provider", "fallback"}, args...))
+	return providerCmd(append([]string{"provider", "fallback"}, args...))
 }
 
 func TestFallbackCommandSetShowClear(t *testing.T) {
