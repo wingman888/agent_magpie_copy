@@ -45,6 +45,17 @@ func (p Provider) IsOpenCode() bool {
 	return false
 }
 
+// modelsHeaders is the hook for a model-list GET. A list request has no
+// conversation, so an OpenCode host gets a session derived from the provider
+// id: stable for that provider, and distinct from its chat sessions.
+func (p Provider) modelsHeaders(req *http.Request) {
+	if req.URL == nil || !IsOpenCodeHost(req.URL.Hostname()) {
+		return
+	}
+	sum := sha256.Sum256([]byte("models:" + p.ID))
+	req.Header.Set(OpenCodeSessionHeader, "magpie-"+hex.EncodeToString(sum[:])[:32])
+}
+
 // SetOpenCodeHeaders adds x-opencode-session to a request bound for OpenCode.
 // Any other host gets nothing. in is the agent's request headers (may be nil)
 // and body is the request body being sent, whose first user message stands in
@@ -88,6 +99,11 @@ func firstUserText(body []byte) (string, bool) {
 	if len(v.Input) > 0 {
 		var s string
 		if json.Unmarshal(v.Input, &s) == nil {
+			if strings.TrimSpace(s) == "" {
+				// an empty prompt: the raw input stands in, so that
+				// conversations do not all share one empty value
+				return string(bytes.TrimSpace(v.Input)), true
+			}
 			return s, true
 		}
 		if t, ok := userTextIn(v.Input); ok {
@@ -97,25 +113,32 @@ func firstUserText(body []byte) (string, bool) {
 	return "", false
 }
 
-// userTextIn returns the content of the first item whose role is user.
+// userTextIn returns the text of the first item whose role is user. When that
+// message carries no text (empty, or only non-text parts such as images), the
+// message's own raw JSON stands in for the text.
 func userTextIn(list json.RawMessage) (string, bool) {
-	var items []struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	}
+	var items []json.RawMessage
 	if json.Unmarshal(list, &items) != nil {
 		return "", false
 	}
-	for _, it := range items {
-		if it.Role == "user" {
-			return contentText(it.Content), true
+	for _, raw := range items {
+		var it struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		}
+		if json.Unmarshal(raw, &it) != nil || it.Role != "user" {
+			continue
+		}
+		if t := contentText(it.Content); strings.TrimSpace(t) != "" {
+			return t, true
+		}
+		return string(bytes.TrimSpace(raw)), true
 	}
 	return "", false
 }
 
 // contentText flattens message content: a plain string, or a list of parts
-// whose text is joined. Content with no text falls back to its raw JSON.
+// whose text is joined. Content with no text yields "".
 func contentText(raw json.RawMessage) string {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
@@ -129,9 +152,7 @@ func contentText(raw json.RawMessage) string {
 		for _, p := range parts {
 			b.WriteString(p.Text)
 		}
-		if b.Len() > 0 {
-			return b.String()
-		}
+		return b.String()
 	}
-	return string(bytes.TrimSpace(raw))
+	return ""
 }
