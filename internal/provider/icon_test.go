@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// isolateConfig points the config and home directories at temp dirs so the
+// isolateIconDirs points the config and home directories at temp dirs so the
 // tests never touch the real providers.json, icons, or signed-in agents.
-func isolateConfig(t *testing.T) string {
+func isolateIconDirs(t *testing.T) string {
 	t.Helper()
 	cfg := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
@@ -50,7 +50,7 @@ func iconNames(t *testing.T, dir string) []string {
 }
 
 func TestStoreIconAcceptsPNGAndSVG(t *testing.T) {
-	dir := isolateConfig(t)
+	dir := isolateIconDirs(t)
 
 	ref, err := StoreIcon(pngImage(t))
 	if err != nil {
@@ -78,7 +78,7 @@ func TestStoreIconAcceptsPNGAndSVG(t *testing.T) {
 }
 
 func TestStoreIconDetectsFormatsByContent(t *testing.T) {
-	isolateConfig(t)
+	isolateIconDirs(t)
 	cases := map[string][]byte{
 		".jpg":  {0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10},
 		".gif":  []byte("GIF89a\x01\x00\x01\x00"),
@@ -97,7 +97,7 @@ func TestStoreIconDetectsFormatsByContent(t *testing.T) {
 }
 
 func TestStoreIconRejects(t *testing.T) {
-	isolateConfig(t)
+	isolateIconDirs(t)
 	if _, err := StoreIcon(nil); err == nil {
 		t.Error("empty content accepted")
 	}
@@ -117,7 +117,7 @@ func TestStoreIconRejects(t *testing.T) {
 }
 
 func TestStoreIconStoresDuplicateOnce(t *testing.T) {
-	dir := isolateConfig(t)
+	dir := isolateIconDirs(t)
 	a, err := StoreIcon([]byte(svgDoc))
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestStoreIconStoresDuplicateOnce(t *testing.T) {
 }
 
 func TestIconFileOnlyAcceptsStoredNames(t *testing.T) {
-	dir := isolateConfig(t)
+	dir := isolateIconDirs(t)
 	ref, err := StoreIcon(pngImage(t))
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestIconFileOnlyAcceptsStoredNames(t *testing.T) {
 }
 
 func TestResolveIconFileBuiltinAndEmpty(t *testing.T) {
-	isolateConfig(t)
+	isolateIconDirs(t)
 	src := filepath.Join(t.TempDir(), "logo.png")
 	if err := os.WriteFile(src, pngImage(t), 0o644); err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestResolveIconFileBuiltinAndEmpty(t *testing.T) {
 }
 
 func TestSetIconRefusesPresetAndAccepts(t *testing.T) {
-	isolateConfig(t)
+	isolateIconDirs(t)
 	pr, err := FromPreset("deepseek")
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestSetIconRefusesPresetAndAccepts(t *testing.T) {
 }
 
 func TestSaveKeepsReferencedIconsAndPrunesOld(t *testing.T) {
-	dir := isolateConfig(t)
+	dir := isolateIconDirs(t)
 	refA, err := StoreIcon(pngImage(t))
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +276,7 @@ func TestSaveKeepsReferencedIconsAndPrunesOld(t *testing.T) {
 }
 
 func TestPruneLeavesNonIconFiles(t *testing.T) {
-	dir := isolateConfig(t)
+	dir := isolateIconDirs(t)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
