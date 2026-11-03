@@ -71,6 +71,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
+| DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
 
 Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
@@ -203,6 +204,7 @@ you press *Add*. `magpie import <link>` does the same in a terminal.
 | `models`    | model ids to expose, comma separated                               |
 | `catalog`   | models.dev provider id, for model names and reasoning levels       |
 | `website`, `keys` | the vendor's site and its API-key page (https)               |
+| `icon`      | an https picture of the vendor's own (PNG, JPEG, GIF, WebP, ICO, SVG, at most 1 MB). magpie downloads it once, after you confirm the import, into its icons folder; without one it falls back to the catalog's logo or a plain mark |
 
 Base URLs must be https (plain http only to this machine or the local
 network). Web pages and GitHub don't link custom schemes reliably, so link
@@ -322,6 +324,33 @@ Keys in the terminal version:
 
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
+
+### Backup and restore
+
+`magpie backup` writes everything magpie is set up with to one file: your
+providers (keys, extra keys, custom headers, picked icons), settings, every
+saved profile, and each agent's current models. The file is encrypted with a
+passphrase you type twice (AES-256-GCM, key from PBKDF2-SHA256); its contents
+are never readable as plain text. It is written with mode 0600.
+
+```sh
+magpie backup                               # magpie.magpie-backup in this directory
+magpie backup ~/b.magpie-backup             # or a name of your choice
+magpie backup --no-keys ~/share.magpie-backup   # no API keys and no credential headers, to share
+echo "passphrase" | magpie backup           # passphrase from stdin, for scripts
+
+magpie restore magpie.magpie-backup         # on the other machine
+magpie restore --no-agents b.magpie-backup  # providers, settings and profiles, agents untouched
+```
+
+Restoring keeps what the backup does not cover: a provider with the same id
+gets the backup's settings but keeps this machine's key. Providers that end up
+with no key are listed, with the `magpie provider key <id>` to fix each one.
+Agent models are set only for agents installed here; the rest are reported as
+skipped. Subscription logins (Claude Code, Codex, Copilot…) are never in a
+backup: sign in on each machine. A wrong passphrase, or a file changed after it
+was written, changes nothing. Lose the passphrase and the file cannot be
+opened.
 
 ## Files
 
