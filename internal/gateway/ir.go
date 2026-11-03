@@ -1,6 +1,6 @@
 // Package gateway is the local LLM endpoint agents talk to. It serves the
-// three wire APIs coding agents speak — OpenAI Chat Completions, OpenAI
-// Responses and Anthropic Messages — and forwards each call to whichever
+// wire APIs coding agents speak — OpenAI Chat Completions, OpenAI
+// Responses, Anthropic Messages and Google Gemini — and forwards each call to whichever
 // provider serves the requested model, translating between the APIs when
 // the provider does not speak the one the agent used.
 package gateway
@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// The three APIs are close cousins; everything below is the shape they have
+// The APIs are close cousins; everything below is the shape they have
 // in common. A request is parsed into it, and a reply is produced from it.
 
 // Kind is what a part of a message holds.
