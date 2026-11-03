@@ -138,9 +138,6 @@ type Result struct {
 	Parts []Part
 	Stop  string
 	Usage Usage
-	// Cut is set when the reply ended without a stop: the open tool call,
-	// if the last part is one, has incomplete arguments.
-	Cut bool
 }
 
 // collector assembles a Result from events. Encoders use the same logic to
@@ -210,7 +207,6 @@ func (c *collector) add(ev Event) {
 func (c *collector) finish() Result {
 	c.closeTool()
 	if c.res.Stop == "" {
-		c.res.Cut = true
 		c.res.Stop = "stop"
 		for _, p := range c.res.Parts {
 			if p.Kind == ToolCall {
