@@ -11,273 +11,264 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// geminiSandbox points HOME and dial's config at temp dirs and registers a
-// fake provider "fake" with models m1 and m2.
-func geminiSandbox(t *testing.T) (home string) {
-	t.Helper()
-	root := t.TempDir()
-	home = filepath.Join(root, "home")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "cfg"))
-	if err := provider.Save(provider.Provider{
-		ID: "fake", Name: "Fake", Chat: "https://fake.example.com/v1", Key: "k",
-		Models: []string{"m1", "m2"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return home
-}
-
-func writeGemini(t *testing.T, home, settings, env string) (settingsPath, envPath string) {
-	t.Helper()
-	dir := filepath.Join(home, ".gemini")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	settingsPath = filepath.Join(dir, "settings.json")
-	envPath = filepath.Join(dir, ".env")
-	if settings != "" {
-		if err := os.WriteFile(settingsPath, []byte(settings), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if env != "" {
-		if err := os.WriteFile(envPath, []byte(env), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return settingsPath, envPath
-}
-
-func getJSON(t *testing.T, path, key string) string {
-	t.Helper()
-	v, _ := edit.GetJSON(path, key)
-	return v
-}
-
-func getEnv(t *testing.T, path, key string) (string, bool) {
-	t.Helper()
-	return edit.GetEnvFile(path, key)
-}
-
-func geminiField(t *testing.T, home, key string) *Field {
-	t.Helper()
-	a := gemini(home)
-	f := a.Field(key)
-	if f == nil {
-		t.Fatalf("no field %q", key)
-	}
-	return f
-}
-
-const geminiSettings = `{
-  "other": "keep me",
+const geminiOrigSettings = `{
   "security": {"auth": {"selectedType": "oauth-personal"}},
   "model": {"name": "gemini-2.5-pro"}
 }
 `
 
-const geminiEnv = "FOO=bar\nGEMINI_API_KEY=orig-key\nGOOGLE_GEMINI_BASE_URL=https://old.example.com\n"
-
-func TestGeminiRouteThenNativeRestores(t *testing.T) {
-	home := geminiSandbox(t)
-	settings, env := writeGemini(t, home, geminiSettings, geminiEnv)
-
-	model := geminiField(t, home, "model")
-	auth := geminiField(t, home, "provider")
-
-	if err := model.Set("fake/m1"); err != nil {
+// geminiSetup points HOME and dial's config at temp dirs, writes the given
+// Gemini CLI files ("" leaves a file absent) and adds a provider "fake" with
+// two models to the catalog.
+func geminiSetup(t *testing.T, env, settings string) (a *Agent, envPath, settingsPath string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k",
+		Models: []string{"m1", "m2"}, Chat: "http://127.0.0.1:9/v1"}); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := getEnv(t, env, "GOOGLE_GEMINI_BASE_URL"); v != gateway.URL() {
-		t.Errorf("base url = %q, want %q", v, gateway.URL())
-	}
-	if v, _ := getEnv(t, env, "GEMINI_API_KEY"); v != gateway.Token {
-		t.Errorf("key = %q, want %q", v, gateway.Token)
-	}
-	if v, _ := getEnv(t, env, "FOO"); v != "bar" {
-		t.Errorf("unrelated .env line lost: FOO=%q", v)
-	}
-	if v := getJSON(t, settings, "security.auth.selectedType"); v != "gemini-api-key" {
-		t.Errorf("selectedType = %q", v)
-	}
-	if v := getJSON(t, settings, "model.name"); v != "fake/m1" {
-		t.Errorf("model.name = %q, want fake/m1", v)
-	}
-	if v := getJSON(t, settings, "other"); v != "keep me" {
-		t.Errorf("unrelated settings field lost: other=%q", v)
-	}
-	if v := auth.Get(); v != "dial" {
-		t.Errorf("auth Get = %q, want dial", v)
-	}
-
-	// picking a native model restores the CLI's own endpoint and key
-	if err := model.Set("gemini-2.5-flash"); err != nil {
+	a, err := Find("gemini")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if v := getJSON(t, settings, "model.name"); v != "gemini-2.5-flash" {
-		t.Errorf("model.name = %q, want the native pick", v)
-	}
-	if v := getJSON(t, settings, "security.auth.selectedType"); v != "oauth-personal" {
-		t.Errorf("selectedType = %q, want oauth-personal", v)
-	}
-	if v, _ := getEnv(t, env, "GEMINI_API_KEY"); v != "orig-key" {
-		t.Errorf("key = %q, want orig-key", v)
-	}
-	if v, _ := getEnv(t, env, "GOOGLE_GEMINI_BASE_URL"); v != "https://old.example.com" {
-		t.Errorf("base = %q, want the old one", v)
-	}
-	if auth.Get() == "dial" {
-		t.Error("still routed after native pick")
-	}
-}
-
-func TestGeminiRouteAgainKeepsOriginalStash(t *testing.T) {
-	home := geminiSandbox(t)
-	settings, env := writeGemini(t, home, geminiSettings, geminiEnv)
-	model := geminiField(t, home, "model")
-
-	if err := model.Set("fake/m1"); err != nil {
+	if err := os.MkdirAll(a.Dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := model.Set("fake/m2"); err != nil {
-		t.Fatal(err)
-	}
-	if v := getJSON(t, settings, "model.name"); v != "fake/m2" {
-		t.Errorf("model.name = %q, want fake/m2", v)
-	}
-	// Default must bring back the pre-dial values, not the gateway's own.
-	if err := model.Set(""); err != nil {
-		t.Fatal(err)
-	}
-	if v, _ := getEnv(t, env, "GEMINI_API_KEY"); v != "orig-key" {
-		t.Errorf("key = %q, want orig-key", v)
-	}
-	if v, _ := getEnv(t, env, "GOOGLE_GEMINI_BASE_URL"); v != "https://old.example.com" {
-		t.Errorf("base = %q, want the old one", v)
-	}
-	if v := getJSON(t, settings, "security.auth.selectedType"); v != "oauth-personal" {
-		t.Errorf("selectedType = %q, want oauth-personal", v)
-	}
-	if v := getJSON(t, settings, "model.name"); v != "" {
-		t.Errorf("model.name = %q, want it removed", v)
-	}
-	if v := getJSON(t, settings, "other"); v != "keep me" {
-		t.Errorf("unrelated settings field lost: other=%q", v)
-	}
-}
-
-func TestGeminiDefaultRemovesThingsThatWereAbsent(t *testing.T) {
-	home := geminiSandbox(t)
-	settings, env := writeGemini(t, home, `{"other": 1}`, "FOO=bar\n")
-	model := geminiField(t, home, "model")
-
-	if err := model.Set("fake/m1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := model.Set(""); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := getEnv(t, env, "GEMINI_API_KEY"); ok {
-		t.Error("GEMINI_API_KEY should be gone: there was none before routing")
-	}
-	if _, ok := getEnv(t, env, "GOOGLE_GEMINI_BASE_URL"); ok {
-		t.Error("GOOGLE_GEMINI_BASE_URL should be gone")
-	}
-	if v := getJSON(t, settings, "security.auth.selectedType"); v != "" {
-		t.Errorf("selectedType = %q, want it removed", v)
-	}
-	if v := getJSON(t, settings, "model.name"); v != "" {
-		t.Errorf("model.name = %q, want it removed", v)
-	}
-	if v, _ := getEnv(t, env, "FOO"); v != "bar" {
-		t.Errorf("unrelated .env line lost: FOO=%q", v)
-	}
-	if v := getJSON(t, settings, "other"); v != "1" {
-		t.Errorf("unrelated settings field lost: other=%q", v)
-	}
-}
-
-func TestGeminiNativeOnFreshConfigClearsRouting(t *testing.T) {
-	home := geminiSandbox(t)
-	settings, env := writeGemini(t, home, "", "")
-	model := geminiField(t, home, "model")
-
-	if err := model.Set("fake/m1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := model.Set("gemini-2.5-pro"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := getEnv(t, env, "GEMINI_API_KEY"); ok {
-		t.Error("GEMINI_API_KEY should be gone")
-	}
-	if _, ok := getEnv(t, env, "GOOGLE_GEMINI_BASE_URL"); ok {
-		t.Error("GOOGLE_GEMINI_BASE_URL should be gone")
-	}
-	if v := getJSON(t, settings, "security.auth.selectedType"); v != "" {
-		t.Errorf("selectedType = %q, want it removed", v)
-	}
-	if v := getJSON(t, settings, "model.name"); v != "gemini-2.5-pro" {
-		t.Errorf("model.name = %q", v)
-	}
-}
-
-func TestGeminiAuthDialGetAndSet(t *testing.T) {
-	home := geminiSandbox(t)
-	writeGemini(t, home, geminiSettings, geminiEnv)
-	auth := geminiField(t, home, "provider")
-	model := geminiField(t, home, "model")
-
-	// not routed yet: Set("dial") is an error and changes nothing
-	if err := auth.Set("dial"); err == nil {
-		t.Error("Set(dial) while not routed should fail")
-	}
-	if v := auth.Get(); v == "dial" {
-		t.Errorf("Get = dial while not routed")
-	}
-
-	if err := model.Set("fake/m1"); err != nil {
-		t.Fatal(err)
-	}
-	// routed: Set("dial") succeeds and leaves the state alone
-	if err := auth.Set("dial"); err != nil {
-		t.Fatalf("Set(dial) while routed: %v", err)
-	}
-	if v := auth.Get(); v != "dial" {
-		t.Errorf("Get = %q, want dial", v)
-	}
-	if v := getJSON(t, filepath.Join(home, ".gemini", "settings.json"), "model.name"); v != "fake/m1" {
-		t.Errorf("Set(dial) changed the model to %q", v)
-	}
-}
-
-func TestGeminiFieldLookup(t *testing.T) {
-	home := geminiSandbox(t)
-	a := gemini(home)
-	for _, k := range []string{"provider", "auth", "Auth", "model"} {
-		if a.Field(k) == nil {
-			t.Errorf("Field(%q) not found", k)
+	envPath = filepath.Join(a.Dir, ".env")
+	settingsPath = a.Path
+	if env != "" {
+		if err := os.WriteFile(envPath, []byte(env), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if f := a.Field("auth"); f == nil || f.Key != "provider" {
-		t.Errorf("auth should resolve to the provider field, got %+v", f)
+	if settings != "" {
+		if err := os.WriteFile(settingsPath, []byte(settings), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return a, envPath, settingsPath
+}
+
+// envIs asserts a dotenv key's value; "" means the key must be absent.
+func envIs(t *testing.T, path, key, want string) {
+	t.Helper()
+	got, ok := edit.GetEnvFile(path, key)
+	if want == "" {
+		if ok {
+			t.Errorf("%s = %q, want it removed", key, got)
+		}
+		return
+	}
+	if got != want {
+		t.Errorf("%s = %q, want %q", key, got, want)
 	}
 }
 
-func TestGeminiOptionsIncludeDialModels(t *testing.T) {
-	home := geminiSandbox(t)
-	opts := geminiField(t, home, "model").Options(nil)
-	var found bool
-	for _, o := range opts {
-		if o.Value == "fake/m1" {
-			found = true
-			if !strings.Contains(o.Note, "via dial") {
-				t.Errorf("note = %q", o.Note)
+// jsonIs asserts a settings value; "" means the key must be absent.
+func jsonIs(t *testing.T, path, key, want string) {
+	t.Helper()
+	got, ok := edit.GetJSON(path, key)
+	if want == "" {
+		if ok {
+			t.Errorf("%s = %q, want it removed", key, got)
+		}
+		return
+	}
+	if got != want {
+		t.Errorf("%s = %q, want %q", key, got, want)
+	}
+}
+
+func TestGeminiRouteWritesGatewayConfig(t *testing.T) {
+	a, envPath, sp := geminiSetup(t, "GEMINI_API_KEY=mine\n", geminiOrigSettings)
+	if err := a.Field("model").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	envIs(t, envPath, "GOOGLE_GEMINI_BASE_URL", gateway.URL())
+	envIs(t, envPath, "GEMINI_API_KEY", gateway.Token)
+	jsonIs(t, sp, "security.auth.selectedType", "gemini-api-key")
+	jsonIs(t, sp, "model.name", "fake/m1")
+	if got := a.Field("provider").Get(); got != dialID {
+		t.Errorf("auth shows %q, want %q", got, dialID)
+	}
+}
+
+func TestGeminiRoutedOptionsListDial(t *testing.T) {
+	a, _, _ := geminiSetup(t, "", geminiOrigSettings)
+	hasDial := func() bool {
+		for _, o := range a.Field("provider").Options(nil) {
+			if o.Value == dialID {
+				return true
 			}
 		}
+		return false
 	}
-	if !found {
-		t.Error("fake/m1 missing from model options")
+	if hasDial() {
+		t.Fatal("dial auth offered before routing")
 	}
+	if err := a.Field("model").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if !hasDial() {
+		t.Error("dial auth not offered while routed")
+	}
+}
+
+func TestGeminiNativeModelRestoresOriginals(t *testing.T) {
+	a, envPath, sp := geminiSetup(t, "GEMINI_API_KEY=mine\n", geminiOrigSettings)
+	if err := a.Field("model").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	// switching between catalog models must not overwrite the stash
+	if err := a.Field("model").Set("fake/m2"); err != nil {
+		t.Fatal(err)
+	}
+	envIs(t, envPath, "GOOGLE_GEMINI_BASE_URL", gateway.URL())
+	jsonIs(t, sp, "model.name", "fake/m2")
+
+	if err := a.Field("model").Set("gemini-2.5-flash"); err != nil {
+		t.Fatal(err)
+	}
+	envIs(t, envPath, "GOOGLE_GEMINI_BASE_URL", "")
+	envIs(t, envPath, "GEMINI_API_KEY", "mine")
+	jsonIs(t, sp, "security.auth.selectedType", "oauth-personal")
+	jsonIs(t, sp, "model.name", "gemini-2.5-flash")
+	if got := a.Field("provider").Get(); got != "google" {
+		t.Errorf("auth shows %q after restore, want google", got)
+	}
+}
+
+func TestGeminiDefaultRestoresOriginals(t *testing.T) {
+	a, envPath, sp := geminiSetup(t, "GEMINI_API_KEY=mine\nGOOGLE_GEMINI_BASE_URL=https://relay.example\n",
+		geminiOrigSettings)
+	// a custom base URL is the user's own; routing must give it back
+	if err := a.Field("model").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Field("provider").Set(""); err != nil { // dial gemini default
+		t.Fatal(err)
+	}
+	envIs(t, envPath, "GOOGLE_GEMINI_BASE_URL", "https://relay.example")
+	envIs(t, envPath, "GEMINI_API_KEY", "mine")
+	jsonIs(t, sp, "security.auth.selectedType", "oauth-personal")
+	jsonIs(t, sp, "model.name", "gemini-2.5-pro")
+}
+
+func TestGeminiAbsentValuesAreRemoved(t *testing.T) {
+	a, envPath, sp := geminiSetup(t, "", "{}\n")
+	if err := a.Field("model").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Field("model").Set(""); err != nil { // default
+		t.Fatal(err)
+	}
+	envIs(t, envPath, "GOOGLE_GEMINI_BASE_URL", "")
+	envIs(t, envPath, "GEMINI_API_KEY", "")
+	jsonIs(t, sp, "security.auth.selectedType", "")
+	jsonIs(t, sp, "model.name", "")
+}
+
+func TestGeminiAuthChangeUnroutes(t *testing.T) {
+	a, envPath, sp := geminiSetup(t, "GEMINI_API_KEY=mine\n", geminiOrigSettings)
+	if err := a.Field("model").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Field("provider").Set("google"); err != nil {
+		t.Fatal(err)
+	}
+	envIs(t, envPath, "GOOGLE_GEMINI_BASE_URL", "")
+	envIs(t, envPath, "GEMINI_API_KEY", "mine")
+	jsonIs(t, sp, "security.auth.selectedType", "oauth-personal")
+}
+
+func TestGeminiManualDialNeedsRoute(t *testing.T) {
+	a, _, sp := geminiSetup(t, "", geminiOrigSettings)
+	err := a.Field("provider").Set(dialID)
+	if err == nil {
+		t.Fatal("selecting dial without routing should fail")
+	}
+	if !strings.Contains(err.Error(), "dial gemini") {
+		t.Errorf("error gives no guidance: %v", err)
+	}
+	jsonIs(t, sp, "security.auth.selectedType", "oauth-personal")
+}
+
+func TestGeminiFieldByDisplayName(t *testing.T) {
+	a, _, sp := geminiSetup(t, "", geminiOrigSettings)
+	if f := a.Field("auth"); f == nil || f.Key != "provider" {
+		t.Fatalf(`Field("auth") = %v, want the provider field`, f)
+	}
+	if f := a.Field("provider"); f == nil || f.Label != "auth" {
+		t.Fatalf(`Field("provider") = %v, want the provider field`, f)
+	}
+	if f := a.Field("model"); f == nil || f.Key != "model" {
+		t.Fatalf(`Field("model") = %v, want the model field`, f)
+	}
+	if a.Field("nope") != nil {
+		t.Error("unknown name matched a field")
+	}
+	if err := a.Field("auth").Set("vertex"); err != nil {
+		t.Fatal(err)
+	}
+	jsonIs(t, sp, "security.auth.selectedType", "vertex-ai")
+}
+
+func TestGeminiModelOptionsGrouped(t *testing.T) {
+	a, _, _ := geminiSetup(t, "", geminiOrigSettings)
+	groups := map[string]bool{}
+	for _, o := range a.Field("model").Options(nil) {
+		groups[o.Group] = true
+	}
+	if !groups["Gemini CLI"] {
+		t.Error("native Gemini models are not in their own group")
+	}
+	if !groups["Fake"] {
+		t.Error("catalog models are not grouped by provider")
+	}
+}
+
+// The CLI's own base URL survives a detour through a catalog model and a
+// Google sign-in: unrouting restores it, and nothing clears it afterwards.
+func TestGeminiAuthGoogleKeepsRelayURL(t *testing.T) {
+	a, envPath, sp := geminiSetup(t, "GEMINI_API_KEY=mine\nGOOGLE_GEMINI_BASE_URL=https://relay.example\n",
+		geminiOrigSettings)
+	if err := a.Field("model").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Field("provider").Set("google"); err != nil {
+		t.Fatal(err)
+	}
+	envIs(t, envPath, "GOOGLE_GEMINI_BASE_URL", "https://relay.example")
+	envIs(t, envPath, "GEMINI_API_KEY", "mine")
+	jsonIs(t, sp, "security.auth.selectedType", "oauth-personal")
+
+	if err := a.Field("model").Set("gemini-2.5-flash"); err != nil {
+		t.Fatal(err)
+	}
+	envIs(t, envPath, "GOOGLE_GEMINI_BASE_URL", "https://relay.example")
+	jsonIs(t, sp, "model.name", "gemini-2.5-flash")
+}
+
+// Choosing "custom" while routed gives back the CLI's own base URL. With no
+// base URL of its own it is refused, and the route stays as it was.
+func TestGeminiCustomWhileRouted(t *testing.T) {
+	a, envPath, _ := geminiSetup(t, "GEMINI_API_KEY=mine\nGOOGLE_GEMINI_BASE_URL=https://relay.example\n",
+		geminiOrigSettings)
+	if err := a.Field("model").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Field("provider").Set("custom"); err != nil {
+		t.Fatal(err)
+	}
+	envIs(t, envPath, "GOOGLE_GEMINI_BASE_URL", "https://relay.example")
+
+	b, bPath, _ := geminiSetup(t, "GEMINI_API_KEY=mine\n", geminiOrigSettings)
+	if err := b.Field("model").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Field("provider").Set("custom"); err == nil {
+		t.Fatal("custom without a base URL of the CLI's own should be refused")
+	}
+	envIs(t, bPath, "GOOGLE_GEMINI_BASE_URL", gateway.URL())
 }

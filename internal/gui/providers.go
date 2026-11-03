@@ -40,14 +40,13 @@ type providerJSON struct {
 		Masked   string `json:"masked"`
 		Optional bool   `json:"optional"`
 	} `json:"key"`
-	Ready     bool              `json:"ready"`
-	Chosen    []string          `json:"chosen"`  // the user's explicit picks, if any
-	Models    []modelJSON       `json:"models"`  // everything the vendor lists, exposed ones flagged
-	Exposed   int               `json:"exposed"` // how many reach the agents
-	Fetched   string            `json:"fetched"` // "3h ago" when the list came from the vendor
-	Agents    []providerAgent   `json:"agents"`  // detected agents, current ones flagged
-	Sponsored bool              `json:"sponsored"`
-	Account   *provider.Account `json:"account,omitempty"` // sign-in providers: whose login supplies the models
+	Ready     bool            `json:"ready"`
+	Chosen    []string        `json:"chosen"`  // the user's explicit picks, if any
+	Models    []modelJSON     `json:"models"`  // everything the vendor lists, exposed ones flagged
+	Exposed   int             `json:"exposed"` // how many reach the agents
+	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
+	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
+	Sponsored bool            `json:"sponsored"`
 }
 
 type providerAgent struct {
@@ -75,8 +74,6 @@ type providersJSON struct {
 	Providers []providerJSON `json:"providers"`
 	Presets   []presetJSON   `json:"presets"`
 	Gateway   gatewayJSON    `json:"gateway"`
-	// Notices are agent logins dial sees but does not offer, e.g. Claude Code.
-	Notices []provider.Notice `json:"notices"`
 }
 
 // currentProvider reads which provider (and model) an agent is routed to now.
@@ -99,7 +96,6 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
-		Account: p.Account,
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
@@ -141,10 +137,7 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 
 func providersState(gw *gateway.Server) providersJSON {
 	agents := agent.Detected()
-	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Notices: provider.Notices()}
-	if s.Notices == nil {
-		s.Notices = []provider.Notice{}
-	}
+	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}}
 	have := map[string]bool{}
 	for _, p := range provider.All() {
 		have[p.ID] = true
