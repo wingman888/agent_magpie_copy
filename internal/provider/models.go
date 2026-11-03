@@ -237,12 +237,19 @@ type Entry struct {
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`
+
+	// Group is set on a routing group's entry, whose ID is "group/<id>" and
+	// whose Model and Provider are empty; Members are its usable members.
+	Group   *Group   `json:"group,omitempty"`
+	Members []Member `json:"-"`
 }
 
-// Catalog lists every exposed model of every ready provider.
+// Catalog lists every exposed model of every ready provider, then the
+// routing groups with a usable member (see groups.go).
 func Catalog() []Entry {
+	all := All()
 	var out []Entry
-	for _, p := range All() {
+	for _, p := range all {
 		if !p.Ready() {
 			continue
 		}
@@ -250,17 +257,21 @@ func Catalog() []Entry {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
 		}
 	}
-	return out
+	return append(out, groupEntries(all)...)
 }
 
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
 // It accepts catalog ids, "provider/model" for any model (exposed or not),
-// and the bare model id when exactly one provider serves it.
+// and the bare model id when exactly one provider serves it. A routing
+// group ("group/<id>") is not one provider's model: see ResolveGroup.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
+	if isGroupID(id) {
+		return Provider{}, "", false
+	}
 	entries := Catalog()
 	for _, e := range entries {
-		if e.ID == id {
+		if e.Group == nil && e.ID == id {
 			return e.Provider, e.Model, true
 		}
 	}
@@ -271,7 +282,7 @@ func Resolve(id string) (Provider, string, bool) {
 	}
 	var hits []Entry
 	for _, e := range entries {
-		if e.Model == id {
+		if e.Group == nil && e.Model == id {
 			hits = append(hits, e)
 		}
 	}
