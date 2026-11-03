@@ -4,18 +4,16 @@ package gateway
 // — a coding plan out of quota, a rate limit, an overloaded or failing
 // vendor. The request goes to the next one only while none of the reply has
 // been sent, so an agent sees one clean answer from whoever gave it, never a
-// half from each. A provider that just failed that way waits at the back of
-// the line for a minute, rather than costing every request a doomed try.
-//
-// A provider with several keys on is several candidates, one per key, in
-// order, and so is a subscription with several accounts on: when one
-// account runs out, the next account of the same provider takes the
-// request before any fallback model does.
+// half from each. A key that just failed that way waits at the back of its
+// provider's line for a minute, rather than costing every request a doomed
+// try. A provider with several keys on tries them in turn before its
+// fallbacks are used.
 
 import (
 	"bytes"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,54 +22,37 @@ import (
 
 const fallbackCooldown = time.Minute
 
+// candidate is one attempt: a provider with the single key to send, and the
+// model to ask for.
 type candidate struct {
-	p     provider.Provider
+	p     provider.Provider // Key and KeyName are the key this attempt uses
 	model string
-	rest  string // what rests after a failure: the provider, or one of its keys
+	ref   string // cooldown id: the provider and this key
+	key   string // the key itself, kept out of error texts
+	label string // how the call record names this attempt
 }
 
-// label names a candidate in a call's record: the provider, and the key
-// when it has several on.
-func (c candidate) label() string {
-	if c.rest == c.p.ID {
-		return c.p.ID
-	}
-	if c.p.Account != nil {
-		return c.p.ID + " (" + c.p.Account.User + ")"
-	}
-	if c.p.KeyName != "" {
-		return c.p.ID + " (" + c.p.KeyName + ")"
-	}
-	return c.p.ID + " (" + provider.Mask(c.p.Key) + ")"
-}
-
-// perKey is a provider once per key it has on, in order — or, for a
-// signed-in agent, once per account it has on, its own first.
-func perKey(p provider.Provider, model string) []candidate {
-	if p.Account != nil {
-		out := []candidate{{p, model, p.ID}}
-		for _, q := range p.AlsoOn() {
-			out = append(out, candidate{q, model, p.ID + "@" + q.Account.User})
-		}
-		return out
-	}
-	keys := p.KeysOn()
-	if len(keys) < 2 {
-		return []candidate{{p, model, p.ID}}
-	}
-	out := make([]candidate, 0, len(keys))
-	for _, k := range keys {
-		q := p
-		q.Key, q.KeyName = k.Key, k.Name
-		out = append(out, candidate{q, model, p.ID + "#" + provider.KeyID(k.Key)})
-	}
-	return out
-}
-
-// candidates is the primary and then its fallbacks, those resting after a
-// recent failure moved behind the rest.
+// candidates is the primary and then its fallbacks, each tried key by key.
+// Within a provider the keys still on (not resting) go first; a provider with
+// no key ready goes behind the rest, as before.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := perKey(p, model)
+	var ready, resting []candidate
+	add := func(gp provider.Provider, gm string) {
+		var rdy, rst []candidate
+		for _, c := range keyAttempts(gp, gm) {
+			if s.resting(c.ref) {
+				rst = append(rst, c)
+			} else {
+				rdy = append(rdy, c)
+			}
+		}
+		if len(rdy) == 0 {
+			resting = append(resting, rst...)
+			return
+		}
+		ready = append(append(ready, rdy...), rst...)
+	}
+	add(p, model)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -79,20 +60,49 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, perKey(fp, fm)...)
-	}
-	if len(out) == 1 {
-		return out
-	}
-	var ready, resting []candidate
-	for _, c := range out {
-		if s.resting(c.rest) {
-			resting = append(resting, c)
-		} else {
-			ready = append(ready, c)
-		}
+		add(fp, fm)
 	}
 	return append(ready, resting...)
+}
+
+// keyAttempts is one candidate per key on the provider, in attempt order.
+// Keys that are off are never listed.
+func keyAttempts(p provider.Provider, model string) []candidate {
+	keys := p.KeysOn()
+	out := make([]candidate, 0, len(keys))
+	for _, k := range keys {
+		kp := p
+		kp.Key, kp.KeyName, kp.Keys = k.Key, k.Name, nil
+		label := p.ID
+		if len(keys) > 1 {
+			label = accountLabel(p.ID, k)
+		}
+		out = append(out, candidate{
+			p:     kp,
+			model: model,
+			ref:   p.ID + "\x00" + provider.KeyRef(k.Key),
+			key:   k.Key,
+			label: label,
+		})
+	}
+	return out
+}
+
+// accountLabel names a key in the call record: the provider and the key's
+// name, or its masked form when it has none.
+func accountLabel(id string, k provider.NamedKey) string {
+	if k.Name != "" {
+		return id + "(" + k.Name + ")"
+	}
+	return id + "(" + provider.Mask(k.Key) + ")"
+}
+
+// scrub hides a key that an error text happens to carry.
+func scrub(text, key string) string {
+	if key == "" || !strings.Contains(text, key) {
+		return text
+	}
+	return strings.ReplaceAll(text, key, provider.Mask(key))
 }
 
 var restingUntil = struct {
@@ -100,15 +110,15 @@ var restingUntil = struct {
 	m map[string]time.Time
 }{m: map[string]time.Time{}}
 
-func (s *Server) resting(id string) bool {
+func (s *Server) resting(ref string) bool {
 	restingUntil.Lock()
 	defer restingUntil.Unlock()
-	return time.Now().Before(restingUntil.m[id])
+	return time.Now().Before(restingUntil.m[ref])
 }
 
-func (s *Server) rest(id string) {
+func (s *Server) rest(ref string) {
 	restingUntil.Lock()
-	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
+	restingUntil.m[ref] = time.Now().Add(fallbackCooldown)
 	restingUntil.Unlock()
 }
 
