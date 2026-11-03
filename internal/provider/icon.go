@@ -126,7 +126,9 @@ func IconFile(name string) string {
 }
 
 // gcIcons removes stored icons that no provider in f references and that
-// are older than the grace period. Best effort: errors are ignored.
+// are older than the grace period (strictly: mtime before now-1h). Best
+// effort: errors are ignored. Callers must pass a config that was parsed
+// successfully; an empty f would make every stored icon look unreferenced.
 func gcIcons(f file) {
 	used := map[string]bool{}
 	for _, p := range f.Providers {
@@ -144,11 +146,14 @@ func gcIcons(f file) {
 		if e.IsDir() || !iconName.MatchString(e.Name()) || used[e.Name()] {
 			continue
 		}
-		fi, err := e.Info()
-		if err != nil || !fi.ModTime().Before(cutoff) {
+		// Stat again right before removing, so an icon re-stored since the
+		// directory listing (and so fresh again) is left alone.
+		p := filepath.Join(dir, e.Name())
+		fi, err := os.Stat(p)
+		if err != nil || !fi.Mode().IsRegular() || !fi.ModTime().Before(cutoff) {
 			continue
 		}
-		os.Remove(filepath.Join(dir, e.Name()))
+		os.Remove(p)
 	}
 }
 

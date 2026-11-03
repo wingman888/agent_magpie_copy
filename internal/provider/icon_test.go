@@ -313,3 +313,106 @@ func TestGCAfterIconChangeAndDelete(t *testing.T) {
 		t.Fatalf("unreferenced icon kept after grace period: %v", err)
 	}
 }
+
+func TestStoreIconFileExactlyMaxAccepted(t *testing.T) {
+	setupIcons(t)
+	p := filepath.Join(t.TempDir(), "edge.png")
+	if err := os.WriteFile(p, pngBytes(MaxIcon-8), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := StoreIconFile(p)
+	if err != nil {
+		t.Fatalf("exactly 1 MB file rejected: %v", err)
+	}
+	if fi, _ := os.Stat(IconFile(ref)); fi == nil || fi.Size() != MaxIcon {
+		t.Fatalf("stored size wrong: %v", fi)
+	}
+}
+
+func TestStoreIconFileRejectsDirectory(t *testing.T) {
+	setupIcons(t)
+	if _, err := StoreIconFile(t.TempDir()); err == nil {
+		t.Fatal("directory accepted as icon")
+	}
+	if len(iconEntries(t)) != 0 {
+		t.Fatal("directory rejection left a file behind")
+	}
+}
+
+func TestStoreIconSVGMarkerAnywhere(t *testing.T) {
+	setupIcons(t)
+	// SVG detection is a substring test for "<svg", whatever comes before it.
+	ref, err := StoreIcon([]byte("  \n<?xml version=\"1.0\"?>\n<svg/>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(ref, ".svg") {
+		t.Fatalf("ref %q, want .svg", ref)
+	}
+}
+
+func TestGCKeepsIconAtExactGraceBoundary(t *testing.T) {
+	t0 := setupIcons(t)
+	ref, err := StoreIcon(pngBytes(40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly one hour old: "older than an hour" is strict, so it stays.
+	nowFunc = func() time.Time { return t0.Add(time.Hour) }
+	if err := Save(Provider{ID: "other", Name: "Other", Key: "sk-y", Chat: "https://other.example/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(IconFile(ref)); err != nil {
+		t.Fatalf("icon at exactly 1h removed: %v", err)
+	}
+	// One second past the boundary it goes.
+	nowFunc = func() time.Time { return t0.Add(time.Hour + time.Second) }
+	if err := Save(Provider{ID: "other", Name: "Other", Key: "sk-y", Chat: "https://other.example/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(IconFile(ref)); !os.IsNotExist(err) {
+		t.Fatalf("icon older than 1h kept: %v", err)
+	}
+}
+
+func TestGCSkipsWhenConfigDamaged(t *testing.T) {
+	t0 := setupIcons(t)
+	keep, err := StoreIcon(pngBytes(50))
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := Provider{ID: "relay", Name: "Relay", Key: "sk-x", Chat: "https://relay.example/v1", Icon: keep}
+	if err := Save(relay); err != nil {
+		t.Fatal(err)
+	}
+	// Damage providers.json, then let the grace period pass.
+	damaged := []byte("{\"providers\": [ broken")
+	if err := os.WriteFile(Path(), damaged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nowFunc = func() time.Time { return t0.Add(2 * time.Hour) }
+
+	if err := Save(Provider{ID: "other", Name: "Other", Key: "sk-y", Chat: "https://other.example/v1"}); err == nil {
+		t.Fatal("Save on damaged providers.json succeeded")
+	}
+	if err := Delete("relay"); err == nil {
+		t.Fatal("Delete on damaged providers.json succeeded")
+	}
+	if _, err := os.Stat(IconFile(keep)); err != nil {
+		t.Fatalf("icon collected while config was damaged: %v", err)
+	}
+	if b, _ := os.ReadFile(Path()); !bytes.Equal(b, damaged) {
+		t.Fatalf("damaged providers.json was overwritten: %q", b)
+	}
+}
+
+func TestLoadStrictMissingFileIsEmpty(t *testing.T) {
+	setupIcons(t)
+	f, err := loadStrict()
+	if err != nil {
+		t.Fatalf("missing providers.json is an error: %v", err)
+	}
+	if len(f.Providers) != 0 {
+		t.Fatalf("missing providers.json has providers: %+v", f.Providers)
+	}
+}

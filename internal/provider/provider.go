@@ -74,12 +74,29 @@ func Path() string {
 	return filepath.Join(home, ".config", "magpie", "providers.json")
 }
 
+// load reads providers.json for display. A missing file is an empty config;
+// a damaged one reads as empty too. Write paths must use loadStrict instead,
+// so a damaged file is never silently replaced.
 func load() file {
-	var f file
-	if b, err := os.ReadFile(Path()); err == nil {
-		json.Unmarshal(b, &f)
-	}
+	f, _ := loadStrict()
 	return f
+}
+
+// loadStrict reads providers.json. A missing file is an empty config and no
+// error; a file that exists but does not parse is an error.
+func loadStrict() (file, error) {
+	var f file
+	b, err := os.ReadFile(Path())
+	if errors.Is(err, os.ErrNotExist) {
+		return f, nil
+	}
+	if err != nil {
+		return f, err
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
+		return file{}, fmt.Errorf("%s is damaged, not saving: %w", Path(), err)
+	}
+	return f, nil
 }
 
 func store(f file) error {
@@ -189,7 +206,10 @@ func Save(p Provider) error {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
-	f := load()
+	f, err := loadStrict()
+	if err != nil {
+		return err
+	}
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
@@ -204,7 +224,10 @@ func Save(p Provider) error {
 // model picks kept); signing out is the agent's job.
 func Delete(id string) error {
 	if _, ok := find(Accounts(), id); ok {
-		f := load()
+		f, err := loadStrict()
+		if err != nil {
+			return err
+		}
 		for i := range f.Providers {
 			if f.Providers[i].ID == id {
 				f.Providers[i].Hidden = true
@@ -214,7 +237,10 @@ func Delete(id string) error {
 		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
 		return storeAndCollect(f)
 	}
-	f := load()
+	f, err := loadStrict()
+	if err != nil {
+		return err
+	}
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
