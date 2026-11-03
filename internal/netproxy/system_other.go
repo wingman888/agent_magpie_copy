@@ -2,5 +2,8 @@
 
 package netproxy
 
-// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
-func system() Proxy { return Proxy{} }
+// readSystemProxy does not read the system proxy on other platforms. Desktop
+// environments pass their proxy to applications as environment variables.
+func readSystemProxy() systemSettings {
+	return systemSettings{}
+}
