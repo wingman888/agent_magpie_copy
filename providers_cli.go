@@ -25,7 +25,7 @@ const providerUsage = `usage:
   magpie provider key <id> <key>          change the API key
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
-  magpie provider rm <id>                 remove a provider
+  magpie provider rm <id>                 remove a provider (a signed-in agent is only hidden; add brings it back)
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
        magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
@@ -33,9 +33,13 @@ const providerUsage = `usage:
 // providers: `magpie providers`
 func providers() error {
 	all := provider.All()
-	if len(all) == 0 {
+	removed := provider.Excluded()
+	if len(all) == 0 && len(removed) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
 		return nil
+	}
+	if len(all) == 0 {
+		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
 	}
 	uses := usesByProvider()
 	type row struct{ name, id, host, key, models, uses string }
@@ -73,13 +77,13 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	for _, x := range provider.Excluded() {
+	for _, x := range removed {
 		name := x.Agent
 		if a, err := agent.Find(x.Agent); err == nil {
 			name = a.Name
 		}
 		fmt.Println()
-		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why))
+		fmt.Println(" ", muted.Render(name+" is signed in but not offered ("+x.Why+") · magpie provider add "+x.Provider+" brings it back"))
 	}
 	return nil
 }
@@ -191,6 +195,11 @@ func providerCmd(args []string) error {
 		}
 		if err := provider.Delete(p.ID); err != nil {
 			return err
+		}
+		if p.Account != nil {
+			// an agent's sign-in is untouched; only magpie stops offering it
+			fmt.Println(green.Render("✓"), "removed", p.Name, muted.Render("· still signed in to "+p.Account.Agent+" · magpie provider add "+p.ID+" brings it back"))
+			return nil
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil

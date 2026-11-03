@@ -48,19 +48,24 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 	if time.Since(subscriptionUsageCache.at) < time.Minute && subscriptionUsageCache.data != nil {
 		return append([]SubscriptionQuota(nil), subscriptionUsageCache.data...)
 	}
+	// only accounts magpie offers: removed or signed-out agents are not counted
+	visible := map[string]bool{}
+	for _, a := range Accounts() {
+		visible[a.ID] = true
+	}
 	var out []SubscriptionQuota
-	if _, _, ok := claudeCredential(); ok {
+	if visible["claude"] {
 		out = append(out, claudeSubscriptionUsage(ctx))
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if _, ok := codexAccount(home); ok {
+		if visible["codex"] {
 			out = append(out, codexSubscriptionUsage(ctx, filepath.Join(home, ".codex", "auth.json")))
 		}
 		cfg := os.Getenv("XDG_CONFIG_HOME")
 		if cfg == "" {
 			cfg = filepath.Join(home, ".config")
 		}
-		if app, ok := copilotLogin(cfg); ok {
+		if app, ok := copilotLogin(cfg); ok && visible["copilot"] {
 			out = append(out, copilotSubscriptionUsage(ctx, app.Token))
 		}
 	}

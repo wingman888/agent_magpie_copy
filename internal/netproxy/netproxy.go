@@ -43,6 +43,11 @@ func For(u *url.URL) (*url.URL, error) {
 	case s.Proxy != "":
 		return settings.ProxyURL(s.Proxy)
 	}
+	// NO_PROXY is an explicit "connect directly" list: it applies to the
+	// environment proxy and to the system proxy alike.
+	if matchesList(firstEnv("NO_PROXY", "no_proxy"), u) {
+		return nil, nil
+	}
 	if p := fromEnv(u); p != nil {
 		return p, nil
 	}
@@ -67,9 +72,6 @@ func Transport() *http.Transport {
 
 // fromEnv is the proxy named by the environment, or nil.
 func fromEnv(u *url.URL) *url.URL {
-	if matchesList(firstEnv("NO_PROXY", "no_proxy"), u) {
-		return nil
-	}
 	var raw string
 	if u.Scheme == "https" {
 		raw = firstEnv("HTTPS_PROXY", "https_proxy")

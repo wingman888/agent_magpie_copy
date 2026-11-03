@@ -95,6 +95,11 @@ func TestNoProxyEnvironment(t *testing.T) {
 	expect(t, "https://example.org", "http://env.example:3128")
 	t.Setenv("NO_PROXY", "*")
 	expect(t, "https://api.example.com", "")
+	// with no environment proxy, NO_PROXY still keeps the system proxy away
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("NO_PROXY", "intranet.example")
+	expect(t, "https://intranet.example", "")
+	expect(t, "https://other.example", "http://sys.example:8443")
 }
 
 func TestNoProxyWildcard(t *testing.T) {

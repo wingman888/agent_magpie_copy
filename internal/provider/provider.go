@@ -52,6 +52,11 @@ type Provider struct {
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
+	// Hidden marks a signed-in agent the user removed from magpie. Its entry
+	// keeps the model picks, so adding it back restores them. Only accounts
+	// are ever hidden.
+	Hidden bool `json:"hidden,omitempty"`
+
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
@@ -99,23 +104,35 @@ func store(f file) error {
 func All() []Provider {
 	stored := load().Providers
 	picks := map[string][]string{}
+	hidden := map[string]bool{}
 	var out []Provider
 	for _, p := range stored {
 		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			picks[p.ID] = p.Models
+			hidden[p.ID] = p.Hidden
 			continue
 		}
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken {
+		if _, taken := find(out, a.ID); taken || hidden[a.ID] {
 			continue
 		}
 		a.Models = picks[a.ID]
 		out = append(out, a)
 	}
 	return out
+}
+
+// storedEntry finds the entry the user's file keeps for an id.
+func storedEntry(f file, id string) (Provider, bool) {
+	for _, p := range f.Providers {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return Provider{}, false
 }
 
 func find(ps []Provider, id string) (Provider, bool) {
@@ -160,10 +177,16 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if a, ok := find(Accounts(), p.ID); ok {
+	f := load()
+	if a, ok := find(signIns(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in
-		p = Provider{ID: a.ID, Models: p.Models}
+		// agent's own sign-in. Adding back a removed account, with no picks
+		// given, keeps the picks it had.
+		models := p.Models
+		if old, ok := storedEntry(f, a.ID); ok && old.Hidden && p.Models == nil {
+			models = old.Models
+		}
+		p = Provider{ID: a.ID, Models: models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -172,7 +195,6 @@ func Save(p Provider) error {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
-	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
@@ -183,21 +205,20 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider. For an account it forgets the model picks;
-// signing out is the agent's job.
+// Delete removes a provider. An account is only hidden from magpie: its model
+// picks stay, and signing out or adding it back is the agent's job.
 func Delete(id string) error {
+	f := load()
 	if _, ok := find(Accounts(), id); ok {
-		f := load()
-		keep := f.Providers[:0]
-		for _, p := range f.Providers {
-			if p.ID != id {
-				keep = append(keep, p)
+		for i := range f.Providers {
+			if f.Providers[i].ID == id {
+				f.Providers[i].Hidden = true
+				return store(f)
 			}
 		}
-		f.Providers = keep
+		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
 		return store(f)
 	}
-	f := load()
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {

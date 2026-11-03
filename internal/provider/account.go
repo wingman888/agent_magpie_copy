@@ -67,16 +67,26 @@ func (p Provider) Prepare(body []byte) []byte {
 	return body
 }
 
-// Exclusion is a sign-in magpie found but will not offer as a provider.
+// Exclusion is a sign-in the user has removed from magpie. The agent is still
+// signed in; magpie just does not offer it. `magpie provider add <id>` brings
+// it back with the model picks it had.
 type Exclusion struct {
-	Agent string `json:"agent"`
-	Why   string `json:"why"`
+	Agent    string `json:"agent"`
+	Provider string `json:"provider"`
+	Why      string `json:"why"`
 }
 
-// Excluded lists sign-ins magpie detects but cannot expose. It is currently
-// empty, but remains part of the API so the CLI and GUI can explain future
-// account types that are detectable but not usable.
-func Excluded() []Exclusion { return nil }
+// Excluded lists the signed-in agents the user removed from magpie.
+func Excluded() []Exclusion {
+	f := load()
+	var out []Exclusion
+	for _, a := range signIns() {
+		if e, ok := storedEntry(f, a.ID); ok && e.Hidden {
+			out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID, Why: "you removed it from magpie"})
+		}
+	}
+	return out
+}
 
 const (
 	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -111,6 +121,7 @@ var (
 	claudeStatusAt   time.Time
 	claudeStatusUser string
 	claudeStatusPlan string
+	claudeStatusOut  bool // `claude auth status` says Claude Code is signed out
 
 	claudeCacheMu  sync.Mutex
 	claudeCacheAt  time.Time
@@ -278,37 +289,58 @@ func claudeExecutable() string {
 	return ""
 }
 
-// claudeIdentity asks Claude Code itself which account is active. Its credential
+// claudeAuthStatusRun runs `claude auth status --json` and returns its stdout.
+// The exit status is returned too, but callers read the JSON either way: Claude
+// Code exits non-zero when signed out, and says so in the JSON. A var so tests
+// can stand in for the CLI.
+var claudeAuthStatusRun = func(ctx context.Context) ([]byte, error) {
+	path := claudeExecutable()
+	if path == "" {
+		return nil, errors.New("claude is not installed")
+	}
+	return exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
+}
+
+// claudeStatus asks Claude Code itself which account is active. Its credential
 // blob intentionally contains tokens and plan metadata but no display identity;
 // `claude auth status --json` is the authoritative, non-secret view shown by the
-// CLI. Cache it briefly because the providers screen refreshes often.
-func claudeIdentity() (string, string) {
+// CLI. signedOut is true only when that output says so; when the command is
+// missing or its output cannot be read, the credential check alone decides.
+// Cache it briefly because the providers screen refreshes often.
+func claudeStatus() (user, plan string, signedOut bool) {
 	claudeStatusMu.Lock()
 	defer claudeStatusMu.Unlock()
 	if time.Since(claudeStatusAt) < 30*time.Second {
-		return claudeStatusUser, claudeStatusPlan
+		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 	}
 	claudeStatusAt = time.Now()
-	path := claudeExecutable()
-	if path == "" {
-		return claudeStatusUser, claudeStatusPlan
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
-	if err != nil {
-		return claudeStatusUser, claudeStatusPlan
-	}
+	out, _ := claudeAuthStatusRun(ctx)
 	var status struct {
-		LoggedIn         bool   `json:"loggedIn"`
+		LoggedIn         *bool  `json:"loggedIn"`
 		Email            string `json:"email"`
 		SubscriptionType string `json:"subscriptionType"`
 	}
-	if json.Unmarshal(out, &status) == nil && status.LoggedIn {
+	if json.Unmarshal(out, &status) != nil || status.LoggedIn == nil {
+		// unknown: the original judgement (credentials present) stands
+		claudeStatusOut = false
+		return claudeStatusUser, claudeStatusPlan, false
+	}
+	if *status.LoggedIn {
 		claudeStatusUser = strings.TrimSpace(status.Email)
 		claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
+		claudeStatusOut = false
+	} else {
+		claudeStatusUser, claudeStatusPlan, claudeStatusOut = "", "", true
 	}
-	return claudeStatusUser, claudeStatusPlan
+	return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+}
+
+// claudeIdentity is the account's display name and plan, as Claude Code reports them.
+func claudeIdentity() (string, string) {
+	user, plan, _ := claudeStatus()
+	return user, plan
 }
 
 func claudeAccount() (Provider, bool) {
@@ -316,7 +348,11 @@ func claudeAccount() (Provider, bool) {
 	if !ok {
 		return Provider{}, false
 	}
-	user, statusPlan := claudeIdentity()
+	user, statusPlan, signedOut := claudeStatus()
+	if signedOut {
+		// Claude Code signed out; any credential left behind is not a login
+		return Provider{}, false
+	}
 	plan := c.OAuth.SubscriptionType
 	if statusPlan != "" {
 		plan = statusPlan
@@ -487,8 +523,22 @@ func claudeToken(ctx context.Context) (string, error) {
 	return fresh.AccessToken, nil
 }
 
-// Accounts lists the signed-in agents as providers.
+// Accounts lists the signed-in agents magpie offers as providers: every
+// sign-in except the ones the user removed.
 func Accounts() []Provider {
+	f := load()
+	var out []Provider
+	for _, a := range signIns() {
+		if e, ok := storedEntry(f, a.ID); ok && e.Hidden {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// signIns lists every agent signed in on this machine, removed or not.
+func signIns() []Provider {
 	home, _ := os.UserHomeDir()
 	cfg := os.Getenv("XDG_CONFIG_HOME")
 	if cfg == "" {

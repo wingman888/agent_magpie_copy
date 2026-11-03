@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -64,11 +65,18 @@ func signIn(t *testing.T) string {
 func isolate(t *testing.T) {
 	t.Helper()
 	oldKeychain, oldURL, oldBase := claudeKeychain, claudeTokenURL, claudeBase
+	oldStatus := claudeAuthStatusRun
 	claudeKeychain = false
+	// tests never ask the machine's own Claude Code; a test that wants an
+	// answer stubs claudeAuthStatusRun itself
+	claudeAuthStatusRun = func(context.Context) ([]byte, error) { return nil, errors.New("no claude in tests") }
 	forgetClaudeCredential()
+	forgetClaudeStatus()
 	t.Cleanup(func() {
 		claudeKeychain, claudeTokenURL, claudeBase = oldKeychain, oldURL, oldBase
+		claudeAuthStatusRun = oldStatus
 		forgetClaudeCredential()
+		forgetClaudeStatus()
 	})
 }
 
@@ -107,11 +115,15 @@ func TestAccountsAreProviders(t *testing.T) {
 	if len(codex.Exposed()) != 1 || codex.Exposed()[0].ID != "gpt-5.5" || codex.Responses == "" {
 		t.Fatalf("picks: %+v", codex.Exposed())
 	}
+	// removing an account hides it from the list; its picks are kept for add
 	if err := Delete("codex"); err != nil {
 		t.Fatal(err)
 	}
-	if codex, _ = find(All(), "codex"); len(codex.Models) != 0 || codex.Account == nil {
-		t.Fatalf("after delete: %+v", codex)
+	if _, ok := find(All(), "codex"); ok {
+		t.Fatal("codex still listed after remove")
+	}
+	if x := Excluded(); len(x) != 1 || x[0].Provider != "codex" {
+		t.Fatalf("excluded after remove: %+v", x)
 	}
 
 	// signed out: gone, and a stale picks entry is not a provider
