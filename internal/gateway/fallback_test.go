@@ -235,6 +235,34 @@ func TestStreamingNoSwitchAfterFirstChunk(t *testing.T) {
 	}
 }
 
+// When the primary answers outright, a resting fallback was not used, so the
+// record must not claim a switch: Fallback stays empty and the field is omitted.
+func TestPrimarySuccessWithRestingFallbackRecordsNoSwitch(t *testing.T) {
+	const aChatOK = `{"id":"a1","object":"chat.completion","model":"m1","choices":[{"index":0,"message":{"role":"assistant","content":"from A"},"finish_reason":"stop"}]}`
+	a := &upstream{body: aChatOK}
+	b := &upstream{body: fbChatOK}
+	s := pair(t, a, b, "b/m2")
+	s.rest("b", "b: 503 B is down")
+	code, body := chat(t, s, "a/m1", false)
+	if code != 200 || !strings.Contains(body, "from A") {
+		t.Fatalf("status %d, body %s; want A's reply", code, body)
+	}
+	if b.count() != 0 {
+		t.Errorf("B got %d requests, want none", b.count())
+	}
+	rec := s.Recent()[0]
+	if rec.Provider != "a" || rec.Fallback != "" {
+		t.Errorf("record provider %q fallback %q; want a and empty", rec.Provider, rec.Fallback)
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"fallback"`) {
+		t.Errorf("record JSON carries a fallback key: %s", raw)
+	}
+}
+
 func TestMissingAndRepeatedFallbacksAreSkipped(t *testing.T) {
 	a := &upstream{status: 429, body: fbRateLimited}
 	b := &upstream{body: fbChatOK}

@@ -28,6 +28,8 @@ const providerUsage = `usage:
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
+  magpie provider fallback <id> [<provider/model>… | none]
+                                          models tried in order when this provider can't answer (quota, rate limit, overload, down)
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
@@ -43,7 +45,7 @@ func providers() error {
 		return nil
 	}
 	uses := usesByProvider()
-	type row struct{ name, id, host, key, models, uses string }
+	type row struct{ name, id, host, key, models, uses, fallback string }
 	var rows []row
 	w := [5]int{}
 	for _, p := range all {
@@ -70,13 +72,20 @@ func providers() error {
 		if u := uses[p.ID]; len(u) > 0 {
 			r.uses = green.Render("← " + strings.Join(u, ", "))
 		}
+		if len(p.Fallback) > 0 {
+			r.fallback = muted.Render("fallback " + fallbackChain(p.Fallback))
+		}
 		for i, s := range []string{r.name, r.id, r.host, r.key, r.models} {
 			w[i] = max(w[i], lipgloss.Width(s))
 		}
 		rows = append(rows, r)
 	}
 	for _, r := range rows {
-		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
+		line := fmt.Sprintf("  %s  %s  %s  %s  %s  %s", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
+		if r.fallback != "" {
+			line += "  " + r.fallback
+		}
+		fmt.Println(line)
 	}
 	for _, x := range provider.Excluded() {
 		name := x.Agent
@@ -226,6 +235,8 @@ func providerCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil
+	case "fallback":
+		return fallbackCmd(rest)
 	case "test":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider test <id>")
@@ -286,6 +297,66 @@ func providerCmd(args []string) error {
 		return err
 	}
 	return showProvider(*p)
+}
+
+const fallbackUsage = "magpie provider fallback <id> [<provider/model>… | none]"
+
+// fallbackCmd: `magpie provider fallback <id>` shows the chain,
+// `magpie provider fallback <id> <provider/model>…` replaces it, and
+// `magpie provider fallback <id> none` clears it.
+func fallbackCmd(rest []string) error {
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: %s", fallbackUsage)
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	names := rest[1:]
+	switch {
+	case len(names) == 0:
+		if len(p.Fallback) == 0 {
+			fmt.Println(muted.Render(p.Name+" · 没有 fallback"), muted.Render("· usage: "+fallbackUsage))
+			return nil
+		}
+		fmt.Println(" ", bold.Render(p.Name)+muted.Render("  "+p.ID))
+		fmt.Printf("  %s %s\n", muted.Render(pad("fallback", 10)), fallbackChain(p.Fallback))
+		return nil
+	case len(names) == 1 && strings.TrimSpace(names[0]) == "none":
+		p.Fallback = nil
+		if err := provider.Save(*p); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), p.Name, "fallback cleared")
+		return nil
+	}
+	// check every name before saving anything, so a bad one changes nothing
+	var chain []string
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "none" {
+			return fmt.Errorf("\"none\" clears the list and takes no other names\n\nusage: %s", fallbackUsage)
+		}
+		if _, _, ok := gateway.FallbackTarget(name); !ok {
+			return fmt.Errorf("unknown model %q · see magpie models", name)
+		}
+		chain = append(chain, name)
+	}
+	p.Fallback = chain
+	if err := provider.Save(*p); err != nil {
+		return err
+	}
+	saved, err := provider.Find(p.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), saved.Name, "fallback", fallbackChain(saved.Fallback))
+	return nil
+}
+
+// fallbackChain renders a fallback list as "a → b".
+func fallbackChain(xs []string) string {
+	return strings.Join(xs, " → ")
 }
 
 // addProvider: `magpie provider add <preset> [key]` or `magpie provider add <name> k=v…`

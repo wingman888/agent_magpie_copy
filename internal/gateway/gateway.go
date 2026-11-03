@@ -396,10 +396,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		break
 	}
 	final := targets[at]
-	// a resting provider that was not reached still explains the switch
-	for _, t := range targets[at+1:] {
-		if t.rest != "" {
-			failed = append(failed, t.rest)
+	// a resting provider that was not reached still explains the switch;
+	// when the primary answered outright there was no switch to explain
+	if at > 0 {
+		for _, t := range targets[at+1:] {
+			if t.rest != "" {
+				failed = append(failed, t.rest)
+			}
 		}
 	}
 	call.Provider = final.p.ID
