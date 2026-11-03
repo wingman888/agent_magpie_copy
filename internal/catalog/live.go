@@ -59,24 +59,12 @@ func SaveLive(provider, base string, models []Model) error {
 	return os.WriteFile(p, b, 0o644)
 }
 
-// SetHeaders adds extra headers to a request, under the names as given.
-// net/http would canonicalize a name ("x-org-id" to "X-Org-Id"); writing the
-// map directly keeps what the user typed. A header already set under the
-// same canonical name is replaced, so extra headers can override defaults.
-func SetHeaders(req *http.Request, h map[string]string) {
-	for name, value := range h {
-		req.Header.Del(name)
-		req.Header[name] = []string{value}
-	}
-}
-
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
 // around it. The result keeps the server's order. anthropic sends the
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-// headers are the provider's own extra headers, sent last.
 func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
@@ -137,7 +125,11 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	SetHeaders(req, headers)
+	// The user's own headers, after the defaults so a private auth scheme
+	// wins. Written directly so the name keeps the exact case the user typed.
+	for k, v := range headers {
+		req.Header[k] = []string{v}
+	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -192,11 +184,8 @@ func Decorate(live []Model, known []Model) []Model {
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
 		k, ok := byID[m.ID]
-		if !ok {
-			// "provider/model" ids match by the model part after the last slash
-			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
-				k, ok = byID[m.ID[i+1:]]
-			}
+		if i := strings.LastIndexByte(m.ID, '/'); !ok && i >= 0 {
+			k, ok = byID[m.ID[i+1:]] // a gateway's "deepseek/deepseek-chat"
 		}
 		if ok {
 			if m.Name == "" || m.Name == m.ID {
