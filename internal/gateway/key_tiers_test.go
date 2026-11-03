@@ -36,13 +36,17 @@ func TestKeyFit(t *testing.T) {
 		from  provider.Protocol
 		want  int
 	}{
-		{provider.Provider{}, "m", provider.Chat, 1},                // unspecified
-		{chat, "m", provider.Chat, 0},                               // made for the request's protocol
-		{ant, "m", provider.Chat, 2},                                // made for another
-		{chat, "m", provider.Anthropic, 2},                          // made for another
-		{ant, "claude-opus-4-8", provider.Chat, 0},                  // a Claude model is at home in Anthropic
-		{chat, "claude-opus-4-8", provider.Chat, 2},                 // so a Chat key is aside for it
-		{ant, "anthropic/claude-opus-4-8", provider.Chat, 0},        // vendor prefix does not change that
+		// unspecified
+		{provider.Provider{}, "m", provider.Chat, 1},
+		// made for the request's protocol
+		{chat, "m", provider.Chat, 0},
+		// made for another
+		{ant, "m", provider.Chat, 2},
+		{chat, "m", provider.Anthropic, 2},
+		// a Claude model is at home in Anthropic, so a Chat key is aside for it
+		{ant, "claude-opus-4-8", provider.Chat, 0},
+		{chat, "claude-opus-4-8", provider.Chat, 2},
+		{ant, "anthropic/claude-opus-4-8", provider.Chat, 0},
 	} {
 		if got := keyFit(c.q, c.model, c.from); got != c.want {
 			t.Errorf("keyFit(%q, %s, %s) = %d, want %d", c.q.KeyProtocol, c.model, c.from, got, c.want)
