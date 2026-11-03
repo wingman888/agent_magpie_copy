@@ -1186,7 +1186,7 @@ function renderEditor(p, presetID) {
   const pr = presetID ? providers.presets.find((x) => x.id === presetID) : p?.preset ? providers.presets.find((x) => x.id === p.preset) : null;
   const isNew = !p, custom = !pr;
   draft = draft || (p
-    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [] }
+    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, icon: p.icon, headers: p.headers, key: "", api: p.anthropic && !p.chat ? "anthropic" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [] }
     : pr
       ? { id: pr.id, name: pr.name, preset: pr.id, key: "", chosen: [], extra: [] }
       : { id: "", name: "", preset: "", chat: "", responses: "", anthropic: "", catalog: "", key: "", api: "openai", chosen: [], extra: [] });
@@ -1358,7 +1358,8 @@ function renderEditor(p, presetID) {
   cancel.onclick = cancelEdit;
   const saveBtn = el("button", "text primary", t(isNew ? "Add" : "Save"));
   const save = () => {
-    const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra };
+    // icon and headers travel back as they were loaded, so saving the form leaves them as they are
+    const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra, icon: draft.icon, headers: draft.headers };
     if (isNew && custom && !body.name) { name.focus(); return status(t("Give it a name"), "warn"); }
     if (isNew && custom && !body.chat && !body.anthropic) { url.focus(); return status(t("A base URL is needed"), "warn"); }
     saveBtn.classList.add("busy");

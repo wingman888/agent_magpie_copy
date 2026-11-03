@@ -10,8 +10,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -128,16 +130,68 @@ func sniffIcon(b []byte) string {
 	return ""
 }
 
-// isSVG accepts an XML document with an <svg> root. Scripts are refused: an
-// icon is drawn in the GUI, and a script in it would run there.
+// isSVG accepts an XML document whose root is <svg>. An icon is drawn in the
+// GUI, so anything live in it would run there: scripts, event handlers,
+// javascript: links, and elements that embed other content are refused, as is
+// a DOCTYPE, whose entities could hide any of them.
 func isSVG(b []byte) bool {
 	s := bytes.TrimPrefix(b, []byte("\xEF\xBB\xBF"))
 	s = bytes.TrimLeft(s, " \t\r\n")
 	if !bytes.HasPrefix(s, []byte("<")) {
 		return false
 	}
-	lower := bytes.ToLower(s)
-	return bytes.Contains(lower, []byte("<svg")) && !bytes.Contains(lower, []byte("<script"))
+	dec := xml.NewDecoder(bytes.NewReader(s))
+	root := false
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return false
+		}
+		switch t := tok.(type) {
+		case xml.Directive:
+			return false
+		case xml.StartElement:
+			if !root {
+				root = true
+				if !strings.EqualFold(t.Name.Local, "svg") {
+					return false
+				}
+			}
+			if unsafeSVGElement(t.Name.Local) {
+				return false
+			}
+			for _, a := range t.Attr {
+				if strings.HasPrefix(strings.ToLower(a.Name.Local), "on") || unsafeSVGValue(a.Value) {
+					return false
+				}
+			}
+		}
+	}
+	return root
+}
+
+// unsafeSVGElement names the elements an icon may not contain.
+func unsafeSVGElement(name string) bool {
+	switch strings.ToLower(name) {
+	case "script", "foreignobject", "iframe", "embed", "object":
+		return true
+	}
+	return false
+}
+
+// unsafeSVGValue reports whether an attribute value is a script link. Spaces
+// and control characters are dropped first, as a browser would ignore them.
+func unsafeSVGValue(v string) bool {
+	t := strings.ToLower(strings.Map(func(r rune) rune {
+		if r <= ' ' {
+			return -1
+		}
+		return r
+	}, v))
+	return strings.Contains(t, "javascript:") || strings.Contains(t, "vbscript:")
 }
 
 // pruneIcons deletes stored pictures no provider refers to, once they are

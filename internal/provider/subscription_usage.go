@@ -31,6 +31,11 @@ type SubscriptionQuota struct {
 	Plan     string        `json:"plan,omitempty"`
 	Windows  []QuotaWindow `json:"windows"`
 	Error    string        `json:"error,omitempty"`
+
+	// FiveHourUsed and WeeklyUsed are the used share of the 5-hour and the
+	// weekly window, in percent, when the vendor reports them. LoginUsage sets them.
+	FiveHourUsed *float64 `json:"fiveHourUsed,omitempty"`
+	WeeklyUsed   *float64 `json:"weeklyUsed,omitempty"`
 }
 
 var subscriptionUsageCache struct {
@@ -154,6 +159,9 @@ type accountStatusError struct{ status int }
 
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
+// claudeUsageURL is Claude Code's usage endpoint; a var so tests can point it elsewhere.
+var claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
+
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
 	token, err := claudeToken(ctx)
@@ -163,13 +171,18 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	}
 	_, plan, _ := claudeIdentity()
 	q.Plan = plan
+	return claudeUsageWith(ctx, q, token)
+}
+
+// claudeUsageWith reads the usage windows of the account behind token into q.
+func claudeUsageWith(ctx context.Context, q SubscriptionQuota, token string) SubscriptionQuota {
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
+	err := accountJSON(ctx, claudeUsageURL, token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
@@ -207,6 +220,11 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		q.Error = err.Error()
 		return q
 	}
+	return codexUsageWith(ctx, q, token, accountID)
+}
+
+// codexUsageWith reads the usage windows of the ChatGPT account behind token into q.
+func codexUsageWith(ctx context.Context, q SubscriptionQuota, token, accountID string) SubscriptionQuota {
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -215,7 +233,7 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	err := accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
 	if err != nil {
 		q.Error = err.Error()
 		return q

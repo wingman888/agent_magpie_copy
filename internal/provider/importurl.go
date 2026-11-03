@@ -80,11 +80,17 @@ func ParseImport(link string) (Provider, error) {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return Provider{}, errors.New("the link gives no base URL: it needs chat=, responses= or anthropic=")
 		}
-		if p.Catalog != "" && p.Catalog != Slug(p.Catalog) {
-			p.Catalog = ""
+		// catalog may name several models.dev ids, comma separated; each must be a slug
+		names := CatalogNames(p.Catalog)
+		for _, n := range names {
+			if n != Slug(n) {
+				names = nil
+				break
+			}
 		}
-		if p.Catalog != "" {
-			p.Icon = IconForCatalog(p.Catalog)
+		p.Catalog = strings.Join(names, ",")
+		if len(names) > 0 {
+			p.Icon = IconForCatalog(names[0])
 		}
 		p.Website = page(get("website"))
 		p.KeysURL = page(get("keys"))
