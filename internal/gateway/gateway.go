@@ -67,7 +67,6 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
-	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
@@ -222,13 +221,16 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok {
-		if res := s.countUpstream(r.Context(), p, model, body, r.Header); res != nil {
+	if ok && p.Anthropic != "" {
+		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+		if err == nil {
 			defer res.Body.Close()
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(res.StatusCode)
-			io.Copy(w, res.Body)
-			return
+			if res.StatusCode < 400 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(res.StatusCode)
+				io.Copy(w, res.Body)
+				return
+			}
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -237,31 +239,6 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
-}
-
-// countUpstream asks the provider's Anthropic endpoint to count tokens, with
-// the best fitting key that may reach that endpoint. A key limited to another
-// protocol never does, so a provider with only such keys gets no request here
-// and nil comes back. nil too when no key gets an answer below 400.
-func (s *Server) countUpstream(ctx context.Context, p provider.Provider, model string, body []byte, in http.Header) *http.Response {
-	keys := p.KeysOn()
-	if len(keys) == 0 {
-		keys = []provider.KeyAccount{{}} // a keyless provider still has its endpoint
-	}
-	for _, k := range orderKeys(p, keys, model, provider.Anthropic) {
-		q := p.WithKey(k)
-		if q.Anthropic == "" {
-			continue
-		}
-		res, err := s.forward(ctx, q, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), in)
-		if err == nil && res.StatusCode < 400 {
-			return res
-		}
-		if err == nil {
-			res.Body.Close()
-		}
-	}
-	return nil
 }
 
 // handle is the request path of one client API.
@@ -371,61 +348,46 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary, then its fallbacks while it can't take the request and
-	// nothing has been sent yet
-	cands := s.candidates(p, model, from)
-	var skipped []string
-	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		if !last && hw.failed() {
-			s.rest(c.rest)
-			skipped = append(skipped, c.label()+": "+call.Error)
-			continue
-		}
-		hw.release()
-		model = c.model
-		break
-	}
-	if len(skipped) > 0 {
-		call.Fallback = strings.Join(skipped, "; ")
-	}
-	call.Millis = time.Since(start).Milliseconds()
-	finishCapture()
-	s.record(call)
-	if call.To != "" {
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-	}
-}
-
-// attempt sends a request to one provider. call.To stays empty when the
-// provider has no endpoint to send it to.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
+	call.Provider = p.ID
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
+		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
 	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
 	if relay {
 		call.To = from
-		return s.passthrough(w, r, p, from, model, body, &call.Usage)
+		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+	} else {
+		to := p.Speaks()
+		if len(to) == 0 {
+			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
+			writeError(w, from, call.Status, call.Error)
+			call.Millis = time.Since(start).Milliseconds()
+			finishCapture()
+			s.record(call)
+			return
+		}
+		call.To = to[0]
+		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 	}
-	to := p.Speaks()
-	if len(to) == 0 {
-		msg := p.Name + " has no endpoint configured"
-		return writeError(w, from, 502, msg), msg
-	}
-	call.To = to[0]
-	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+	call.Millis = time.Since(start).Milliseconds()
+	finishCapture()
+	s.record(call)
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
 // forward sends a request to the provider.
@@ -451,6 +413,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
+	p.ApplyHeaders(req)
 	return s.client.Do(req)
 }
 

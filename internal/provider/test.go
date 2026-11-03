@@ -33,25 +33,19 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
-		// each endpoint is probed with a key that may use it; an endpoint
-		// with no such key is not probed
-		q, ok := p.ForProtocol(proto)
-		if !ok {
-			continue
-		}
 		var url, body string
 		switch proto {
 		case Chat:
-			url = q.Chat + "/chat/completions"
+			url = p.Chat + "/chat/completions"
 			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 		case Responses:
-			url = q.Responses + "/responses"
+			url = p.Responses + "/responses"
 			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
 		case Anthropic:
-			url = q.Anthropic + "/v1/messages"
+			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		}
-		out = append(out, probe(ctx, q, proto, url, q.Prepare([]byte(body)), model))
+		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
 	}
 	return out
 }
@@ -93,6 +87,7 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 		r.Error = err.Error()
 		return r
 	}
+	p.ApplyHeaders(req)
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
 	r.Millis = time.Since(start).Milliseconds()
