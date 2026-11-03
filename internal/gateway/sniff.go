@@ -3,41 +3,10 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"strings"
 
-	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/magpie/internal/provider"
 )
-
-// peekSSE reports whether a reply body is a server-sent event stream. A reply
-// that names its type is taken at its word. A reply with no Content-Type is
-// judged by its first bytes, since some streams arrive without one. The
-// returned reader still yields every byte, including the ones looked at.
-func peekSSE(contentType string, body io.Reader) (io.Reader, bool) {
-	if strings.HasPrefix(contentType, "text/event-stream") {
-		return body, true
-	}
-	if contentType != "" {
-		return body, false
-	}
-	var head []byte
-	buf := make([]byte, 512)
-	for len(bytes.TrimLeft(head, " \t\r\n")) < 6 {
-		n, err := body.Read(buf)
-		head = append(head, buf[:n]...)
-		if err != nil {
-			break
-		}
-	}
-	return io.MultiReader(bytes.NewReader(head), body), looksLikeSSE(head)
-}
-
-// looksLikeSSE reports whether the start of a body is an event stream: a field
-// line ("event:" or "data:") or a comment line.
-func looksLikeSSE(head []byte) bool {
-	s := bytes.TrimLeft(head, " \t\r\n")
-	return bytes.HasPrefix(s, []byte("event:")) || bytes.HasPrefix(s, []byte("data:")) || bytes.HasPrefix(s, []byte(":"))
-}
 
 // usageSniffer picks the usage block out of a provider reply that is being
 // copied to the client untouched. Streams are read line by line as they

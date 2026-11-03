@@ -1,8 +1,11 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,23 +18,24 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/dial/internal/provider"
-	"github.com/yetone/dial/internal/usage"
+	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/usage"
 )
 
-// DefaultAddr is where the gateway listens unless DIAL_ADDR says otherwise.
+// DefaultAddr is where the gateway listens unless MAGPIE_ADDR says otherwise.
 const DefaultAddr = "127.0.0.1:3425"
 
 // Token is the bearer token agents are told to use. The gateway only
 // listens on loopback and accepts anything, but agents insist on one.
-const Token = "dial"
+const Token = "magpie"
 
 // Version is set by main.
 var Version = "dev"
 
 // Addr is the listen address.
 func Addr() string {
-	if a := os.Getenv("DIAL_ADDR"); a != "" {
+	if a := os.Getenv("MAGPIE_ADDR"); a != "" {
 		return a
 	}
 	return DefaultAddr
@@ -49,21 +53,26 @@ func Running() bool {
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-	return bytes.Contains(b, []byte(`"dial"`))
+	return bytes.Contains(b, []byte(`"magpie"`))
 }
 
 // Call is one request the gateway handled, for the status views.
 type Call struct {
-	Time     time.Time         `json:"time"`
-	Agent    string            `json:"agent"` // who called, from the client's User-Agent
-	Model    string            `json:"model"`
-	Provider string            `json:"provider"`
-	From     provider.Protocol `json:"from"`
-	To       provider.Protocol `json:"to"`
-	Status   int               `json:"status"`
-	Millis   int64             `json:"ms"`
-	Error    string            `json:"error,omitempty"`
-	Usage    Usage             `json:"usage"`
+	Time              time.Time         `json:"time"`
+	Agent             string            `json:"agent"` // who called, from the client's User-Agent
+	Model             string            `json:"model"`
+	Provider          string            `json:"provider"`
+	From              provider.Protocol `json:"from"`
+	To                provider.Protocol `json:"to"`
+	Status            int               `json:"status"`
+	Millis            int64             `json:"ms"`
+	Error             string            `json:"error,omitempty"`
+	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
+	Usage             Usage             `json:"usage"`
+	RequestBody       string            `json:"requestBody,omitempty"`
+	ResponseBody      string            `json:"responseBody,omitempty"`
+	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
+	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
 }
 
 // Server is the gateway.
@@ -71,20 +80,27 @@ type Server struct {
 	client *http.Client
 	mu     sync.Mutex
 	recent []Call
-	debug  bool
+	// responseOnly remembers models rejected by Chat Completions, avoiding a
+	// known-failing probe on every Claude Code turn.
+	responseOnly map[string]bool
+	subscription *subscriptionBridge
+	debug        bool
+	trace        trace // what routing did with each request, for the Gateway view
 }
 
 // New makes a gateway.
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
+			Proxy:                 netproxy.Func,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,
 			ForceAttemptHTTP2:     true,
 		}},
-		debug: os.Getenv("DIAL_DEBUG") != "",
+		responseOnly: make(map[string]bool),
+		subscription: newSubscriptionBridge(),
+		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
 }
 
@@ -112,7 +128,7 @@ func (s *Server) record(c Call) {
 }
 
 // ListenAndServe runs the gateway until ctx ends. A bind error means
-// another dial is already serving, which is fine for the caller to ignore.
+// another magpie is already serving, which is fine for the caller to ignore.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	ln, err := net.Listen("tcp", Addr())
 	if err != nil {
@@ -131,7 +147,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	return nil
 }
 
-// Handler routes the three APIs.
+// Handler routes the client APIs.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.info)
@@ -145,20 +161,29 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
+	mux.HandleFunc("POST /_magpie/claude-mcp/{token}", s.subscription.mcpCall)
+	mux.HandleFunc(CodexPath+"/", s.codexBackend)
+	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
+	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses and /v1/messages")
+		writeError(w, provider.Chat, http.StatusNotFound, "magpie serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models/*")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"}})
+	writeJSON(w, 200, map[string]any{"name": "magpie", "version": Version, "models": len(provider.Catalog()),
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1beta/models/{model}:generateContent"}})
 }
 
 func modelObject(e provider.Entry) map[string]any {
+	owner := e.Provider.ID
+	if e.Group != nil {
+		// a routing group has no provider of its own
+		owner = "magpie"
+	}
 	return map[string]any{"id": e.ID, "object": "model", "type": "model", "created": 0, "created_at": "2025-01-01T00:00:00Z",
-		"owned_by": e.Provider.ID, "display_name": e.Name}
+		"owned_by": owner, "display_name": e.Name}
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +200,17 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if strings.HasPrefix(id, provider.GroupPrefix) {
+		// a group is described as its first member that can be used now
+		e, ok := groupEntry(id)
+		if !ok {
+			writeError(w, provider.Chat, 404, noGroupReady(id))
+			return
+		}
+		e.ID = id
+		writeJSON(w, 200, modelObject(e))
+		return
+	}
 	for _, e := range provider.Catalog() {
 		if e.ID == id {
 			writeJSON(w, 200, modelObject(e))
@@ -193,6 +229,29 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, model, ok := provider.Resolve(modelOf(body))
+	// Claude Subscription generations run through the Claude Code binary. Its
+	// OAuth token must not take a direct HTTP side path just for token counting.
+	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok") {
+		req, err := parseAnthropic(body)
+		if err != nil {
+			writeError(w, provider.Anthropic, 400, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
+		return
+	}
+	if ok {
+		// a relay's OpenAI-only key can't count Anthropic tokens
+		q := p
+		q.Anthropic = ""
+		for _, c := range perKey(p, model, provider.Anthropic) {
+			if c.p.Anthropic != "" {
+				q = c.p
+				break
+			}
+		}
+		p = q
+	}
 	if ok && p.Anthropic != "" {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
@@ -210,16 +269,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Anthropic, 400, err.Error())
 		return
 	}
-	n := len(req.System)
-	for _, m := range req.Messages {
-		for _, p := range m.Parts {
-			n += len(p.Text) + len(p.Args) + len(p.Name)
-		}
-	}
-	for _, t := range req.Tools {
-		n += len(t.Name) + len(t.Description) + len(t.Schema)
-	}
-	writeJSON(w, 200, map[string]any{"input_tokens": n / 4})
+	writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 }
 
 // handle is the request path of one client API.
@@ -230,58 +280,262 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			writeError(w, from, 400, err.Error())
 			return
 		}
-		start := time.Now()
-		call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
-		p, model, ok := provider.Resolve(call.Model)
+		s.serve(w, r, from, body)
+	}
+}
+
+// gemini serves /v1beta/models/{model}:{method}. The Gemini API keeps the
+// model and the streaming choice in the URL; they move into the body so
+// serve sees one shape.
+func (s *Server) gemini(w http.ResponseWriter, r *http.Request) {
+	call := r.PathValue("call")
+	i := strings.LastIndex(call, ":") // model ids may hold a colon (ollama tags), methods never do
+	if i < 0 {
+		writeError(w, provider.Gemini, 404, "expected /v1beta/models/{model}:generateContent")
+		return
+	}
+	model, method := call[:i], call[i+1:]
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if err != nil {
+		writeError(w, provider.Gemini, 400, err.Error())
+		return
+	}
+	var stream bool
+	switch method {
+	case "generateContent":
+	case "streamGenerateContent":
+		stream = true
+	case "countTokens":
+		s.geminiCount(w, model, body)
+		return
+	default:
+		writeError(w, provider.Gemini, 404, "unknown method "+method)
+		return
+	}
+	s.serve(w, r, provider.Gemini, withFields(body, map[string]any{"model": model, "stream": stream}))
+}
+
+// geminiCount answers countTokens with a rough estimate.
+func (s *Server) geminiCount(w http.ResponseWriter, model string, body []byte) {
+	var wrap struct {
+		Inner json.RawMessage `json:"generateContentRequest"`
+	}
+	if json.Unmarshal(body, &wrap) == nil && len(wrap.Inner) > 0 {
+		body = wrap.Inner
+	}
+	req, err := parseGemini(body)
+	if err != nil {
+		writeError(w, provider.Gemini, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"totalTokens": estimate(req)})
+}
+
+func (s *Server) geminiModels(w http.ResponseWriter, r *http.Request) {
+	models := []map[string]any{}
+	for _, e := range provider.Catalog() {
+		models = append(models, geminiModel(e.ID, e.Name))
+	}
+	writeJSON(w, 200, map[string]any{"models": models})
+}
+
+// estimate is a token count from sizes, for clients that ask before sending.
+func estimate(req *Request) int {
+	n := len(req.System)
+	for _, m := range req.Messages {
+		for _, p := range m.Parts {
+			n += len(p.Text) + len(p.Args) + len(p.Name)
+		}
+	}
+	for _, t := range req.Tools {
+		n += len(t.Name) + len(t.Description) + len(t.Schema)
+	}
+	return n / 4
+}
+
+// serve routes one parsed-enough request to its provider.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
+	start := time.Now()
+	requestBody, requestTruncated := captureRequestBody(body)
+	capture := &captureResponseWriter{ResponseWriter: w}
+	w = capture
+	call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent")),
+		RequestBody: requestBody, RequestTruncated: requestTruncated}
+	finishCapture := func() {
+		call.ResponseBody = capture.body.text()
+		call.ResponseTruncated = capture.body.truncated
+	}
+	fail := func(what, msg string) {
+		call.Status, call.Error = 404, what
+		writeError(w, from, 404, msg)
+		finishCapture()
+		s.record(call)
+	}
+	session := sessionOf(r.Header)
+	var tn turnRef
+	if session != "" {
+		turn, within := turnOf(from, body)
+		tn = turnRef{session: session, model: call.Model, turn: turn, within: within}
+	}
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet; a routing group's members instead
+	var cands []candidate
+	var pl planned
+	var model, mode, providerName string
+	var group *GroupTrace
+	if strings.HasPrefix(call.Model, provider.GroupPrefix) {
+		g, ms, ok := provider.FindGroup(call.Model)
 		if !ok {
-			call.Status, call.Error = 404, "unknown model"
-			s.record(call)
-			msg := fmt.Sprintf("dial knows no model %q", call.Model)
+			msg := noGroupReady(call.Model)
+			fail(msg, msg)
+			return
+		}
+		tn.rotating = g.Routing == provider.Rotate
+		members := make([]memberOf, 0, len(ms))
+		names := make([]string, 0, len(ms))
+		for _, m := range ms {
+			q, err := provider.Find(m.Provider)
+			if err != nil {
+				continue
+			}
+			members = append(members, memberOf{p: *q, model: m.Model})
+			names = append(names, m.String())
+		}
+		cands, pl = s.planGroup(g, members, from, tn)
+		if len(cands) == 0 {
+			msg := noGroupReady(call.Model)
+			fail(msg, msg)
+			return
+		}
+		mode = g.Affinity
+		if mode == "" && len(members) > 0 {
+			mode = members[0].p.Affinity
+		}
+		group = &GroupTrace{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity,
+			Auto: provider.GroupAuto(g.ID), Members: names}
+		providerName = call.Model
+	} else {
+		p, m, ok := provider.Resolve(call.Model)
+		if !ok {
+			msg := fmt.Sprintf("magpie knows no model %q", call.Model)
 			if ids := provider.IDs(); len(ids) > 0 {
 				msg += "; it has " + strings.Join(ids, ", ")
 			} else {
-				msg += "; add a provider in dial first"
+				msg += "; add a provider in magpie first"
 			}
-			writeError(w, from, 404, msg)
+			fail("unknown model", msg)
 			return
 		}
-		call.Provider = p.ID
-		if p.Base(from) != "" {
-			call.To = from
-			call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
-		} else {
-			to := p.Speaks()
-			if len(to) == 0 {
-				writeError(w, from, 502, p.Name+" has no endpoint configured")
-				return
-			}
-			call.To = to[0]
-			call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+		model = m
+		tn.rotating = p.Routing == provider.Rotate
+		cands, pl = s.planIn(p, model, from, tn)
+		mode, providerName = p.Affinity, p.ID
+	}
+	// a conversation keeps to the key or account that last answered it, when
+	// its affinity says so: that one moves to the front
+	fromAt, to, aff := affine(cands, session, call.Model, mode, tn, start)
+	if fromAt >= 0 {
+		cands, pl.order = shift(cands, fromAt, to), shift(pl.order, fromAt, to)
+	}
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: providerName,
+		Order: pl.order, Left: pl.left, Group: group, Affinity: aff})
+	var skipped []string
+	for i, c := range cands {
+		last := i == len(cands)-1 || r.Context().Err() != nil
+		hw := newHoldWriter(w, !last)
+		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		began := time.Now()
+		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
+		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
+		if !last && hw.failed() {
+			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
+			try.Fail, try.Rest = rest.Why, &rest
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			skipped = append(skipped, c.label()+": "+call.Error)
+			continue
 		}
-		call.Millis = time.Since(start).Milliseconds()
-		s.record(call)
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+		hw.release()
+		model = c.model
+		if call.Status < 400 {
+			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+			if session != "" {
+				recordReply(session, call.Model, c, call.Usage.CacheRead)
+			}
+		} else {
+			try.Fail = failure(call.Status, []byte(call.Error))
+		}
+		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+		break
+	}
+	if len(skipped) > 0 {
+		call.Fallback = strings.Join(skipped, "; ")
+	}
+	call.Millis = time.Since(start).Milliseconds()
+	finishCapture()
+	s.trace.update(tr, func(t *Route) {
+		t.Done, t.Status, t.Error, t.Millis = true, call.Status, call.Error, call.Millis
+		t.Tokens = call.Usage.Input + call.Usage.Output + call.Usage.CacheRead + call.Usage.CacheWrite
+	})
+	s.record(call)
+	if call.To != "" {
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
 			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 	}
 }
 
-// forward sends a request to the provider. Where it goes and who it says it
-// is come from provider.Upstream, which reads an agent's login when the
-// provider is one.
-func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
-	base, auth, err := provider.Upstream(ctx, p, to, body)
-	if err != nil {
-		return nil, err
+// attempt sends a request to one provider. call.To stays empty when the
+// provider has no endpoint to send it to.
+func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
+	// A Claude Code subscription must run through the genuine binary. Direct
+	// OAuth HTTP requests are content-classified as third-party traffic when
+	// they carry another agent's harness (Pi, OpenCode, and others).
+	if p.Account != nil && p.Account.Agent == "claude" {
+		call.To = provider.Anthropic
+		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
 	}
-	body = provider.UpstreamBody(p, to, body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
+	// Cursor's API belongs to its own clients: its CLI does the talking
+	if p.Account != nil && p.Account.Agent == "cursor" {
+		call.To = from
+		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+			return s.subscription.startCursor(ctx, req, model)
+		}
+		return s.serveSubscription(w, r, from, "Cursor", model, body, &call.Usage, start)
+	}
+	// and so does Grok's
+	if p.Account != nil && p.Account.Agent == "grok" {
+		call.To = from
+		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+			return s.subscription.startGrok(ctx, req, model, p.Account.Home)
+		}
+		return s.serveSubscription(w, r, from, "Grok", model, body, &call.Usage, start)
+	}
+	// a backend that only streams gets a non-streaming request translated
+	// (the provider is always streamed on that path) rather than relayed
+	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
+	if relay {
+		call.To = from
+		return s.passthrough(w, r, p, from, model, body, &call.Usage)
+	}
+	to := p.Speaks()
+	if len(to) == 0 {
+		msg := p.Name + " has no endpoint configured"
+		return writeError(w, from, 502, msg), msg
+	}
+	call.To = to[0]
+	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+}
+
+// forward sends a request to the provider.
+func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("User-Agent", "dial/"+Version)
+	req.Header.Set("User-Agent", "magpie/"+Version)
 	if to == provider.Anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 		for _, h := range []string{"anthropic-version", "anthropic-beta"} {
@@ -290,58 +544,48 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	for k, v := range auth {
-		req.Header.Set(k, v)
+	if p.IsOpenCode() {
+		req.Header.Set("x-opencode-session", conversationID(in, body))
+	}
+	if err := p.Sign(ctx, req, to, body); err != nil {
+		return nil, err
 	}
 	return s.client.Do(req)
-}
-
-// upstreamError reads an upstream's error reply and says what to tell the
-// client. A refused agent login gets the message that says how to fix it.
-func upstreamError(p provider.Provider, res *http.Response) string {
-	if e := provider.AccountRejected(p, res.StatusCode); e != nil {
-		return p.Name + ": " + e.Error()
-	}
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	return p.Name + ": " + provider.APIError(b, res.Status)
 }
 
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
-	res, err := s.forward(r.Context(), p, proto, pathOf(proto), rewriteModel(body, model), r.Header)
+	body = rewriteModel(body, model)
+	if proto == provider.Chat {
+		body = developerAsSystem(body)
+	}
+	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		msg := upstreamError(p, res)
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		keepRetry(w.Header(), res.Header)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
-	if proto == provider.Responses && p.Account != nil && p.Account.Agent == "codex" && !wantsStream(body) {
-		// Codex only streams; a client that asked for one whole reply gets the final response object.
-		return aggregate(w, res, p, u)
-	}
-	rd, isSSE := peekSSE(res.Header.Get("Content-Type"), res.Body)
+	rd, sse := eventStream(res)
 	h := w.Header()
 	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
 		if v := res.Header.Get(k); v != "" {
 			h.Set(k, v)
 		}
 	}
-	ct := res.Header.Get("Content-Type")
-	if ct == "" && isSSE {
-		ct = "text/event-stream"
-		h.Set("Content-Type", ct)
-	}
-	if isSSE {
+	if sse {
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Accel-Buffering", "no")
 	}
 	w.WriteHeader(res.StatusCode)
 	f, _ := w.(http.Flusher)
-	sniff := newSniffer(proto, ct)
+	sniff := newSniffer(proto, res.Header.Get("Content-Type"))
 	defer func() { u.add(sniff.usage()) }()
 	buf := make([]byte, 32<<10)
 	for {
@@ -362,104 +606,118 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	return res.StatusCode, ""
 }
 
-// wantsStream reports whether a request asked for a streamed reply.
-func wantsStream(body []byte) bool {
-	var v struct {
-		Stream bool `json:"stream"`
+// eventStream reports whether a reply is server-sent events. The header
+// says so for most vendors; the ChatGPT backend sends none, so the body's
+// first bytes decide, and the header is filled in for whoever reads it.
+func eventStream(res *http.Response) (io.Reader, bool) {
+	ct := res.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "text/event-stream") {
+		return res.Body, true
 	}
-	json.Unmarshal(body, &v)
-	return v.Stream
+	if ct != "" && !strings.HasPrefix(ct, "text/plain") {
+		return res.Body, false
+	}
+	br := bufio.NewReaderSize(res.Body, 4<<10)
+	head, _ := br.Peek(16)
+	head = bytes.TrimLeft(head, " \t\r\n")
+	for _, pfx := range []string{"event:", "data:", ":"} {
+		if bytes.HasPrefix(head, []byte(pfx)) {
+			res.Header.Set("Content-Type", "text/event-stream")
+			return br, true
+		}
+	}
+	return br, false
 }
 
-// aggregate answers a non-streaming Responses request that Codex served as a
-// stream. It reads the whole stream and replies with the final response
-// object; the token counts come from the same stream.
-func aggregate(w http.ResponseWriter, res *http.Response, p provider.Provider, u *Usage) (int, string) {
-	rd, isSSE := peekSSE(res.Header.Get("Content-Type"), res.Body)
-	raw, err := io.ReadAll(io.LimitReader(rd, 64<<20))
+func (s *Server) responseOnlyModel(providerID, model string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.responseOnly[providerID+"\x00"+model]
+}
+
+func (s *Server) markResponseOnly(providerID, model string) {
+	s.mu.Lock()
+	s.responseOnly[providerID+"\x00"+model] = true
+	s.mu.Unlock()
+}
+
+// forwardTranslated sends one translated, streaming request upstream. Chat is
+// preferred by most OpenAI-compatible providers, but some models are exposed
+// only by the Responses endpoint; retry that endpoint before failing, like
+// Alma's Claude Code provider proxy does.
+func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to provider.Protocol, req *Request, model string, in http.Header) (*http.Response, provider.Protocol, error) {
+	send := func(proto provider.Protocol) (*http.Response, error) {
+		body := build(proto, req, model, p.Host(), p.RejectsTemperature(model))
+		return s.forward(ctx, p, proto, pathOf(proto), p.Prepare(body), in)
+	}
+	if to == provider.Chat && p.Responses != "" && s.responseOnlyModel(p.ID, model) {
+		to = provider.Responses
+	}
+	res, err := send(to)
 	if err != nil {
-		msg := p.Name + ": " + err.Error()
-		return writeError(w, provider.Responses, 502, msg), msg
+		return nil, to, err
 	}
-	ct := "application/json"
-	if isSSE {
-		ct = "text/event-stream"
+	if to != provider.Chat || p.Responses == "" || res.StatusCode < 400 {
+		return res, to, nil
 	}
-	sniff := newSniffer(provider.Responses, ct)
-	sniff.write(raw)
-	u.add(sniff.usage())
-	final, failure := finalResponse(raw, isSSE)
-	if failure != "" {
-		msg := p.Name + ": " + failure
-		return writeError(w, provider.Responses, 502, msg), msg
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	res.Body.Close()
+	if !notChatModel(res.StatusCode, b) {
+		res.Body = io.NopCloser(bytes.NewReader(b))
+		return res, to, nil
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(final)
-	return http.StatusOK, ""
+	s.markResponseOnly(p.ID, model)
+	res, err = send(provider.Responses)
+	return res, provider.Responses, err
 }
 
-// finalResponse finds the response object a Responses reply ends with. A
-// stream that ends in failure, or without a response, yields the message.
-func finalResponse(raw []byte, isSSE bool) ([]byte, string) {
-	if !isSSE {
-		if json.Valid(raw) && len(bytes.TrimSpace(raw)) > 0 {
-			return raw, ""
-		}
-		return nil, "the reply was not a response object"
+// notChatModel recognizes the errors used by OpenAI-compatible servers when a
+// model can only be called through /responses.
+func notChatModel(status int, body []byte) bool {
+	if status < 400 {
+		return false
 	}
-	var final []byte
-	var failure string
-	readSSE(bytes.NewReader(raw), func(_, data string) error {
-		var ev struct {
-			Type     string          `json:"type"`
-			Response json.RawMessage `json:"response"`
+	msg := strings.ToLower(string(body))
+	for _, phrase := range []string{
+		"not a chat model",
+		"not supported in the v1/chat/completions",
+		"not supported in /v1/chat/completions",
+		"use v1/completions",
+		"use /v1/completions",
+		"use v1/responses",
+		"use /v1/responses",
+	} {
+		if strings.Contains(msg, phrase) {
+			return true
 		}
-		if json.Unmarshal([]byte(data), &ev) != nil {
-			return nil
-		}
-		switch ev.Type {
-		case "response.completed", "response.incomplete":
-			final = ev.Response
-		case "response.failed":
-			failure = provider.APIError(ev.Response, "response failed")
-		case "error":
-			failure = provider.APIError([]byte(data), "error")
-		}
-		return nil
-	})
-	if final != nil {
-		return final, ""
 	}
-	if failure == "" {
-		failure = "the stream ended without a response"
-	}
-	return nil, failure
+	return false
 }
 
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
 func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
-	req, err := parse(from, body)
+	request, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
 	}
-	stream := req.Stream
-	req.Stream = true
-	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
+	stream := request.Stream
+	request.Stream = true
+	res, actual, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
 	if err != nil {
 		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		msg := upstreamError(p, res)
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		keepRetry(w.Header(), res.Header)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
-	dec := decoder(to)
-	// a stream may arrive without a Content-Type; its first bytes say what it is
-	rd, isSSE := peekSSE(res.Header.Get("Content-Type"), res.Body)
-	if !isSSE {
+	dec := decoder(actual)
+	rd, sse := eventStream(res)
+	if !sse {
 		// the provider ignored stream:true; read the whole reply as one
 		// event stream would be wrong, so give up cleanly
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
@@ -467,7 +725,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
-		enc := encoder(from, newSSEWriter(w), req.Model)
+		enc := encoder(from, newSSEWriter(w), request.Model)
 		var failed string
 		readSSE(rd, func(_, data string) error {
 			return dec(data, func(ev Event) {
@@ -492,7 +750,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)
-	out := render(from, res2, req.Model)
+	out := render(from, res2, request.Model)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(out)
@@ -517,16 +775,18 @@ func parse(proto provider.Protocol, body []byte) (*Request, error) {
 		return parseChat(body)
 	case provider.Responses:
 		return parseResponses(body)
+	case provider.Gemini:
+		return parseGemini(body)
 	}
 	return parseAnthropic(body)
 }
 
-func build(proto provider.Protocol, r *Request, model, host string) []byte {
+func build(proto provider.Protocol, r *Request, model, host string, rejectTemp bool) []byte {
 	switch proto {
 	case provider.Chat:
-		return buildChat(r, model, host)
+		return buildChat(r, model, host, rejectTemp)
 	case provider.Responses:
-		return buildResponses(r, model)
+		return buildResponses(r, model, rejectTemp)
 	}
 	return buildAnthropic(r, model)
 }
@@ -554,6 +814,8 @@ func encoder(proto provider.Protocol, w *sseWriter, model string) streamEncoder 
 		return &chatEncoder{w: w, model: model}
 	case provider.Responses:
 		return &responsesEncoder{w: w, model: model}
+	case provider.Gemini:
+		return &geminiEncoder{w: w, model: model}
 	}
 	return &anthropicEncoder{w: w, model: model}
 }
@@ -564,11 +826,21 @@ func render(proto provider.Protocol, res Result, model string) []byte {
 		return renderChat(res, model)
 	case provider.Responses:
 		return renderResponses(res, model)
+	case provider.Gemini:
+		return renderGemini(res, model)
 	}
 	return renderAnthropic(res, model)
 }
 
 // ---- small helpers ------------------------------------------------------------
+
+func streamOf(body []byte) bool {
+	var v struct {
+		Stream bool `json:"stream"`
+	}
+	json.Unmarshal(body, &v)
+	return v.Stream
+}
 
 func modelOf(body []byte) string {
 	var v struct {
@@ -580,13 +852,99 @@ func modelOf(body []byte) string {
 
 // rewriteModel swaps the model field, keeping every other field as it was.
 func rewriteModel(body []byte, model string) []byte {
+	return withFields(body, map[string]any{"model": model})
+}
+
+// developerAsSystem turns "developer" messages into "system" ones. Agents
+// such as Pi send the developer role to reasoning models, which OpenAI
+// accepts, but other Chat Completions backends (DeepSeek among them) reject
+// the whole request; every backend accepts system, OpenAI included.
+func developerAsSystem(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"developer"`)) {
+		return body
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var m map[string]any
 	if err := dec.Decode(&m); err != nil {
 		return body
 	}
-	m["model"] = model
+	msgs, _ := m["messages"].([]any)
+	changed := false
+	for _, v := range msgs {
+		if msg, ok := v.(map[string]any); ok && msg["role"] == "developer" {
+			msg["role"] = "system"
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// sessionHeaders are where agents already name their conversation: OpenCode
+// (to its own gateway, and to everyone else), Pi, Codex and Claude Code.
+var sessionHeaders = []string{
+	"x-opencode-session", "x-session-affinity", "x-session-id",
+	"session_id", "session-id", "x-claude-code-session-id",
+}
+
+// conversationID is a stable id for the conversation a request belongs to.
+// It is the agent's own session id when it sends one; otherwise it is derived
+// from the conversation's first user message, which every later turn repeats.
+func conversationID(in http.Header, body []byte) string {
+	for _, h := range sessionHeaders {
+		if v := strings.TrimSpace(in.Get(h)); v != "" {
+			return v
+		}
+	}
+	var m struct {
+		Messages []json.RawMessage `json:"messages"`
+		Input    json.RawMessage   `json:"input"`
+	}
+	// An undecodable body still gets an id: the hash of the whole body.
+	_ = json.Unmarshal(body, &m)
+	items := m.Messages
+	if len(items) == 0 && len(m.Input) > 0 && m.Input[0] == '[' {
+		// A malformed input array leaves items empty, and the whole body is hashed.
+		_ = json.Unmarshal(m.Input, &items)
+	}
+	first := []byte(m.Input)
+	if len(items) > 0 {
+		first = items[0]
+	}
+	for _, it := range items {
+		var r struct {
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(it, &r) == nil && r.Role == "user" {
+			first = it
+			break
+		}
+	}
+	if len(first) == 0 {
+		first = body
+	}
+	sum := sha256.Sum256(first)
+	return "magpie-" + hex.EncodeToString(sum[:12])
+}
+
+// withFields sets top-level fields, keeping every other field as it was.
+func withFields(body []byte, fields map[string]any) []byte {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return body
+	}
+	for k, v := range fields {
+		m[k] = v
+	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return body
@@ -618,9 +976,17 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 		typ = "overloaded_error"
 	}
 	var v any
-	if proto == provider.Anthropic {
+	switch proto {
+	case provider.Anthropic:
 		v = map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
-	} else {
+	case provider.Gemini:
+		st := map[int]string{400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
+			429: "RESOURCE_EXHAUSTED", 500: "INTERNAL", 502: "UNAVAILABLE", 503: "UNAVAILABLE", 529: "UNAVAILABLE"}[status]
+		if st == "" {
+			st = "UNKNOWN"
+		}
+		v = map[string]any{"error": map[string]any{"code": status, "message": msg, "status": st}}
+	default:
 		v = map[string]any{"error": map[string]any{"message": msg, "type": typ, "code": nil, "param": nil}}
 	}
 	writeJSON(w, status, v)
