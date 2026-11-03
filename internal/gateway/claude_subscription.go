@@ -102,10 +102,10 @@ func callbackBaseURL() string {
 	return "http://" + host + ":" + port
 }
 
-// start runs Claude Code for one request. token is the OAuth token of a
+// start runs Claude Code for one request. oauth is the OAuth token of a
 // remembered account to run it as; empty runs it as the sign-in Claude Code
 // holds itself.
-func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, token string) (*subscriptionRun, <-chan Event, error) {
+func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, oauth string) (*subscriptionRun, <-chan Event, error) {
 	binary, err := claudeBinary()
 	if err != nil {
 		return nil, nil, err
@@ -147,9 +147,9 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, tok
 	cmd := exec.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
 	cmd.Env = cleanClaudeEnv(os.Environ())
-	if token != "" {
+	if oauth != "" {
 		// the environment's last value wins, so this overrides any inherited one
-		cmd.Env = append(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN="+token)
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN="+oauth)
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
