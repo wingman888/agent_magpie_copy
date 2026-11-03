@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -24,22 +21,19 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog
   magpie provider key <id> <key>          change the API key
-  magpie provider icon <id> <file|name|"">  set a custom vendor's icon: an image file, a built-in icon name, or "" for the default
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
-       magpie provider add "Org Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme
-       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
-       magpie provider add "Team Relay" url=https://relay.example.com/v1 key=sk-… icon=./logo.png`
+       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
 
 // providers: `magpie providers`
 func providers() error {
 	all := provider.All()
-	if len(all) == 0 && len(provider.Excluded()) == 0 {
+	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
 		return nil
 	}
@@ -85,11 +79,7 @@ func providers() error {
 			name = a.Name
 		}
 		fmt.Println()
-		back := ""
-		if x.Provider != "" {
-			back = " · magpie provider add " + x.Provider + " brings it back"
-		}
-		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why+back))
+		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why))
 	}
 	return nil
 }
@@ -191,8 +181,6 @@ func providerCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), p.Name, "key", muted.Render(provider.Mask(p.Key)))
 		return nil
-	case "icon":
-		return setIcon(rest)
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -289,12 +277,6 @@ func addProvider(rest []string) error {
 	if err := applyPairs(&p, rest); err != nil {
 		return err
 	}
-	return saveNew(p)
-}
-
-// saveNew saves a provider the user just added, then asks the vendor for
-// its models.
-func saveNew(p provider.Provider) error {
 	if err := provider.Save(p); err != nil {
 		return err
 	}
@@ -348,16 +330,6 @@ func showProvider(p provider.Provider) error {
 	default:
 		kv("key", amber.Render("not set")+muted.Render("  magpie provider key "+p.ID+" …"))
 	}
-	if p.Preset == "" && p.Account == nil {
-		names := make([]string, 0, len(p.Headers))
-		for name := range p.Headers {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			fmt.Printf("  header  %s: %s\n", name, p.Headers[name])
-		}
-	}
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
@@ -390,18 +362,6 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		if !ok {
 			return fmt.Errorf("expected key=value, got %q\n\n%s", kv, providerUsage)
 		}
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if len(k) >= len(headerPrefix) && strings.EqualFold(k[:len(headerPrefix)], headerPrefix) {
-			// header.<name>=<value>: the name keeps the case typed. An empty
-			// name is dropped (see provider.Save).
-			if name := strings.TrimSpace(k[len(headerPrefix):]); name != "" {
-				if p.Headers == nil {
-					p.Headers = map[string]string{}
-				}
-				p.Headers[name] = v
-			}
-			continue
-		}
 		switch strings.ToLower(k) {
 		case "id":
 			p.ID = v
@@ -424,90 +384,13 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "keys":
 			p.KeysURL = v
 		case "icon":
-			if p.Preset != "" || p.Account != nil {
-				return errNotCustom
-			}
-			icon, err := iconValue(v)
-			if err != nil {
-				return err
-			}
-			p.Icon = icon
+			p.Icon = v
 		default:
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}
 	}
 	return nil
 }
-
-// errNotCustom is the refusal for setting an icon on a preset vendor or a
-// signed-in agent, which keep their own icons.
-var errNotCustom = errors.New("only custom providers can have an icon (presets and signed-in agents keep their own)")
-
-// setIcon: `magpie provider icon <id> <file | built-in name | "">`
-func setIcon(rest []string) error {
-	if len(rest) != 2 {
-		return fmt.Errorf("magpie provider icon <id> <image file | built-in icon name | \"\">")
-	}
-	p, err := provider.Find(rest[0])
-	if err != nil {
-		return err
-	}
-	if p.Preset != "" || p.Account != nil {
-		return errNotCustom
-	}
-	icon, err := iconValue(strings.TrimSpace(rest[1]))
-	if err != nil {
-		return err
-	}
-	p.Icon = icon
-	if err := provider.Save(*p); err != nil {
-		return err
-	}
-	shown := icon
-	if shown == "" {
-		shown = "default"
-	}
-	fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(shown))
-	return nil
-}
-
-// iconValue turns an icon setting into the value Provider.Icon holds. An
-// existing file is stored and becomes its "file:" reference; "" means the
-// default icon; anything else is taken as a built-in icon name. A path-like
-// value naming no file is an error, since built-in names never look like paths.
-func iconValue(v string) (string, error) {
-	if v == "" {
-		return "", nil
-	}
-	info, err := os.Stat(v)
-	switch {
-	case err == nil && info.IsDir():
-		// A folder is never an image; a name that happens to match one in the
-		// working directory is still a built-in icon name.
-		return v, nil
-	case err == nil && info.Mode().IsRegular():
-		return provider.StoreIconFile(v)
-	case looksLikeIconFile(v):
-		return "", fmt.Errorf("no such icon file: %s", v)
-	}
-	return v, nil
-}
-
-// looksLikeIconFile is true for a value written as a file path: it has a
-// separator or an image extension.
-func looksLikeIconFile(v string) bool {
-	if strings.ContainsAny(v, `/\`) {
-		return true
-	}
-	switch strings.ToLower(filepath.Ext(v)) {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg":
-		return true
-	}
-	return false
-}
-
-// headerPrefix starts a k=v key that sets a request header, e.g. header.X-Org-Id.
-const headerPrefix = "header."
 
 func ago(t time.Time) string {
 	d := time.Since(t)
@@ -557,47 +440,4 @@ func serve() error {
 		fmt.Printf("  %d models · %s\n", n, muted.Render("magpie models"))
 	}
 	return s.ListenAndServe(context.Background())
-}
-
-// importCmd adds the provider a magpie://import link describes, after
-// showing it: magpie import [-y] <link>.
-func importCmd(args []string) error {
-	yes := false
-	var link string
-	for _, a := range args {
-		switch a {
-		case "-y", "--yes":
-			yes = true
-		default:
-			link = a
-		}
-	}
-	if link == "" {
-		return errors.New("magpie import [-y] 'magpie://import?…'")
-	}
-	p, err := provider.ParseImport(link)
-	if err != nil {
-		return err
-	}
-	if err := showProvider(p); err != nil {
-		return err
-	}
-	if old, err := provider.Find(p.ID); err == nil {
-		fmt.Println(amber.Render("!"), "replaces your", old.Name)
-	}
-	if !yes {
-		if st, err := os.Stdin.Stat(); err != nil || st.Mode()&os.ModeCharDevice == 0 {
-			return errors.New("not a terminal: add -y to import without asking")
-		}
-		fmt.Print("Add it? [y/N] ")
-		var answer string
-		_, _ = fmt.Scanln(&answer)
-		if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
-			return errors.New("nothing added")
-		}
-	}
-	if p.Key == "" && !p.Ready() {
-		fmt.Println(amber.Render("!"), "the link has no key · magpie provider key", p.ID, "<key>")
-	}
-	return saveNew(p)
 }
