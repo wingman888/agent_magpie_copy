@@ -64,7 +64,8 @@ func SaveLive(provider, base string, models []Model) error {
 // around it. The result keeps the server's order. anthropic sends the
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
-// Anthropic-flavoured catalog — namespaced, differently named ids.
+// Anthropic-flavoured catalog — namespaced, differently named ids. headers
+// are extra request headers sent with every try, applied last (see SetHeaders).
 func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
@@ -125,12 +126,8 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	// The user's own headers, after the defaults so a private auth scheme
-	// wins. Written directly so the name keeps the exact case the user typed.
-	for k, v := range headers {
-		req.Header[k] = []string{v}
-	}
-	res, err := http.DefaultClient.Do(req)
+	SetHeaders(req.Header, headers)
+	res, err := HeaderClient(http.DefaultClient, headers).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +165,31 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	return out, nil
 }
 
+// SetHeaders writes extra headers into h under exactly the names given, so
+// the case the user typed is what goes out on the wire (http.Header.Set would
+// canonicalize it). An existing header whose name differs only in case is
+// replaced, so a custom Authorization overrides the auth header; names that
+// differ only in case from each other are kept as separate entries.
+func SetHeaders(h http.Header, extra map[string]string) {
+	if len(extra) == 0 {
+		return
+	}
+	for k := range h {
+		if _, own := extra[k]; own {
+			continue
+		}
+		for name := range extra {
+			if strings.EqualFold(k, name) {
+				delete(h, k)
+				break
+			}
+		}
+	}
+	for name, v := range extra {
+		h[name] = []string{v}
+	}
+}
+
 type liveModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -183,11 +205,7 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if i := strings.LastIndexByte(m.ID, '/'); !ok && i >= 0 {
-			k, ok = byID[m.ID[i+1:]] // a gateway's "deepseek/deepseek-chat"
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
