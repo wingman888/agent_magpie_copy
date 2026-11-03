@@ -310,7 +310,7 @@ func TestPreferredAPIs(t *testing.T) {
 	chatFirst := []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}
 	responsesFirst := []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
 	openai := provider.Provider{ID: "openai", Chat: "https://api.openai.com/v1", Responses: "https://api.openai.com/v1"}
-	copilot := provider.Provider{ID: "copilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase,
+	copilot := provider.Provider{ID: "copilot", Chat: "https://api.githubcopilot.com", Responses: "https://api.githubcopilot.com", Anthropic: "https://api.githubcopilot.com",
 		Account: &provider.Account{Agent: "copilot"}}
 	other := provider.Provider{ID: "router", Chat: "https://openrouter.ai/api/v1", Responses: "https://openrouter.ai/api/v1"}
 	for _, tc := range []struct {
