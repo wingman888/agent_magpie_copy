@@ -46,7 +46,8 @@ func TestCopilotUserTurn(t *testing.T) {
 		{"responses user message", Responses, `{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`, true},
 		{"responses untyped user message", Responses, `{"input":[{"role":"user","content":"hi"}]}`, true},
 		{"responses function output only", Responses, `{"input":[{"role":"user","content":"hi"},{"type":"function_call","call_id":"c1","name":"ls","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"ok"}]}`, false},
-		{"responses user then function output", Responses, `{"input":[{"role":"user","content":"hi"},{"type":"function_call_output","call_id":"c1","output":"ok"}]}`, true},
+		{"responses user then function output is the agent's", Responses, `{"input":[{"role":"user","content":"hi"},{"type":"function_call_output","call_id":"c1","output":"ok"}]}`, false},
+			{"responses function output then user", Responses, `{"input":[{"type":"function_call_output","call_id":"c1","output":"ok"},{"role":"user","content":"and then"}]}`, true},
 		{"responses assistant last", Responses, `{"input":[{"role":"user","content":"hi"},{"type":"message","role":"assistant","content":"yo"}]}`, false},
 	}
 	for _, c := range cases {
