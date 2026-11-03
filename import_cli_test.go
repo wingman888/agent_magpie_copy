@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -233,5 +235,91 @@ func TestImportRejectsExtraArgs(t *testing.T) {
 	}
 	if _, err := runImport(t, "", false, "--bogus", testRelayLink); err == nil {
 		t.Error("unknown flag accepted")
+	}
+}
+
+// Overwriting a keyed provider with a keyless link warns about the loss of the
+// old key, and the confirmed import really replaces it.
+func TestImportReplaceKeylessWarnsAndOverwrites(t *testing.T) {
+	importTestIsolate(t)
+	if _, err := runImport(t, "", false, "-y", testRelayLink+"&key=sk-old"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	out, err := runImport(t, "y\n", true, testRelayLink)
+	if err != nil {
+		t.Fatalf("keyless replace: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "This will replace the existing provider test-relay") {
+		t.Errorf("replace warning missing:\n%s", out)
+	}
+	if !strings.Contains(out, "will be discarded") || !strings.Contains(out, "(the new provider has no key)") {
+		t.Errorf("warning does not say what is lost:\n%s", out)
+	}
+	if strings.Index(out, "replace") > strings.Index(out, "Add it? [y/N]") {
+		t.Errorf("warning printed after the question:\n%s", out)
+	}
+	if key, ok := savedKey(t, "test-relay"); !ok || key != "" {
+		t.Errorf("after keyless replace: saved=%v key=%q, want saved with empty key", ok, key)
+	}
+}
+
+// A link whose id is owned by a signed-in agent account is refused before any
+// summary or question. The Codex account is detected from ~/.codex/auth.json.
+func TestImportAccountIDRefusedBeforeConfirm(t *testing.T) {
+	importTestIsolate(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	auth := `{"auth_mode":"chatgpt","tokens":{"access_token":"tok-test","refresh_token":"r","id_token":""}}`
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(auth), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runImport(t, "y\n", true, "magpie://import?name=Codex&chat=https://relay.example/v1&key=sk-x")
+	if err == nil || !strings.Contains(err.Error(), "account") || !strings.Contains(err.Error(), "id=") {
+		t.Fatalf("err = %v, want refusal naming the account and id=", err)
+	}
+	if strings.Contains(out, "Add it?") || strings.Contains(out, "prompts and key sent to") {
+		t.Errorf("summary or question shown for an account id:\n%s", out)
+	}
+	for _, p := range provider.All() {
+		if p.ID == "codex" && p.Account == nil {
+			t.Errorf("a stored codex provider was created")
+		}
+	}
+	if _, err := os.Stat(provider.Path()); err == nil {
+		t.Errorf("providers file was written")
+	}
+}
+
+// /dev/null is a character device but never answers a prompt.
+func TestIsTerminalRejectsDevNull(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Skipf("cannot open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+	if isTerminal(f) {
+		t.Fatal("isTerminal(os.DevNull) = true, want false")
+	}
+}
+
+// Without a terminal and without -y, a keyless remote link is still refused.
+func TestImportDevNullStdinNeedsYes(t *testing.T) {
+	importTestIsolate(t)
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Skipf("cannot open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+	var out bytes.Buffer
+	err = importLink([]string{testRelayLink + "&key=sk-a"}, f, &out, isTerminal(f))
+	if err == nil || !strings.Contains(err.Error(), "-y") {
+		t.Fatalf("err = %v, want refusal asking for -y", err)
+	}
+	if _, ok := savedKey(t, "test-relay"); ok {
+		t.Fatal("saved without confirmation on /dev/null stdin")
 	}
 }

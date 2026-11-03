@@ -25,11 +25,18 @@ func isImportLink(arg string) bool {
 	return len(arg) >= n && strings.EqualFold(arg[:n], provider.Scheme+":")
 }
 
-// isTerminal reports whether f is a character device, i.e. an interactive
-// console. A redirected or piped stdin is not, and cannot answer a prompt.
+// isTerminal reports whether f is an interactive console. A redirected or piped
+// stdin is not, and cannot answer a prompt. /dev/null is a character device too,
+// so it is excluded explicitly: it never answers anything.
 func isTerminal(f *os.File) bool {
 	fi, err := f.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	if null, err := os.Stat(os.DevNull); err == nil && os.SameFile(fi, null) {
+		return false
+	}
+	return true
 }
 
 // importCmd: `magpie import [-y|--yes] <link>`, or `magpie 'magpie:…'`, where
@@ -64,6 +71,20 @@ func importLink(args []string, in io.Reader, out io.Writer, interactive bool) er
 		return err
 	}
 
+	// An id owned by a signed-in agent account cannot be saved as a provider:
+	// refuse before the summary, so the user never confirms something that
+	// would silently be dropped.
+	for _, a := range provider.Accounts() {
+		if a.ID == p.ID {
+			name := a.Name
+			if name == "" {
+				name = a.ID
+			}
+			return fmt.Errorf("id %q is used by the signed-in %s account; "+
+				"change the link's id= to add this provider under another id", p.ID, name)
+		}
+	}
+
 	// Compare ids exactly: provider.Find would also match by name.
 	var existing *provider.Provider
 	for _, e := range provider.All() {
@@ -78,6 +99,10 @@ func importLink(args []string, in io.Reader, out io.Writer, interactive bool) er
 	if existing != nil {
 		fmt.Fprintln(out, amber.Render("!"), "This will replace the existing provider "+p.ID+
 			muted.Render(" ("+existing.Name+")"))
+		fmt.Fprintln(out, "  The existing provider's API key, models and settings will be discarded.")
+		if existing.Key != "" && p.Key == "" {
+			fmt.Fprintln(out, "  (the new provider has no key)")
+		}
 	}
 
 	if !yes {
