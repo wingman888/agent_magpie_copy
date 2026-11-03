@@ -56,20 +56,10 @@ func sse(lines ...string) string {
 	return b.String()
 }
 
-// clearProxyEnv empties every proxy variable for the duration of the test, so
-// a proxy configured in the host environment cannot change where requests go.
-func clearProxyEnv(t *testing.T) {
-	t.Helper()
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
-		t.Setenv(k, "")
-	}
-}
-
 // setup points magpie's provider file at a temp dir and adds one provider
 // speaking only the given protocol, backed by the fake.
 func setup(t *testing.T, proto provider.Protocol, f *fake) *httptest.Server {
 	t.Helper()
-	clearProxyEnv(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	up := httptest.NewServer(f)
@@ -140,7 +130,6 @@ func (f *fallbackFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestAnthropicClientFallsBackFromChatToResponses(t *testing.T) {
-	clearProxyEnv(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	f := &fallbackFake{}
@@ -499,7 +488,6 @@ func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 // the sampling knobs, so a plain non-streaming Responses call is
 // translated, signed with the account's tokens, and answered as JSON.
 func TestCodexAccountUpstream(t *testing.T) {
-	clearProxyEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -517,7 +505,33 @@ func TestCodexAccountUpstream(t *testing.T) {
 		`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
 		`data: {"type":"response.output_text.delta","delta":"pong"}`,
 		`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`)}
-	up := httptest.NewServer(f)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var request struct {
+			Input []struct {
+				Role string `json:"role"`
+			} `json:"input"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, item := range request.Input {
+			if item.Role == "system" {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, `{"detail":"System messages are not allowed"}`)
+				return
+			}
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		f.ServeHTTP(w, r)
+	}))
 	defer up.Close()
 	old := provider.CodexBase
 	provider.CodexBase = up.URL + "/backend-api/codex"
@@ -553,6 +567,41 @@ func TestCodexAccountUpstream(t *testing.T) {
 	}
 	if _, isList := upstream["input"].([]any); !isList {
 		t.Fatalf("relayed input not a list: %s", f.got)
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{"anthropic", "/v1/messages", `{"model":"codex/gpt-5.5","max_tokens":20,"system":"Top-level instructions","messages":[{"role":"system","content":"First instruction"},{"role":"user","content":"ping"},{"role":"system","content":"Later instruction"}]}`},
+		{"responses passthrough", "/v1/responses", `{"model":"codex/gpt-5.5","stream":true,"instructions":"Top-level instructions","input":[{"type":"message","role":"system","content":[{"type":"input_text","text":"First instruction"}]},{"role":"user","content":"ping"},{"role":"system","content":"Later instruction"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := post(t, tc.path, tc.body)
+			if code != http.StatusOK || !strings.Contains(body, "pong") {
+				t.Fatalf("system instructions rejected: %d %s", code, body)
+			}
+			var request struct {
+				Instructions string `json:"instructions"`
+				Input        []struct {
+					Role    string          `json:"role"`
+					Content json.RawMessage `json:"content"`
+				} `json:"input"`
+			}
+			if err := json.Unmarshal(f.got, &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Instructions != "Top-level instructions" || len(request.Input) != 3 {
+				t.Fatalf("instructions lost or reordered: %s", f.got)
+			}
+			for i, want := range []struct{ role, text string }{{"developer", "First instruction"}, {"user", "ping"}, {"developer", "Later instruction"}} {
+				item := request.Input[i]
+				if item.Role != want.role || stringOrText(item.Content) != want.text {
+					t.Errorf("input[%d]: role=%q content=%s, want %s %q", i, item.Role, item.Content, want.role, want.text)
+				}
+			}
+		})
 	}
 }
 
