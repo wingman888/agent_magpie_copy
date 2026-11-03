@@ -17,11 +17,11 @@ func TestAnthropicForcedChoiceDowngradedWithThinking(t *testing.T) {
 		name     string
 		choice   string
 		effort   string
-		want     string // tool_choice type; "" means absent
+		want     string // tool_choice type; "" means absent (auto is the default, so it is left out)
 		thinking bool
 	}{
-		{"any with thinking", "required", "medium", "auto", true},
-		{"named with thinking", "name:read", "low", "auto", true},
+		{"any with thinking", "required", "medium", "", true},
+		{"named with thinking", "name:read", "low", "", true},
 		{"none with thinking", "none", "medium", "none", true},
 		{"any without thinking", "required", "", "any", false},
 		{"named without thinking", "name:read", "", "tool", false},
@@ -73,8 +73,11 @@ func TestGeminiAnyWithThinkingOverAnthropicUpstream(t *testing.T) {
 	if up["thinking"] == nil {
 		t.Errorf("thinking not enabled: %s", f.got)
 	}
-	if tc, _ := up["tool_choice"].(map[string]any); tc["type"] != "auto" {
-		t.Errorf("tool_choice: %v", up["tool_choice"])
+	// absent means auto to Anthropic; a forced type would be rejected with thinking on
+	if tc, ok := up["tool_choice"]; ok && tc != nil {
+		if m, _ := tc.(map[string]any); m["type"] != "auto" {
+			t.Errorf("tool_choice must not force a tool with thinking on: %v", tc)
+		}
 	}
 }
 
