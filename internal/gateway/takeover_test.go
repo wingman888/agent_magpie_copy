@@ -134,7 +134,7 @@ func TestClaudeAlongsideAccountTakesOver(t *testing.T) {
 			rec := postTo(srv.Handler(), "/v1/messages", body)
 			out := rec.Body.String()
 			if rec.Code != 200 || !strings.Contains(out, "from other") || strings.Contains(out, "rate limit") {
-				t.Fatalf("status %d, body %q; want the other account's reply only", rec.Code, out)
+				t.Fatalf("status %d, body %s; want the other account's reply only", rec.Code, strings.ReplaceAll(out, `"`, "'"))
 			}
 			calls := srv.Recent()
 			if len(calls) == 0 || calls[0].Provider != "claude" || calls[0].Fallback == "" {

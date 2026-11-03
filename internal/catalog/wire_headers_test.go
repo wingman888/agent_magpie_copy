@@ -103,7 +103,7 @@ func TestHTTP1TransportDoesNotNegotiateHTTP2(t *testing.T) {
 	c := &http.Client{Transport: HTTP1Transport(base)}
 	res, err := c.Get(srv.URL)
 	if err != nil {
-		t.Fatalf("GET %s: %v", srv.URL, err)
+		t.Fatalf("GET: %s", strings.ReplaceAll(err.Error(), `"`, "'"))
 	}
 	defer res.Body.Close()
 	if res.ProtoMajor != 1 {
