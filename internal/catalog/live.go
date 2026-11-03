@@ -64,7 +64,8 @@ func SaveLive(provider, base string, models []Model) error {
 // around it. The result keeps the server's order. anthropic sends the
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
-// Anthropic-flavoured catalog — namespaced, differently named ids.
+// Anthropic-flavoured catalog — namespaced, differently named ids. headers
+// are extra request headers sent with every try, applied last (see SetHeaders).
 func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
@@ -125,11 +126,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	// The user's own headers, after the defaults so a private auth scheme
-	// wins. Written directly so the name keeps the exact case the user typed.
-	for k, v := range headers {
-		req.Header[k] = []string{v}
-	}
+	SetHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -166,6 +163,31 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 		out = append(out, Model{ID: id, Name: name})
 	}
 	return out, nil
+}
+
+// SetHeaders writes extra headers into h under exactly the names given, so
+// the case the user typed is what goes out on the wire (http.Header.Set would
+// canonicalize it). An existing header whose name differs only in case is
+// replaced, so a custom Authorization overrides the auth header; names that
+// differ only in case from each other are kept as separate entries.
+func SetHeaders(h http.Header, extra map[string]string) {
+	if len(extra) == 0 {
+		return
+	}
+	for k := range h {
+		if _, own := extra[k]; own {
+			continue
+		}
+		for name := range extra {
+			if strings.EqualFold(k, name) {
+				delete(h, k)
+				break
+			}
+		}
+	}
+	for name, v := range extra {
+		h[name] = []string{v}
+	}
 }
 
 type liveModel struct {
