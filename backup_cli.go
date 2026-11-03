@@ -21,6 +21,7 @@ var (
 	errBackupUsage  = errors.New("usage: magpie backup [--no-keys] [file]")
 	errRestoreUsage = errors.New("usage: magpie restore [--no-agents] <file>")
 	errEmptyPass    = errors.New("口令不能为空，未写入任何文件")
+	errRestoreEmpty = errors.New("口令不能为空")
 	errPassMismatch = errors.New("两次输入的口令不一致，未生成备份")
 )
 
@@ -94,7 +95,7 @@ func restoreCmd(args []string) error {
 		return err
 	}
 	if pass == "" {
-		return errEmptyPass
+		return errRestoreEmpty
 	}
 	b, err := backup.Open(data, pass)
 	if err != nil {

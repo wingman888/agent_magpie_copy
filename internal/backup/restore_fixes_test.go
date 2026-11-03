@@ -66,7 +66,7 @@ func TestHeaderFieldWrongTypeIsPassphraseError(t *testing.T) {
 func TestNoKeysDropsURLCredentials(t *testing.T) {
 	isolate(t)
 	if err := provider.Save(provider.Provider{
-		ID: "link", Name: "Link", Chat: "https://user:pw-secret@api.link.test/v1?api_key=url-secret&model=m1",
+		ID: "link", Name: "Link", Key: "k-local", Chat: "https://user:pw-secret@api.link.test/v1?api_key=url-secret&model=m1",
 		Anthropic: "https://api.link.test?token=tok-secret",
 	}); err != nil {
 		t.Fatal(err)
