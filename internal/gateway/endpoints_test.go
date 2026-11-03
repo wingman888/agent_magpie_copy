@@ -1,12 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
@@ -199,11 +201,15 @@ func TestServerErrorDoesNotMoveEndpoint(t *testing.T) {
 		Chat: up.URL + "/v1", Responses: up.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}
-	code, body := serveTo(t, New(), "/v1/chat/completions", `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`)
+	s := New()
+	s.sleep = func(context.Context, time.Duration) bool { return true } // the retries do not wait here
+	code, body := serveTo(t, s, "/v1/chat/completions", `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`)
 	if code != 500 || !strings.Contains(body, "use v1/responses") {
 		t.Fatalf("%d %s", code, body)
 	}
-	if want := []string{"/v1/chat/completions"}; !reflect.DeepEqual(f.paths, want) {
+	// a lone candidate's 500 is tried again (three tries in all), each on
+	// the same endpoint: it is never moved to the Responses one
+	if want := []string{"/v1/chat/completions", "/v1/chat/completions", "/v1/chat/completions"}; !reflect.DeepEqual(f.paths, want) {
 		t.Fatalf("asked %v, want %v", f.paths, want)
 	}
 }
