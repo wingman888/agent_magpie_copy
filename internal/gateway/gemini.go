@@ -611,18 +611,14 @@ func (s *Server) geminiModels(w http.ResponseWriter, r *http.Request) {
 // geminiModel routes /v1beta/models/{model}:{method}. The model id may hold
 // slashes and colons, so the method is whatever follows the last colon.
 func (s *Server) geminiModel(w http.ResponseWriter, r *http.Request) {
-	rest := r.PathValue("rest")
-	i := strings.LastIndex(rest, ":")
-	if i <= 0 {
+	model, method, ok := splitGeminiTarget(r.PathValue("rest"))
+	if !ok {
 		writeError(w, clientGemini, http.StatusNotFound, "dial serves "+apiHint)
 		return
 	}
-	model, method := rest[:i], rest[i+1:]
 	switch method {
-	case "generateContent":
-		s.geminiCall(w, r, model, false)
-	case "streamGenerateContent":
-		s.geminiCall(w, r, model, true)
+	case "generateContent", "streamGenerateContent":
+		s.geminiCall(w, r, model)
 	case "countTokens":
 		s.geminiCount(w, r, model)
 	default:
@@ -632,13 +628,50 @@ func (s *Server) geminiModel(w http.ResponseWriter, r *http.Request) {
 }
 
 // geminiCall is the request path of generateContent and its streaming form.
-func (s *Server) geminiCall(w http.ResponseWriter, r *http.Request, model string, stream bool) {
+func (s *Server) geminiCall(w http.ResponseWriter, r *http.Request, model string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
 	if err != nil {
 		writeError(w, clientGemini, 400, err.Error())
 		return
 	}
-	s.serve(w, r, clientGemini, model, body, stream)
+	s.serve(w, r, clientGemini, model, body)
+}
+
+// splitGeminiTarget splits "{model}:{method}" from a Gemini URL. The model id
+// may hold slashes and colons, so the method is whatever follows the last colon.
+func splitGeminiTarget(rest string) (model, method string, ok bool) {
+	i := strings.LastIndex(rest, ":")
+	if i <= 0 {
+		return "", "", false
+	}
+	return rest[:i], rest[i+1:], true
+}
+
+// geminiTarget reads the model and whether streaming was asked for from the
+// URL of a Gemini request, which carries both.
+func geminiTarget(r *http.Request) (model string, stream bool) {
+	model, method, ok := splitGeminiTarget(r.PathValue("rest"))
+	if !ok {
+		return "", false
+	}
+	return model, method == "streamGenerateContent"
+}
+
+// encoderFor is encoder for a parsed request. The Gemini encoder also needs
+// what the client asked for, which the protocol alone does not say.
+func encoderFor(proto provider.Protocol, w *sseWriter, req *Request) streamEncoder {
+	if proto == clientGemini {
+		return &geminiEncoder{w: w, model: req.Model, showThoughts: req.ShowThoughts}
+	}
+	return encoder(proto, w, req.Model)
+}
+
+// renderFor is render for a parsed request, for the same reason as encoderFor.
+func renderFor(proto provider.Protocol, res Result, req *Request) []byte {
+	if proto == clientGemini {
+		return renderGemini(res, req)
+	}
+	return render(proto, res, req.Model)
 }
 
 // geminiCount answers countTokens with a rough estimate. The request may be

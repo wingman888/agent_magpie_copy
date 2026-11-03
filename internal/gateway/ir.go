@@ -73,7 +73,7 @@ type Request struct {
 	Stop         []string
 	Stream       bool
 	Effort       string // low | medium | high | xhigh | max, when the client asked
-	Thinking     bool   // the client asked for reasoning, so the upstream should reason
+	Thinking     bool   // the client asked for visible reasoning
 	ShowThoughts bool   // the client wants reasoning text back (Gemini includeThoughts)
 	Parallel     *bool  // parallel tool calls allowed
 }

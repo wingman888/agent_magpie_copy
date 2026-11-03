@@ -253,16 +253,15 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			writeError(w, from, 400, err.Error())
 			return
 		}
-		s.serve(w, r, from, modelOf(body), body, false)
+		s.serve(w, r, from, modelOf(body), body)
 	}
 }
 
-// serve is the request path shared by every client API: resolve the model,
-// pass the call through or translate it, then record it. stream is set when
-// the client asked for streaming outside the body (Gemini's URL method).
-func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, stream bool) {
+// serve is the request path shared by every client API: resolve the model
+// the client asked for, pass the call through or translate it, then record it.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, asked string, body []byte) {
 	start := time.Now()
-	call := Call{Time: start, From: from, Model: model, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
+	call := Call{Time: start, From: from, Model: asked, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
 	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
@@ -281,7 +280,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			return
 		}
 		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], call.Model, model, body, stream, &call.Usage)
+		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	s.record(call)
@@ -363,13 +362,18 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, asked, model string, body []byte, asksStream bool, u *Usage) (int, string) {
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
 	req, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
 	}
-	if req.Model == "" { // Gemini bodies do not name the model; the URL does
-		req.Model = asked
+	asksStream := false
+	if from == clientGemini { // Gemini bodies name neither the model nor the streaming method; the URL does
+		var asked string
+		asked, asksStream = geminiTarget(r)
+		if req.Model == "" {
+			req.Model = asked
+		}
 	}
 	stream := req.Stream || asksStream
 	req.Stream = true
@@ -392,7 +396,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
-		enc := encoder(from, newSSEWriter(w), req)
+		enc := encoderFor(from, newSSEWriter(w), req)
 		var failed string
 		readSSE(res.Body, func(_, data string) error {
 			return dec(data, func(ev Event) {
@@ -417,7 +421,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)
-	out := render(from, res2, req)
+	out := renderFor(from, res2, req)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(out)
@@ -475,28 +479,24 @@ type streamEncoder interface {
 	finish()
 }
 
-func encoder(proto provider.Protocol, w *sseWriter, req *Request) streamEncoder {
+func encoder(proto provider.Protocol, w *sseWriter, model string) streamEncoder {
 	switch proto {
 	case provider.Chat:
-		return &chatEncoder{w: w, model: req.Model}
+		return &chatEncoder{w: w, model: model}
 	case provider.Responses:
-		return &responsesEncoder{w: w, model: req.Model}
-	case clientGemini:
-		return &geminiEncoder{w: w, model: req.Model, showThoughts: req.ShowThoughts}
+		return &responsesEncoder{w: w, model: model}
 	}
-	return &anthropicEncoder{w: w, model: req.Model}
+	return &anthropicEncoder{w: w, model: model}
 }
 
-func render(proto provider.Protocol, res Result, req *Request) []byte {
+func render(proto provider.Protocol, res Result, model string) []byte {
 	switch proto {
 	case provider.Chat:
-		return renderChat(res, req.Model)
+		return renderChat(res, model)
 	case provider.Responses:
-		return renderResponses(res, req.Model)
-	case clientGemini:
-		return renderGemini(res, req)
+		return renderResponses(res, model)
 	}
-	return renderAnthropic(res, req.Model)
+	return renderAnthropic(res, model)
 }
 
 // ---- small helpers ------------------------------------------------------------
