@@ -44,12 +44,12 @@ type providerJSON struct {
 		Optional bool   `json:"optional"`
 	} `json:"key"`
 	Ready     bool            `json:"ready"`
-	Chosen    []string        `json:"chosen"`  // the user's explicit picks, if any
+	Chosen    []string        `json:"chosen"`   // the user's explicit picks, if any
 	Fallback  []string        `json:"fallback"` // models the gateway tries when this one can't answer
-	Models    []modelJSON     `json:"models"`  // everything the vendor lists, exposed ones flagged
-	Exposed   int             `json:"exposed"` // how many reach the agents
-	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
-	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
+	Models    []modelJSON     `json:"models"`   // everything the vendor lists, exposed ones flagged
+	Exposed   int             `json:"exposed"`  // how many reach the agents
+	Fetched   string          `json:"fetched"`  // "3h ago" when the list came from the vendor
+	Agents    []providerAgent `json:"agents"`   // detected agents, current ones flagged
 	Sponsored bool            `json:"sponsored"`
 	Account   *accountJSON    `json:"account,omitempty"` // a signed-in agent, see provider.Account
 }
