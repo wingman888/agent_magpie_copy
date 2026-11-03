@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -59,6 +60,26 @@ func SaveLive(provider, base string, models []Model) error {
 	return os.WriteFile(p, b, 0o644)
 }
 
+// ApplyHeaders sets a provider's own headers on a request. It runs after the
+// auth headers, so a user header can override a default. net/http's Set would
+// canonicalise the name, so the map is written directly to keep the case the
+// user typed, and any copy the defaults set under another case is dropped.
+func ApplyHeaders(h http.Header, extra map[string]string) {
+	names := make([]string, 0, len(extra))
+	for k := range extra {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for k := range h {
+			if strings.EqualFold(k, name) {
+				delete(h, k)
+			}
+		}
+		h[name] = []string{extra[name]}
+	}
+}
+
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
 // around it. The result keeps the server's order. anthropic sends the
@@ -66,6 +87,12 @@ func SaveLive(provider, base string, models []Model) error {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, nil)
+}
+
+// FetchWith is Fetch with extra request headers, for a vendor that needs
+// more than its key to answer (an org id, a gateway token).
+func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -92,7 +119,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -109,7 +136,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -125,6 +152,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, er
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
+	ApplyHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -170,15 +198,13 @@ type liveModel struct {
 }
 
 // Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order.
+// catalog's entry for the same id, keeping the live order. See Find for how
+// an id with a "vendor/" prefix is matched.
 func Decorate(live []Model, known []Model) []Model {
-	byID := make(map[string]Model, len(known))
-	for _, m := range known {
-		byID[m.ID] = m
-	}
+	byID := indexByID(known)
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := byID[m.ID]; ok {
+		if k, ok := lookupID(byID, m.ID); ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

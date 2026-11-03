@@ -304,3 +304,49 @@ func Efforts(models []Model, id string) []string {
 	}
 	return nil
 }
+
+// Catalogs returns the text models of several models.dev providers, in the
+// order named. A model id an earlier catalog already listed is not repeated,
+// so the first catalog named wins.
+func Catalogs(ids []string) []Model {
+	var out []Model
+	seen := map[string]bool{}
+	for _, id := range ids {
+		for _, m := range Provider(id) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+// Find returns the entry of known that a model id names. The id itself is
+// tried first; for "vendor/model" the part after the last slash is tried next,
+// so "deepseek/deepseek-chat" finds "deepseek-chat".
+func Find(known []Model, id string) (Model, bool) {
+	return lookupID(indexByID(known), id)
+}
+
+// indexByID maps each id to its first entry: the first catalog named wins.
+func indexByID(known []Model) map[string]Model {
+	byID := make(map[string]Model, len(known))
+	for _, m := range known {
+		if _, dup := byID[m.ID]; !dup {
+			byID[m.ID] = m
+		}
+	}
+	return byID
+}
+
+func lookupID(byID map[string]Model, id string) (Model, bool) {
+	if m, ok := byID[id]; ok {
+		return m, true
+	}
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		m, ok := byID[id[i+1:]]
+		return m, ok
+	}
+	return Model{}, false
+}
