@@ -310,11 +310,12 @@ func TestAccountNoteAndCodexOwnModelsHidden(t *testing.T) {
 	})
 	writeGeminiFile(t, filepath.Join(home, ".codex", "auth.json"), string(body))
 
-	// the picker of another agent credits the account, not the vendor
+	// the picker of another agent credits the account, not the vendor; Pi
+	// spells catalog values as dial/<provider>/<model>
 	piAgent := pi(home)
 	var found bool
 	for _, o := range piAgent.Field("model").Options(nil) {
-		if strings.HasPrefix(o.Value, "codex/") {
+		if strings.HasPrefix(o.Value, "dial/codex/") {
 			found = true
 			if o.Note != "dev@example.com · via dial" {
 				t.Errorf("codex note = %q, want the account user", o.Note)
@@ -322,7 +323,7 @@ func TestAccountNoteAndCodexOwnModelsHidden(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("other agents should offer codex/… models")
+		t.Error("other agents should offer dial/codex/… models")
 	}
 
 	// Codex's own picker leaves its sign-in models out
