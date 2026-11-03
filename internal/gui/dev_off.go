@@ -1,4 +1,4 @@
-//go:build !dev && !nogui
+//go:build !dev
 
 package gui
 
