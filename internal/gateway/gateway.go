@@ -131,7 +131,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	return nil
 }
 
-// Handler routes the client APIs.
+// Handler routes the four APIs: the three wire APIs and the Gemini API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.info)
@@ -146,16 +146,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
-	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
+	// {rest} is "{model}:{method}"; the model may itself contain slashes.
+	mux.HandleFunc("POST /v1beta/models/{rest...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models/*")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and the Gemini API under /v1beta/models")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1beta/models/{model}:generateContent"}})
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages",
+			"/v1beta/models", "/v1beta/models/{model}:generateContent",
+			"/v1beta/models/{model}:streamGenerateContent?alt=sse", "/v1beta/models/{model}:countTokens"}})
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -212,78 +215,11 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Anthropic, 400, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
+	writeJSON(w, 200, map[string]any{"input_tokens": roughTokens(req)})
 }
 
-// handle is the request path of one client API.
-func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
-		if err != nil {
-			writeError(w, from, 400, err.Error())
-			return
-		}
-		s.serve(w, r, from, body)
-	}
-}
-
-// gemini serves /v1beta/models/{model}:{method}. The Gemini API keeps the
-// model and the streaming choice in the URL; they move into the body so
-// serve sees one shape.
-func (s *Server) gemini(w http.ResponseWriter, r *http.Request) {
-	call := r.PathValue("call")
-	i := strings.LastIndex(call, ":") // model ids may hold a colon (ollama tags), methods never do
-	if i < 0 {
-		writeError(w, provider.Gemini, 404, "expected /v1beta/models/{model}:generateContent")
-		return
-	}
-	model, method := call[:i], call[i+1:]
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
-	if err != nil {
-		writeError(w, provider.Gemini, 400, err.Error())
-		return
-	}
-	var stream bool
-	switch method {
-	case "generateContent":
-	case "streamGenerateContent":
-		stream = true
-	case "countTokens":
-		s.geminiCount(w, model, body)
-		return
-	default:
-		writeError(w, provider.Gemini, 404, "unknown method "+method)
-		return
-	}
-	s.serve(w, r, provider.Gemini, withFields(body, map[string]any{"model": model, "stream": stream}))
-}
-
-// geminiCount answers countTokens with a rough estimate.
-func (s *Server) geminiCount(w http.ResponseWriter, model string, body []byte) {
-	var wrap struct {
-		Inner json.RawMessage `json:"generateContentRequest"`
-	}
-	if json.Unmarshal(body, &wrap) == nil && len(wrap.Inner) > 0 {
-		body = wrap.Inner
-	}
-	req, err := parseGemini(body)
-	if err != nil {
-		writeError(w, provider.Gemini, 400, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]any{"totalTokens": estimate(req)})
-}
-
-func (s *Server) geminiModels(w http.ResponseWriter, r *http.Request) {
-	models := []map[string]any{}
-	for _, e := range provider.Catalog() {
-		models = append(models, geminiModel(e.ID, e.Name))
-	}
-	writeJSON(w, 200, map[string]any{"models": models})
-}
-
-// estimate is a token count from sizes, for clients that ask before sending.
-func estimate(req *Request) int {
+// roughTokens estimates a request's size in tokens: a quarter of its text.
+func roughTokens(req *Request) int {
 	n := len(req.System)
 	for _, m := range req.Messages {
 		for _, p := range m.Parts {
@@ -296,27 +232,45 @@ func estimate(req *Request) int {
 	return n / 4
 }
 
-// serve routes one parsed-enough request to its provider.
-func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
+// unknownModelMessage says what the gateway does know, for a 404.
+func unknownModelMessage(model string) string {
+	msg := fmt.Sprintf("dial knows no model %q", model)
+	if ids := provider.IDs(); len(ids) > 0 {
+		return msg + "; it has " + strings.Join(ids, ", ")
+	}
+	return msg + "; add a provider in dial first"
+}
+
+// handle is the request path of one client API whose body names the model.
+func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+		if err != nil {
+			writeError(w, from, 400, err.Error())
+			return
+		}
+		s.serve(w, r, from, modelOf(body), body, nil)
+	}
+}
+
+// serve is the request path every client API shares: resolve the model, then
+// relay the body to the provider or translate it, recording the call and its
+// usage. model is the id the client named. stream, when not nil, replaces the
+// body's own stream flag; the Gemini API says streaming in the URL instead.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, stream *bool) {
 	start := time.Now()
-	call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
-	p, model, ok := provider.Resolve(call.Model)
+	call := Call{Time: start, From: from, Model: model, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
+	p, vendorModel, ok := provider.Resolve(call.Model)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		s.record(call)
-		msg := fmt.Sprintf("dial knows no model %q", call.Model)
-		if ids := provider.IDs(); len(ids) > 0 {
-			msg += "; it has " + strings.Join(ids, ", ")
-		} else {
-			msg += "; add a provider in dial first"
-		}
-		writeError(w, from, 404, msg)
+		writeError(w, from, 404, unknownModelMessage(call.Model))
 		return
 	}
 	call.Provider = p.ID
 	if p.Base(from) != "" {
 		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+		call.Status, call.Error = s.passthrough(w, r, p, from, vendorModel, body, &call.Usage)
 	} else {
 		to := p.Speaks()
 		if len(to) == 0 {
@@ -324,11 +278,20 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			return
 		}
 		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+		req, err := parse(from, body)
+		if err != nil {
+			call.Status, call.Error = writeError(w, from, 400, err.Error()), err.Error()
+		} else {
+			if stream != nil {
+				req.Stream = *stream
+			}
+			req.Model = call.Model
+			call.Status, call.Error = s.translate(w, r, p, from, to[0], vendorModel, req, &call.Usage)
+		}
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: vendorModel,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
@@ -406,11 +369,8 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
-	req, err := parse(from, body)
-	if err != nil {
-		return writeError(w, from, 400, err.Error()), err.Error()
-	}
+// req is the client's request already parsed; model is the vendor's id.
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, req *Request, u *Usage) (int, string) {
 	stream := req.Stream
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
@@ -551,20 +511,13 @@ func modelOf(body []byte) string {
 
 // rewriteModel swaps the model field, keeping every other field as it was.
 func rewriteModel(body []byte, model string) []byte {
-	return withFields(body, map[string]any{"model": model})
-}
-
-// withFields sets top-level fields, keeping every other field as it was.
-func withFields(body []byte, fields map[string]any) []byte {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var m map[string]any
 	if err := dec.Decode(&m); err != nil {
 		return body
 	}
-	for k, v := range fields {
-		m[k] = v
-	}
+	m["model"] = model
 	out, err := json.Marshal(m)
 	if err != nil {
 		return body
@@ -600,12 +553,7 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 	case provider.Anthropic:
 		v = map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
 	case provider.Gemini:
-		st := map[int]string{400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
-			429: "RESOURCE_EXHAUSTED", 500: "INTERNAL", 502: "UNAVAILABLE", 503: "UNAVAILABLE", 529: "UNAVAILABLE"}[status]
-		if st == "" {
-			st = "UNKNOWN"
-		}
-		v = map[string]any{"error": map[string]any{"code": status, "message": msg, "status": st}}
+		v = map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}}
 	default:
 		v = map[string]any{"error": map[string]any{"message": msg, "type": typ, "code": nil, "param": nil}}
 	}
