@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// isolate points the config dir at a temp dir so a test that accidentally
+// importIsolate points the config dir at a temp dir so a test that accidentally
 // saved something would be visible; ParseImport must leave it empty.
-func isolate(t *testing.T) string {
+func importIsolate(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -32,7 +32,7 @@ func TestImportScheme(t *testing.T) {
 }
 
 func TestImportLinkForms(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	for _, link := range []string{
 		"magpie://import?preset=deepseek",
 		"magpie:import?preset=deepseek",
@@ -48,7 +48,7 @@ func TestImportLinkForms(t *testing.T) {
 }
 
 func TestImportPresetWithModelsAndKey(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?preset=deepseek&key=sk-abc&models=a,%20b")
 	pr := Preset("deepseek")
 	if p.ID != "deepseek" || p.Key != "sk-abc" {
@@ -66,7 +66,7 @@ func TestImportPresetWithModelsAndKey(t *testing.T) {
 }
 
 func TestImportPresetIgnoresEndpointParams(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?preset=deepseek&chat=https://evil.example/v1&website=javascript:x&catalog=bad!")
 	pr := Preset("deepseek")
 	if p.Chat != pr.Chat || p.Website != pr.Website {
@@ -75,7 +75,7 @@ func TestImportPresetIgnoresEndpointParams(t *testing.T) {
 }
 
 func TestImportPresetNameOverride(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?preset=deepseek&name=Work%20DS")
 	if p.Name != "Work DS" || p.ID != "deepseek" {
 		t.Errorf("name %q id %q", p.Name, p.ID)
@@ -83,7 +83,7 @@ func TestImportPresetNameOverride(t *testing.T) {
 }
 
 func TestImportRegion(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?preset=yylx&region=cn")
 	if p.Chat != "https://cn.yylx.io/v1" || p.Anthropic != "https://cn.yylx.io" {
 		t.Errorf("region cn endpoints: chat %q anthropic %q", p.Chat, p.Anthropic)
@@ -97,7 +97,7 @@ func TestImportRegion(t *testing.T) {
 }
 
 func TestImportCustom(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?name=My%20Relay&chat=https://relay.example/v1/&anthropic=https://relay.example&website=https://relay.example&keys=javascript:alert(1)")
 	if p.ID != "my-relay" || p.Name != "My Relay" {
 		t.Errorf("id %q name %q", p.ID, p.Name)
@@ -120,7 +120,7 @@ func TestImportCustom(t *testing.T) {
 }
 
 func TestImportCustomCatalogAndKeysHTTPS(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?name=Acme&responses=https://api.acme.example/v1&catalog=fireworks-ai&keys=https://acme.example/keys")
 	if p.Catalog != "fireworks-ai" || p.KeysURL != "https://acme.example/keys" {
 		t.Errorf("catalog %q keys %q", p.Catalog, p.KeysURL)
@@ -132,7 +132,7 @@ func TestImportCustomCatalogAndKeysHTTPS(t *testing.T) {
 }
 
 func TestImportCustomFullExample(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&anthropic=https://api.acme.example&key=sk-x&models=gpt-5.5,claude-sonnet-5")
 	if p.ID != "acme-relay" || p.Key != "sk-x" || strings.Join(p.Models, ",") != "gpt-5.5,claude-sonnet-5" {
 		t.Errorf("got %+v", p)
@@ -140,7 +140,7 @@ func TestImportCustomFullExample(t *testing.T) {
 }
 
 func TestImportIDRules(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?name=Anything&id=Custom%20ID&chat=https://a.example/v1")
 	if p.ID != "custom-id" {
 		t.Errorf("explicit id = %q", p.ID)
@@ -158,7 +158,7 @@ func TestImportIDRules(t *testing.T) {
 }
 
 func TestImportNameTruncated(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	long := strings.Repeat("a", 100)
 	p := mustParse(t, "magpie://import?name="+long+"&chat=https://a.example/v1")
 	if len([]rune(p.Name)) != 80 {
@@ -167,7 +167,7 @@ func TestImportNameTruncated(t *testing.T) {
 }
 
 func TestImportNoKeyIsAllowed(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?preset=openai")
 	if p.Key != "" || p.Ready() {
 		t.Errorf("key %q ready %v", p.Key, p.Ready())
@@ -175,7 +175,7 @@ func TestImportNoKeyIsAllowed(t *testing.T) {
 }
 
 func TestImportLocalHTTPAccepted(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	for _, base := range []string{
 		"http://localhost:11434/v1",
 		"http://127.0.0.1:8080/v1",
@@ -193,7 +193,7 @@ func TestImportLocalHTTPAccepted(t *testing.T) {
 }
 
 func TestImportRejects(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	cases := map[string]string{
 		"https url":           "https://usemagpie.ai/import?preset=deepseek",
 		"other action":        "magpie://delete?id=x",
@@ -232,12 +232,12 @@ func TestImportRejects(t *testing.T) {
 }
 
 func TestImportKeyLengthBoundary(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	mustParse(t, "magpie://import?preset=deepseek&key="+strings.Repeat("k", 4096))
 }
 
 func TestImportModelsBoundaryAndCleaning(t *testing.T) {
-	isolate(t)
+	importIsolate(t)
 	p := mustParse(t, "magpie://import?preset=deepseek&models="+manyModelsQuery(200))
 	if len(p.Models) != 200 {
 		t.Errorf("got %d models, want 200", len(p.Models))
@@ -250,7 +250,7 @@ func TestImportModelsBoundaryAndCleaning(t *testing.T) {
 
 // ParseImport must never write the config file or touch the network.
 func TestImportHasNoSideEffects(t *testing.T) {
-	dir := isolate(t)
+	dir := importIsolate(t)
 	for _, link := range []string{
 		"magpie://import?preset=deepseek&key=sk-abc",
 		"magpie://import?name=My%20Relay&chat=https://relay.example/v1",
