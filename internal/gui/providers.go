@@ -25,18 +25,17 @@ type modelJSON struct {
 }
 
 type providerJSON struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Icon      string            `json:"icon"`
-	Headers   map[string]string `json:"headers,omitempty"` // extra request headers of a custom vendor
-	Preset    string            `json:"preset"`
-	Host      string            `json:"host"`
-	Chat      string            `json:"chat"`
-	Responses string            `json:"responses"`
-	Anthropic string            `json:"anthropic"`
-	Catalog   string            `json:"catalog"`
-	Website   string            `json:"website"`
-	KeysURL   string            `json:"keysUrl"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Icon      string `json:"icon"`
+	Preset    string `json:"preset"`
+	Host      string `json:"host"`
+	Chat      string `json:"chat"`
+	Responses string `json:"responses"`
+	Anthropic string `json:"anthropic"`
+	Catalog   string `json:"catalog"`
+	Website   string `json:"website"`
+	KeysURL   string `json:"keysUrl"`
 	Key       struct {
 		Set      bool   `json:"set"`
 		Masked   string `json:"masked"`
@@ -109,7 +108,7 @@ func currentProvider(a *agent.Agent) (string, string) {
 
 func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 	out := providerJSON{
-		ID: p.ID, Name: p.Name, Icon: p.Icon, Headers: p.Headers, Preset: p.Preset, Host: p.Host(),
+		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
@@ -205,19 +204,11 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 		writeJSON(rw, providersState(gw))
 	})
 	mux.HandleFunc("POST /api/provider/{action}", func(rw http.ResponseWriter, r *http.Request) {
-		var raw json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-			fail(rw, err)
-			return
-		}
 		var in provider.Provider
-		if err := json.Unmarshal(raw, &in); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return
 		}
-		// which fields the body carries: an absent one keeps the saved value
-		var sent map[string]json.RawMessage
-		_ = json.Unmarshal(raw, &sent)
 		switch r.PathValue("action") {
 		case "save":
 			// a preset needs nothing but the key; a saved provider keeps
@@ -235,24 +226,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			old, _ := provider.Find(in.ID)
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
-			}
-			if old != nil {
-				// the form knows only the current key; keep the others, and
-				// the current key's name and protocol while it stays current.
-				// The form does not edit fallbacks either, so they stay too.
-				in.Fallback = old.Fallback
-				in.Keys = old.Keys
-				if in.Key == old.Key {
-					in.KeyName, in.KeyProtocol = old.KeyName, old.KeyProtocol
-				}
-				// headers and the icon are edited elsewhere, or not at all
-				// yet: a body that leaves them out keeps the saved ones
-				if _, ok := sent["headers"]; !ok {
-					in.Headers = old.Headers
-				}
-				if _, ok := sent["icon"]; !ok {
-					in.Icon = old.Icon
-				}
 			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)

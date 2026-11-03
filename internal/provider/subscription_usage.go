@@ -31,106 +31,45 @@ type SubscriptionQuota struct {
 	Plan     string        `json:"plan,omitempty"`
 	Windows  []QuotaWindow `json:"windows"`
 	Error    string        `json:"error,omitempty"`
-
-	// FiveHourUsed and WeeklyUsed are the used share of the 5-hour and the
-	// weekly window, in percent, when the vendor reports them. LoginUsage sets them.
-	FiveHourUsed *float64 `json:"fiveHourUsed,omitempty"`
-	WeeklyUsed   *float64 `json:"weeklyUsed,omitempty"`
 }
 
 var subscriptionUsageCache struct {
 	sync.Mutex
-	at      time.Time
-	data    []SubscriptionQuota
-	pending chan struct{} // closed when the refresh in flight is done
+	at   time.Time
+	data []SubscriptionQuota
 }
-
-// subscriptionTimeout bounds one refresh; the vendors' endpoints can be
-// unreachable without a proxy, and then each fetch would hang to it.
-var subscriptionTimeout = 10 * time.Second
 
 // SubscriptionUsage returns rolling quotas for signed-in first-party agents.
 // Results are cached because these private account endpoints are aggressively
-// rate limited when several CLI sessions are active. Once there is something
-// cached it comes back at once, and a stale copy is refreshed in the
-// background; only the very first call waits, for as long as ctx allows.
+// rate limited when several CLI sessions are active.
 func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
-	c := &subscriptionUsageCache
-	c.Lock()
-	have, fresh := c.data != nil, time.Since(c.at) < time.Minute
-	if !fresh && c.pending == nil {
-		done := make(chan struct{})
-		c.pending = done
-		go func() {
-			out := fetchSubscriptionUsage()
-			c.Lock()
-			c.at, c.data, c.pending = time.Now(), out, nil
-			c.Unlock()
-			close(done)
-		}()
+	subscriptionUsageCache.Lock()
+	defer subscriptionUsageCache.Unlock()
+	if time.Since(subscriptionUsageCache.at) < time.Minute && subscriptionUsageCache.data != nil {
+		return append([]SubscriptionQuota(nil), subscriptionUsageCache.data...)
 	}
-	pending := c.pending
-	c.Unlock()
-	if !have && pending != nil {
-		select {
-		case <-pending:
-		case <-ctx.Done():
-			return nil
-		}
-	}
-	c.Lock()
-	defer c.Unlock()
-	return visibleQuotas(c.data)
-}
-
-// visibleQuotas drops accounts removed from magpie since the last refresh.
-func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
+	var out []SubscriptionQuota
 	hidden := map[string]bool{}
 	for _, p := range load().Providers {
 		hidden[p.ID] = p.Hidden
 	}
-	out := []SubscriptionQuota{}
-	for _, q := range all {
-		if !hidden[q.Provider] {
-			out = append(out, q)
-		}
-	}
-	return out
-}
-
-// fetchSubscriptionUsage asks every signed-in vendor at once.
-func fetchSubscriptionUsage() []SubscriptionQuota {
-	ctx, cancel := context.WithTimeout(context.Background(), subscriptionTimeout)
-	defer cancel()
-	hidden := map[string]bool{}
-	for _, p := range load().Providers {
-		hidden[p.ID] = p.Hidden
-	}
-	var fetches []func() SubscriptionQuota
 	if _, ok := claudeAccount(); ok && !hidden["claude"] {
-		fetches = append(fetches, func() SubscriptionQuota { return claudeSubscriptionUsage(ctx) })
+		out = append(out, claudeSubscriptionUsage(ctx))
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if _, ok := codexAccount(home); ok && !hidden["codex"] {
-			auth := filepath.Join(home, ".codex", "auth.json")
-			fetches = append(fetches, func() SubscriptionQuota { return codexSubscriptionUsage(ctx, auth) })
+		if p, ok := codexAccount(home); ok && !hidden[p.ID] {
+			out = append(out, codexSubscriptionUsage(ctx, filepath.Join(home, ".codex", "auth.json")))
 		}
 		cfg := os.Getenv("XDG_CONFIG_HOME")
 		if cfg == "" {
 			cfg = filepath.Join(home, ".config")
 		}
 		if app, ok := copilotLogin(cfg); ok && !hidden["copilot"] {
-			fetches = append(fetches, func() SubscriptionQuota { return copilotSubscriptionUsage(ctx, app.Token) })
+			out = append(out, copilotSubscriptionUsage(ctx, app.Token))
 		}
 	}
-	out := make([]SubscriptionQuota, len(fetches))
-	var wg sync.WaitGroup
-	for i, f := range fetches {
-		wg.Add(1)
-		go func() { defer wg.Done(); out[i] = f() }()
-	}
-	wg.Wait()
-	return out
+	subscriptionUsageCache.at, subscriptionUsageCache.data = time.Now(), out
+	return append([]SubscriptionQuota(nil), out...)
 }
 
 func accountJSON(ctx context.Context, url, token string, headers map[string]string, dst any) error {
@@ -159,9 +98,6 @@ type accountStatusError struct{ status int }
 
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
-// claudeUsageURL is Claude Code's usage endpoint; a var so tests can point it elsewhere.
-var claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
-
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
 	token, err := claudeToken(ctx)
@@ -171,18 +107,13 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	}
 	_, plan, _ := claudeIdentity()
 	q.Plan = plan
-	return claudeUsageWith(ctx, q, token)
-}
-
-// claudeUsageWith reads the usage windows of the account behind token into q.
-func claudeUsageWith(ctx context.Context, q SubscriptionQuota, token string) SubscriptionQuota {
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err := accountJSON(ctx, claudeUsageURL, token, map[string]string{
+	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
@@ -220,11 +151,6 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		q.Error = err.Error()
 		return q
 	}
-	return codexUsageWith(ctx, q, token, accountID)
-}
-
-// codexUsageWith reads the usage windows of the ChatGPT account behind token into q.
-func codexUsageWith(ctx context.Context, q SubscriptionQuota, token, accountID string) SubscriptionQuota {
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -233,7 +159,7 @@ func codexUsageWith(ctx context.Context, q SubscriptionQuota, token, accountID s
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err := accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
 	if err != nil {
 		q.Error = err.Error()
 		return q

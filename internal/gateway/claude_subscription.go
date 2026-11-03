@@ -556,13 +556,10 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	_ = os.RemoveAll(run.tmp)
 }
 
-// serveClaudeSubscription runs one request through the Claude Code binary. It
-// writes the reply once it has one. A failure before any reply is returned, not
-// written, so the caller can try another candidate or write the error itself.
-func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) (int, string, *upstreamFail) {
+func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) (int, string) {
 	req, err := parse(from, body)
 	if err != nil {
-		return 0, "", &upstreamFail{400, err.Error(), false}
+		return writeError(w, from, 400, err.Error()), err.Error()
 	}
 	stream := req.Stream
 	req.Model = model
@@ -575,7 +572,7 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 		run, events, err = s.subscription.start(r.Context(), req, model)
 	}
 	if err != nil {
-		return 0, "", claudeFail(err.Error())
+		return writeError(w, from, 502, "Claude Code: "+err.Error()), err.Error()
 	}
 
 	if stream {
@@ -591,7 +588,7 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 			enc.event(ev)
 		}
 		enc.finish()
-		return 200, failed, nil
+		return 200, failed
 	}
 	var col collector
 	for ev := range events {
@@ -599,22 +596,12 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 	if col.err != "" && len(col.res.Parts) == 0 {
 		run.abort()
-		return 0, "", claudeFail(col.err)
+		return writeError(w, from, 502, "Claude Code: "+col.err), col.err
 	}
 	res := col.finish()
 	usage.add(res.Usage)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	_, _ = w.Write(render(from, res, req.Model))
-	return 200, col.err, nil
-}
-
-// claudeFail is a Claude Code failure before any reply. It is worth another
-// candidate when its text names a quota, rate limit or overload.
-func claudeFail(msg string) *upstreamFail {
-	msg = "Claude Code: " + msg
-	if !retryText(msg) {
-		return &upstreamFail{502, msg, false}
-	}
-	return &upstreamFail{statusOfText(msg), msg, true}
+	return 200, col.err
 }

@@ -9,10 +9,12 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -21,10 +23,63 @@ type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
 	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
-	// Proxy for magpie's own requests to vendors: "" follows the
-	// environment and then the system, "direct" uses none, anything else
-	// is the proxy (http://, https:// or socks5://; host:port means http).
-	Proxy string `json:"proxy,omitempty"`
+	Proxy string `json:"proxy,omitempty"` // "" follow env/system | direct | proxy URL (http, https, socks5, socks5h; bare host:port means http)
+}
+
+// ProxyExample is the form shown in proxy validation errors.
+const ProxyExample = "http://127.0.0.1:7890"
+
+// ValidateProxy checks a proxy setting. "" (follow environment and system)
+// and "direct" (no proxy, case-insensitive) are valid. Anything else must be
+// a proxy URL with scheme http, https, socks5 or socks5h, or a bare host:port
+// that is taken as http. The host must not be empty, and a port, when given,
+// must be a number from 1 to 65535. The value is expected to be trimmed.
+func ValidateProxy(s string) error {
+	_, err := normalizeProxy(s)
+	return err
+}
+
+// normalizeProxy returns the stored form of a proxy setting: trimmed, with
+// "direct" in lower case. It fails with an error that shows the right form.
+func normalizeProxy(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if strings.EqualFold(s, "direct") {
+		return "direct", nil
+	}
+	bad := func(why string) error {
+		return fmt.Errorf("proxy %q is not valid (%s); use a form such as %s, or direct for no proxy", s, why, ProxyExample)
+	}
+	raw := s
+	if !strings.Contains(raw, "://") {
+		// a bare host:port is taken as an HTTP proxy
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", bad("cannot be parsed")
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", bad("scheme must be http, https, socks5 or socks5h")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", bad("host is missing")
+	}
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return "", bad("host is not a valid name or address")
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return "", bad("port must be a number from 1 to 65535")
+		}
+	}
+	return s, nil
 }
 
 // Themes and Langs are the accepted values, in the order the UI offers them.
@@ -56,6 +111,8 @@ func Load() Settings {
 }
 
 // Save validates and writes the settings.
+// Every check runs before the file is touched, so a rejected save leaves the
+// existing settings as they were.
 func Save(s Settings) error {
 	s = s.normal()
 	if !slices.Contains(Themes, s.Theme) {
@@ -67,17 +124,11 @@ func Save(s Settings) error {
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
 	}
-	s.Proxy = strings.TrimSpace(s.Proxy)
-	if s.Proxy != "" && s.Proxy != "direct" {
-		raw := s.Proxy
-		if !strings.Contains(raw, "://") {
-			raw = "http://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
-			return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", s.Proxy)
-		}
+	proxy, err := normalizeProxy(s.Proxy)
+	if err != nil {
+		return err
 	}
+	s.Proxy = proxy
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
 	}
