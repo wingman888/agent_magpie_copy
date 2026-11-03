@@ -214,9 +214,9 @@ func TestDeleteClearsAccountChoiceOnly(t *testing.T) {
 func TestSelfBuiltProviderWins(t *testing.T) {
 	home := sandbox(t)
 	writeCodexChatGPT(t, home)
-	if err := Save(Provider{ID: "codex", Name: "Codex", Chat: "https://relay.example.com/v1", Key: "k-own"}); err != nil {
-		t.Fatal(err)
-	}
+	// a provider the user built themselves before (with an address and key)
+	writeTestFile(t, Path(), `{"providers":[{"id":"codex","name":"Codex","key":"k-own",`+
+		`"chat":"https://relay.example.com/v1"}]}`)
 	if findProvider(Accounts(), "codex") != nil {
 		t.Fatal("a self-built codex provider must suppress the account version")
 	}
