@@ -45,6 +45,26 @@ func readSSE(r io.Reader, fn func(event, data string) error) error {
 	return sc.Err()
 }
 
+// upstreamStream gives the reply body and its content type. Some upstreams
+// (the ChatGPT backend among them) send an event stream with no Content-Type,
+// so when the header is missing the first bytes decide.
+func upstreamStream(res *http.Response) (io.Reader, string) {
+	br := bufio.NewReader(res.Body)
+	ct := res.Header.Get("Content-Type")
+	if ct == "" {
+		if head, _ := br.Peek(6); looksLikeEvents(head) {
+			ct = "text/event-stream"
+		}
+	}
+	return br, ct
+}
+
+// looksLikeEvents reports whether the bytes begin like an SSE event line.
+func looksLikeEvents(b []byte) bool {
+	b = bytes.TrimLeft(b, " \t\r\n")
+	return bytes.HasPrefix(b, []byte("event:")) || bytes.HasPrefix(b, []byte("data:"))
+}
+
 // sseWriter writes events to a client and flushes each one.
 type sseWriter struct {
 	w     http.ResponseWriter
