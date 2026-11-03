@@ -19,28 +19,12 @@ const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
 func viaDial(prefix string) []Option {
-	return viaDialSkipping(prefix, nil)
-}
-
-// viaDialSkipping is viaDial without the providers skip returns true for.
-func viaDialSkipping(prefix string, skip func(provider.Provider) bool) []Option {
 	var out []Option
 	for _, e := range provider.Catalog() {
-		if skip != nil && skip(e.Provider) {
-			continue
-		}
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Owner() + " · via dial",
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
-}
-
-// ownAccount is true for the provider that rides on Codex's own login: the
-// Codex CLI already reaches those models, so it must not be offered them back.
-func ownAccount(agentID string) func(provider.Provider) bool {
-	return func(p provider.Provider) bool {
-		return p.Account != nil && p.Account.Agent == agentID
-	}
 }
 
 // isDial reports whether a model value is a catalog reference.
@@ -52,17 +36,9 @@ func isDial(v string) bool {
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
 func dialModels() []catalog.Model {
-	return dialModelsSkipping(nil)
-}
-
-// dialModelsSkipping is dialModels without the providers skip returns true for.
-func dialModelsSkipping(skip func(provider.Provider) bool) []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		if skip != nil && skip(e.Provider) {
-			continue
-		}
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Owner(), Provider: e.Provider.Catalog, Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }
