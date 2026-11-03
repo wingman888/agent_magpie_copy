@@ -486,5 +486,8 @@ func SetFallback(id string, refs []string) error {
 func SplitFallback(ref string) (id, model string, ok bool) {
 	id, model, ok = strings.Cut(strings.TrimSpace(ref), "/")
 	id, model = strings.TrimSpace(id), strings.TrimSpace(model)
-	return id, model, ok && id != "" && model != ""
+	if !ok || id == "" || model == "" {
+		return "", "", false
+	}
+	return id, model, true
 }
