@@ -92,6 +92,15 @@ type providersJSON struct {
 	Gateway   gatewayJSON    `json:"gateway"`
 }
 
+// inheritHeaders keeps the saved custom headers when the form did not send
+// any field for them, so editing another field does not drop them. A form
+// that sends headers (even an empty object) decides them itself.
+func inheritHeaders(in, old *provider.Provider) {
+	if in.Headers == nil && old != nil {
+		in.Headers = old.Headers
+	}
+}
+
 // currentProvider reads which provider (and model) an agent is routed to now.
 func currentProvider(a *agent.Agent) (string, string) {
 	if len(a.Fields) == 0 {
@@ -227,6 +236,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
+			inheritHeaders(&in, old)
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
 				return
