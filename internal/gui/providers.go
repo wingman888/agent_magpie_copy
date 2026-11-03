@@ -284,6 +284,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 				// the other keys are kept apart, in the Accounts list
 				in.Keys = old.Keys
 				in.Routing = old.Routing // set on its own, with route
+				in.Affinity = old.Affinity
 				if in.Key == old.Key {
 					in.KeyName, in.KeyProtocol = old.KeyName, old.KeyProtocol
 				}

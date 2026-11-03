@@ -63,10 +63,16 @@ type Provider struct {
 	// Routing is how requests spread over the keys or accounts it has on:
 	// "" smart, the first while it has quota to spare, then whichever has
 	// the most; "order" in order, the next one only when the one before
-	// can't take it; "rotate" each in turn; "usage" the least used first.
-	// Whichever it is, one out of credit, out of quota, rate limited or
-	// failing is passed over for as long as that lasts.
+	// can't take it; "rotate" each in turn; "least-used" the least used
+	// first. Whichever it is, one out of credit, out of quota, rate limited
+	// or failing is passed over for as long as that lasts.
 	Routing string `json:"routing,omitempty"`
+
+	// Affinity is whether a conversation keeps to the key or account that
+	// last answered it, so the vendor's prompt cache can hit: "" automatic,
+	// "session" for the whole conversation, "turn" within one user turn,
+	// "off" never. See AffinityAuto and the rest.
+	Affinity string `json:"affinity,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
@@ -107,6 +113,9 @@ type Provider struct {
 
 type file struct {
 	Providers []Provider `json:"providers"`
+	// Groups are the routing groups the user made, and the hidden marks of
+	// the ones magpie found on its own that the user removed (groups.go).
+	Groups []Group `json:"groups,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -161,7 +170,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback, a.Routing = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing
+		a.Models, a.Fallback, a.Routing, a.Affinity = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing, picks[a.ID].Affinity
 		out = append(out, a)
 	}
 	return out
@@ -220,13 +229,16 @@ func Save(p Provider) error {
 	if p.ID == "magpie" {
 		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
+	if p.ID == groupProvider {
+		return errors.New(`"group" is the prefix of routing groups (group/…); pick another id`)
+	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity}
 	} else {
 		if slices.Contains(accountIDs, p.ID) && !stored(p.ID) {
 			// taken, it would hide that subscription once signed in
@@ -306,6 +318,25 @@ func Delete(id string) error {
 	return store(f)
 }
 
+// SetAffinity changes how a provider's conversations keep to one of its keys
+// or accounts (see Provider.Affinity); a value the code does not know is
+// automatic (""). A signed-in account has no entry of its own until this.
+func SetAffinity(providerID, affinity string) error {
+	id := strings.ToLower(strings.TrimSpace(providerID))
+	f := load()
+	for i := range f.Providers {
+		if f.Providers[i].ID == id {
+			f.Providers[i].Affinity = normalizeAffinity(affinity)
+			return store(f)
+		}
+	}
+	if _, ok := find(All(), id); !ok {
+		return fmt.Errorf("no provider %q", providerID)
+	}
+	f.Providers = append(f.Providers, Provider{ID: id, Affinity: normalizeAffinity(affinity)})
+	return store(f)
+}
+
 // keyOptional is true for local servers, which usually have no key.
 func keyOptional(p Provider) bool {
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
@@ -327,9 +358,8 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
-		p.Routing = ""
-	}
+	p.Routing = normalizeRouting(p.Routing)
+	p.Affinity = normalizeAffinity(p.Affinity)
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {

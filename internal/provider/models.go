@@ -237,18 +237,33 @@ type Entry struct {
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`
+
+	// Group is set on a routing group's entry (ID group/<id>): the group,
+	// with the members that can be used now. Its Provider is empty and its
+	// Model is empty too; the gateway spreads a request over the members.
+	Group *Group `json:"group,omitempty"`
 }
 
-// Catalog lists every exposed model of every ready provider.
+// Catalog lists every exposed model of every ready provider, then the
+// routing groups that have a member that can be used now.
 func Catalog() []Entry {
+	ps := All()
+	x := exposureOf(ps)
 	var out []Entry
-	for _, p := range All() {
+	for _, p := range ps {
 		if !p.Ready() {
 			continue
 		}
-		for _, m := range p.Exposed() {
+		for _, m := range x[p.ID] {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
 		}
+	}
+	for _, g := range groupsNow(ps, x) {
+		rg, models := resolve(g, ps, x)
+		if len(rg.Members) == 0 {
+			continue
+		}
+		out = append(out, Entry{ID: GroupPrefix + rg.ID, Name: rg.Name, Efforts: commonEfforts(models), Group: &rg})
 	}
 	return out
 }
@@ -260,7 +275,7 @@ func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
 	entries := Catalog()
 	for _, e := range entries {
-		if e.ID == id {
+		if e.Group == nil && e.ID == id {
 			return e.Provider, e.Model, true
 		}
 	}
@@ -271,7 +286,7 @@ func Resolve(id string) (Provider, string, bool) {
 	}
 	var hits []Entry
 	for _, e := range entries {
-		if e.Model == id {
+		if e.Group == nil && e.Model == id {
 			hits = append(hits, e)
 		}
 	}

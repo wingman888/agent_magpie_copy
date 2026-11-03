@@ -49,7 +49,7 @@ type Weighed struct {
 	Agent    string            `json:"agent,omitempty"`
 	Plan     string            `json:"plan,omitempty"`
 	Model    string            `json:"model"`
-	Routing  string            `json:"routing"` // its provider's: "", order, rotate, usage
+	Routing  string            `json:"routing"` // its provider's: "", order, rotate, least-used
 	Fallback bool              `json:"fallback,omitempty"`
 	Shared   bool              `json:"shared,omitempty"` // its provider has more than one on
 	Known    bool              `json:"known,omitempty"`  // the vendor said what the account has left
