@@ -23,6 +23,10 @@ import (
 //go:embed codex_prompt.md
 var codexPrompt string
 
+// codexAccount is the provider id of Codex's own ChatGPT sign-in. Codex does
+// not list it: its own models reach it directly, not through the gateway.
+const codexAccount = "codex"
+
 func codex(home string) *Agent {
 	dir := filepath.Join(home, ".codex")
 	path := filepath.Join(dir, "config.toml")
@@ -31,7 +35,7 @@ func codex(home string) *Agent {
 	routed := func() bool { return get("model_provider") == dialID }
 	models := func() []catalog.Model {
 		if routed() {
-			return dialModels()
+			return dialModelsExcept(codexAccount)
 		}
 		return catalog.Codex()
 	}
@@ -70,7 +74,7 @@ func codex(home string) *Agent {
 			); err != nil {
 				return err
 			}
-			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModels())); err != nil {
+			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModelsExcept(codexAccount))); err != nil {
 				return err
 			}
 			if err := edit.SetTOMLTop(path,
@@ -130,7 +134,7 @@ func codex(home string) *Agent {
 					if p := get("model_provider"); p != "" && p != dialID {
 						own = group(p, own)
 					}
-					return append(own, viaDial("")...)
+					return append(own, viaDialExcept("", codexAccount)...)
 				},
 			},
 			{

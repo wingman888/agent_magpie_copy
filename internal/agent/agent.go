@@ -78,10 +78,16 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key.
+// Field looks a field up by key, or failing that by the label the picker
+// shows for it (case-insensitive), so `dial gemini auth …` works.
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
+			return &a.Fields[i]
+		}
+	}
+	for i := range a.Fields {
+		if a.Fields[i].Label != "" && strings.EqualFold(a.Fields[i].Label, key) {
 			return &a.Fields[i]
 		}
 	}

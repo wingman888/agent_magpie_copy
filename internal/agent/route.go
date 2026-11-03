@@ -19,9 +19,23 @@ const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
 func viaDial(prefix string) []Option {
+	return viaDialExcept(prefix, "")
+}
+
+// viaDialExcept is viaDial without one provider, by id. An agent leaves out
+// its own sign-in: its own models need no detour through the gateway.
+func viaDialExcept(prefix, skip string) []Option {
 	var out []Option
 	for _, e := range provider.Catalog() {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
+		if e.Provider.ID == skip {
+			continue
+		}
+		// a sign-in's note names the account, not the vendor
+		note := e.Provider.Name
+		if e.Provider.Account != nil {
+			note = e.Provider.Account.User
+		}
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
@@ -35,9 +49,15 @@ func isDial(v string) bool {
 
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-func dialModels() []catalog.Model {
+func dialModels() []catalog.Model { return dialModelsExcept("") }
+
+// dialModelsExcept is dialModels without one provider, by id.
+func dialModelsExcept(skip string) []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
+		if e.Provider.ID == skip {
+			continue
+		}
 		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
