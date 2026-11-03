@@ -163,16 +163,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		writeJSON(rw, state())
 	})
 	providerRoutes(mux, w, gw)
-	importRoutes(mux)
 	usageRoutes(mux)
 	updateRoutes(mux, w)
 	mux.HandleFunc("GET /api/settings", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, settingsState())
 	})
 	mux.HandleFunc("POST /api/settings", func(rw http.ResponseWriter, r *http.Request) {
-		// Start from the saved settings so fields the page does not send
-		// (such as proxy) are kept rather than reset to their zero value.
-		in := settings.Load()
+		var in settings.Settings
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return

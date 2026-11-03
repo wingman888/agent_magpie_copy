@@ -13,13 +13,11 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -87,18 +85,11 @@ type Server struct {
 	debug        bool
 }
 
-// proxyFor is the proxy rule for requests to vendors: settings, then
-// environment, then the operating system, with loopback always direct.
-// It is evaluated per request, so settings changes apply without a restart.
-func proxyFor(r *http.Request) (*url.URL, error) {
-	return netproxy.For(r.URL)
-}
-
 // New makes a gateway.
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 proxyFor,
+			Proxy:                 http.ProxyFromEnvironment,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,

@@ -2,8 +2,6 @@ package gui
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	_ "embed"
 	"log"
 	"os"
@@ -17,7 +15,6 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
 )
 
@@ -35,17 +32,6 @@ type host struct {
 
 	panelHeight int
 	query       string // what the windows' URLs carry (a forced theme)
-
-	ready     chan struct{} // closed once the main window can be shown
-	readyOnce sync.Once
-}
-
-// whenReady runs fn once the main window can be shown safely.
-func (h *host) whenReady(fn func()) {
-	go func() {
-		<-h.ready
-		fn()
-	}()
 }
 
 func (h *host) HidePanel() { h.panel.Hide() }
@@ -56,16 +42,6 @@ func (h *host) ShowMain(view string) {
 	}
 	h.main.Show()
 	h.main.Focus()
-}
-// Import opens the window on an import link, for the user to confirm.
-func (h *host) Import(link string) {
-	id := stashImport(link)
-	h.whenReady(func() {
-		h.panel.Hide()
-		h.main.SetURL("/?view=providers&import=" + id + h.query)
-		h.main.Show()
-		h.main.Focus()
-	})
 }
 func (h *host) Quit()              { h.app.Quit() }
 func (h *host) OpenURL(url string) { _ = h.app.Browser.OpenURL(url) }
@@ -89,8 +65,7 @@ func (h *host) FitPanel(height int) {
 // Run starts the desktop app: a menu bar icon whose click drops down a compact
 // panel, plus a regular window for when you want it to stay around.
 // showMain opens the window immediately; otherwise only the tray icon appears.
-// link is a magpie:// link the app was started with, to confirm and import.
-func Run(version string, showMain bool, link string) error {
+func Run(version string, showMain bool) error {
 	// After an update off the Mac, the old process starts this one and then
 	// quits; let it go before looking for the gateway.
 	update.AwaitPredecessor()
@@ -132,23 +107,14 @@ func Run(version string, showMain bool, link string) error {
 			cancel()
 		}
 	}()
-	go func() {
-		if err := registerScheme(); err != nil {
-			log.Println("magpie:// links:", err)
-		}
-	}()
 	// MAGPIE_THEME=light|dark forces the palette; handy for screenshots.
 	theme := ""
 	if t := os.Getenv("MAGPIE_THEME"); t != "" {
 		theme = "&theme=" + t
 	}
 	Version = version
-	h := &host{query: theme, ready: make(chan struct{})}
+	h := &host{query: theme}
 	h.app = application.New(application.Options{
-		// Windows and Linux start a new process for a magpie:// link (or a
-		// second launch); it hands its arguments to the running one and quits.
-		// The Mac sends the link to the running app itself.
-		SingleInstance: singleInstance(h),
 		Name:        "magpie",
 		Description: "one place to pick every agent's model",
 		Icon:        appIcon,
@@ -230,69 +196,19 @@ func Run(version string, showMain bool, link string) error {
 	}
 	h.tray.SetMenu(menu)
 	h.tray.AttachWindow(h.panel).WindowOffset(6)
-	// the quick panel by the icon, or the main window if the user would
-	// rather (Settings → Tray icon)
-	h.tray.OnClick(func() {
-		if settings.Load().Tray == "window" {
-			h.ShowMain("")
-			return
-		}
-		h.tray.ToggleWindow()
-	})
 
-	// Wails shows a Windows webview 3s after Show whether or not WebView2
-	// has made its controller yet, and a slow first start then crashes on
-	// the nil controller; there, wait for the first page.
-	markReady := func() { h.readyOnce.Do(func() { close(h.ready) }) }
-	if runtime.GOOS == "windows" {
-		h.main.OnWindowEvent(events.Windows.WebViewNavigationCompleted, func(*application.WindowEvent) { markReady() })
-	} else {
-		h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { markReady() })
-	}
 	if showMain {
-		h.whenReady(func() { h.ShowMain("") })
-	}
-	if link != "" {
-		h.Import(link)
-	}
-	// Windows and Linux also report the start's own link as an event.
-	var skip sync.Once
-	h.app.Event.OnApplicationEvent(events.Common.ApplicationLaunchedWithUrl, func(e *application.ApplicationEvent) {
-		u := ImportLink([]string{e.Context().URL()})
-		dup := false
-		if u == link {
-			skip.Do(func() { dup = true })
+		if runtime.GOOS == "windows" {
+			// Wails shows a Windows webview 3s after Show whether or not
+			// WebView2 has made its controller yet, and a slow first start
+			// then crashes on the nil controller; wait for the first page.
+			var once sync.Once
+			h.main.OnWindowEvent(events.Windows.WebViewNavigationCompleted, func(*application.WindowEvent) {
+				once.Do(func() { h.ShowMain("") })
+			})
+		} else {
+			h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { h.ShowMain("") })
 		}
-		if u != "" && !dup {
-			h.Import(u)
-		}
-	})
+	}
 	return h.app.Run()
-}
-
-// singleInstance makes a second launch hand over to this one, off the Mac.
-// The id covers the executable and the config dir, so a build elsewhere or
-// a sandboxed HOME runs on its own.
-func singleInstance(h *host) *application.SingleInstanceOptions {
-	if runtime.GOOS == "darwin" || !sessionBus() {
-		return nil
-	}
-	exe, _ := os.Executable()
-	sum := sha256.Sum256([]byte(exe + "\x00" + settings.Dir()))
-	return &application.SingleInstanceOptions{
-		UniqueID: "ai.usemagpie.app.i" + hex.EncodeToString(sum[:6]),
-		OnSecondInstanceLaunch: func(d application.SecondInstanceData) {
-			args := d.Args
-			if len(args) > 0 {
-				args = args[1:]
-			}
-			switch {
-			case ImportLink(args) != "":
-				h.Import(ImportLink(args))
-			case len(args) == 1 && args[0] == "tray":
-			default:
-				h.whenReady(func() { h.ShowMain("") })
-			}
-		},
-	}
 }
