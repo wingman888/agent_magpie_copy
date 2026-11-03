@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,23 +30,23 @@ func (p Provider) Test(ctx context.Context) []Result {
 	} else if ms := p.Available(); len(ms) > 0 {
 		model = ms[0].ID
 	}
-	// the key in use, on the endpoints it is for only
-	q := p.WithKey(KeyAccount{Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol})
 	var out []Result
-	for _, proto := range q.Speaks() {
+	for _, proto := range p.Speaks() {
 		var url, body string
+		headers := map[string]string{"Authorization": "Bearer " + p.Key}
 		switch proto {
 		case Chat:
-			url = q.Chat + "/chat/completions"
+			url = p.Chat + "/chat/completions"
 			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 		case Responses:
-			url = q.Responses + "/responses"
+			url = p.Responses + "/responses"
 			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
 		case Anthropic:
-			url = q.Anthropic + "/v1/messages"
+			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
+			headers = AuthHeaders(p, Anthropic)
 		}
-		out = append(out, probe(ctx, q, proto, url, q.Prepare([]byte(body)), model))
+		out = append(out, probe(ctx, proto, url, body, model, headers))
 	}
 	return out
 }
@@ -55,8 +54,7 @@ func (p Provider) Test(ctx context.Context) []Result {
 // AuthHeaders is how a request to the vendor proves who it is. Anthropic's
 // own API wants x-api-key alone; compatible vendors take either, so both.
 func AuthHeaders(p Provider, proto Protocol) map[string]string {
-	if p.Key == "" || (p.KeyProtocol != "" && p.KeyProtocol != proto) {
-		// a key limited to another protocol is not sent to this one
+	if p.Key == "" {
 		return map[string]string{}
 	}
 	if proto == Anthropic {
@@ -68,7 +66,7 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
-func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string) Result {
+func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -76,19 +74,15 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		r.Error = err.Error()
 		return r
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	if p.IsOpenCode() {
-		req.Header.Set("x-opencode-session", "magpie-test-"+randomUUID())
-	}
-	if err := p.Sign(ctx, req, proto, body); err != nil {
-		r.Error = err.Error()
-		return r
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
