@@ -101,6 +101,13 @@ func HTTP1Transport(t *http.Transport) *http.Transport {
 	c := t.Clone()
 	c.ForceAttemptHTTP2 = false
 	c.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	if c.TLSClientConfig != nil {
+		// a transport that already used HTTP/2 left "h2" in the TLS config
+		// it clones; without this the server would pick h2 and fail
+		cfg := c.TLSClientConfig.Clone()
+		cfg.NextProtos = []string{"http/1.1"}
+		c.TLSClientConfig = cfg
+	}
 	return c
 }
 

@@ -180,11 +180,20 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, oau
 		b.removeRun(run)
 		return nil, nil, err
 	}
+	// cmd.Wait closes the pipes, so it must come after the readers are done;
+	// calling it first can cut off output the process already wrote.
+	stderrDone, outDone := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(stderrDone)
 		_, _ = io.Copy(&lockedWriter{run: run}, io.LimitReader(stderr, 1<<20))
 	}()
-	go run.readOutput(stdout)
 	go func() {
+		defer close(outDone)
+		run.readOutput(stdout)
+	}()
+	go func() {
+		<-outDone
+		<-stderrDone
 		_ = cmd.Wait()
 		run.finish()
 	}()
