@@ -29,7 +29,7 @@ const usageHalfLife = time.Hour
 
 var routed = struct {
 	sync.Mutex
-	turn     map[string]int      // provider → requests routed in turn
+	turn     map[string]int      // pool (see turnPool) → requests routed in turn
 	used     map[string]tokenUse // candidate rest id → tokens it served
 	failures map[string]int      // candidate rest id → failures since it last answered
 }{turn: map[string]int{}, used: map[string]tokenUse{}, failures: map[string]int{}}
@@ -220,6 +220,13 @@ func route(p provider.Provider, cs []candidate, model string, from provider.Prot
 	return cs
 }
 
+// turnPool names the pool a turn is taken within: the provider, and the
+// protocol its keys are made for ("" when any). cs is the pool, the keys
+// that suit the request; the ones aside are not in it.
+func turnPool(p provider.Provider, cs []candidate) string {
+	return p.ID + "|" + string(cs[0].p.KeyProtocol)
+}
+
 // weighing is what one provider's candidates were ordered by: the share of
 // its allowance each account has used and when that renews, and the tokens
 // each served lately. The routing trace shows the same.
@@ -317,9 +324,12 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 	case provider.Ordered:
 		return cs, wg
 	case provider.Rotate:
+		// each pool of keys takes its turns apart: the keys made for
+		// Anthropic and those made for Chat do not move each other along
+		pool := turnPool(p, cs)
 		routed.Lock()
-		n := routed.turn[p.ID] % len(cs)
-		routed.turn[p.ID]++
+		n := routed.turn[pool] % len(cs)
+		routed.turn[pool]++
 		routed.Unlock()
 		cs = append(append([]candidate{}, cs[n:]...), cs[:n]...)
 	case provider.LeastUsed:
