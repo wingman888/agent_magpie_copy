@@ -1,1 +1,1 @@
-./internal/gui
+./. ./internal/backup ./internal/provider
