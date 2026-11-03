@@ -124,7 +124,7 @@ func TestAsideKeyTakenWhenThePoolFails(t *testing.T) {
 	// an Anthropic request tries the pool first, and only then the Chat key
 	seen = nil
 	if code, body := post(t, "/v1/messages", `{"model":"relay/m","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`); code != 200 || !strings.Contains(body, "from-kc") {
-		t.Fatalf("anthropic: %d %s", code, body)
+		t.Fatalf("anthropic: %d %s (upstream saw %v)", code, strings.Join(strings.Fields(body), " "), seen)
 	}
 	if strings.Join(seen, ",") != "/v1/messages k1,/v1/messages k2,/v1/chat/completions kc" {
 		t.Fatalf("anthropic request tried %v", seen)
