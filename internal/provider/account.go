@@ -874,11 +874,12 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
+		turn := copilotTurnOf(body)
 		req.Header.Set("X-Initiator", "agent")
-		if lastRole(body) == "user" {
+		if turn.user {
 			req.Header.Set("X-Initiator", "user")
 		}
-		if bytes.Contains(body, []byte(`"image_url"`)) {
+		if turn.vision {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
@@ -893,17 +894,96 @@ func copilotProvider(app copilotApp, plan string) Provider {
 	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
 }
 
-// lastRole is the role of the last message in a chat request.
-func lastRole(body []byte) string {
+// copilotTurn is what a request body says about its own last turn.
+type copilotTurn struct {
+	user   bool // the user typed it, rather than a tool's reply
+	vision bool // the body carries an image
+}
+
+// copilotTurnOf reads a body in any of the three API shapes: Chat and
+// Anthropic carry messages, Responses carries input. A tool's reply is not
+// the user's turn: a Chat tool message, an Anthropic user message made only of
+// tool_result blocks, and a Responses function output all count as the agent's.
+func copilotTurnOf(body []byte) copilotTurn {
+	var t copilotTurn
 	var v struct {
-		Messages []struct {
-			Role string `json:"role"`
-		} `json:"messages"`
+		Input    json.RawMessage   `json:"input"`
+		Messages []json.RawMessage `json:"messages"`
 	}
-	if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
-		return ""
+	if json.Unmarshal(body, &v) == nil {
+		t.user = lastTurnIsUser(v.Input, v.Messages)
 	}
-	return v.Messages[len(v.Messages)-1].Role
+	var doc any
+	if json.Unmarshal(body, &doc) == nil {
+		t.vision = hasImage(doc)
+	}
+	return t
+}
+
+// lastTurnIsUser reports whether the last turn of a request was typed by the user.
+func lastTurnIsUser(input json.RawMessage, messages []json.RawMessage) bool {
+	if in := bytes.TrimSpace(input); len(in) > 0 {
+		if in[0] == '"' {
+			return true // a string input is the user's text
+		}
+		if in[0] == '[' {
+			var items []struct {
+				Type string `json:"type"`
+				Role string `json:"role"`
+			}
+			if json.Unmarshal(in, &items) != nil || len(items) == 0 {
+				return false
+			}
+			last := items[len(items)-1]
+			return last.Type != "function_call_output" && last.Role == "user"
+		}
+	}
+	if len(messages) == 0 {
+		return false
+	}
+	var m struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(messages[len(messages)-1], &m) != nil || m.Role != "user" {
+		return false
+	}
+	var parts []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(m.Content, &parts) != nil || len(parts) == 0 {
+		return true // plain text, or no blocks to call a tool's reply
+	}
+	for _, p := range parts {
+		if p.Type != "tool_result" {
+			return true // text or an image among the results: the user spoke
+		}
+	}
+	return false // nothing but tool_result blocks: the agent's turn
+}
+
+// hasImage finds an image part anywhere in a decoded body: Chat image_url,
+// Responses input_image, or an Anthropic image block.
+func hasImage(v any) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		switch x["type"] {
+		case "image_url", "input_image", "image":
+			return true
+		}
+		for _, c := range x {
+			if hasImage(c) {
+				return true
+			}
+		}
+	case []any:
+		for _, c := range x {
+			if hasImage(c) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {
