@@ -31,6 +31,12 @@ func (l *rotWarmLog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, rotWarmOK)
 }
 
+const (
+	rotMsgFirst = `[{"role":"user","content":"first"}]`
+	rotMsgNext  = `[{"role":"user","content":"first"},{"role":"assistant","content":"ok"},{"role":"user","content":"next"}]`
+	rotMsgTool  = `[{"role":"user","content":"next"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"done"}]`
+)
+
 // TestGroupRotatingMemberMovesOnEachTurn: an order group whose member rotates
 // its keys goes to the next key at each new user turn, even when the cache is
 // warm; within a turn the tool-result requests stay on the turn's key.
@@ -83,16 +89,16 @@ func TestRotGroupRotatingMemberMovesOnEachTurn(t *testing.T) {
 		return rotLastRoute(t, s)
 	}
 
-	send(msgFirst, "k1")
-	if r := send(msgTool, "k1"); rotWhy(r) != "turn" {
+	send(rotMsgFirst, "k1")
+	if r := send(rotMsgTool, "k1"); rotWhy(r) != "turn" {
 		t.Fatalf("within turn: why %q", rotWhy(r))
 	}
-	if r := send(msgNext, "k2"); rotWhy(r) != "new-turn" {
+	if r := send(rotMsgNext, "k2"); rotWhy(r) != "new-turn" {
 		t.Fatalf("new turn: why %q, want new-turn", rotWhy(r))
 	}
-	send(msgTool, "k2")
-	send(msgNext, "k3")
-	send(msgNext, "k1")
+	send(rotMsgTool, "k2")
+	send(rotMsgNext, "k3")
+	send(rotMsgNext, "k1")
 }
 
 // lastRoute is the newest route the server traced.
