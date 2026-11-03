@@ -209,7 +209,7 @@ func TestAffKeepTo(t *testing.T) {
 		rotating bool
 		cv       *convo
 		within   bool
-		affWhy   string
+		why      string
 		kept     bool
 	}{
 		{"no memory", "", false, memory("", 0, now), false, "first", false},
