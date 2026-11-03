@@ -32,6 +32,9 @@ func All() []*Agent {
 		cursor(home),
 		copilot(home),
 		crush(home, cfg),
+		dsh(home),
+		commandCode(home),
+		omp(home),
 	}
 }
 
@@ -131,7 +134,17 @@ func ownOptions(authFile string, cur string, extra ...string) []Option {
 	sort.Strings(providers)
 	var out []Option
 	for _, p := range providers {
-		out = append(out, group(p, options(catalog.Provider(p), p+"/"))...)
+		name := catalog.ProviderName(p)
+		if name == "" {
+			name = p
+		}
+		opts := group(name, options(catalog.Provider(p), p+"/"))
+		if ic := providerIcon(p); ic != "" {
+			for i := range opts {
+				opts[i].GroupIcon = ic
+			}
+		}
+		out = append(out, opts...)
 	}
 	return out
 }
@@ -160,44 +173,37 @@ func magpieProviderJSON(shape string) any {
 		}
 		return map[string]any{"type": "openai", "name": "magpie", "base_url": gatewayV1(), "api_key": gateway.Token, "models": ms}
 	case "pi":
-		return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": piModels(models)}
+		var ms []map[string]any
+		for _, m := range models {
+			// reasoning lets Pi offer its thinking levels for the model
+			e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
+			if levels := piThinkingLevels(m.Efforts); levels != nil {
+				e["thinkingLevelMap"] = levels
+			}
+			ms = append(ms, e)
+		}
+		if ms == nil {
+			ms = []map[string]any{}
+		}
+		return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
 	}
 	return nil
 }
 
-// piModels renders the model entries of Pi's models.json. Pi only offers the
-// thinking levels a model declares, so the levels Pi would not show by default
-// (xhigh, max) are declared through thinkingLevelMap, keyed and valued by the
-// level name itself. Models without those levels get no such field.
-func piModels(models []catalog.Model) []map[string]any {
-	var ms []map[string]any
-	for _, m := range models {
-		// reasoning lets Pi offer its thinking levels for the model
-		e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-		if tl := piThinkingLevelMap(m.Efforts); tl != nil {
-			e["thinkingLevelMap"] = tl
-		}
-		ms = append(ms, e)
-	}
-	if ms == nil {
-		ms = []map[string]any{}
-	}
-	return ms
-}
-
-// piThinkingLevelMap declares the extra levels Pi needs to be told about:
-// "max" and "xhigh". It returns nil when the model has neither.
-func piThinkingLevelMap(efforts []string) map[string]string {
-	var tl map[string]string
+// piThinkingLevels is the thinkingLevelMap for a model's efforts. Pi offers
+// xhigh and max only for models that map them, so without it a model whose
+// top level is max stopped at high in Pi.
+func piThinkingLevels(efforts []string) map[string]any {
+	var levels map[string]any
 	for _, e := range efforts {
-		if e == "max" || e == "xhigh" {
-			if tl == nil {
-				tl = map[string]string{}
+		if e == "xhigh" || e == "max" {
+			if levels == nil {
+				levels = map[string]any{}
 			}
-			tl[e] = e
+			levels[e] = e
 		}
 	}
-	return tl
+	return levels
 }
 
 func opencode(home, cfg string) *Agent {

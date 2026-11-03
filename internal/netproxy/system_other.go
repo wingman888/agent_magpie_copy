@@ -2,6 +2,5 @@
 
 package netproxy
 
-// readSystem has nothing to read here: on Linux the environment is the only
-// source of a system proxy.
-func readSystem() system { return system{} }
+// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
+func system() Proxy { return Proxy{} }
