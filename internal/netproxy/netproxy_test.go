@@ -6,7 +6,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/yetone/magpie/internal/settings"
@@ -246,14 +245,18 @@ func TestInstallSetsDefaultTransport(t *testing.T) {
 		t.Skip("DefaultTransport is not *http.Transport")
 	}
 	old := tr.Proxy
-	oldOnce := installOnce
+	installMu.Lock()
+	wasInstalled := installed
+	installed = false
+	installMu.Unlock()
 	t.Cleanup(func() {
 		tr.Proxy = old
-		installOnce = oldOnce
+		installMu.Lock()
+		installed = wasInstalled
+		installMu.Unlock()
 	})
 	// Install runs at most once per process; reset it so this test does not
 	// depend on, or consume, that one call (matters with -count=2).
-	installOnce = sync.Once{}
 	isolate(t, systemSettings{Proxy: "http://127.0.0.1:7890"})
 
 	Install()

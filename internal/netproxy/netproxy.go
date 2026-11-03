@@ -99,16 +99,25 @@ func resetSystemCache() {
 // once at startup; repeated calls do nothing. It does nothing if
 // DefaultTransport is not an *http.Transport.
 func Install() {
-	installOnce.Do(func() {
-		t, ok := http.DefaultTransport.(*http.Transport)
-		if !ok || t == nil {
-			return
-		}
-		t.Proxy = proxyFunc
-	})
+	installMu.Lock()
+	defer installMu.Unlock()
+	if installed {
+		return
+	}
+	installed = true
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || t == nil {
+		return
+	}
+	t.Proxy = proxyFunc
 }
 
-var installOnce sync.Once
+// installMu and installed make Install run once. They are plain values
+// (not sync.Once) so tests can reset them.
+var (
+	installMu sync.Mutex
+	installed bool
+)
 
 func proxyFunc(r *http.Request) (*url.URL, error) {
 	if r == nil || r.URL == nil {
