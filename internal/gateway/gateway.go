@@ -74,17 +74,14 @@ type Server struct {
 	debug  bool
 }
 
-// New makes a gateway.
+// New makes a gateway. The upstream client leaves Transport nil, so requests
+// go through http.DefaultTransport (resolved per request). That keeps the
+// standard proxy, HTTP/2 and idle settings, and lets a test stand-in intercept
+// upstream traffic by replacing http.DefaultTransport.
 func New() *Server {
 	return &Server{
-		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			ResponseHeaderTimeout: 10 * time.Minute,
-			MaxIdleConnsPerHost:   8,
-			IdleConnTimeout:       90 * time.Second,
-			ForceAttemptHTTP2:     true,
-		}},
-		debug: os.Getenv("DIAL_DEBUG") != "",
+		client: &http.Client{},
+		debug:  os.Getenv("DIAL_DEBUG") != "",
 	}
 }
 
@@ -131,7 +128,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	return nil
 }
 
-// Handler routes the four APIs: the three wire APIs and the Gemini API.
+// Handler routes the client APIs.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.info)
@@ -146,19 +143,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
-	// {rest} is "{model}:{method}"; the model may itself contain slashes.
-	mux.HandleFunc("POST /v1beta/models/{rest...}", s.gemini)
+	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses and /v1/messages, and the Gemini API under /v1beta/models")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models/*")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages",
-			"/v1beta/models", "/v1beta/models/{model}:generateContent",
-			"/v1beta/models/{model}:streamGenerateContent?alt=sse", "/v1beta/models/{model}:countTokens"}})
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1beta/models/{model}:generateContent"}})
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -215,11 +209,78 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Anthropic, 400, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"input_tokens": roughTokens(req)})
+	writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 }
 
-// roughTokens estimates a request's size in tokens: a quarter of its text.
-func roughTokens(req *Request) int {
+// handle is the request path of one client API.
+func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+		if err != nil {
+			writeError(w, from, 400, err.Error())
+			return
+		}
+		s.serve(w, r, from, body)
+	}
+}
+
+// gemini serves /v1beta/models/{model}:{method}. The Gemini API keeps the
+// model and the streaming choice in the URL; they move into the body so
+// serve sees one shape.
+func (s *Server) gemini(w http.ResponseWriter, r *http.Request) {
+	call := r.PathValue("call")
+	i := strings.LastIndex(call, ":") // model ids may hold a colon (ollama tags), methods never do
+	if i < 0 {
+		writeError(w, provider.Gemini, 404, "expected /v1beta/models/{model}:generateContent")
+		return
+	}
+	model, method := call[:i], call[i+1:]
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if err != nil {
+		writeError(w, provider.Gemini, 400, err.Error())
+		return
+	}
+	var stream bool
+	switch method {
+	case "generateContent":
+	case "streamGenerateContent":
+		stream = true
+	case "countTokens":
+		s.geminiCount(w, model, body)
+		return
+	default:
+		writeError(w, provider.Gemini, 404, "unknown method "+method)
+		return
+	}
+	s.serve(w, r, provider.Gemini, withFields(body, map[string]any{"model": model, "stream": stream}))
+}
+
+// geminiCount answers countTokens with a rough estimate.
+func (s *Server) geminiCount(w http.ResponseWriter, model string, body []byte) {
+	var wrap struct {
+		Inner json.RawMessage `json:"generateContentRequest"`
+	}
+	if json.Unmarshal(body, &wrap) == nil && len(wrap.Inner) > 0 {
+		body = wrap.Inner
+	}
+	req, err := parseGemini(body)
+	if err != nil {
+		writeError(w, provider.Gemini, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"totalTokens": estimate(req)})
+}
+
+func (s *Server) geminiModels(w http.ResponseWriter, r *http.Request) {
+	models := []map[string]any{}
+	for _, e := range provider.Catalog() {
+		models = append(models, geminiModel(e.ID, e.Name))
+	}
+	writeJSON(w, 200, map[string]any{"models": models})
+}
+
+// estimate is a token count from sizes, for clients that ask before sending.
+func estimate(req *Request) int {
 	n := len(req.System)
 	for _, m := range req.Messages {
 		for _, p := range m.Parts {
@@ -232,72 +293,52 @@ func roughTokens(req *Request) int {
 	return n / 4
 }
 
-// unknownModelMessage says what the gateway does know, for a 404.
-func unknownModelMessage(model string) string {
-	msg := fmt.Sprintf("dial knows no model %q", model)
-	if ids := provider.IDs(); len(ids) > 0 {
-		return msg + "; it has " + strings.Join(ids, ", ")
-	}
-	return msg + "; add a provider in dial first"
-}
-
-// handle is the request path of one client API whose body names the model.
-func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
-		if err != nil {
-			writeError(w, from, 400, err.Error())
-			return
-		}
-		s.serve(w, r, from, modelOf(body), body, nil)
-	}
-}
-
-// serve is the request path every client API shares: resolve the model, then
-// relay the body to the provider or translate it, recording the call and its
-// usage. model is the id the client named. stream, when not nil, replaces the
-// body's own stream flag; the Gemini API says streaming in the URL instead.
-func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, stream *bool) {
+// serve routes one parsed-enough request to its provider.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
 	start := time.Now()
-	call := Call{Time: start, From: from, Model: model, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
-	p, vendorModel, ok := provider.Resolve(call.Model)
+	call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
+	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		s.record(call)
-		writeError(w, from, 404, unknownModelMessage(call.Model))
+		msg := fmt.Sprintf("dial knows no model %q", call.Model)
+		if ids := provider.IDs(); len(ids) > 0 {
+			msg += "; it has " + strings.Join(ids, ", ")
+		} else {
+			msg += "; add a provider in dial first"
+		}
+		writeError(w, from, 404, msg)
 		return
 	}
 	call.Provider = p.ID
-	if p.Base(from) != "" {
+	up := p.Upstream()
+	switch {
+	case p.Account == nil && p.Base(from) != "",
+		p.Account != nil && len(up) > 0 && up[0] == from && wantsStream(body):
+		// relayed as the provider streams it: a streamed account request
+		// goes out as the backend takes it, events untouched
 		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, vendorModel, body, &call.Usage)
-	} else {
-		to := p.Speaks()
-		if len(to) == 0 {
-			writeError(w, from, 502, p.Name+" has no endpoint configured")
-			return
-		}
-		call.To = to[0]
-		req, err := parse(from, body)
-		if err != nil {
-			call.Status, call.Error = writeError(w, from, 400, err.Error()), err.Error()
-		} else {
-			if stream != nil {
-				req.Stream = *stream
-			}
-			req.Model = call.Model
-			call.Status, call.Error = s.translate(w, r, p, from, to[0], vendorModel, req, &call.Usage)
-		}
+		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+	case len(up) == 0:
+		writeError(w, from, 502, p.Name+" has no endpoint configured")
+		return
+	default:
+		call.To = up[0]
+		call.Status, call.Error = s.translate(w, r, p, from, up[0], model, body, &call.Usage)
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: vendorModel,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
+	if p.Account != nil {
+		// the backend's own body rules; the URL and credentials come from Sign
+		body = p.Prepare(body)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -313,10 +354,39 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
+	if p.Account != nil {
+		if err := p.Sign(ctx, req, to, body); err != nil {
+			return nil, err
+		}
+		return s.client.Do(req)
+	}
 	for k, v := range provider.AuthHeaders(p, to) {
 		req.Header.Set(k, v)
 	}
 	return s.client.Do(req)
+}
+
+// failure answers a request that never got a reply from the provider. A
+// missing or expired sign-in is a 401, so the client shows it as an auth
+// problem rather than an outage.
+func failure(w http.ResponseWriter, proto provider.Protocol, p provider.Provider, err error) (int, string) {
+	msg := p.Name + ": " + err.Error()
+	status := 502
+	if provider.IsSignedOut(err) {
+		status = 401
+	}
+	return writeError(w, proto, status, msg), err.Error()
+}
+
+// replyError relays a provider's error reply in the client's shape. For an
+// account, a rejected token is followed by how to sign in again.
+func replyError(w http.ResponseWriter, proto provider.Protocol, p provider.Provider, res *http.Response) (int, string) {
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	msg := p.Name + ": " + provider.APIError(b, res.Status)
+	if p.Account != nil && (res.StatusCode == 401 || res.StatusCode == 403) {
+		msg += "; " + p.SignInHint()
+	}
+	return writeError(w, proto, res.StatusCode, msg), msg
 }
 
 // passthrough relays a request the provider understands as-is, with the
@@ -325,31 +395,33 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), rewriteModel(body, model), r.Header)
 	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
+		return failure(w, proto, p, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		return writeError(w, proto, res.StatusCode, msg), msg
+		return replyError(w, proto, p, res)
 	}
+	ct, rd := replyType(res, p.Account != nil)
 	h := w.Header()
-	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
+	for _, k := range []string{"Request-Id", "X-Request-Id"} {
 		if v := res.Header.Get(k); v != "" {
 			h.Set(k, v)
 		}
 	}
-	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+	if ct != "" {
+		h.Set("Content-Type", ct)
+	}
+	if strings.HasPrefix(ct, "text/event-stream") {
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Accel-Buffering", "no")
 	}
 	w.WriteHeader(res.StatusCode)
 	f, _ := w.(http.Flusher)
-	sniff := newSniffer(proto, res.Header.Get("Content-Type"))
+	sniff := newSniffer(proto, ct)
 	defer func() { u.add(sniff.usage()) }()
 	buf := make([]byte, 32<<10)
 	for {
-		n, err := res.Body.Read(buf)
+		n, err := rd.Read(buf)
 		if n > 0 {
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
@@ -369,32 +441,34 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-// req is the client's request already parsed; model is the vendor's id.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, req *Request, u *Usage) (int, string) {
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	req, err := parse(from, body)
+	if err != nil {
+		return writeError(w, from, 400, err.Error()), err.Error()
+	}
 	stream := req.Stream
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
 	if err != nil {
-		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
+		return failure(w, from, p, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		return writeError(w, from, res.StatusCode, msg), msg
+		return replyError(w, from, p, res)
 	}
+	ct, rd := replyType(res, p.Account != nil)
 	dec := decoder(to)
-	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+	if !strings.HasPrefix(ct, "text/event-stream") {
 		// the provider ignored stream:true; read the whole reply as one
 		// event stream would be wrong, so give up cleanly
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
-		enc := encoder(from, newSSEWriter(w), req)
+		enc := encoder(from, newSSEWriter(w), req.Model)
 		var failed string
-		rerr := readSSE(res.Body, func(_, data string) error {
+		readSSE(rd, func(_, data string) error {
 			return dec(data, func(ev Event) {
 				switch ev.Kind {
 				case KError:
@@ -405,30 +479,19 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 				enc.event(ev)
 			})
 		})
-		// A broken connection ends the reply without a stop; the encoder
-		// sees that from the missing stop. For the Gemini API the error is
-		// also recorded; the other client APIs keep their original behaviour.
-		if rerr != nil && failed == "" && from == provider.Gemini {
-			failed = rerr.Error()
-		}
 		enc.finish()
 		return 200, failed
 	}
 	var col collector
-	rerr := readSSE(res.Body, func(_, data string) error {
+	readSSE(rd, func(_, data string) error {
 		return dec(data, col.add)
 	})
-	// Transport errors fail a non-streamed Gemini reply with 502 when nothing
-	// was received; other client APIs keep returning whatever was collected.
-	if rerr != nil && col.err == "" && from == provider.Gemini {
-		col.err = rerr.Error()
-	}
 	if col.err != "" && len(col.res.Parts) == 0 {
 		return writeError(w, from, 502, p.Name+": "+col.err), col.err
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)
-	out := render(from, res2, req)
+	out := render(from, res2, req.Model)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(out)
@@ -486,31 +549,28 @@ type streamEncoder interface {
 	finish()
 }
 
-// encoder streams replies to the client's API. req is the client's request,
-// whose model is the id the client named.
-func encoder(proto provider.Protocol, w *sseWriter, req *Request) streamEncoder {
+func encoder(proto provider.Protocol, w *sseWriter, model string) streamEncoder {
 	switch proto {
 	case provider.Chat:
-		return &chatEncoder{w: w, model: req.Model}
+		return &chatEncoder{w: w, model: model}
 	case provider.Responses:
-		return &responsesEncoder{w: w, model: req.Model}
+		return &responsesEncoder{w: w, model: model}
 	case provider.Gemini:
-		return &geminiEncoder{w: w, model: req.Model, thoughts: req.Thinking}
+		return &geminiEncoder{w: w, model: model}
 	}
-	return &anthropicEncoder{w: w, model: req.Model}
+	return &anthropicEncoder{w: w, model: model}
 }
 
-// render makes a whole reply in the client's API. req is as in encoder.
-func render(proto provider.Protocol, res Result, req *Request) []byte {
+func render(proto provider.Protocol, res Result, model string) []byte {
 	switch proto {
 	case provider.Chat:
-		return renderChat(res, req.Model)
+		return renderChat(res, model)
 	case provider.Responses:
-		return renderResponses(res, req.Model)
+		return renderResponses(res, model)
 	case provider.Gemini:
-		return renderGemini(res, req.Model, req.Thinking)
+		return renderGemini(res, model)
 	}
-	return renderAnthropic(res, req.Model)
+	return renderAnthropic(res, model)
 }
 
 // ---- small helpers ------------------------------------------------------------
@@ -525,13 +585,20 @@ func modelOf(body []byte) string {
 
 // rewriteModel swaps the model field, keeping every other field as it was.
 func rewriteModel(body []byte, model string) []byte {
+	return withFields(body, map[string]any{"model": model})
+}
+
+// withFields sets top-level fields, keeping every other field as it was.
+func withFields(body []byte, fields map[string]any) []byte {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var m map[string]any
 	if err := dec.Decode(&m); err != nil {
 		return body
 	}
-	m["model"] = model
+	for k, v := range fields {
+		m[k] = v
+	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return body
@@ -567,7 +634,12 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 	case provider.Anthropic:
 		v = map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
 	case provider.Gemini:
-		v = map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}}
+		st := map[int]string{400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
+			429: "RESOURCE_EXHAUSTED", 500: "INTERNAL", 502: "UNAVAILABLE", 503: "UNAVAILABLE", 529: "UNAVAILABLE"}[status]
+		if st == "" {
+			st = "UNKNOWN"
+		}
+		v = map[string]any{"error": map[string]any{"code": status, "message": msg, "status": st}}
 	default:
 		v = map[string]any{"error": map[string]any{"message": msg, "type": typ, "code": nil, "param": nil}}
 	}
