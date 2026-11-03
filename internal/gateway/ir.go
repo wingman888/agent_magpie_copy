@@ -102,9 +102,6 @@ type Event struct {
 	Model string
 	Stop  string // stop | length | tool | filter
 	Usage Usage
-	// ErrType is the upstream's error type or code for a KError, as sent
-	// ("overloaded_error", "invalid_request_error", "insufficient_quota").
-	ErrType string
 }
 
 // Usage counts tokens.
@@ -146,10 +143,9 @@ type Result struct {
 // collector assembles a Result from events. Encoders use the same logic to
 // know what the reply contained so far.
 type collector struct {
-	res     Result
-	args    strings.Builder // arguments of the open tool call
-	err     string
-	errType string // ErrType of err
+	res  Result
+	args strings.Builder // arguments of the open tool call
+	err  string
 }
 
 func (c *collector) last(k Kind) *Part {
@@ -204,7 +200,7 @@ func (c *collector) add(ev Event) {
 	case KUsage:
 		c.res.Usage.add(ev.Usage)
 	case KError:
-		c.err, c.errType = ev.Text, ev.ErrType
+		c.err = ev.Text
 	}
 }
 
