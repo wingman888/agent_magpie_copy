@@ -1,44 +1,21 @@
-//go:build windows
-
 package netproxy
 
-import (
-	"os/exec"
-	"strings"
-	"unicode"
-)
+import "golang.org/x/sys/windows/registry"
 
-const inetKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-
-// platformSystem reads the Internet Settings of the current user. The
-// standard library has no registry API, so this asks reg.exe, which ships
-// with every Windows.
-func platformSystem() system {
-	enabled := regValue("ProxyEnable") == "0x1"
-	return parseWindows(enabled, regValue("ProxyServer"), regValue("ProxyOverride"))
-}
-
-// regValue returns the data of one value, or "" when it is missing. A
-// `reg query` line looks like "    ProxyServer    REG_SZ    host:port".
-func regValue(name string) string {
-	out, err := exec.Command("reg", "query", inetKey, "/v", name).Output()
+// system reads Internet Options' manual proxy (what most proxy clients set).
+func system() Proxy {
+	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.QUERY_VALUE)
 	if err != nil {
-		return ""
+		return Proxy{}
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		t := strings.TrimSpace(line)
-		if !strings.HasPrefix(t, name) {
-			continue
-		}
-		rest := strings.TrimSpace(t[len(name):])
-		if rest == "" || !unicode.IsSpace(rune(t[len(name)])) {
-			continue
-		}
-		i := strings.IndexFunc(rest, unicode.IsSpace)
-		if i < 0 {
-			return ""
-		}
-		return strings.TrimSpace(rest[i:])
+	defer k.Close()
+	if on, _, err := k.GetIntegerValue("ProxyEnable"); err != nil || on == 0 {
+		return Proxy{}
 	}
-	return ""
+	server, _, err := k.GetStringValue("ProxyServer")
+	if err != nil {
+		return Proxy{}
+	}
+	override, _, _ := k.GetStringValue("ProxyOverride")
+	return parseWindows(server, override)
 }

@@ -3,179 +3,96 @@ package netproxy
 import (
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// isolate points settings at an empty folder, clears every proxy variable,
-// and makes the system proxy whatever sys says for the test's duration.
-func isolate(t *testing.T, sys system) {
-	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	for _, n := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
-		"ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
-		t.Setenv(n, "")
+func TestParseScutil(t *testing.T) {
+	out := `<dictionary> {
+  ExceptionsList : <array> {
+    0 : 127.0.0.1
+    1 : *.local
+  }
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7891
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 1
+  SOCKSPort : 7892
+  SOCKSProxy : 127.0.0.1
+}`
+	p := parseScutil(out)
+	if p.URL != "http://127.0.0.1:7891" || len(p.Bypass) != 2 || p.Bypass[1] != "*.local" {
+		t.Fatalf("%+v", p)
 	}
-	old := readSystem
-	readSystem = func() system { return sys }
-	t.Cleanup(func() { readSystem = old })
-}
-
-func setProxy(t *testing.T, p string) {
-	t.Helper()
-	if err := settings.Save(settings.Settings{Proxy: p}); err != nil {
-		t.Fatal(err)
+	if p := parseScutil("<dictionary> {\n  SOCKSEnable : 1\n  SOCKSPort : 1080\n  SOCKSProxy : 10.0.0.2\n}"); p.URL != "socks5://10.0.0.2:1080" {
+		t.Fatalf("socks: %+v", p)
 	}
-}
-
-func forURL(t *testing.T, raw string) string {
-	t.Helper()
-	u, _ := url.Parse(raw)
-	p, err := For(u)
-	if err != nil {
-		t.Fatalf("For(%s): %v", raw, err)
-	}
-	if p == nil {
-		return ""
-	}
-	return p.String()
-}
-
-func expect(t *testing.T, raw, want string) {
-	t.Helper()
-	if got := forURL(t, raw); got != want {
-		t.Errorf("For(%s) = %q, want %q", raw, got, want)
+	if p := parseScutil("<dictionary> {\n  HTTPEnable : 0\n  HTTPProxy : x\n}"); p.URL != "" {
+		t.Fatalf("off: %+v", p)
 	}
 }
 
-func TestDirectSetting(t *testing.T) {
-	isolate(t, system{HTTPS: "sys.example:8443"})
-	t.Setenv("HTTPS_PROXY", "http://env.example:3128")
-	setProxy(t, "direct")
-	expect(t, "https://api.example.com/v1", "")
-}
-
-func TestSettingBeatsEnvironment(t *testing.T) {
-	isolate(t, system{HTTPS: "sys.example:8443"})
-	t.Setenv("HTTPS_PROXY", "http://env.example:3128")
-	setProxy(t, "socks5://127.0.0.1:1080")
-	expect(t, "https://api.example.com/v1", "socks5://127.0.0.1:1080")
-	setProxy(t, "127.0.0.1:7890")
-	expect(t, "https://api.example.com/v1", "http://127.0.0.1:7890")
-}
-
-func TestEnvironmentBeatsSystem(t *testing.T) {
-	isolate(t, system{HTTPS: "sys.example:8443"})
-	t.Setenv("HTTPS_PROXY", "http://env.example:3128")
-	expect(t, "https://api.example.com/v1", "http://env.example:3128")
-	// an http request does not take the HTTPS variable, so the system proxy applies
-	expect(t, "http://api.example.com/v1", "http://sys.example:8443")
-	t.Setenv("HTTP_PROXY", "env.example:8080")
-	expect(t, "http://api.example.com/v1", "http://env.example:8080")
-}
-
-func TestAllProxyFallback(t *testing.T) {
-	isolate(t, system{})
-	t.Setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
-	expect(t, "http://api.example.com", "socks5://127.0.0.1:1080")
-	expect(t, "https://api.example.com", "socks5://127.0.0.1:1080")
-}
-
-func TestNoProxyEnvironment(t *testing.T) {
-	isolate(t, system{HTTPS: "sys.example:8443"})
-	t.Setenv("HTTPS_PROXY", "http://env.example:3128")
-	t.Setenv("NO_PROXY", ".internal.test, 10.0.0.0/8, example.org:8443")
-	expect(t, "https://svc.internal.test", "")
-	expect(t, "https://10.9.8.7", "")
-	expect(t, "https://example.org:8443", "")
-	// the port in the exception does not match, so the proxy applies
-	expect(t, "https://example.org", "http://env.example:3128")
-	t.Setenv("NO_PROXY", "*")
-	expect(t, "https://api.example.com", "")
-	// with no environment proxy, NO_PROXY still keeps the system proxy away
-	t.Setenv("HTTPS_PROXY", "")
-	t.Setenv("NO_PROXY", "intranet.example")
-	expect(t, "https://intranet.example", "")
-	expect(t, "https://other.example", "http://sys.example:8443")
-}
-
-func TestNoProxyWildcard(t *testing.T) {
-	isolate(t, system{})
-	t.Setenv("HTTPS_PROXY", "http://env.example:3128")
-	t.Setenv("NO_PROXY", "*.example.com")
-	expect(t, "https://a.example.com", "")
-	expect(t, "https://example.com", "")
-	expect(t, "https://example.org", "http://env.example:3128")
-}
-
-func TestSystemFallback(t *testing.T) {
-	isolate(t, system{HTTPS: "sys.example:8443"})
-	expect(t, "https://api.example.com", "http://sys.example:8443")
-}
-
-func TestSystemPriority(t *testing.T) {
-	isolate(t, system{HTTP: "h.example:1", SOCKS: "s.example:2"})
-	expect(t, "https://api.example.com", "http://h.example:1")
-	isolate(t, system{SOCKS: "s.example:2"})
-	expect(t, "https://api.example.com", "socks5://s.example:2")
-	isolate(t, system{HTTPS: "x.example:3", HTTP: "h.example:1", SOCKS: "s.example:2"})
-	expect(t, "https://api.example.com", "http://x.example:3")
-}
-
-func TestSystemExceptions(t *testing.T) {
-	isolate(t, system{HTTPS: "sys.example:8443",
-		Exceptions: []string{"*.corp.example", "10.*", "intra.example:443"}})
-	expect(t, "https://a.corp.example", "")
-	expect(t, "https://corp.example", "")
-	expect(t, "https://10.1.2.3", "")
-	expect(t, "https://intra.example", "")
-	expect(t, "https://public.example", "http://sys.example:8443")
-}
-
-func TestSystemSimpleHostnames(t *testing.T) {
-	isolate(t, system{HTTPS: "sys.example:8443", SimpleLocal: true})
-	expect(t, "https://intranet", "")
-	expect(t, "https://api.example.com", "http://sys.example:8443")
-}
-
-func TestLoopbackNeverProxied(t *testing.T) {
-	isolate(t, system{HTTPS: "sys.example:8443"})
-	t.Setenv("HTTPS_PROXY", "http://env.example:3128")
-	setProxy(t, "http://127.0.0.1:7890")
-	for _, u := range []string{"http://localhost:3425", "http://127.0.0.1:3425",
-		"http://127.1.2.3/", "http://[::1]:3425", "http://dev.localhost/"} {
-		expect(t, u, "")
+func TestParseWindows(t *testing.T) {
+	for server, want := range map[string]string{
+		"127.0.0.1:7890":                     "http://127.0.0.1:7890",
+		"http=127.0.0.1:1;https=127.0.0.1:2": "http://127.0.0.1:2",
+		"socks=127.0.0.1:1080":               "socks5://127.0.0.1:1080",
+		"":                                   "",
+	} {
+		if got := parseWindows(server, "").URL; got != want {
+			t.Errorf("%q: %q, want %q", server, got, want)
+		}
 	}
-	expect(t, "https://api.example.com", "http://127.0.0.1:7890")
-}
-
-func TestProxyHook(t *testing.T) {
-	isolate(t, system{})
-	t.Setenv("HTTPS_PROXY", "http://env.example:3128")
-	req, _ := http.NewRequest("GET", "https://api.example.com/x", nil)
-	p, err := Proxy(req)
-	if err != nil || p == nil || p.Host != "env.example:3128" {
-		t.Fatalf("Proxy: %v %v", p, err)
-	}
-	if Transport().Proxy == nil {
-		t.Fatal("transport without proxy hook")
+	p := parseWindows("127.0.0.1:7890", "*.corp;<local>")
+	if !bypassed("git.corp", p.Bypass) || !bypassed("intranet", p.Bypass) || bypassed("chatgpt.com", p.Bypass) {
+		t.Fatalf("bypass: %+v", p.Bypass)
 	}
 }
 
-func TestInvalidStoredProxy(t *testing.T) {
-	isolate(t, system{})
-	dir := filepath.Dir(settings.Path())
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
+func TestFor(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy"} {
+		t.Setenv(k, "")
 	}
-	if err := os.WriteFile(settings.Path(), []byte(`{"proxy":"ftp://x"}`), 0o644); err != nil {
-		t.Fatal(err)
+	sysCache.at, sysCache.p = farFuture, Proxy{URL: "http://127.0.0.1:7890", Bypass: []string{"*.corp"}}
+	t.Cleanup(func() { sysCache.at = zero })
+
+	u, _ := url.Parse("https://chatgpt.com/backend-api/codex/responses")
+	if p, _ := For(u); p == nil || p.String() != "http://127.0.0.1:7890" {
+		t.Fatalf("system: %v", p)
 	}
-	u, _ := url.Parse("https://api.example.com")
-	if _, err := For(u); err == nil {
-		t.Fatal("ftp proxy in the file was used")
+	corp, _ := url.Parse("https://git.corp/x")
+	if p, _ := For(corp); p != nil {
+		t.Fatalf("bypass: %v", p)
+	}
+	local := &http.Request{URL: &url.URL{Scheme: "http", Host: "127.0.0.1:3425"}}
+	if p, _ := Func(local); p != nil {
+		t.Fatalf("loopback: %v", p)
+	}
+
+	// magpie's own setting wins; "direct" turns it off
+	settings.Save(settings.Settings{Proxy: "socks5://127.0.0.1:1080"})
+	if p, _ := For(u); p == nil || p.String() != "socks5://127.0.0.1:1080" {
+		t.Fatalf("setting: %v", p)
+	}
+	settings.Save(settings.Settings{Proxy: "direct"})
+	if p, _ := For(u); p != nil {
+		t.Fatalf("direct: %v", p)
+	}
+	if err := settings.Save(settings.Settings{Proxy: "ftp://x"}); err == nil {
+		t.Fatal("ftp proxy accepted")
+	}
+	if settings.Save(settings.Settings{Proxy: "127.0.0.1:7890"}) != nil || filepath.Dir(settings.Path()) != filepath.Join(dir, "magpie") {
+		t.Fatal("host:port proxy refused")
 	}
 }
+
+var farFuture = time.Now().Add(time.Hour)
+var zero time.Time
