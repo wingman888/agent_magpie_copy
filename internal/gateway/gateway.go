@@ -400,34 +400,59 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		cands, pl, aff, stuck = affine(scope, mode, rotate, r.Header, from, body, cands, pl)
 	}
 	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Affinity: aff, Order: pl.order, Left: pl.left})
+	// A failure that another candidate may answer moves the request on, and
+	// is not sent to the agent; the last candidate's failure that may pass on
+	// its own is tried again first. The agent going away ends the request:
+	// no candidate is blamed for it, and none is asked.
 	var skipped []string
+tries:
 	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		began := time.Now()
-		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
-		if !last && hw.failed() {
-			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
-			try.Fail, try.Rest = rest.Why, &rest
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			skipped = append(skipped, c.label()+": "+call.Error)
-			continue
-		}
-		hw.release()
-		model = c.model
-		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			if aff != nil {
-				answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
+		last := i == len(cands)-1
+		for retries := 0; ; retries++ {
+			hw := newHoldWriter(w, true) // a failure is held back until it is known to be the answer
+			call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+			began := time.Now()
+			s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
+			call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+			try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
+			if r.Context().Err() != nil && !hw.passing {
+				call.Status, call.Error = 499, "canceled"
+				try.Status, try.Error, try.Kind = 499, "canceled", "canceled"
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+				break tries
 			}
-		} else {
-			try.Fail = failure(call.Status, []byte(call.Error))
+			if hw.failed() {
+				if !last {
+					rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
+					try.Kind, try.Fail, try.Rest = "moved", rest.Why, &rest
+					s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+					skipped = append(skipped, c.label()+": "+call.Error)
+					break
+				}
+				if wait, ok := transientWait(hw.status, hw.header, retries); ok && retries < retryTimes {
+					try.Kind, try.Wait = "retried", wait.Milliseconds()
+					s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+					select {
+					case <-time.After(wait):
+					case <-r.Context().Done():
+					}
+					continue
+				}
+			}
+			hw.release()
+			model = c.model
+			if call.Status < 400 {
+				unrest(c.rest) // it answered: it is no longer resting, whatever it did before
+				served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+				if aff != nil {
+					answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
+				}
+			} else {
+				try.Fail = failure(call.Status, []byte(call.Error))
+			}
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			break tries
 		}
-		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-		break
 	}
 	if len(skipped) > 0 {
 		call.Fallback = strings.Join(skipped, "; ")
@@ -574,6 +599,16 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		return writeError(w, proto, res.StatusCode, msg), msg, nil
 	}
 	rd, sse := eventStream(res)
+	if sse {
+		// nothing goes to the agent until there is content: an error before
+		// it is this candidate's failure, not the agent's
+		var bad *streamErr
+		rd, bad = openStream(rd, proto)
+		if bad != nil {
+			msg := p.Name + ": " + bad.msg
+			return writeError(w, proto, bad.status, msg), msg, nil
+		}
+	}
 	h := w.Header()
 	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
 		if v := res.Header.Get(k); v != "" {
@@ -707,6 +742,13 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg, nil
+	}
+	// an error before the reply's first content is this candidate's failure
+	var bad *streamErr
+	rd, bad = openStream(rd, to)
+	if bad != nil {
+		msg := p.Name + ": " + bad.msg
+		return writeError(w, from, bad.status, msg), msg, nil
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), request.Model)

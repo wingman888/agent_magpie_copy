@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -294,6 +295,15 @@ var restingUntil = struct {
 	note map[string]Rest // why each rests
 }{m: map[string]time.Time{}, note: map[string]Rest{}}
 
+// unrest lifts a candidate's rest: it has answered, so it is no longer
+// failing.
+func unrest(id string) {
+	restingUntil.Lock()
+	defer restingUntil.Unlock()
+	delete(restingUntil.m, id)
+	delete(restingUntil.note, id)
+}
+
 func (s *Server) resting(id string) bool {
 	_, ok := restOf(id)
 	return ok
@@ -316,16 +326,76 @@ func restOf(id string) (Rest, bool) {
 // status code doesn't: some answer 400 or 403 with it.
 var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
 
+// unavailableWords are how vendors say a model is not theirs to give to this
+// key: missing, unsupported, not enabled, not allowed. Some say it in a 400.
+var unavailableWords = regexp.MustCompile(`(?i)model.{0,40}not.?(found|exist|supported|available|enabled|activated|allowed)|model.{0,40}(does not exist|doesn't exist|unsupported|no access|not have access|not authorized|unavailable|permission)|unsupported model|invalid model|no such model|模型.{0,12}(不存在|不支持|不可用|无权|未开通|未启用|未授权)|无权限|未开通`)
+
+// contextWords say the request is too long for the model: another provider
+// would not take it any better, so a 400 saying so is the answer.
+var contextWords = regexp.MustCompile(`(?i)context.{0,30}(length|window|limit)|maximum.{0,30}(length|context)|too long|上下文|超长`)
+
 // retryable says whether another provider may do better with a request
-// that failed this way.
+// that failed this way: an answer that is about the account, the key, the
+// model or the vendor's load, not about the request itself.
 func retryable(status int, body []byte) bool {
 	switch {
-	case status == 402, status == 408, status == 429, status >= 500:
+	case status == 401, status == 402, status == 403, status == 404, status == 408, status == 429, status >= 500:
 		return true
-	case status == 400, status == 401, status == 403:
-		return quotaWords.Match(body)
+	case status == 400, status == 422:
+		if contextWords.Match(body) {
+			return false
+		}
+		return quotaWords.Match(body) || unavailableWords.Match(body) || notChatModel(status, body)
 	}
 	return false
+}
+
+// Retries of a failure that may pass on its own are for the last candidate
+// only: a failure of one with others left moves on to them. A retry waits
+// retryDelay, then twice that, unless the vendor says when to try again;
+// that is taken when it is at most maxRetryWait, and a failure asking for
+// longer is not retried.
+var retryDelay = time.Second
+
+const (
+	retryTimes   = 2
+	maxRetryWait = 8 * time.Second
+)
+
+// transientWait says whether a failure of the last candidate is worth
+// another try, and how long to wait first. The failures that may pass on
+// their own are 408, 500, 502, 503, 504 and 529; a 429 is retried only when
+// the vendor says when to try again.
+func transientWait(status int, h http.Header, retries int) (time.Duration, bool) {
+	wait, said := sentWait(h, time.Now())
+	switch status {
+	case 408, 500, 502, 503, 504, 529:
+	case 429:
+		if !said {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	if said {
+		return wait, wait <= maxRetryWait
+	}
+	return retryDelay << retries, true
+}
+
+// sentWait is the Retry-After a reply carries, in seconds or as a date.
+func sentWait(h http.Header, now time.Time) (time.Duration, bool) {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0, false
+	}
+	if n, err := strconv.ParseFloat(v, 64); err == nil {
+		return max(time.Duration(n*float64(time.Second)), 0), true
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return max(t.Sub(now), 0), true
+	}
+	return 0, false
 }
 
 // holdWriter keeps an error reply back while another provider may still

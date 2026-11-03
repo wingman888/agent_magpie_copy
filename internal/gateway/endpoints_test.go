@@ -205,7 +205,10 @@ func TestDeclaredAPIsAreTheOnlyOnes(t *testing.T) {
 
 // A 5xx that mentions another endpoint is an upstream failure, not a
 // refusal: nothing is switched, and the error reaches the agent as it is.
+// As the last candidate, a 500 is retried on the same endpoint (retryTimes
+// more tries); the point is that no other endpoint is ever asked.
 func TestServerErrorDoesNotSwitchEndpoint(t *testing.T) {
+	quickRetries(t)
 	f, h := upstream(t, provider.Provider{Models: []string{"m1"}, Chat: "x", Responses: "x"}, map[string]scriptReply{
 		chatPath:      {500, "application/json", `{"error":{"message":"use v1/responses"}}`},
 		responsesPath: responsesOK,
@@ -214,7 +217,7 @@ func TestServerErrorDoesNotSwitchEndpoint(t *testing.T) {
 	if code != 500 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	if f.count(chatPath) != 1 || f.count(responsesPath) != 0 {
+	if f.count(chatPath) != retryTimes+1 || f.count(responsesPath) != 0 {
 		t.Fatalf("calls: chat=%d responses=%d", f.count(chatPath), f.count(responsesPath))
 	}
 }

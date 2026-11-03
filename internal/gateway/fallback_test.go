@@ -103,6 +103,7 @@ func TestNoFallbackForOtherErrors(t *testing.T) {
 }
 
 func TestLastFallbackErrorReachesTheAgent(t *testing.T) {
+	quickRetries(t)
 	plan := &fake{t: t, ctype: "application/json", code: 429, reply: `{"error":{"message":"plan limit"}}`}
 	spare := &fake{t: t, ctype: "application/json", code: 503, reply: `{"error":{"message":"spare down"}}`}
 	twoProviders(t, plan, spare)
