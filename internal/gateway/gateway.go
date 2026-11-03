@@ -266,9 +266,14 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 	}
 }
 
-// forward sends a request to the provider.
+// forward sends a request to the provider. Account providers get their
+// login read fresh for each call (see target).
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
+	base, auth, body, err := target(ctx, p, to, body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +288,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	for k, v := range provider.AuthHeaders(p, to) {
+	for k, v := range auth {
 		req.Header.Set(k, v)
 	}
 	return s.client.Do(req)
@@ -293,33 +298,40 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	if p.ID == provider.CodexID && proto == provider.Responses && !wantsStream(body) {
+		return s.codexWhole(w, r, p, model, body, u)
+	}
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), rewriteModel(body, model), r.Header)
 	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
+		return upstreamFailure(w, proto, p, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		msg := upstreamError(p, res.StatusCode, b, res.Status)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
+	rd, ct := upstreamStream(res)
 	h := w.Header()
-	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
+	for _, k := range []string{"Request-Id", "X-Request-Id"} {
 		if v := res.Header.Get(k); v != "" {
 			h.Set(k, v)
 		}
 	}
-	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+	if ct != "" {
+		h.Set("Content-Type", ct)
+	}
+	if strings.HasPrefix(ct, "text/event-stream") {
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Accel-Buffering", "no")
 	}
 	w.WriteHeader(res.StatusCode)
 	f, _ := w.(http.Flusher)
-	sniff := newSniffer(proto, res.Header.Get("Content-Type"))
+	sniff := newSniffer(proto, ct)
 	defer func() { u.add(sniff.usage()) }()
 	buf := make([]byte, 32<<10)
 	for {
-		n, err := res.Body.Read(buf)
+		n, err := rd.Read(buf)
 		if n > 0 {
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
@@ -348,26 +360,27 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
 	if err != nil {
-		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
+		return upstreamFailure(w, from, p, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		msg := p.Name + ": " + provider.APIError(b, res.Status)
+		msg := upstreamError(p, res.StatusCode, b, res.Status)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
+	rd, ct := upstreamStream(res)
 	dec := decoder(to)
-	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+	if !strings.HasPrefix(ct, "text/event-stream") {
 		// the provider ignored stream:true; read the whole reply as one
 		// event stream would be wrong, so give up cleanly
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), req.Model)
 		var failed string
-		readSSE(res.Body, func(_, data string) error {
+		readSSE(rd, func(_, data string) error {
 			return dec(data, func(ev Event) {
 				switch ev.Kind {
 				case KError:
@@ -382,7 +395,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return 200, failed
 	}
 	var col collector
-	readSSE(res.Body, func(_, data string) error {
+	readSSE(rd, func(_, data string) error {
 		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {

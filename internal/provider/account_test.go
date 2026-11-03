@@ -362,7 +362,7 @@ func TestCopilotRefreshKeepsOnlyUsableChatModels(t *testing.T) {
 	if strings.Join(ids, ",") != "gpt-4.1,gemini-2.5-pro" {
 		t.Fatalf("refreshed ids = %v", ids)
 	}
-	if _, _, ok := catalog.Live("copilot"); !ok {
+	if _, _, ok := catalog.Live("copilot-octo"); !ok {
 		t.Fatal("refreshed list not saved")
 	}
 	p, _ = Find("copilot")
