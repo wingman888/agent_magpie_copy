@@ -43,13 +43,13 @@ func For(u *url.URL) (*url.URL, error) {
 	case s.Proxy != "":
 		return settings.ProxyURL(s.Proxy)
 	}
-	if p := fromEnv(u); p != nil {
-		return p, nil
-	}
-	// NO_PROXY is an explicit "connect directly" list, so it also keeps the
-	// system proxy away from these hosts.
+	// NO_PROXY is an explicit "connect directly" list: it applies to the
+	// environment proxy and to the system proxy alike.
 	if matchesList(firstEnv("NO_PROXY", "no_proxy"), u) {
 		return nil, nil
+	}
+	if p := fromEnv(u); p != nil {
+		return p, nil
 	}
 	return fromSystem(u), nil
 }
