@@ -171,15 +171,17 @@ func Slug(name string) string {
 	return strings.Trim(idRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-// Save adds or replaces a provider. For an account provider (one without
-// addresses of its own) only the model choice is kept; the address, key and
-// other fields passed in are ignored.
+// Save adds or replaces a provider. For an account provider (codex, copilot)
+// only the model choice is kept; the address, key and other fields passed in
+// are ignored, unless the user already has their own provider with that id.
 func Save(p Provider) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
-	if isAccountID(p.ID) && !p.hasAddress() {
+	// A user's own provider with this id is kept as it was saved; the
+	// account path only ever stores the model choice.
+	if isAccountID(p.ID) && !(p.hasAddress() && hasSelfBuilt(load().Providers, p.ID)) {
 		return saveAccount(p)
 	}
 	if p.ID == "" || p.ID != Slug(p.ID) {
