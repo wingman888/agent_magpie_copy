@@ -1,179 +1,116 @@
 package provider
 
+// How much of its allowance each of an agent's accounts has used, the one
+// the agent is signed in to and every saved one, so picking which to use
+// next is a look at the list, not a guess.
+
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
 
-// loginUsageTTL is how long LoginUsage reuses a result. The vendors' usage
-// endpoints are rate limited, so one `magpie accounts` run must not hit them
-// once per call.
-const loginUsageTTL = time.Minute
-
-// loginUsageState is the cached result for one agent.
-type loginUsageState struct {
-	at   time.Time                    // when data was last fetched in full; zero if never
-	data map[string]SubscriptionQuota // keyed by sign-in email
-	busy chan struct{}                // closed when the fetch in flight is done
-}
-
 var loginUsageCache struct {
 	sync.Mutex
-	byAgent map[string]*loginUsageState
+	m map[string]loginUsageEntry // agent/user
 }
 
-// LoginUsage returns the rolling quota usage of every remembered sign-in of an
-// agent (claude or codex; cc is an alias), keyed by email. The sign-in the agent
-// is using reads its tokens from the agent's own files; the others read magpie's
-// store. Each account is asked on its own. An account whose lookup fails keeps
-// whatever result it had before, so a flaky endpoint does not blank it out.
-// Results are reused for a minute. An unsupported agent gives an empty map.
+type loginUsageEntry struct {
+	at time.Time
+	q  SubscriptionQuota
+}
+
+// LoginUsage is the allowance used by each of an agent's accounts, by
+// user. What was fetched less than a minute ago comes from the cache; the
+// rest is asked for at once, as long as ctx allows.
 func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota {
-	agent, err := AccountAgent(agent)
-	if err != nil {
-		return map[string]SubscriptionQuota{}
+	if agent == "grok" {
+		return grokLoginUsage(ctx)
+	}
+	out := map[string]SubscriptionQuota{}
+	var logins []Login
+	switch agent {
+	case "claude", "codex":
+		logins = Logins(agent)
+	case "copilot":
+		logins = copilotLoginList()
+	case "cursor": // one account, the one cursor-agent is signed in to
+		if user, plan, ok := cursorIdentity(); ok {
+			logins = []Login{{Agent: agent, User: user, Plan: plan, Active: true, On: true}}
+		}
+	default:
+		return out
 	}
 	c := &loginUsageCache
-	for {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, l := range logins {
+		key := agent + "/" + strings.ToLower(l.User)
 		c.Lock()
-		if c.byAgent == nil {
-			c.byAgent = map[string]*loginUsageState{}
-		}
-		st := c.byAgent[agent]
-		if st == nil {
-			st = &loginUsageState{}
-			c.byAgent[agent] = st
-		}
-		fresh := !st.at.IsZero() && time.Since(st.at) < loginUsageTTL
-		switch {
-		case fresh || ctx.Err() != nil:
-			out := cloneLoginUsage(st.data)
-			c.Unlock()
-			return out
-		case st.busy != nil:
-			// another caller is already fetching this agent; wait for it
-			wait := st.busy
-			c.Unlock()
-			select {
-			case <-wait:
-				continue
-			case <-ctx.Done():
-				c.Lock()
-				out := cloneLoginUsage(st.data)
-				c.Unlock()
-				return out
-			}
-		}
-		done := make(chan struct{})
-		st.busy = done
-		prior := st.data
+		e, ok := c.m[key]
 		c.Unlock()
-
-		out := fetchLoginUsage(ctx, agent, prior)
-
-		c.Lock()
-		st.data, st.busy = out, nil
-		if ctx.Err() == nil {
-			st.at = time.Now()
-		}
-		close(done)
-		c.Unlock()
-		return cloneLoginUsage(out)
-	}
-}
-
-// fetchLoginUsage asks every remembered sign-in of agent about its own quota.
-// prior is the last known result; a sign-in that fails keeps its entry from it.
-func fetchLoginUsage(ctx context.Context, agent string, prior map[string]SubscriptionQuota) map[string]SubscriptionQuota {
-	rememberCurrent(agent)
-	cur, _, hasCur := currentSignIn(agent)
-	accountsMu.Lock()
-	f := loadAccounts()
-	accountsMu.Unlock()
-
-	type job struct {
-		user, plan string
-		current    bool
-	}
-	var jobs []job
-	for _, s := range f.Accounts {
-		if s.Agent != agent {
+		if ok && time.Since(e.at) < time.Minute {
+			out[l.User] = e.q
 			continue
 		}
-		jobs = append(jobs, job{user: s.User, plan: s.Plan, current: hasCur && sameUser(cur, s.User)})
-	}
-
-	res := make([]SubscriptionQuota, len(jobs))
-	var wg sync.WaitGroup
-	for i, j := range jobs {
 		wg.Add(1)
-		go func(i int, j job) {
+		go func(l Login) {
 			defer wg.Done()
-			res[i] = accountLoginUsage(ctx, agent, j.user, j.plan, j.current)
-		}(i, j)
+			q := loginQuota(ctx, l)
+			if q.Error != "" && ok {
+				q = e.q // a hiccup keeps what was known
+			}
+			c.Lock()
+			if c.m == nil {
+				c.m = map[string]loginUsageEntry{}
+			}
+			c.m[key] = loginUsageEntry{time.Now(), q}
+			c.Unlock()
+			mu.Lock()
+			out[l.User] = q
+			mu.Unlock()
+		}(l)
 	}
 	wg.Wait()
+	return out
+}
 
-	out := make(map[string]SubscriptionQuota, len(jobs))
-	for i, j := range jobs {
-		q := res[i]
-		if q.Error != "" {
-			if p, ok := prior[j.user]; ok {
-				out[j.user] = p
-				continue
+func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
+	if l.Agent == "cursor" {
+		return cursorSubscriptionUsage(ctx, l.Plan)
+	}
+	if l.Agent == "copilot" {
+		for _, c := range copilotLogins(copilotConfigDir()) {
+			if strings.EqualFold(c.User, l.User) {
+				return copilotSubscriptionUsage(ctx, c.app.Token)
 			}
 		}
-		out[j.user] = q
+		return SubscriptionQuota{Provider: l.Agent, Plan: l.Plan, Windows: []QuotaWindow{}, Error: "not signed in"}
 	}
-	return out
-}
-
-// accountLoginUsage asks one sign-in for its windows, with its own credentials.
-func accountLoginUsage(ctx context.Context, agent, user, plan string, current bool) SubscriptionQuota {
-	switch agent {
-	case "claude":
-		q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Plan: plan, Windows: []QuotaWindow{}}
-		var tok string
-		var err error
-		if current {
-			tok, err = claudeToken(ctx)
+	q := SubscriptionQuota{Provider: l.Agent, Plan: l.Plan, Windows: []QuotaWindow{}}
+	var tok, accountID string
+	var err error
+	switch {
+	case l.Active && l.Agent == "claude":
+		tok, err = claudeToken(ctx)
+	case l.Active:
+		tok, accountID, err = codexToken(ctx, codexAuthPath())
+	default:
+		tok, accountID, err = savedLoginToken(ctx, l.Agent, l.User)
+	}
+	if err == nil {
+		if l.Agent == "claude" {
+			q.Windows, err = claudeWindows(ctx, tok)
 		} else {
-			tok, err = savedClaudeToken(ctx, user)
+			var plan string
+			if plan, q.Windows, err = codexWindows(ctx, tok, accountID); plan != "" {
+				q.Plan = plan
+			}
 		}
-		if err != nil {
-			q.Error = err.Error()
-			return q
-		}
-		return claudeWindows(ctx, tok, q)
-	case "codex":
-		q := SubscriptionQuota{Provider: "codex", Name: "Codex", Icon: "codex-color", Plan: plan, Windows: []QuotaWindow{}}
-		var tok, accountID string
-		var err error
-		if current {
-			tok, accountID, err = codexToken(ctx, codexAuthPath())
-		} else {
-			tok, accountID, err = savedCodexToken(ctx, user)
-		}
-		if err != nil {
-			q.Error = err.Error()
-			return q
-		}
-		q = codexWindows(ctx, tok, accountID, q)
-		if q.Plan == "" {
-			q.Plan = plan
-		}
-		return q
 	}
-	return SubscriptionQuota{Error: "no usage for " + agent}
-}
-
-// cloneLoginUsage copies a result so callers cannot change the cache.
-func cloneLoginUsage(m map[string]SubscriptionQuota) map[string]SubscriptionQuota {
-	out := make(map[string]SubscriptionQuota, len(m))
-	for k, q := range m {
-		q.Windows = append([]QuotaWindow{}, q.Windows...)
-		out[k] = q
+	if err != nil {
+		q.Error = err.Error()
 	}
-	return out
+	return q
 }
