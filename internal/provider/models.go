@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -24,7 +25,15 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = catalogModels(p.Catalogs())
+		seen := map[string]bool{}
+		for _, id := range p.Catalogs() {
+			for _, m := range catalog.Provider(id) {
+				if !seen[m.ID] {
+					seen[m.ID] = true
+					known = append(known, m)
+				}
+			}
+		}
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -41,6 +50,13 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
+func (p Provider) firstCatalog() string {
+	if cs := p.Catalogs(); len(cs) > 0 {
+		return cs[0]
+	}
+	return ""
+}
+
 // Fetched reports when the vendor's own list was last fetched.
 func (p Provider) Fetched() (time.Time, bool) {
 	_, t, ok := catalog.Live(p.ID)
@@ -52,31 +68,123 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	if p.Account != nil && p.Account.fetch != nil {
 		return p.Account.fetch(ctx)
 	}
+	if keys := p.allKeys(); len(keys) > 1 {
+		return p.fetchPerKey(ctx, keys)
+	}
+	ms, base, err := p.fetchOne(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ms, catalog.SaveLive(p.ID, base, ms)
+}
+
+// fetchOne asks the first endpoint that answers, with p's key.
+func (p Provider) fetchOne(ctx context.Context) ([]catalog.Model, string, error) {
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic, p.CustomHeaders())
+		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic, p.Headers)
 		if err == nil {
-			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
+			return ms, p.Base(proto), nil
 		}
 		lastErr = err
 	}
 	if lastErr == nil {
 		lastErr = errorf("%s has no endpoint to ask", p.Name)
 	}
-	return nil, lastErr
+	return nil, "", lastErr
+}
+
+// fetchPerKey asks with each key in turn, at the endpoint it is made for: a
+// relay that hands out a key per group lists each group's models to its key
+// only. The lists are merged, each model marking the keys that see it. A
+// key that can't be asked now keeps the models it saw last time.
+func (p Provider) fetchPerKey(ctx context.Context, keys []KeyAccount) ([]catalog.Model, error) {
+	old, _, _ := catalog.Live(p.ID)
+	var out []catalog.Model
+	at := map[string]int{}
+	add := func(m catalog.Model, id string) {
+		i, ok := at[m.ID]
+		if !ok {
+			m.Keys = nil
+			at[m.ID], i = len(out), len(out)
+			out = append(out, m)
+		}
+		if !slices.Contains(out[i].Keys, id) {
+			out[i].Keys = append(out[i].Keys, id)
+		}
+	}
+	var base string
+	var lastErr error
+	for _, k := range keys {
+		id := keyID(k.Key)
+		q := p.WithKey(k)
+		ms, b, err := q.fetchOne(ctx)
+		if err != nil {
+			lastErr = err
+			for _, m := range old {
+				if slices.Contains(m.Keys, id) {
+					add(m, id)
+				}
+			}
+			continue
+		}
+		if base == "" {
+			base = b
+		}
+		for _, m := range ms {
+			add(m, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil, lastErr
+	}
+	return out, catalog.SaveLive(p.ID, base, out)
+}
+
+// allKeys is every key the provider has, on or not, the first first.
+func (p Provider) allKeys() []KeyAccount {
+	if p.Key == "" {
+		return nil
+	}
+	out := []KeyAccount{p.first()}
+	for _, k := range p.Keys {
+		if k.Key != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// Serves reports whether key k can be asked for model: false only when the
+// vendor's lists say another of the provider's keys sees it and k doesn't.
+func (p Provider) Serves(k KeyAccount, model string) bool {
+	live, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return true
+	}
+	for _, m := range live {
+		if m.ID == model {
+			return len(m.Keys) == 0 || slices.Contains(m.Keys, keyID(k.Key))
+		}
+	}
+	return true
 }
 
 // Exposed lists the models magpie offers to agents for this provider: the
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
+	byID := make(map[string]catalog.Model, len(avail))
+	for _, m := range avail {
+		byID[m.ID] = m
+	}
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
-			if m, ok := findModel(avail, id); ok {
+			if m, ok := byID[id]; ok {
 				out = append(out, m)
 			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
+				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.firstCatalog()})
 			}
 		}
 		return out
@@ -98,44 +206,12 @@ func (p Provider) Exposed() []catalog.Model {
 // plus the vendor's own list — so a model released after this binary was
 // built is handled without a code change.
 func (p Provider) RejectsTemperature(model string) bool {
-	m, ok := findModel(p.Available(), model)
-	return ok && m.Temperature != nil && !*m.Temperature
-}
-
-// catalogModels lists the models of several models.dev catalogs, in order. A
-// model two catalogs both list keeps the entry of the first.
-func catalogModels(names []string) []catalog.Model {
-	var out []catalog.Model
-	seen := map[string]bool{}
-	for _, name := range names {
-		for _, m := range catalog.Provider(name) {
-			if !seen[m.ID] {
-				seen[m.ID] = true
-				out = append(out, m)
-			}
+	for _, m := range p.Available() {
+		if m.ID == model && m.Temperature != nil {
+			return !*m.Temperature
 		}
 	}
-	return out
-}
-
-// findModel finds a model in a list by its id. An id with a "provider/" prefix
-// that the list does not spell out is looked up by the part after its last
-// slash: "deepseek/deepseek-chat" finds the catalog's "deepseek-chat". The
-// model returned keeps the id asked for.
-func findModel(list []catalog.Model, id string) (catalog.Model, bool) {
-	part := id
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		part = id[i+1:]
-	}
-	for _, want := range []string{id, part} {
-		for _, m := range list {
-			if m.ID == want {
-				m.ID = id
-				return m, true
-			}
-		}
-	}
-	return catalog.Model{}, false
+	return false
 }
 
 // Chosen reports whether a model is exposed.
@@ -160,11 +236,20 @@ type Entry struct {
 	Model    string   `json:"model"` // what magpie sends the vendor
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
-	Provider Provider `json:"-"`
+	Provider Provider `json:"-"`               // a group's: its first member's
+	Group    string   `json:"group,omitempty"` // set on a routing group (group.go)
+	Icons    []string `json:"-"`               // a group's: its providers' icons, one per provider
 }
 
-// Catalog lists every exposed model of every ready provider.
+// Catalog lists every exposed model of every ready provider, then the
+// routing groups.
 func Catalog() []Entry {
+	entries := providerEntries()
+	return append(entries, groupEntries(entries)...)
+}
+
+// providerEntries is the catalog without its groups.
+func providerEntries() []Entry {
 	var out []Entry
 	for _, p := range All() {
 		if !p.Ready() {
@@ -180,9 +265,21 @@ func Catalog() []Entry {
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
 // It accepts catalog ids, "provider/model" for any model (exposed or not),
 // and the bare model id when exactly one provider serves it.
+// A group's id resolves to its first member.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
-	entries := Catalog()
+	if strings.HasPrefix(id, GroupPrefix) {
+		for _, e := range Catalog() {
+			if e.ID == id {
+				return e.Provider, e.Model, true
+			}
+		}
+		return Provider{}, "", false
+	}
+	return resolveIn(providerEntries(), id)
+}
+
+func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 	for _, e := range entries {
 		if e.ID == id {
 			return e.Provider, e.Model, true
