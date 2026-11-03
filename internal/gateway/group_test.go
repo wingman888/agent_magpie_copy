@@ -1,0 +1,356 @@
+package gateway
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/yetone/magpie/internal/provider"
+)
+
+// routeEnv starts each test with no config, no rests and no conversation.
+func routeEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	expireRests()
+	affinity.Lock()
+	affinity.last = map[string]answer{}
+	affinity.Unlock()
+	routed.Lock()
+	routed.rotate = map[string]rotation{}
+	routed.Unlock()
+}
+
+// expireRests makes every candidate ready again, as a minute later would.
+func expireRests() {
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.note = map[string]Rest{}
+	restingUntil.Unlock()
+}
+
+// restFor makes a candidate rest, as a failure would.
+func restFor(id string) {
+	restingUntil.Lock()
+	restingUntil.m[id] = time.Now().Add(time.Minute)
+	restingUntil.note[id] = Rest{Why: failRate, Status: 429, By: "cooldown"}
+	restingUntil.Unlock()
+}
+
+// keysProvider saves a provider whose first key is keys[0], then the rest.
+func keysProvider(t *testing.T, url, id, affinity, routing string, models []string, keys ...string) {
+	t.Helper()
+	p := provider.Provider{ID: id, Name: strings.ToUpper(id), Chat: url + "/v1", Models: models,
+		Affinity: affinity, Routing: routing, Key: keys[0], KeyName: "Key1"}
+	for i, k := range keys[1:] {
+		p.Keys = append(p.Keys, provider.KeyAccount{Name: fmt.Sprintf("Key%d", i+2), Key: k})
+	}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// keyRest is the candidate id of a provider's key.
+func keyRest(id, key string) string { return id + "#" + provider.KeyID(key) }
+
+// sendTo posts a chat request to a gateway handler.
+func sendTo(t *testing.T, h http.Handler, body string, hdr map[string]string) (int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// lastRoute is the trace of the latest request.
+func lastRoute(t *testing.T, s *Server) Route {
+	t.Helper()
+	rs := s.Trace(context.Background(), 0, 0).Routes
+	if len(rs) == 0 {
+		t.Fatal("no request traced")
+	}
+	return rs[len(rs)-1]
+}
+
+// Messages of a conversation, as chat clients send them.
+func msgUser(text string) string {
+	return `{"role":"user","content":"` + text + `"}`
+}
+
+func msgCall(id string) string {
+	return `{"role":"assistant","content":null,"tool_calls":[{"id":"` + id + `","type":"function","function":{"name":"f","arguments":"{}"}}]}`
+}
+
+func msgResult(id string) string {
+	return `{"role":"tool","tool_call_id":"` + id + `","content":"ok"}`
+}
+
+func reqBody(model string, msgs ...string) string {
+	return `{"model":"` + model + `","messages":[` + strings.Join(msgs, ",") + `]}`
+}
+
+// A routing group over two providers: group/mine tries b first, then a.
+func TestGroupTriesMembersInOrderAndFallsThrough(t *testing.T) {
+	routeEnv(t)
+	upA := &byKey{limited: map[string]bool{}}
+	srvA := httptest.NewServer(upA)
+	defer srvA.Close()
+	upB := &byKey{limited: map[string]bool{"kb": true}}
+	srvB := httptest.NewServer(upB)
+	defer srvB.Close()
+	keysProvider(t, srvA.URL, "a", "", "", []string{"only-a"}, "ka")
+	keysProvider(t, srvB.URL, "b", "", "", []string{"vendor/m"}, "kb")
+	if err := provider.SaveGroup(provider.Group{ID: "mine", Name: "Mine", Routing: "order",
+		Members: []string{"b/vendor/m", "a/only-a"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New()
+	code, body := sendTo(t, s.Handler(), reqBody("group/mine", msgUser("hi")), nil)
+	if code != 200 || !strings.Contains(body, "from-ka") {
+		t.Fatalf("%d %s", code, body)
+	}
+	if strings.Join(upB.seen, ",") != "kb" || strings.Join(upA.seen, ",") != "ka" {
+		t.Fatalf("b saw %v, a saw %v", upB.seen, upA.seen)
+	}
+	rt := lastRoute(t, s)
+	if rt.Group == nil || rt.Group.ID != "mine" || rt.Group.Routing != "order" {
+		t.Fatalf("group trace: %+v", rt.Group)
+	}
+	if strings.Join(rt.Group.Members, ",") != "b/vendor/m,a/only-a" {
+		t.Fatalf("members: %v", rt.Group.Members)
+	}
+	if len(rt.Order) != 2 || rt.Order[0].Provider != "b" || rt.Order[1].Provider != "a" {
+		t.Fatalf("order: %+v", rt.Order)
+	}
+	if len(rt.Tries) != 2 || rt.Tries[0].ID != "b" || rt.Tries[0].Status != 429 || rt.Tries[1].ID != "a" {
+		t.Fatalf("tries: %+v", rt.Tries)
+	}
+}
+
+// A group none of whose members is ready answers 404.
+func TestGroupWithNoReadyMemberIs404(t *testing.T) {
+	routeEnv(t)
+	if err := provider.SaveGroup(provider.Group{ID: "idle", Members: []string{"nowhere/m"}}); err != nil {
+		t.Fatal(err)
+	}
+	code, body := sendTo(t, New().Handler(), reqBody("group/idle", msgUser("hi")), nil)
+	if code != 404 || !strings.Contains(body, "没有模型就绪") {
+		t.Fatalf("%d %s", code, body)
+	}
+}
+
+// Auto affinity: within a turn, the tool results come back to the key that
+// answered last, even though the first key is back and would be tried first.
+func TestAffinityKeepsToolResultsOnTheAnsweringKey(t *testing.T) {
+	routeEnv(t)
+	up := &byKey{limited: map[string]bool{"k1": true}}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	keysProvider(t, srv.URL, "pa", "", "", []string{"m1"}, "k1", "k2")
+	s := New()
+	h := s.Handler()
+
+	if code, body := sendTo(t, h, reqBody("pa/m1", msgUser("a")), nil); code != 200 || !strings.Contains(body, "from-k2") {
+		t.Fatalf("first: %d %s", code, body)
+	}
+	expireRests()
+	up.seen = nil
+	code, body := sendTo(t, h, reqBody("pa/m1", msgUser("a"), msgCall("c1"), msgResult("c1")), nil)
+	if code != 200 || !strings.Contains(body, "from-k2") {
+		t.Fatalf("tool results: %d %s", code, body)
+	}
+	if strings.Join(up.seen, ",") != "k2" {
+		t.Fatalf("tool results tried %v, want only k2", up.seen)
+	}
+	rt := lastRoute(t, s)
+	if rt.Affinity == nil || rt.Affinity.Why != "turn" || !rt.Affinity.Kept || !rt.Affinity.Within ||
+		rt.Affinity.Last != keyRest("pa", "k2") || rt.Affinity.Turn != 1 {
+		t.Fatalf("affinity: %+v", rt.Affinity)
+	}
+}
+
+// Session affinity holds across turns too.
+func TestSessionAffinityHoldsAcrossTurns(t *testing.T) {
+	routeEnv(t)
+	up := &byKey{limited: map[string]bool{"k1": true}}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	keysProvider(t, srv.URL, "ps", "session", "", []string{"m1"}, "k1", "k2")
+	s := New()
+	h := s.Handler()
+	sendTo(t, h, reqBody("ps/m1", msgUser("a")), nil)
+	expireRests()
+	up.seen = nil
+	code, _ := sendTo(t, h, reqBody("ps/m1", msgUser("a"), msgCall("c1"), msgResult("c1"), msgUser("b")), nil)
+	if code != 200 || strings.Join(up.seen, ",") != "k2" {
+		t.Fatalf("%d, tried %v", code, up.seen)
+	}
+	if rt := lastRoute(t, s); rt.Affinity == nil || rt.Affinity.Why != "session" || !rt.Affinity.Kept {
+		t.Fatalf("affinity: %+v", rt.Affinity)
+	}
+}
+
+// Affinity off: the next request is routed afresh, so the rate limited key
+// is tried first again.
+func TestAffinityOffRoutesAfresh(t *testing.T) {
+	routeEnv(t)
+	up := &byKey{limited: map[string]bool{"k1": true}}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	keysProvider(t, srv.URL, "po", "off", "", []string{"m1"}, "k1", "k2")
+	s := New()
+	h := s.Handler()
+	sendTo(t, h, reqBody("po/m1", msgUser("a")), nil)
+	expireRests()
+	up.seen = nil
+	sendTo(t, h, reqBody("po/m1", msgUser("a"), msgCall("c1"), msgResult("c1")), nil)
+	if strings.Join(up.seen, ",") != "k1,k2" {
+		t.Fatalf("tried %v, want k1 then k2", up.seen)
+	}
+	if rt := lastRoute(t, s); rt.Affinity == nil || rt.Affinity.Why != "off" || rt.Affinity.Kept {
+		t.Fatalf("affinity: %+v", rt.Affinity)
+	}
+}
+
+// When the key that answered last is resting, the conversation moves on, and
+// a new conversation is first routed afresh.
+func TestAffinityGivesWayToResting(t *testing.T) {
+	routeEnv(t)
+	up := &byKey{limited: map[string]bool{}}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	keysProvider(t, srv.URL, "pr", "", "", []string{"m1"}, "k1", "k2")
+	s := New()
+	h := s.Handler()
+	if code, _ := sendTo(t, h, reqBody("pr/m1", msgUser("a")), nil); code != 200 {
+		t.Fatalf("first: %d", code)
+	}
+	restFor(keyRest("pr", "k1"))
+	up.seen = nil
+	sendTo(t, h, reqBody("pr/m1", msgUser("a"), msgCall("c1"), msgResult("c1")), nil)
+	if strings.Join(up.seen, ",") != "k2" {
+		t.Fatalf("tried %v, want only k2", up.seen)
+	}
+	if rt := lastRoute(t, s); rt.Affinity == nil || rt.Affinity.Why != "resting" || rt.Affinity.Kept {
+		t.Fatalf("affinity: %+v", rt.Affinity)
+	}
+
+	// another conversation, named by its own session id, has no memory
+	up.seen = nil
+	sendTo(t, h, reqBody("pr/m1", msgUser("z")), map[string]string{"x-session-id": "another"})
+	if rt := lastRoute(t, s); rt.Affinity == nil || rt.Affinity.Why != "first" {
+		t.Fatalf("affinity: %+v", rt.Affinity)
+	}
+}
+
+// Rotation goes turn by turn: k1 → k2 → k3 → k1 across turns, the tool
+// results of a turn stay on its key, and another model's requests in between
+// don't move the order.
+func TestRotationIsPerTurn(t *testing.T) {
+	routeEnv(t)
+	up := &byKey{limited: map[string]bool{}}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	keysProvider(t, srv.URL, "rt", "", provider.Rotate, []string{"m1", "m2"}, "k1", "k2", "k3")
+	h := New().Handler()
+	hdr := map[string]string{"x-session-id": "rotate-me"}
+	// step sends one request and checks which key answered it alone
+	step := func(what, model, want string, msgs ...string) {
+		t.Helper()
+		up.seen = nil
+		if code, _ := sendTo(t, h, reqBody(model, msgs...), hdr); code != 200 {
+			t.Fatalf("%s: %d", what, code)
+		}
+		if got := strings.Join(up.seen, ","); got != want {
+			t.Fatalf("%s: tried %s, want %s", what, got, want)
+		}
+	}
+	a, c1, r1 := msgUser("a"), msgCall("c1"), msgResult("c1")
+	b, c2, r2 := msgUser("b"), msgCall("c2"), msgResult("c2")
+	cc, c3 := msgUser("c"), msgUser("d")
+	step("turn 1", "rt/m1", "k1", a)
+	step("turn 1 tool results", "rt/m1", "k1", a, c1, r1)
+	step("m2 in between", "rt/m2", "k1", a)
+	step("turn 2", "rt/m1", "k2", a, c1, r1, b)
+	step("turn 2 tool results", "rt/m1", "k2", a, c1, r1, b, c2, r2)
+	step("m2 again", "rt/m2", "k2", a)
+	step("turn 3", "rt/m1", "k3", a, c1, r1, b, c2, r2, cc)
+	step("turn 4", "rt/m1", "k1", a, c1, r1, b, c2, r2, cc, c3)
+}
+
+// Units: why affinity keeps or lets go, as the trace says it.
+func TestAffinityWhy(t *testing.T) {
+	routeEnv(t)
+	a := candidate{rest: "p#a", model: "m"}
+	b := candidate{rest: "p#b", model: "m"}
+	cs := []candidate{a, b}
+	now := time.Now()
+	ans := func(c candidate, cache int, at time.Time) answer {
+		return answer{key: candKey(c), rest: c.rest, at: at, cacheRead: cache}
+	}
+	fresh := now.Add(-time.Minute)
+	cases := []struct {
+		name     string
+		mode     string
+		cv       convo
+		last     answer
+		known    bool
+		lastIdx  int // the candidate the last answer is; -1 when it is not among them
+		rotating bool
+		lefts    map[string]left
+		why      string
+		kept     bool
+	}{
+		{"off", "off", convo{within: true}, ans(a, 0, fresh), true, 0, false, nil, "off", false},
+		{"first", "auto", convo{within: true}, answer{}, false, 0, false, nil, "first", false},
+		{"gone", "auto", convo{within: true}, ans(candidate{rest: "p#z", model: "m"}, 0, fresh), true, -1, false, nil, "gone", false},
+		{"spent", "auto", convo{within: true}, ans(a, 0, fresh), true, 0, false, map[string]left{candKey(a): {used: 99}}, "spent", false},
+		{"session", "session", convo{}, ans(a, 0, fresh), true, 0, false, nil, "session", true},
+		{"turn within", "turn", convo{within: true}, ans(a, 0, fresh), true, 0, false, nil, "turn", true},
+		{"turn new", "turn", convo{}, ans(a, 0, fresh), true, 0, false, nil, "new-turn", false},
+		{"auto within", "auto", convo{within: true}, ans(a, 0, fresh), true, 0, false, nil, "turn", true},
+		{"auto rotating", "auto", convo{}, ans(a, 4096, fresh), true, 0, true, nil, "new-turn", false},
+		{"auto no cache", "auto", convo{}, ans(a, 512, fresh), true, 0, false, nil, "no-cache", false},
+		{"auto cold", "auto", convo{}, ans(a, 4096, now.Add(-6*time.Minute)), true, 0, false, nil, "cold", false},
+		{"auto cache", "auto", convo{}, ans(a, 4096, fresh), true, 0, false, nil, "cache", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			why := affinityWhy(tc.mode, cs, tc.lastIdx, tc.known, tc.last, tc.lefts, tc.cv, tc.rotating, now)
+			if why != tc.why {
+				t.Fatalf("why %q, want %q", why, tc.why)
+			}
+			kept := why == "session" || why == "turn" || why == "cache"
+			if kept != tc.kept {
+				t.Fatalf("kept %v for why %q", kept, why)
+			}
+		})
+	}
+}
+
+// Turns are the user's messages that say something; a request ending in tool
+// results is within a turn.
+func TestTurnsOfConversation(t *testing.T) {
+	msgs := func(parts ...string) []Message {
+		req, err := parseChat([]byte(reqBody("m", parts...)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req.Messages
+	}
+	if turn, within := turnsOf(msgs(msgUser("a"), msgCall("c1"), msgResult("c1"))); turn != 1 || !within {
+		t.Fatalf("tool results: turn %d within %v", turn, within)
+	}
+	if turn, within := turnsOf(msgs(msgUser("a"), msgCall("c1"), msgResult("c1"), msgUser("b"))); turn != 2 || within {
+		t.Fatalf("new turn: turn %d within %v", turn, within)
+	}
+}
