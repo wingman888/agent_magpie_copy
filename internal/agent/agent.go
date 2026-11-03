@@ -29,6 +29,10 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
+	// Optional marks a per-slot override that exists only once set (Claude
+	// Code's per-tier models): an empty value means "as the main field", so
+	// listings leave it out and a bare model value never picks it.
+	Optional bool
 }
 
 // Agent is one supported coding agent.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -160,17 +161,44 @@ func magpieProviderJSON(shape string) any {
 		}
 		return map[string]any{"type": "openai", "name": "magpie", "base_url": gatewayV1(), "api_key": gateway.Token, "models": ms}
 	case "pi":
-		var ms []map[string]any
-		for _, m := range models {
-			// reasoning lets Pi offer its thinking levels for the model
-			ms = append(ms, map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0})
-		}
-		if ms == nil {
-			ms = []map[string]any{}
-		}
-		return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
+		return piProviderJSON(models)
 	}
 	return nil
+}
+
+// piProviderJSON is the provider block for Pi's models.json. Pi offers only
+// the thinking levels a model declares, so a model whose efforts include
+// xhigh or max gets a thinkingLevelMap naming them; the others get none.
+func piProviderJSON(models []catalog.Model) any {
+	var ms []map[string]any
+	for _, m := range models {
+		// reasoning lets Pi offer its thinking levels for the model
+		e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
+		if lv := piThinkingLevelMap(m.Efforts); lv != nil {
+			e["thinkingLevelMap"] = lv
+		}
+		ms = append(ms, e)
+	}
+	if ms == nil {
+		ms = []map[string]any{}
+	}
+	return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
+}
+
+// piThinkingLevelMap names the levels Pi does not know by default (xhigh,
+// max) so it offers them; level names pass through unchanged. nil when the
+// model declares neither.
+func piThinkingLevelMap(efforts []string) map[string]string {
+	var out map[string]string
+	for _, lv := range []string{"xhigh", "max"} {
+		if slices.Contains(efforts, lv) {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[lv] = lv
+		}
+	}
+	return out
 }
 
 func opencode(home, cfg string) *Agent {
