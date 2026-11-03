@@ -297,12 +297,16 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 				Reason string `json:"reason"`
 			} `json:"incomplete_details"`
 			Error *struct {
-				Message string `json:"message"`
+				Message string          `json:"message"`
+				Type    string          `json:"type"`
+				Code    json.RawMessage `json:"code"`
 			} `json:"error"`
 			Output []rItem `json:"output"`
 		} `json:"response"`
 		Error *struct {
-			Message string `json:"message"`
+			Message string          `json:"message"`
+			Type    string          `json:"type"`
+			Code    json.RawMessage `json:"code"`
 		} `json:"error"`
 		Message string `json:"message"`
 	}
@@ -333,7 +337,7 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		}
 	case "response.completed", "response.incomplete", "response.failed":
 		if ev.Response.Error != nil {
-			emit(Event{Kind: KError, Text: ev.Response.Error.Message})
+			emit(Event{Kind: KError, Text: ev.Response.Error.Message, ErrType: errKind(ev.Response.Error.Type, ev.Response.Error.Code)})
 			return nil
 		}
 		stop := "stop"
@@ -352,11 +356,12 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStop, Stop: stop})
 		emit(Event{Kind: KUsage, Usage: ev.Response.Usage.usage()})
 	case "error":
-		msg := ev.Message
+		msg, typ := ev.Message, ""
+		var code json.RawMessage
 		if ev.Error != nil {
-			msg = ev.Error.Message
+			msg, typ, code = ev.Error.Message, ev.Error.Type, ev.Error.Code
 		}
-		emit(Event{Kind: KError, Text: msg})
+		emit(Event{Kind: KError, Text: msg, ErrType: errKind(typ, code)})
 	}
 	return nil
 }

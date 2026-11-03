@@ -1,21 +1,13 @@
-//go:build darwin
-
 package netproxy
 
-import (
-	"context"
-	"os/exec"
-	"time"
-)
+import "os/exec"
 
-// readSystemProxy reads "System Settings → Network → Proxies" through scutil.
-// Any failure means there is no system proxy.
-func readSystemProxy() systemSettings {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "scutil", "--proxy").Output()
+// system reads what System Settings → Network → Proxies says, through
+// scutil (the same dictionary CFNetwork uses).
+func system() Proxy {
+	out, err := exec.Command("scutil", "--proxy").Output()
 	if err != nil {
-		return systemSettings{}
+		return Proxy{}
 	}
-	return parseDarwinProxy(string(out))
+	return parseScutil(string(out))
 }

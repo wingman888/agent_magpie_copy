@@ -332,14 +332,16 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		} `json:"choices"`
 		Usage *cUsage `json:"usage"`
 		Error *struct {
-			Message string `json:"message"`
+			Message string          `json:"message"`
+			Type    string          `json:"type"`
+			Code    json.RawMessage `json:"code"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(data), &ch); err != nil {
 		return nil
 	}
 	if ch.Error != nil {
-		emit(Event{Kind: KError, Text: ch.Error.Message})
+		emit(Event{Kind: KError, Text: ch.Error.Message, ErrType: errKind(ch.Error.Type, ch.Error.Code)})
 		return nil
 	}
 	if !d.started {
