@@ -1,87 +1,107 @@
 package agent
 
 import (
-	"fmt"
 	"strings"
 
-	"github.com/yetone/dial/internal/catalog"
-	"github.com/yetone/dial/internal/gateway"
-	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // Every agent's model picker has two halves: the models the agent reaches
-// on its own (its sign-in, its own keys), and dial's catalog — every model
+// on its own (its sign-in, its own keys), and magpie's catalog — every model
 // of every provider the user added, reached through the local gateway.
 // A catalog model is spelled "provider/model"; an agent that sends that to
 // the gateway gets the vendor's reply in whichever API the agent speaks.
 
-// dialID is the provider id agents know the gateway by.
-const dialID = "dial"
+// magpieID is the provider id agents know the gateway by.
+const magpieID = "magpie"
 
-// viaDial lists the catalog for a picker, one group per provider.
-func viaDial(prefix string) []Option {
-	return viaDialExcept(prefix, "")
-}
+// groupsSection is the picker's header for routing groups, which come first.
+const groupsSection = "Routing groups"
 
-// viaDialExcept is viaDial without one provider, by id. An agent leaves out
-// its own sign-in: its own models need no detour through the gateway.
-func viaDialExcept(prefix, skip string) []Option {
-	var out []Option
+// viaMagpie lists the catalog for a picker: the routing groups first, in a
+// section of their own, then one group per provider.
+func viaMagpie(prefix string) []Option {
+	var groups, out []Option
 	for _, e := range provider.Catalog() {
-		if e.Provider.ID == skip {
+		if e.Group != "" {
+			groups = append(groups, groupOption(prefix, e))
 			continue
 		}
-		// a sign-in's note names the account, not the vendor
-		note := e.Provider.Name
-		if e.Provider.Account != nil {
-			note = e.Provider.Account.User
+		note := e.Provider.Name + " · via magpie"
+		if a := e.Provider.Account; a != nil {
+			note = a.User + " · via magpie"
 		}
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note + " · via dial",
-			Icon: e.Provider.Icon, Group: e.Provider.Name})
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
+			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
+	}
+	return append(groups, out...)
+}
+
+// groupOption is a routing group's picker entry. Its icons are those of the
+// providers its members come from, each shown once.
+func groupOption(prefix string, e provider.Entry) Option {
+	o := Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
+		Group: groupsSection, Ref: e.ID}
+	_, ms, _ := provider.FindGroup(e.ID)
+	seen := map[string]bool{}
+	for _, m := range ms {
+		if seen[m.Provider] {
+			continue
+		}
+		seen[m.Provider] = true
+		icon := m.Target.Icon
+		if icon == "" {
+			icon = m.Provider
+		}
+		o.Icons = append(o.Icons, icon)
+	}
+	if len(o.Icons) > 0 {
+		o.Icon = o.Icons[0]
+	}
+	return o
+}
+
+// viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going
+// through magpie to its own ChatGPT login would only add a hop.
+func viaMagpieFor(agentID, prefix string) []Option {
+	var out []Option
+	for _, o := range viaMagpie(prefix) {
+		if !strings.HasPrefix(o.Value, prefix+agentID+"/") {
+			out = append(out, o)
+		}
 	}
 	return out
 }
 
-// isDial reports whether a model value is a catalog reference.
-func isDial(v string) bool {
+// isMagpie reports whether a model value is a catalog reference.
+func isMagpie(v string) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(v)), provider.GroupPrefix) {
+		_, _, ok := provider.FindGroup(v)
+		return ok
+	}
 	_, _, ok := provider.Resolve(v)
 	return ok && strings.Contains(v, "/")
 }
 
-// bareRef maps a bare model id (no provider prefix) to its catalog reference,
-// "provider/model". It fails when no provider serves the id, and when several
-// do: then the user has to name the provider, since dial cannot pick for them.
-func bareRef(v string) (string, error) {
-	var owners []string
-	seen := map[string]bool{}
-	for _, e := range provider.Catalog() {
-		if e.Model == v && !seen[e.Provider.ID] {
-			seen[e.Provider.ID] = true
-			owners = append(owners, e.Provider.ID)
-		}
+func firstOf(xs []string) string {
+	if len(xs) > 0 {
+		return xs[0]
 	}
-	if len(owners) > 1 {
-		return "", fmt.Errorf("%q is served by several providers (%s); write one as provider/%s", v, strings.Join(owners, ", "), v)
-	}
-	p, m, ok := provider.Resolve(v)
-	if !ok {
-		return "", fmt.Errorf("%q is not a model in dial's catalog, or several providers serve it; write provider/model (see `dial models`)", v)
-	}
-	return p.ID + "/" + m, nil
+	return ""
 }
 
-// dialModels is the catalog as catalog.Models, for agents that keep their
+// magpieModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-func dialModels() []catalog.Model { return dialModelsExcept("") }
-
-// dialModelsExcept is dialModels without one provider, by id.
-func dialModelsExcept(skip string) []catalog.Model {
+func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		if e.Provider.ID == skip {
-			continue
+		name := e.Name + " · " + e.Provider.Name
+		if e.Group != "" {
+			name = e.Name + " · routing group"
 		}
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
 	}
 	return out
 }
