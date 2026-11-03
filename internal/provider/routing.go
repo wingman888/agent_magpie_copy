@@ -22,14 +22,11 @@ const (
 )
 
 // normRouting keeps a known routing and falls back to smart ("") for
-// anything else. "usage", the name least-used had in older configs, reads
-// as least-used.
+// anything else, including the old name "usage".
 func normRouting(r string) string {
 	switch r = strings.ToLower(strings.TrimSpace(r)); r {
 	case Ordered, Rotate, LeastUsed:
 		return r
-	case "usage":
-		return LeastUsed
 	}
 	return ""
 }

@@ -339,8 +339,8 @@ func TestF09SaveGroupRules(t *testing.T) {
 	if err := SaveGroup(Group{ID: "old", Members: []string{"a/m"}, Routing: "usage", Affinity: "session"}); err != nil {
 		t.Fatal(err)
 	}
-	if g, _, _ := FindGroup("old"); g.Routing != LeastUsed || g.Affinity != "session" {
-		t.Errorf("usage/session: routing=%q affinity=%q", g.Routing, g.Affinity)
+	if g, _, _ := FindGroup("old"); g.Routing != "" || g.Affinity != "session" {
+		t.Errorf("usage/session: routing=%q affinity=%q, want \"\" and session", g.Routing, g.Affinity)
 	}
 }
 
@@ -389,7 +389,7 @@ func TestF09DeleteUserGroup(t *testing.T) {
 func TestF09NormRouting(t *testing.T) {
 	cases := map[string]string{
 		"order": Ordered, " Rotate ": Rotate, "least-used": LeastUsed,
-		"usage": LeastUsed, "bogus": "", "": "",
+		"usage": "", "bogus": "", "": "",
 	}
 	for in, want := range cases {
 		if got := normRouting(in); got != want {
