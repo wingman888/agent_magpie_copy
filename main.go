@@ -14,9 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudebridge"
 	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
-	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
@@ -40,23 +38,13 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
-  magpie backup [--no-keys] [file]     export it all to one file, encrypted with a passphrase
-                                       (magpie.magpie-backup; --no-keys leaves out every API key)
-  magpie restore [--no-agents] <file>  restore a backup on this machine
-                                       (--no-agents leaves the agents' models alone)
-  echo "pw" | magpie backup              scripts: the passphrase is the first line of stdin
-
-  magpie providers               list your providers: host, key, models, who uses them
+  magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
-  magpie provider fallback <id> <provider/model>…   use these when it's out of quota or down
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
-  magpie accounts [agent]         the Claude Code and Codex subscriptions magpie remembers
-  magpie accounts add <agent>     sign in to one more Claude or ChatGPT subscription
-  magpie accounts switch <agent> <email>   sign the agent in to another of them
 
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
@@ -76,7 +64,6 @@ var (
 
 func main() {
 	gateway.Version = version
-	netproxy.Install()
 	update.GUI = hasGUI
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
@@ -85,15 +72,8 @@ func main() {
 }
 
 func run(args []string) error {
-	// internal: the auth provider of a Grok run behind the gateway, asked
-	// for a token often; nothing else of magpie's needs to start for it
-	if len(args) == 3 && args[0] == "grok-token" {
-		return provider.GrokToken(os.Stdout, args[1], args[2], os.Getenv("GROK_AUTH_EXPIRED") == "1")
-	}
 	settings.Migrate()
-	if !leavesAgentsAlone(args) {
-		agent.RenameLegacy()
-	}
+	agent.RenameLegacy()
 	if len(args) == 0 {
 		if hasGUI {
 			return runGUI(true, "")
@@ -136,10 +116,6 @@ func run(args []string) error {
 		return nil
 	case "save", "use", "rm", "profiles":
 		return profiles(args)
-	case "backup":
-		return backupCmd(args)
-	case "restore":
-		return restoreCmd(args)
 	case "import":
 		return importCmd(args[1:])
 	case "providers":
@@ -152,8 +128,6 @@ func run(args []string) error {
 		return models()
 	case "serve":
 		return serve()
-	case "accounts", "account":
-		return accountsCmd(args)
 	case "usage":
 		return usageCmd(args)
 	case "update":
@@ -186,26 +160,6 @@ func run(args []string) error {
 		return set(a, args[1], args[2])
 	}
 	return fmt.Errorf("too many arguments\n\n%s", usage)
-}
-
-// leavesAgentsAlone says whether a command must not rewrite the agents' own
-// files. backup only reads them; restore --no-agents is asked not to touch
-// them at all, so the one-off rename of old agent settings is left out too.
-func leavesAgentsAlone(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	switch args[0] {
-	case "backup":
-		return true
-	case "restore":
-		for _, a := range args[1:] {
-			if a == "--no-agents" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func set(a *agent.Agent, key, value string) error {
