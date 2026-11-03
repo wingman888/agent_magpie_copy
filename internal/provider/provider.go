@@ -37,11 +37,11 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// Further accounts on the same vendor. Key is the front one (tried
-	// first); KeyName names it. Keys holds the rest in attempt order, and an
-	// off entry is kept but never used. See keys.go.
-	KeyName string     `json:"keyName,omitempty"`
-	Keys    []keyEntry `json:"keys,omitempty"`
+	// KeyName names the front key (the one in Key), when the user gave it one.
+	// Keys are the provider's other keys, in the order the gateway tries them
+	// after the front one; Off keeps a key on file without using it. See keys.go.
+	KeyName string    `json:"keyName,omitempty"`
+	Keys    []KeySlot `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -185,9 +185,6 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
-	// a save that brings no key list (the editor, the CLI) keeps the keys
-	// the provider already has; see keepKeys
-	listed := p.Keys != nil
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -208,9 +205,6 @@ func Save(p Provider) error {
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
-		}
-		if old, ok := savedProvider(p.ID); ok && !listed {
-			p = normalize(keepKeys(p, old))
 		}
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
@@ -271,13 +265,13 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
+	p.setSlots(cleanSlots(p.slots()))
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
 			*u = "https://" + *u
 		}
 	}
-	p = setKeys(p, keyList(p))
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
 	p.Catalog = strings.Join(p.Catalogs(), ", ")

@@ -349,8 +349,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary's keys, then its fallbacks' keys, while none of them can
-	// take the request and nothing has been sent yet
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
 	cands := s.candidates(p, model)
 	var skipped []string
 	for i, c := range cands {
@@ -358,10 +358,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		hw := newHoldWriter(w, !last)
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		call.Error = scrub(call.Error, c.key)
 		if !last && hw.failed() {
-			s.rest(c.ref)
-			skipped = append(skipped, c.label+": "+call.Error)
+			s.rest(c.p.ID)
+			skipped = append(skipped, c.p.ID+": "+call.Error)
 			continue
 		}
 		hw.release()
