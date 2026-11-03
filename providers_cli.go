@@ -35,6 +35,7 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
+		printExcluded()
 		return nil
 	}
 	uses := usesByProvider()
@@ -43,10 +44,12 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" {
+		if p.Preset == "" && p.Account == nil {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
+		case p.Account != nil:
+			r.key = green.Render("●") + " " + muted.Render("signed in as "+signedInAs(p))
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -71,7 +74,38 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
+	printExcluded()
 	return nil
+}
+
+// printExcluded notes, at the end of the list, each sign-in dial recognizes
+// but does not offer, so the user does not take its absence for a fault.
+func printExcluded() {
+	for _, x := range provider.Excluded() {
+		fmt.Println(muted.Render(agentName(x.Agent) + " is signed in but not offered: " + x.Why))
+	}
+}
+
+// agentName is an agent's display name, or its id when dial does not know it.
+func agentName(id string) string {
+	for _, a := range agent.All() {
+		if a.ID == id {
+			return a.Name
+		}
+	}
+	return id
+}
+
+// signedInAs names the signed-in user of an account provider. The fallback
+// is the name the agent's own sign-in screen uses.
+func signedInAs(p provider.Provider) string {
+	if p.Account.User != "" {
+		return p.Account.User
+	}
+	if p.Account.Agent == "codex" {
+		return "ChatGPT"
+	}
+	return "GitHub"
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -133,7 +167,11 @@ func models() error {
 	for _, e := range entries {
 		if e.Provider.ID != last {
 			last = e.Provider.ID
-			fmt.Println(faint.Render("  " + e.Provider.Name))
+			head := e.Provider.Name
+			if e.Provider.Account != nil {
+				head += " " + muted.Render(signedInAs(e.Provider))
+			}
+			fmt.Println(faint.Render("  " + head))
 		}
 		line := "  " + pad(e.ID, w)
 		if e.Name != "" && e.Name != e.Model {
@@ -165,6 +203,9 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
+		if p.Account != nil {
+			return fmt.Errorf("%s signs in through %s; dial keeps no key for it", p.Name, p.Account.Agent)
+		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
 			return err
@@ -181,6 +222,11 @@ func providerCmd(args []string) error {
 		}
 		if err := provider.Delete(p.ID); err != nil {
 			return err
+		}
+		if p.Account != nil {
+			// the sign-in is the agent's: the provider stays while it lasts
+			fmt.Println(green.Render("✓"), "cleared the models of", p.Name, muted.Render("· sign out of "+p.Account.Agent+" to remove it"))
+			return nil
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil
@@ -299,28 +345,39 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" {
+	if p.Preset == "" && p.Account == nil {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
+	if p.Account != nil {
+		kv("account", accountLine(p))
+	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
-	switch {
-	case p.Key != "":
-		kv("key", muted.Render(provider.Mask(p.Key)))
-	case p.Ready():
-		kv("key", muted.Render("none needed"))
-	default:
-		kv("key", amber.Render("not set")+muted.Render("  dial provider key "+p.ID+" …"))
+	if p.Account == nil {
+		switch {
+		case p.Key != "":
+			kv("key", muted.Render(provider.Mask(p.Key)))
+		case p.Ready():
+			kv("key", muted.Render("none needed"))
+		default:
+			kv("key", amber.Render("not set")+muted.Render("  dial provider key "+p.ID+" …"))
+		}
 	}
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
 	ms := p.Exposed()
 	src := "models.dev"
+	if p.Account != nil {
+		src = "built-in list · " + p.Account.Agent + " sign-in"
+	}
 	if t, ok := p.Fetched(); ok {
 		src = p.Host() + " · fetched " + ago(t)
+		if p.Account != nil {
+			src = "fetched " + ago(t)
+		}
 	}
 	kv("models", fmt.Sprintf("%d exposed of %d %s", len(ms), len(p.Available()), muted.Render("from "+src)))
 	for i, m := range ms {
@@ -424,4 +481,14 @@ func serve() error {
 		fmt.Printf("  %d models · %s\n", n, muted.Render("dial models"))
 	}
 	return s.ListenAndServe(context.Background())
+}
+
+// accountLine is the account row of an account provider's details:
+// "user (plan: pro) via codex". It carries no token.
+func accountLine(p provider.Provider) string {
+	s := signedInAs(p)
+	if p.Account.Plan != "" {
+		s += " (plan: " + p.Account.Plan + ")"
+	}
+	return s + " via " + p.Account.Agent
 }
