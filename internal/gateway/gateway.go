@@ -368,7 +368,10 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err != nil {
 		return nil, err
 	}
-	sniffStream(res)
+	if p.Account != nil {
+		// the Codex backend sends no Content-Type; ordinary replies are left alone
+		sniffStream(res)
+	}
 	return res, nil
 }
 
