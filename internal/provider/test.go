@@ -1,17 +1,13 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
-
-	"github.com/yetone/magpie/internal/catalog"
 )
 
 // Result is what a probe of one endpoint came back with.
@@ -25,88 +21,46 @@ type Result struct {
 }
 
 // Test sends the smallest possible request to each endpoint the vendor
-// serves, signed with a key made for it and asking for a model that key
-// sees, and reports what came back.
+// serves, with the first exposed model, and reports what came back.
 func (p Provider) Test(ctx context.Context) []Result {
 	p.Fetch(ctx)
+	model := ""
+	if ms := p.Exposed(); len(ms) > 0 {
+		model = ms[0].ID
+	} else if ms := p.Available(); len(ms) > 0 {
+		model = ms[0].ID
+	}
+	protos := p.Speaks()
+	if p.Account != nil {
+		protos = []Protocol{p.AccountProtocol()}
+	}
 	var out []Result
-	for _, proto := range p.Speaks() {
-		q, ok := p.keyFor(proto)
-		model := p.testModel(q, proto)
-		if !ok {
-			out = append(out, Result{Protocol: proto, Model: model, Error: "no key is on for this endpoint"})
-			continue
-		}
+	for _, proto := range protos {
 		var url, body string
+		headers := map[string]string{"Authorization": "Bearer " + p.Key}
 		switch proto {
 		case Chat:
-			url = q.Chat + "/chat/completions"
+			url = p.Chat + "/chat/completions"
 			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 		case Responses:
-			url = q.Responses + "/responses"
+			url = p.Responses + "/responses"
 			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
 		case Anthropic:
-			url = q.Anthropic + "/v1/messages"
+			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
+			headers = AuthHeaders(p, Anthropic)
 		}
-		out = append(out, probe(ctx, q, proto, url, q.Prepare([]byte(body)), model))
+		if p.Account != nil {
+			// An account is shaped and signed the way its backend requires,
+			// with the login's own token rather than a key.
+			b := p.Prepare([]byte(body))
+			sign := func(ctx context.Context, req *http.Request) error { return p.Sign(ctx, req, proto, b) }
+			out = append(out, probe(ctx, proto, url, string(b), model, nil, sign))
+			continue
+		}
+		out = append(out, probe(ctx, proto, url, body, model, headers, nil))
 	}
 	return out
-}
-
-// keyFor is p using the first key on that works with proto: one made for
-// it, else one made for any. A provider without keys is left as it is.
-func (p Provider) keyFor(proto Protocol) (Provider, bool) {
-	keys := p.KeysOn()
-	if len(keys) == 0 {
-		return p, true
-	}
-	for _, want := range []Protocol{proto, ""} {
-		for _, k := range keys {
-			if k.Protocol == want {
-				return p.WithKey(k), true
-			}
-		}
-	}
-	return p, false
-}
-
-// testModel is the model a probe of proto's endpoint asks for: the first
-// exposed one q's key sees, else the first it sees at all — preferring a
-// Claude model on the Anthropic endpoint.
-func (p Provider) testModel(q Provider, proto Protocol) string {
-	k := q.first()
-	var pools [][]catalog.Model
-	if ms := p.Exposed(); len(ms) > 0 {
-		pools = append(pools, ms)
-	}
-	pools = append(pools, p.Available())
-	for _, want := range []func(string) bool{
-		func(id string) bool {
-			if apis := p.APIs(id); apis != nil {
-				return slices.Contains(apis, proto)
-			}
-			return proto != Anthropic || isClaude(id)
-		},
-		func(string) bool { return true },
-	} {
-		for _, pool := range pools {
-			for _, m := range pool {
-				if want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
-					return m.ID
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func isClaude(id string) bool {
-	id = strings.ToLower(id)
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		id = id[i+1:]
-	}
-	return strings.HasPrefix(id, "claude")
 }
 
 // AuthHeaders is how a request to the vendor proves who it is. Anthropic's
@@ -124,7 +78,9 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
-func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string) Result {
+// probe sends one request. sign, when set, attaches the credentials and
+// rewrites the URL (account providers); otherwise headers are used as given.
+func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string, sign func(context.Context, *http.Request) error) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -132,19 +88,21 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		r.Error = err.Error()
 		return r
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	if p.IsOpenCode() {
-		req.Header.Set("x-opencode-session", "magpie-test-"+randomUUID())
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
-	if err := p.Sign(ctx, req, proto, body); err != nil {
-		r.Error = err.Error()
-		return r
+	if sign != nil {
+		if err := sign(ctx, req); err != nil {
+			r.Error = err.Error()
+			return r
+		}
 	}
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
