@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/dial/internal/catalog"
 )
 
 func errorf(format string, a ...any) error { return fmt.Errorf(format, a...) }
@@ -15,22 +15,18 @@ func errorf(format string, a ...any) error { return fmt.Errorf(format, a...) }
 // manyModels is where "expose everything" stops being helpful.
 const manyModels = 24
 
-// Available lists every model the vendor is known to serve: the list fetched
-// from the vendor itself when there is one, over the models.dev catalog (or,
-// for an account, whatever the agent's own sign-in can see).
+// Available lists every model the vendor is known to serve: its own list
+// when fetched (see Fetch), else the models.dev catalog for the vendor.
 func (p Provider) Available() []catalog.Model {
-	signedIn := p.Account != nil && p.Account.models != nil
-	var known []catalog.Model
-	if signedIn {
-		known = p.Account.models()
-	} else {
-		known = p.catalogModels()
+	if p.Account != nil {
+		if live, _, ok := catalog.Live(p.ID); ok {
+			return catalog.Decorate(live, accountModels(p.ID))
+		}
+		return accountModels(p.ID)
 	}
+	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
-	}
-	if signedIn {
-		return known
 	}
 	var out []catalog.Model
 	for _, m := range known {
@@ -41,12 +37,6 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
-// catalogModels is the models.dev list the provider names, searched in the
-// order its catalog= lists them.
-func (p Provider) catalogModels() []catalog.Model {
-	return catalog.Catalogs(CatalogNames(p.Catalog))
-}
-
 // Fetched reports when the vendor's own list was last fetched.
 func (p Provider) Fetched() (time.Time, bool) {
 	_, t, ok := catalog.Live(p.ID)
@@ -55,12 +45,12 @@ func (p Provider) Fetched() (time.Time, bool) {
 
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
-	if p.Account != nil && p.Account.fetch != nil {
-		return p.Account.fetch(ctx)
+	if p.Account != nil {
+		return p.fetchAccount(ctx)
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.CustomHeaders())
+		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key)
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -72,8 +62,10 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	return nil, lastErr
 }
 
-// Exposed lists the models magpie offers to agents for this provider: the
-// user's picks; else the preset's; else everything, when that is few.
+// Exposed lists the models dial offers to agents for this provider: the
+// user's picks; else the preset's; else everything, when that is few. An agent
+// account with no picks offers everything its sign-in can use, never capped:
+// the account's own list is already limited to what it may use.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
 	byID := make(map[string]catalog.Model, len(avail))
@@ -82,49 +74,36 @@ func (p Provider) Exposed() []catalog.Model {
 	}
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
-		var known []catalog.Model
 		for _, id := range ids {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
-				continue
+			} else {
+				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
 			}
-			// not in the vendor's own list: the catalog may still name it, with
-			// a "vendor/" prefix stripped, so it keeps its name and levels
-			if known == nil {
-				known = p.catalogModels()
-			}
-			if k, ok := catalog.Find(known, id); ok {
-				k.ID = id
-				out = append(out, k)
-				continue
-			}
-			out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
 		}
 		return out
 	}
 	if len(p.Models) > 0 {
 		return pick(p.Models)
 	}
-	if len(avail) <= manyModels {
-		return avail
-	}
-	// More than an agent's picker wants. Show the first slice of the
-	// vendor's own list — theirs run newest first — and let the user pick
-	// from the rest; nothing here is compiled in.
-	return avail[:manyModels]
-}
-
-// RejectsTemperature reports whether the model is known to refuse
-// temperature and top_p. The answer comes from the catalog — models.dev
-// plus the vendor's own list — so a model released after this binary was
-// built is handled without a code change.
-func (p Provider) RejectsTemperature(model string) bool {
-	for _, m := range p.Available() {
-		if m.ID == model && m.Temperature != nil {
-			return !*m.Temperature
+	if pr := Preset(p.Preset); pr != nil && len(pr.Defaults) > 0 {
+		if _, fetched := p.Fetched(); !fetched {
+			return pick(pr.Defaults)
+		}
+		var have []string
+		for _, id := range pr.Defaults {
+			if _, ok := byID[id]; ok {
+				have = append(have, id)
+			}
+		}
+		if len(have) > 0 {
+			return pick(have)
 		}
 	}
-	return false
+	if p.Account != nil || len(avail) <= manyModels {
+		return avail
+	}
+	return nil
 }
 
 // Chosen reports whether a model is exposed.
@@ -137,7 +116,7 @@ func (p Provider) Chosen(id string) bool {
 	return false
 }
 
-// ---- the magpie catalog ------------------------------------------------------
+// ---- the dial catalog ------------------------------------------------------
 //
 // Agents see one flat list of models across every provider, each spelled
 // "provider/model" so nothing ever clashes. The bare model id works too
@@ -145,8 +124,8 @@ func (p Provider) Chosen(id string) bool {
 
 // Entry is one model as the agents see it.
 type Entry struct {
-	ID       string   `json:"id"`    // what the agent sends magpie
-	Model    string   `json:"model"` // what magpie sends the vendor
+	ID       string   `json:"id"`    // what the agent sends dial
+	Model    string   `json:"model"` // what dial sends the vendor
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`

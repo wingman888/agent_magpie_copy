@@ -1,78 +1,93 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/dial/internal/gateway"
+	"github.com/yetone/dial/internal/provider"
 )
 
-func TestApplyPairsHeaders(t *testing.T) {
-	var p provider.Provider
-	err := applyPairs(&p, []string{"url=https://relay.example/v1", "key=sk", "header.X-Org-Id=acme", "HEADER.x-gateway=gw=1"})
+// cliStdoutOf runs fn and returns what it printed to stdout.
+func cliStdoutOf(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Names keep the case typed; the prefix is case-insensitive; values may hold "=".
-	if p.Headers["X-Org-Id"] != "acme" || p.Headers["x-gateway"] != "gw=1" || len(p.Headers) != 2 {
-		t.Fatalf("headers = %#v", p.Headers)
+	old := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	fn()
+	w.Close()
+	os.Stdout = old
+	b, _ := io.ReadAll(r)
+	return string(b)
+}
+
+// With no providers at all, `dial providers` still says that a signed-in
+// Claude Code is not offered, and why.
+func TestCliProvidersShowsClaudeNoteWithNoProviders(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg-config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "xdg-cache"))
+	claude := filepath.Join(home, ".claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", claude)
+	if err := os.MkdirAll(claude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claude, ".credentials.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(provider.All()); n != 0 {
+		t.Fatalf("expected no providers, got %d", n)
+	}
+
+	var err error
+	out := cliStdoutOf(t, func() { err = providers() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "已登录但不提供") {
+		t.Errorf("output lacks the Claude note: %q", out)
+	}
+	if !strings.Contains(out, "no providers yet") {
+		t.Errorf("output lacks the empty-list hint: %q", out)
 	}
 }
 
-func TestApplyPairsRejectsBadHeaders(t *testing.T) {
-	for _, kv := range []string{"header.=x", "header.Bad Name=x", "header.X-A=line\nbreak"} {
-		var p provider.Provider
-		if err := applyPairs(&p, []string{kv}); err == nil {
-			t.Errorf("%q accepted", kv)
-		}
-	}
-}
+// A Gemini CLI routed through dial lists under the provider it routes to: its
+// first field is the auth choice, so the provider comes from its own field.
+func TestCliUsesByProviderCountsRoutedGemini(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg-config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "xdg-cache"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 
-func TestApplyPairsIconNeedsCustomProvider(t *testing.T) {
-	p := provider.Provider{ID: "openai", Preset: "openai"}
-	err := applyPairs(&p, []string{"icon=openai"})
-	if err == nil || !strings.Contains(err.Error(), "only custom providers") {
-		t.Fatalf("preset icon error = %v", err)
-	}
-}
-
-func TestIconArg(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if ref, err := iconArg("ollama"); err != nil || ref != "ollama" {
-		t.Errorf("built-in: %q, %v", ref, err)
-	}
-	if ref, err := iconArg(""); err != nil || ref != "" {
-		t.Errorf("empty: %q, %v", ref, err)
-	}
-	if _, err := iconArg("no-such-icon"); err == nil {
-		t.Error("unknown name accepted")
-	}
-
-	dir := t.TempDir()
-	png := filepath.Join(dir, "logo.png")
-	if err := os.WriteFile(png, append([]byte("\x89PNG\r\n\x1a\n"), 'x'), 0o600); err != nil {
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k",
+		Chat: "http://127.0.0.1:9/v1", Models: []string{"m1"}}); err != nil {
 		t.Fatal(err)
 	}
-	ref, err := iconArg(png)
-	if err != nil || !strings.HasPrefix(ref, "file:") || !strings.HasSuffix(ref, ".png") {
-		t.Fatalf("picture file: %q, %v", ref, err)
-	}
-
-	txt := filepath.Join(dir, "notes.txt")
-	if err := os.WriteFile(txt, []byte("just text"), 0o600); err != nil {
+	dir := filepath.Join(home, ".gemini")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := iconArg(txt); err == nil {
-		t.Error("plain text accepted as an icon")
-	}
-
-	big := filepath.Join(dir, "big.png")
-	if err := os.WriteFile(big, append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, provider.MaxIcon)...), 0o600); err != nil {
+	settings := `{"security":{"auth":{"selectedType":"gemini-api-key"}},"model":{"name":"fake/m1"}}`
+	env := "GOOGLE_GEMINI_BASE_URL=" + gateway.URL() + "\nGEMINI_API_KEY=" + gateway.Token + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(settings), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := iconArg(big); err == nil {
-		t.Error("picture over 1 MB accepted")
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(env), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := usesByProvider()["fake"]; !reflect.DeepEqual(got, []string{"Gemini CLI"}) {
+		t.Errorf("uses of fake = %v, want [Gemini CLI]", got)
 	}
 }

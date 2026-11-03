@@ -6,65 +6,66 @@ import (
 	"testing"
 )
 
-// writeCatalog puts a valid models.dev-shaped file where load() will find it;
-// load() falls back to the machine's own caches, so a malformed file would
-// silently read the developer's real catalog.
-func writeCatalog(t *testing.T, body string) {
+// catIsolateCodex points HOME at a fresh tree and returns the Codex cache path.
+func catIsolateCodex(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "magpie"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(CachePath(), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	Reset()
-	t.Cleanup(Reset)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	return filepath.Join(home, ".codex", "models_cache.json")
 }
 
-func TestProviderReadsTemperatureCapability(t *testing.T) {
-	writeCatalog(t, `{
-	  "openai": {
-	    "models": {
-	      "gpt-5.5": {"id":"gpt-5.5","name":"GPT-5.5","temperature":false,
-	                  "reasoning_options":[{"type":"effort","values":["low","high"]}]},
-	      "gpt-4.1": {"id":"gpt-4.1","name":"GPT-4.1","temperature":true}
-	    }
-	  }
-	}`)
-
-	ms := Provider("openai")
-	if len(ms) != 2 {
-		t.Fatalf("models: %+v", ms)
-	}
-	byID := map[string]Model{}
+func catIDsOf(ms []Model) map[string]int {
+	out := map[string]int{}
 	for _, m := range ms {
-		byID[m.ID] = m
+		out[m.ID]++
 	}
-	if p := byID["gpt-5.5"].Temperature; p == nil || *p {
-		t.Fatalf("gpt-5.5 temperature: %v", p)
-	}
-	if p := byID["gpt-4.1"].Temperature; p == nil || !*p {
-		t.Fatalf("gpt-4.1 temperature: %v", p)
-	}
-	if got := byID["gpt-5.5"].Efforts; len(got) != 2 || got[0] != "low" {
-		t.Fatalf("efforts: %v", got)
+	return out
+}
+
+// Without Codex's cache, the built-in list is the answer, gpt-5.5 included.
+func TestCatCodexWithoutCacheIsBuiltin(t *testing.T) {
+	catIsolateCodex(t)
+	if got := catIDsOf(Codex()); got["gpt-5.5"] != 1 {
+		t.Fatalf("gpt-5.5 missing without a cache: %v", got)
 	}
 }
 
-func TestDecorateCarriesTemperature(t *testing.T) {
-	no, yes := false, true
-	live := []Model{{ID: "new-model"}, {ID: "gpt-5.5"}}
-	known := []Model{
-		{ID: "gpt-5.5", Name: "GPT-5.5", Temperature: &no, Released: "2026-04-23"},
-		{ID: "old", Temperature: &yes},
+// With a cache, the cache's models come first in its order, the built-in
+// models it does not name follow, and nothing is listed twice.
+func TestCatCodexUnionsCacheWithBuiltin(t *testing.T) {
+	path := catIsolateCodex(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	out := Decorate(live, known)
-	if out[0].Temperature != nil {
-		t.Fatalf("an unknown model gained a capability: %v", *out[0].Temperature)
+	cache := `{"models":[
+		{"slug":"gpt-7-new","display_name":"New","priority":1},
+		{"slug":"gpt-5.5","display_name":"GPT-5.5 from cache","priority":2},
+		{"slug":"hidden-one","display_name":"Hidden","visibility":"hide","priority":0}
+	]}`
+	if err := os.WriteFile(path, []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if out[1].Temperature == nil || *out[1].Temperature || out[1].Name != "GPT-5.5" {
-		t.Fatalf("decorated: %+v", out[1])
+	got := Codex()
+	if len(got) < 2 || got[0].ID != "gpt-7-new" || got[1].ID != "gpt-5.5" {
+		t.Fatalf("cache order not kept first: %+v", got)
+	}
+	if got[1].Name != "GPT-5.5 from cache" {
+		t.Errorf("cache entry should win over built-in: %+v", got[1])
+	}
+	counts := catIDsOf(got)
+	for id, n := range counts {
+		if n != 1 {
+			t.Errorf("%s listed %d times", id, n)
+		}
+	}
+	if counts["gpt-5.5"] != 1 {
+		t.Errorf("gpt-5.5 missing: %v", counts)
+	}
+	if counts["gpt-6-astra"] != 1 {
+		t.Errorf("built-in model absent from the cache not added: %v", counts)
+	}
+	if counts["hidden-one"] != 0 {
+		t.Errorf("hidden cache model listed: %v", counts)
 	}
 }
