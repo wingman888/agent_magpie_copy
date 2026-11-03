@@ -904,83 +904,141 @@ type copilotTurn struct {
 // Anthropic carry messages, Responses carries input. A tool's reply is not
 // the user's turn: a Chat tool message, an Anthropic user message made only of
 // tool_result blocks, and a Responses function output all count as the agent's.
+// Decoding into RawMessage fields means a body of the wrong shape (messages
+// not an array, input a number) reads as "no information" rather than failing.
 func copilotTurnOf(body []byte) copilotTurn {
-	var t copilotTurn
 	var v struct {
-		Input    json.RawMessage   `json:"input"`
-		Messages []json.RawMessage `json:"messages"`
+		Input    json.RawMessage `json:"input"`
+		Messages json.RawMessage `json:"messages"`
 	}
-	if json.Unmarshal(body, &v) == nil {
-		t.user = lastTurnIsUser(v.Input, v.Messages)
+	if json.Unmarshal(body, &v) != nil {
+		return copilotTurn{}
 	}
-	var doc any
-	if json.Unmarshal(body, &doc) == nil {
-		t.vision = hasImage(doc)
+	return copilotTurn{
+		user:   lastTurnIsUser(v.Input, v.Messages),
+		vision: hasImageInContent(v.Input, v.Messages),
 	}
-	return t
 }
 
 // lastTurnIsUser reports whether the last turn of a request was typed by the user.
-func lastTurnIsUser(input json.RawMessage, messages []json.RawMessage) bool {
+func lastTurnIsUser(input, messages json.RawMessage) bool {
 	if in := bytes.TrimSpace(input); len(in) > 0 {
-		if in[0] == '"' {
+		switch in[0] {
+		case '"':
 			return true // a string input is the user's text
-		}
-		if in[0] == '[' {
-			var items []struct {
-				Type string `json:"type"`
-				Role string `json:"role"`
-			}
-			if json.Unmarshal(in, &items) != nil || len(items) == 0 {
-				return false
-			}
-			last := items[len(items)-1]
-			return last.Type != "function_call_output" && last.Role == "user"
+		case '[':
+			return lastResponsesItemIsUser(in)
 		}
 	}
-	if len(messages) == 0 {
+	return lastMessageIsUser(messages)
+}
+
+// lastResponsesItemIsUser reads the last item of a Responses input array. An
+// item without a role (a function_call) or with type function_call_output is
+// the agent's.
+func lastResponsesItemIsUser(in json.RawMessage) bool {
+	var items []struct {
+		Type string `json:"type"`
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(in, &items) != nil || len(items) == 0 {
 		return false
 	}
-	var m struct {
+	last := items[len(items)-1]
+	return last.Type != "function_call_output" && last.Role == "user"
+}
+
+// lastMessageIsUser reads a Chat or Anthropic messages array. Chat may end with
+// system or developer instructions; those do not change whose turn it is, so
+// they are skipped before looking at the last real message.
+func lastMessageIsUser(messages json.RawMessage) bool {
+	var list []struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	}
-	if json.Unmarshal(messages[len(messages)-1], &m) != nil || m.Role != "user" {
+	if json.Unmarshal(messages, &list) != nil {
 		return false
 	}
+	i := len(list) - 1
+	for i >= 0 && (list[i].Role == "system" || list[i].Role == "developer") {
+		i--
+	}
+	if i < 0 || list[i].Role != "user" {
+		return false
+	}
+	// A user message with no content blocks (content absent, "" or []) is the
+	// user's turn: only a message made of tool_result blocks is a tool's reply,
+	// and an empty message carries no tool reply. Keeping that default avoids
+	// silently demoting a real user turn whose text was stripped to agent.
+	return !isToolReply(list[i].Content)
+}
+
+// isToolReply reports whether content is a non-empty list made only of
+// tool_result blocks.
+func isToolReply(content json.RawMessage) bool {
 	var parts []struct {
 		Type string `json:"type"`
 	}
-	if json.Unmarshal(m.Content, &parts) != nil || len(parts) == 0 {
-		return true // plain text, or no blocks to call a tool's reply
+	if json.Unmarshal(content, &parts) != nil || len(parts) == 0 {
+		return false
 	}
 	for _, p := range parts {
 		if p.Type != "tool_result" {
-			return true // text or an image among the results: the user spoke
+			return false // text or an image among the blocks: the user spoke
 		}
 	}
-	return false // nothing but tool_result blocks: the agent's turn
+	return true
 }
 
-// hasImage finds an image part anywhere in a decoded body: Chat image_url,
-// Responses input_image, or an Anthropic image block.
-func hasImage(v any) bool {
-	switch x := v.(type) {
-	case map[string]any:
-		switch x["type"] {
-		case "image_url", "input_image", "image":
+// imagePartTypes are the content-part types that carry an image: Chat
+// image_url, Anthropic image, Responses input_image.
+var imagePartTypes = map[string]bool{"image_url": true, "image": true, "input_image": true}
+
+// hasImageInContent reports whether an image part sits in the message content
+// of a request: messages[*].content[*] (Chat, Anthropic, including an
+// Anthropic tool_result's nested content) or input[*].content[*] (Responses).
+// Other places such as tools, schemas or metadata are not scanned, so a tool
+// definition that describes an image type does not count.
+func hasImageInContent(input, messages json.RawMessage) bool {
+	var msgs []struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(messages, &msgs) == nil {
+		for _, m := range msgs {
+			if partsHaveImage(m.Content) {
+				return true
+			}
+		}
+	}
+	var items []struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(input, &items) == nil {
+		for _, it := range items {
+			if partsHaveImage(it.Content) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// partsHaveImage reports whether a content list holds an image part, looking
+// into an Anthropic tool_result's own content as well.
+func partsHaveImage(content json.RawMessage) bool {
+	var parts []struct {
+		Type    string          `json:"type"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(content, &parts) != nil {
+		return false // a plain string, or no list
+	}
+	for _, p := range parts {
+		if imagePartTypes[p.Type] {
 			return true
 		}
-		for _, c := range x {
-			if hasImage(c) {
-				return true
-			}
-		}
-	case []any:
-		for _, c := range x {
-			if hasImage(c) {
-				return true
-			}
+		if p.Type == "tool_result" && partsHaveImage(p.Content) {
+			return true
 		}
 	}
 	return false
