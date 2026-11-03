@@ -67,11 +67,15 @@ else
 Type=Application
 Name=magpie
 Comment=Every agent's model. One place.
-Exec=$bin/magpie app
+Exec=$bin/magpie %u
 Icon=magpie
 Categories=Development;Utility;
+MimeType=x-scheme-handler/magpie;
 Terminal=false
 EOF
+    # magpie://import links open in magpie
+    command -v update-desktop-database >/dev/null && update-desktop-database "$share/applications" 2>/dev/null || true
+    command -v xdg-mime >/dev/null && xdg-mime default magpie.desktop x-scheme-handler/magpie 2>/dev/null || true
     say "installed the magpie desktop app (menu entry: magpie)"
   else
     say "installed the terminal build; for the desktop app, install WebKitGTK 4.1 (libwebkit2gtk-4.1-0) and run this again"

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -89,7 +90,7 @@ type Server struct {
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
+			Proxy:                 netproxy.Func,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,
@@ -412,7 +413,8 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
-	return s.client.Do(req)
+	p.ApplyHeaders(req)
+	return p.ClientFor(s.client).Do(req)
 }
 
 // passthrough relays a request the provider understands as-is, with the
