@@ -1,15 +1,13 @@
-//go:build darwin
-
 package netproxy
 
 import "os/exec"
 
-// platformSystem reads the network settings with scutil, which is how the
-// system itself reports them.
-func platformSystem() system {
+// system reads what System Settings → Network → Proxies says, through
+// scutil (the same dictionary CFNetwork uses).
+func system() Proxy {
 	out, err := exec.Command("scutil", "--proxy").Output()
 	if err != nil {
-		return system{}
+		return Proxy{}
 	}
 	return parseScutil(string(out))
 }

@@ -2,6 +2,5 @@
 
 package netproxy
 
-// platformSystem: Linux has no system-wide proxy setting that applications
-// read, so only the environment applies there.
-func platformSystem() system { return system{} }
+// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
+func system() Proxy { return Proxy{} }
