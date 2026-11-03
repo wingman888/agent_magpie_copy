@@ -184,12 +184,12 @@ func providerCmd(args []string) error {
 		if len(rest) != 2 {
 			return fmt.Errorf("magpie provider key <id> <key>")
 		}
-		// replaces the front key only: its name and the other keys are kept
-		if err := provider.SetFrontKey(rest[0], rest[1]); err != nil {
-			return err
-		}
 		p, err := provider.Find(rest[0])
 		if err != nil {
+			return err
+		}
+		p.Key = rest[1]
+		if err := provider.Save(*p); err != nil {
 			return err
 		}
 		fmt.Println(green.Render("✓"), p.Name, "key", muted.Render(provider.Mask(p.Key)))

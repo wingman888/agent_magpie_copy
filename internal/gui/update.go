@@ -26,6 +26,8 @@ type updater struct {
 	bundle  string // the .app to replace, "" when not in one or not writable
 	exe     string // off the Mac: the binary to replace, "" when not writable
 	staged  string
+	done    int64 // downloading: bytes so far, of total (0 when unknown)
+	total   int64
 	onReady func(version string)
 }
 
@@ -36,6 +38,8 @@ type updateJSON struct {
 	Notes   string `json:"notes,omitempty"`
 	URL     string `json:"url,omitempty"`
 	Error   string `json:"error,omitempty"`
+	Done    int64  `json:"done,omitempty"` // downloading: bytes so far
+	Total   int64  `json:"total,omitempty"`
 }
 
 var updates = &updater{}
@@ -91,8 +95,13 @@ func (u *updater) check() {
 		u.state = "available" // the user fetches it from the release page
 		return
 	}
-	u.state = "downloading"
+	u.state, u.done, u.total = "downloading", 0, 0
 	u.mu.Unlock()
+	ctx = update.WithProgress(ctx, func(done, total int64) {
+		u.mu.Lock()
+		u.done, u.total = done, total
+		u.mu.Unlock()
+	})
 	var staged string
 	if u.bundle != "" {
 		staged, err = update.Stage(ctx, rel, u.bundle)
@@ -137,6 +146,9 @@ func (u *updater) json() updateJSON {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	j := updateJSON{State: u.state, Current: Version, Error: u.err}
+	if u.state == "downloading" {
+		j.Done, j.Total = u.done, u.total
+	}
 	if u.latest != nil {
 		j.Latest, j.Notes, j.URL = u.latest.Version, u.latest.Notes, u.latest.URL
 	}

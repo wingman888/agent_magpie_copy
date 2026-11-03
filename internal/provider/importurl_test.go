@@ -85,6 +85,40 @@ func TestParseImportRejects(t *testing.T) {
 	}
 }
 
+func TestParseImportIcon(t *testing.T) {
+	q := url.Values{
+		"name": {"My Relay"},
+		"chat": {"https://relay.example/v1"},
+		"icon": {"https://relay.example/logo.svg?v=2"},
+	}
+	p, err := ParseImport("magpie://import?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.IconURL != "https://relay.example/logo.svg?v=2" {
+		t.Fatalf("iconUrl = %q", p.IconURL)
+	}
+	// an explicit icon wins over the catalog's own logo
+	q.Set("catalog", "openai")
+	if p, err = ParseImport("magpie://import?" + q.Encode()); err != nil || p.IconURL == "" {
+		t.Fatalf("with a catalog: %+v, %v", p, err)
+	}
+	for _, bad := range []string{
+		"http://relay.example/logo.svg", // plain http
+		"file:///etc/passwd",
+		"https://user:pw@relay.example/logo.svg",
+		"https://relay.example/logo.svg#x",
+		"https://localhost/logo.svg",
+		"https://127.0.0.1/logo.svg",
+		"not a url",
+	} {
+		q.Set("icon", bad)
+		if _, err := ParseImport("magpie://import?" + q.Encode()); err == nil {
+			t.Errorf("icon %q accepted", bad)
+		}
+	}
+}
+
 func TestParseImportLocalHTTP(t *testing.T) {
 	for _, host := range []string{"localhost:11434", "127.0.0.1:8080", "192.168.1.20:8000", "box.local"} {
 		if _, err := ParseImport("magpie://import?name=Local&chat=http://" + host + "/v1"); err != nil {

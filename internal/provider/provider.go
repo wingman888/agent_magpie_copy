@@ -37,11 +37,14 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName names the front key (Key). Keys are the other keys the provider
-	// holds, in the order magpie tries them after the front one. Key stays the
-	// front key, so anything that reads it sees the account magpie uses first.
-	KeyName string     `json:"keyName,omitempty"`
-	Keys    []KeyEntry `json:"keys,omitempty"`
+	// KeyName names the key in use, and Keys are the provider's other
+	// accounts: keys saved to switch to (see keys.go).
+	KeyName string       `json:"keyName,omitempty"`
+	Keys    []KeyAccount `json:"keys,omitempty"`
+	// KeyProtocol, when set, is the one protocol the first key is good
+	// for: a relay that hands out one key for Anthropic and another for
+	// OpenAI (see KeyAccount.Protocol).
+	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -55,6 +58,14 @@ type Provider struct {
 	// reply has been sent: models as agents pick them (provider/model),
 	// tried in order.
 	Fallback []string `json:"fallback,omitempty"`
+
+	// Routing is how requests spread over the keys or accounts it has on:
+	// "" smart, the first while it has quota to spare, then whichever has
+	// the most; "order" in order, the next one only when the one before
+	// can't take it; "rotate" each in turn; "usage" the least used first.
+	// Whichever it is, one out of credit, out of quota, rate limited or
+	// failing is passed over for as long as that lasts.
+	Routing string `json:"routing,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
@@ -71,6 +82,11 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// IconURL is a picture the vendor named in an import link, to be fetched
+	// once the user confirms. It is only a carrier between parsing and that
+	// fetch: Save drops it, so it never reaches providers.json.
+	IconURL string `json:"iconUrl,omitempty"`
 
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
@@ -126,8 +142,7 @@ func All() []Provider {
 	picks := map[string]Provider{}
 	var out []Provider
 	for _, p := range stored {
-		// an unusable key list still lists (with no key in use); only Save refuses it
-		p, _ = normalize(p)
+		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			picks[p.ID] = p
 			continue
@@ -138,7 +153,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
+		a.Models, a.Fallback, a.Routing = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing
 		out = append(out, a)
 	}
 	return out
@@ -186,10 +201,8 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
-	p, err := normalize(p)
-	if err != nil {
-		return err
-	}
+	p = normalize(p)
+	p.IconURL = "" // import-only: never stored
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
@@ -205,7 +218,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -256,6 +269,37 @@ func Delete(id string) error {
 	return store(f)
 }
 
+// Stored lists the providers exactly as providers.json holds them: no
+// signed-in accounts, nothing derived. Backups read from here.
+func Stored() []Provider { return load().Providers }
+
+// Put writes p as it is, replacing the stored provider with the same id or
+// adding it. Unlike Save it accepts a provider without a key or a URL, so a
+// backup can be restored as it was taken. replaced reports whether an entry
+// with that id already existed.
+func Put(p Provider) (replaced bool, err error) {
+	p = normalize(p)
+	p.IconURL = ""
+	if p.ID == "" || p.ID != Slug(p.ID) {
+		return false, fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
+	}
+	if p.ID == "magpie" {
+		return false, errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
+	}
+	if p.Name == "" {
+		p.Name = p.ID
+	}
+	f := load()
+	for i := range f.Providers {
+		if f.Providers[i].ID == p.ID {
+			f.Providers[i] = p
+			return true, store(f)
+		}
+	}
+	f.Providers = append(f.Providers, p)
+	return false, store(f)
+}
+
 // keyOptional is true for local servers, which usually have no key.
 func keyOptional(p Provider) bool {
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
@@ -265,39 +309,10 @@ func keyOptional(p Provider) bool {
 	return strings.HasPrefix(h, "localhost") || strings.HasPrefix(h, "127.0.0.1") || strings.HasPrefix(h, "0.0.0.0")
 }
 
-// normalize tidies a provider as read from or written to the file. The error
-// is for a key list that cannot work: no front key, and every other key
-// disabled. The provider is returned unpromoted in that case.
-func normalize(p Provider) (Provider, error) {
-	var keyErr error
+func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p.Key, p.Keys)
-	if p.Key == "" && len(p.Keys) > 0 {
-		// no front key but others: the first enabled one fronts; disabled
-		// ones ahead of it stay where they are, disabled
-		j := -1
-		for i, k := range p.Keys {
-			if !k.Off {
-				j = i
-				break
-			}
-		}
-		if j < 0 {
-			keyErr = fmt.Errorf("%s has no enabled key", p.Name)
-		} else {
-			front := p.Keys[j]
-			rest := make([]KeyEntry, 0, len(p.Keys)-1)
-			rest = append(rest, p.Keys[:j]...)
-			rest = append(rest, p.Keys[j+1:]...)
-			p.Key, p.KeyName, p.Keys = front.Key, strings.TrimSpace(front.Name), rest
-		}
-	}
-	if p.Key == "" {
-		p.KeyName = ""
-	}
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -306,6 +321,9 @@ func normalize(p Provider) (Provider, error) {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
+	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
+		p.Routing = ""
+	}
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
@@ -327,7 +345,7 @@ func normalize(p Provider) (Provider, error) {
 			p.KeysURL = pr.KeysURL
 		}
 	}
-	return p, keyErr
+	return p
 }
 
 // Catalogs are the models.dev ids the provider's models are looked up in,
@@ -425,10 +443,9 @@ func HostOf(u string) string {
 	return strings.ToLower(u)
 }
 
-// Mask hides all but the ends of a secret. A secret under 16 characters is
-// hidden entirely; a longer one shows its first and last 4 characters.
+// Mask hides all but the ends of a secret.
 func Mask(s string) string {
-	if len(s) < 16 {
+	if len(s) <= 8 {
 		return strings.Repeat("•", len(s))
 	}
 	return s[:4] + "…" + s[len(s)-4:]

@@ -1,5 +1,12 @@
 package provider
 
+// A provider can hold several accounts, as a subscription can: several API
+// keys — a personal one and the team's, a paid plan and a free one. Any
+// number of them can be on at once: requests go to the first, and when it
+// is out of quota or rate limited the gateway moves on to the next one
+// that's on (see gateway/fallback.go). Key stays the first, so everything
+// else that talks to the vendor reads it as before.
+
 import (
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,330 +15,259 @@ import (
 	"strings"
 )
 
-// A provider can hold several API keys (accounts) at once. The front key is
-// Provider.Key (named by Provider.KeyName); Provider.Keys holds the rest in the
-// order magpie tries them. A key with Off set is kept but never used.
-//
-// Keys are addressed by keyID, a short hash of the key itself, so a listing
-// can refer to one without showing it.
-
-// KeyEntry is a key beyond the front one, as stored in providers.json.
-type KeyEntry struct {
+// KeyAccount is a saved key after the first. Off keeps it without using it.
+type KeyAccount struct {
 	Name string `json:"name,omitempty"`
 	Key  string `json:"key"`
-	Off  bool   `json:"off,omitempty"` // kept, but not used
+	Off  bool   `json:"off,omitempty"`
+	// Protocol, when set, is the only one the key works with: some relays
+	// give out one key for Anthropic and another for OpenAI. Empty is any.
+	Protocol Protocol `json:"protocol,omitempty"`
 }
 
-// KeyInfo describes one key for listings. It never carries the key itself.
+// KeyInfo describes one of a provider's keys without giving it away.
 type KeyInfo struct {
-	ID     string // stable reference, see keyID
-	Name   string
-	Masked string
-	Active bool // first in line: requests go to it first
-	On     bool // enabled; a disabled key is never sent a request
+	ID     string `json:"id"` // a fingerprint, to name it in a switch
+	Name   string `json:"name,omitempty"`
+	Masked string `json:"masked"`
+	Active bool   `json:"active"` // the first, where requests go
+	On     bool   `json:"on"`     // in use: the first, or next in line
+
+	Protocol Protocol `json:"protocol,omitempty"` // the only one it works with
 }
 
-// Credential is an enabled key, in the order requests try them.
-type Credential struct {
-	ID   string
-	Name string
-	Key  string
-}
-
-// Label names the account for logs and call records: "id(name)", or
-// "id(masked key)" when the key has no name.
-func (c Credential) Label(providerID string) string {
-	if c.Name != "" {
-		return providerID + "(" + c.Name + ")"
-	}
-	return providerID + "(" + Mask(c.Key) + ")"
-}
-
-// keyItem is one key in the working list; the front key is items[0].
-type keyItem struct {
-	name string
-	key  string
-	on   bool
-}
-
-// keyID is the stable reference for a key: a hash prefix, never the key.
 func keyID(key string) string {
 	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])[:12]
+	return hex.EncodeToString(sum[:5])
 }
 
-// cleanKeys drops blank and repeated keys (including the front one) from the
-// extra keys, trimming their fields.
-func cleanKeys(front string, keys []KeyEntry) []KeyEntry {
-	var out []KeyEntry
-	seen := map[string]bool{front: true}
-	for _, k := range keys {
-		k.Key = strings.TrimSpace(k.Key)
-		k.Name = strings.TrimSpace(k.Name)
-		if k.Key == "" || seen[k.Key] {
-			continue
-		}
-		seen[k.Key] = true
-		out = append(out, k)
-	}
-	return out
-}
+// KeyID is the fingerprint a key is named by, in lists and in the gateway.
+func KeyID(key string) string { return keyID(key) }
 
-// keyItems is the provider's keys in try order. The front key is always on.
-func keyItems(p *Provider) []keyItem {
-	var items []keyItem
+// KeyList is a provider's keys, in the order requests try them.
+func (p Provider) KeyList() []KeyInfo {
+	var out []KeyInfo
 	if p.Key != "" {
-		items = append(items, keyItem{name: p.KeyName, key: p.Key, on: true})
+		out = append(out, KeyInfo{ID: keyID(p.Key), Name: p.KeyName, Masked: Mask(p.Key), Active: true, On: true, Protocol: p.KeyProtocol})
 	}
 	for _, k := range p.Keys {
-		if k.Key != "" {
-			items = append(items, keyItem{name: k.Name, key: k.Key, on: !k.Off})
-		}
+		out = append(out, KeyInfo{ID: keyID(k.Key), Name: k.Name, Masked: Mask(k.Key), On: !k.Off, Protocol: k.Protocol})
 	}
-	return items
+	return out
 }
 
-// setKeyItems writes a working list back into the stored fields.
-func setKeyItems(p *Provider, items []keyItem) {
-	p.Key, p.KeyName, p.Keys = "", "", nil
-	if len(items) == 0 {
-		return
+// KeysOn is the keys in use, first to last: the first key, then every
+// saved one that's on.
+func (p Provider) KeysOn() []KeyAccount {
+	if p.Key == "" {
+		return nil
 	}
-	p.Key, p.KeyName = items[0].key, items[0].name
-	for _, it := range items[1:] {
-		p.Keys = append(p.Keys, KeyEntry{Name: it.name, Key: it.key, Off: !it.on})
-	}
-}
-
-func countOn(items []keyItem) int {
-	n := 0
-	for _, it := range items {
-		if it.on {
-			n++
-		}
-	}
-	return n
-}
-
-// firstOn is the index of the first enabled key, or -1.
-func firstOn(items []keyItem) int {
-	for i, it := range items {
-		if it.on {
-			return i
-		}
-	}
-	return -1
-}
-
-// moveToFront returns items with items[j] first and the rest in order.
-func moveToFront(items []keyItem, j int) []keyItem {
-	out := make([]keyItem, 0, len(items))
-	out = append(out, items[j])
-	for i, it := range items {
-		if i != j {
-			out = append(out, it)
+	out := []KeyAccount{p.first()}
+	for _, k := range p.Keys {
+		if !k.Off && k.Key != "" {
+			out = append(out, k)
 		}
 	}
 	return out
 }
 
-func findKey(p *Provider, items []keyItem, ref string) (int, error) {
-	ref = strings.TrimSpace(ref)
-	for i := range items {
-		if keyID(items[i].key) == ref {
-			return i, nil
-		}
+// AddKey saves one more key for a provider, on: it takes requests after
+// the ones before it. It becomes the first when the provider has none.
+func AddKey(id, name, key string, proto Protocol) error {
+	name, key = strings.TrimSpace(name), strings.TrimSpace(key)
+	if err := keyProtocolOK(proto); err != nil {
+		return err
 	}
-	// the ref is user input and never echoed: it could be a pasted key
-	return -1, fmt.Errorf("%s has no key with that id (see the key list for ids)", p.Name)
-}
-
-// editKeys loads the provider, lets edit change its key list, and saves the
-// result. Only the key fields of the stored entry are touched, so presets'
-// defaults are not written back into the file.
-func editKeys(id string, edit func(p *Provider, items []keyItem) ([]keyItem, error)) error {
+	if key == "" {
+		return errors.New("paste the key to add")
+	}
 	p, err := Find(id)
 	if err != nil {
 		return err
 	}
 	if p.Account != nil {
-		return fmt.Errorf("%s is a signed-in account; it has no API keys to manage", p.Name)
+		return errors.New("a signed-in account has no keys")
 	}
-	items, err := edit(p, keyItems(p))
+	for _, k := range p.KeyList() {
+		if k.ID == keyID(key) {
+			return fmt.Errorf("%s already has this key", p.Name)
+		}
+	}
+	if p.Key == "" {
+		p.Key, p.KeyName, p.KeyProtocol = key, name, proto
+	} else {
+		p.Keys = append(p.Keys, KeyAccount{Name: name, Key: key, Protocol: proto})
+	}
+	return Save(*p)
+}
+
+// first is the first key as a KeyAccount, and setFirst makes k the first.
+func (p *Provider) first() KeyAccount {
+	return KeyAccount{Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol}
+}
+
+func (p *Provider) setFirst(k KeyAccount) {
+	p.Key, p.KeyName, p.KeyProtocol = k.Key, k.Name, k.Protocol
+}
+
+func keyProtocolOK(proto Protocol) error {
+	switch proto {
+	case "", Chat, Responses, Anthropic:
+		return nil
+	}
+	return fmt.Errorf("unknown protocol %q", proto)
+}
+
+// SetKeyProtocol says which one protocol a key works with; empty is any.
+func SetKeyProtocol(id, keyRef string, proto Protocol) error {
+	if err := keyProtocolOK(proto); err != nil {
+		return err
+	}
+	p, err := Find(id)
 	if err != nil {
 		return err
 	}
-	if len(items) > 0 && countOn(items) == 0 {
-		return fmt.Errorf("%s needs at least one enabled key", p.Name)
+	i, ok := findKey(p, keyRef)
+	if !ok {
+		return fmt.Errorf("%s has no such key", p.Name)
 	}
-	f := load()
-	for i := range f.Providers {
-		if q, _ := normalize(f.Providers[i]); q.ID == p.ID {
-			setKeyItems(&f.Providers[i], items)
-			return store(f)
-		}
+	if i < 0 {
+		p.KeyProtocol = proto
+	} else {
+		p.Keys[i].Protocol = proto
 	}
-	return fmt.Errorf("no provider %q", id)
+	return Save(*p)
 }
 
-// AddKey adds a key to a provider. It is enabled and goes after the existing
-// keys; if the provider had none, it becomes the front key.
-func AddKey(id, name, key string) error {
-	key = strings.TrimSpace(key)
+// WithKey is p using key k: its endpoints narrowed to k's protocol when k
+// has one. It has none left when p doesn't serve that protocol.
+func (p Provider) WithKey(k KeyAccount) Provider {
+	p.Key, p.KeyName, p.KeyProtocol = k.Key, k.Name, k.Protocol
+	if k.Protocol != "" {
+		for _, pr := range Protocols {
+			if pr != k.Protocol {
+				switch pr {
+				case Chat:
+					p.Chat = ""
+				case Responses:
+					p.Responses = ""
+				case Anthropic:
+					p.Anthropic = ""
+				}
+			}
+		}
+	}
+	return p
+}
+
+// findKey is where a key is among p.Keys: -1 for the first key, and ok
+// false when p has no such key.
+func findKey(p *Provider, ref string) (int, bool) {
+	if p.Key != "" && keyID(p.Key) == ref {
+		return -1, true
+	}
+	for i, k := range p.Keys {
+		if keyID(k.Key) == ref {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// UseKey makes one of a provider's keys the first, and turns it on; the
+// one it replaces stays on, next in line.
+func UseKey(id, keyRef string) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	i, ok := findKey(p, keyRef)
+	if !ok {
+		return fmt.Errorf("%s has no such key", p.Name)
+	}
+	if i < 0 {
+		return nil
+	}
+	k := p.Keys[i]
+	rest := append([]KeyAccount{p.first()}, append(p.Keys[:i:i], p.Keys[i+1:]...)...)
+	p.setFirst(k)
+	p.Keys = rest
+	return Save(*p)
+}
+
+// promote takes the first key out of use: the next key that's on takes
+// its place. ok is false when none is.
+func promote(p *Provider) (old KeyAccount, ok bool) {
+	for i, k := range p.Keys {
+		if !k.Off {
+			old = p.first()
+			p.setFirst(k)
+			p.Keys = append(p.Keys[:i:i], p.Keys[i+1:]...)
+			return old, true
+		}
+	}
+	return KeyAccount{}, false
+}
+
+// SetKeyOn turns a key on or off. The last key that's on stays on.
+func SetKeyOn(id, keyRef string, on bool) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	i, ok := findKey(p, keyRef)
+	if !ok {
+		return fmt.Errorf("%s has no such key", p.Name)
+	}
+	switch {
+	case i >= 0:
+		p.Keys[i].Off = !on
+	case !on:
+		old, ok := promote(p)
+		if !ok {
+			return errors.New("that's the only key in use; turn another on first")
+		}
+		old.Off = true
+		p.Keys = append([]KeyAccount{old}, p.Keys...)
+	default:
+		return nil
+	}
+	return Save(*p)
+}
+
+// RemoveKey forgets a key. The last key in use stays: turn another on first.
+func RemoveKey(id, keyRef string) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	i, ok := findKey(p, keyRef)
+	if !ok {
+		return fmt.Errorf("%s has no such key", p.Name)
+	}
+	if i >= 0 {
+		p.Keys = append(p.Keys[:i], p.Keys[i+1:]...)
+	} else if _, ok := promote(p); !ok {
+		return errors.New("that's the only key in use; turn another on before removing it")
+	}
+	return Save(*p)
+}
+
+// RenameKey names one of a provider's keys, "Personal", "Team".
+func RenameKey(id, keyRef, name string) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	i, ok := findKey(p, keyRef)
+	if !ok {
+		return fmt.Errorf("%s has no such key", p.Name)
+	}
 	name = strings.TrimSpace(name)
-	if key == "" {
-		return errors.New("the API key is empty")
+	if i < 0 {
+		p.KeyName = name
+	} else {
+		p.Keys[i].Name = name
 	}
-	return editKeys(id, func(p *Provider, items []keyItem) ([]keyItem, error) {
-		for _, it := range items {
-			if it.key == key {
-				return nil, fmt.Errorf("%s already has that key (%s)", p.Name, Mask(key))
-			}
-		}
-		return append(items, keyItem{name: name, key: key, on: true}), nil
-	})
-}
-
-// SetFrontKey replaces the front key's secret. The front key keeps its name
-// and the other keys stay as they are. The new key may not already be one of
-// the others, since that would silently drop an account.
-func SetFrontKey(id, key string) error {
-	key = strings.TrimSpace(key)
-	return editKeys(id, func(p *Provider, items []keyItem) ([]keyItem, error) {
-		if key == "" {
-			if len(items) > 1 {
-				return nil, fmt.Errorf("%s has other keys; remove them before clearing its front key", p.Name)
-			}
-			if !keyOptional(*p) {
-				return nil, fmt.Errorf("%s needs an API key", p.Name)
-			}
-			return nil, nil
-		}
-		for i := 1; i < len(items); i++ {
-			if items[i].key == key {
-				return nil, fmt.Errorf("%s already has that key as another of its keys (%s)", p.Name, Mask(key))
-			}
-		}
-		if len(items) == 0 {
-			return []keyItem{{key: key, on: true}}, nil
-		}
-		items[0].key = key
-		return items, nil
-	})
-}
-
-// UseKey makes a key the front one and enabled. The key that was in front
-// stays enabled and comes right after it.
-func UseKey(id, ref string) error {
-	return editKeys(id, func(p *Provider, items []keyItem) ([]keyItem, error) {
-		i, err := findKey(p, items, ref)
-		if err != nil {
-			return nil, err
-		}
-		if i == 0 {
-			return items, nil
-		}
-		items[i].on = true
-		return moveToFront(items, i), nil
-	})
-}
-
-// SetKeyOn enables or disables a key. Disabling the front key hands the front
-// to the next enabled key; the disabled one stays in the list. It is an error
-// to leave the provider without an enabled key.
-func SetKeyOn(id, ref string, on bool) error {
-	return editKeys(id, func(p *Provider, items []keyItem) ([]keyItem, error) {
-		i, err := findKey(p, items, ref)
-		if err != nil {
-			return nil, err
-		}
-		if items[i].on == on {
-			return items, nil
-		}
-		if on {
-			items[i].on = true
-			return items, nil
-		}
-		if countOn(items) <= 1 {
-			return nil, fmt.Errorf("%s needs at least one enabled key; enable another key first", p.Name)
-		}
-		items[i].on = false
-		if i == 0 {
-			items = moveToFront(items, firstOn(items))
-		}
-		return items, nil
-	})
-}
-
-// RemoveKey deletes a key. Removing the front key hands the front to the next
-// enabled key. The last enabled key cannot be removed.
-func RemoveKey(id, ref string) error {
-	return editKeys(id, func(p *Provider, items []keyItem) ([]keyItem, error) {
-		i, err := findKey(p, items, ref)
-		if err != nil {
-			return nil, err
-		}
-		if items[i].on && countOn(items) <= 1 {
-			return nil, fmt.Errorf("%s needs at least one enabled key; this is its last one", p.Name)
-		}
-		out := make([]keyItem, 0, len(items)-1)
-		for j, it := range items {
-			if j != i {
-				out = append(out, it)
-			}
-		}
-		if i == 0 {
-			if j := firstOn(out); j >= 0 {
-				out = moveToFront(out, j)
-			}
-		}
-		return out, nil
-	})
-}
-
-// RenameKey names a key. An empty name clears it.
-func RenameKey(id, ref, name string) error {
-	name = strings.TrimSpace(name)
-	return editKeys(id, func(p *Provider, items []keyItem) ([]keyItem, error) {
-		i, err := findKey(p, items, ref)
-		if err != nil {
-			return nil, err
-		}
-		items[i].name = name
-		return items, nil
-	})
-}
-
-// KeyList describes every key in try order, front first. Keys are shown
-// masked.
-func (p *Provider) KeyList() []KeyInfo {
-	items := keyItems(p)
-	out := make([]KeyInfo, 0, len(items))
-	for i, it := range items {
-		out = append(out, KeyInfo{
-			ID:     keyID(it.key),
-			Name:   it.name,
-			Masked: Mask(it.key),
-			Active: i == 0,
-			On:     it.on,
-		})
-	}
-	return out
-}
-
-// KeysOn lists the enabled keys in try order. A provider with no keys at all
-// (a local server, or a signed-in account) returns one empty Credential, so a
-// request is still tried once, unkeyed.
-func (p *Provider) KeysOn() []Credential {
-	items := keyItems(p)
-	if len(items) == 0 {
-		return []Credential{{}}
-	}
-	var out []Credential
-	for _, it := range items {
-		if it.on {
-			out = append(out, Credential{ID: keyID(it.key), Name: it.name, Key: it.key})
-		}
-	}
-	return out
+	return Save(*p)
 }
