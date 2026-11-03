@@ -70,25 +70,35 @@ func keyFamily(proto provider.Protocol) string {
 	return ""
 }
 
-// keyTier ranks how well a key suits a request, 0 best: the key of the
-// model's own family first, then a key for any model, then a key for
-// another family. When the name says nothing, a key that speaks the client's
-// protocol directly is best and one that needs translating is not.
+// keyTier ranks how well a key suits a request, 0 best:
+//  0. a key limited to the model's own family (Claude with an Anthropic key,
+//     GPT with an OpenAI-type key);
+//  1. a key for any model that speaks the client's protocol directly;
+//  2. a key for any model that needs the request translated first;
+//  3. a key limited to another family's model.
+//
+// When the model's family is unknown, a key that speaks the client's
+// protocol directly (limited to that protocol, or for any model on an
+// endpoint the provider has for it) is 0 and every other key is 1; the name
+// alone never favours a key.
 func keyTier(from provider.Protocol, family string, p provider.Provider, k provider.KeyAccount) int {
-	if family != familyUnknown {
-		switch kf := keyFamily(k.Protocol); {
-		case kf == family:
+	direct := k.Protocol == from || (k.Protocol == "" && p.Base(from) != "")
+	if family == familyUnknown {
+		if direct {
 			return 0
-		case kf == "":
-			return 1
-		default:
-			return 2
 		}
+		return 1
 	}
-	if k.Protocol == from || (k.Protocol == "" && p.Base(from) != "") {
+	switch kf := keyFamily(k.Protocol); {
+	case kf == family:
 		return 0
+	case kf == "" && direct:
+		return 1
+	case kf == "":
+		return 2
+	default:
+		return 3
 	}
-	return 1
 }
 
 // label names a candidate in a call's record: the provider, and the key

@@ -102,6 +102,87 @@ func TestKeysLimitedToAMissingProtocolAreNoCandidates(t *testing.T) {
 	}
 }
 
+func TestKeyTierRanksFourLevels(t *testing.T) {
+	// a vendor with a Chat and an Anthropic endpoint, and no Responses one
+	p := provider.Provider{ID: "relay", Chat: "http://chat/v1", Anthropic: "http://ant"}
+	chatKey := provider.KeyAccount{Name: "GPT", Key: "k-chat", Protocol: provider.Chat}
+	antKey := provider.KeyAccount{Name: "Claude", Key: "k-ant", Protocol: provider.Anthropic}
+	gen := provider.KeyAccount{Name: "Any", Key: "k-gen"}
+	for _, tc := range []struct {
+		name  string
+		from  provider.Protocol
+		model string
+		k     provider.KeyAccount
+		want  int
+	}{
+		// claude model: own family 0, any-key direct 1, any-key translated 2, other family 3
+		{"claude, anthropic client, own key", provider.Anthropic, "claude-opus-4-8", antKey, 0},
+		{"claude, anthropic client, any key direct", provider.Anthropic, "claude-opus-4-8", gen, 1},
+		{"claude, responses client, any key translated", provider.Responses, "claude-opus-4-8", gen, 2},
+		{"claude, responses client, own key", provider.Responses, "claude-opus-4-8", antKey, 0},
+		{"claude, anthropic client, openai key", provider.Anthropic, "claude-opus-4-8", chatKey, 3},
+		{"claude, chat client, openai key", provider.Chat, "claude-opus-4-8", chatKey, 3},
+		// gpt model: own family 0, any-key direct 1, any-key translated 2, other family 3
+		{"gpt, chat client, own key", provider.Chat, "gpt-5.5", chatKey, 0},
+		{"gpt, chat client, any key direct", provider.Chat, "gpt-5.5", gen, 1},
+		{"gpt, anthropic client, any key translated", provider.Anthropic, "gpt-5.5", gen, 2},
+		{"gpt, anthropic client, anthropic key", provider.Anthropic, "gpt-5.5", antKey, 3},
+		// unknown model: direct key 0, others 1; the name never favours a key
+		{"unknown, chat client, own key", provider.Chat, "deepseek-chat", chatKey, 0},
+		{"unknown, chat client, any key direct", provider.Chat, "deepseek-chat", gen, 0},
+		{"unknown, chat client, anthropic key", provider.Chat, "deepseek-chat", antKey, 1},
+		{"unknown, responses client, any key translated", provider.Responses, "deepseek-chat", gen, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := keyTier(tc.from, modelFamily(tc.model), p, tc.k); got != tc.want {
+				t.Fatalf("keyTier = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKeysFourLevelsOrderAndConfigOrderWithinTier(t *testing.T) {
+	p := func(first provider.KeyAccount, rest ...provider.KeyAccount) provider.Provider {
+		return provider.Provider{ID: "relay", Chat: "http://chat/v1", Anthropic: "http://ant",
+			Key: first.Key, KeyName: first.Name, KeyProtocol: first.Protocol, Keys: rest}
+	}
+	chat := provider.KeyAccount{Name: "GPT", Key: "k-chat", Protocol: provider.Chat}
+	chat2 := provider.KeyAccount{Name: "GPT2", Key: "k-chat2", Protocol: provider.Chat}
+	ant := provider.KeyAccount{Name: "Claude", Key: "k-ant", Protocol: provider.Anthropic}
+	gen1 := provider.KeyAccount{Name: "Any1", Key: "k-gen1"}
+	gen2 := provider.KeyAccount{Name: "Any2", Key: "k-gen2"}
+	gen3 := provider.KeyAccount{Name: "Any3", Key: "k-gen3"}
+	for _, tc := range []struct {
+		name  string
+		p     provider.Provider
+		from  provider.Protocol
+		model string
+		want  []string
+	}{
+		// claude from responses: own 0, translated generic 2, other family 3,
+		// in that order whatever the configured order
+		{"claude from responses, four levels", p(chat, gen1, ant), provider.Responses, "claude-opus-4-8",
+			[]string{"k-ant", "k-gen1", "k-chat"}},
+		{"claude from responses, configured the other way", p(ant, chat, gen1), provider.Responses, "claude-opus-4-8",
+			[]string{"k-ant", "k-gen1", "k-chat"}},
+		// gpt from chat: own 0, direct generic 1, other family 3
+		{"gpt from chat, four levels", p(ant, gen1, chat2), provider.Chat, "gpt-5.5",
+			[]string{"k-chat2", "k-gen1", "k-ant"}},
+		// same tier keeps the configured order: generics 2 (translated) then openai keys 3
+		{"same tiers keep configured order", p(gen1, chat, gen2, chat2, gen3), provider.Responses, "claude-opus-4-8",
+			[]string{"k-gen1", "k-gen2", "k-gen3", "k-chat", "k-chat2"}},
+		{"same tiers keep configured order, reversed", p(chat2, gen3, ant, gen2, chat), provider.Responses, "claude-opus-4-8",
+			[]string{"k-ant", "k-gen3", "k-gen2", "k-chat2", "k-chat"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := keysOf(perKey(tc.from, tc.p, tc.model))
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("keys %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // routed is an upstream with a Chat and an Anthropic endpoint. It records
 // "path key" for each request, the key from x-api-key or the bearer token.
 type routed struct {
