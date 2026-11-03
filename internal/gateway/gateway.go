@@ -80,8 +80,14 @@ type Server struct {
 // upstream traffic by replacing http.DefaultTransport.
 func New() *Server {
 	return &Server{
-		client: &http.Client{},
-		debug:  os.Getenv("DIAL_DEBUG") != "",
+		client: &http.Client{Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ResponseHeaderTimeout: 10 * time.Minute,
+			MaxIdleConnsPerHost:   8,
+			IdleConnTimeout:       90 * time.Second,
+			ForceAttemptHTTP2:     true,
+		}},
+		debug: os.Getenv("DIAL_DEBUG") != "",
 	}
 }
 
