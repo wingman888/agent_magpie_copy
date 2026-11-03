@@ -51,9 +51,20 @@ func (p Provider) Test(ctx context.Context) []Result {
 	return out
 }
 
-// AuthHeaders is how a request to the vendor proves who it is. Anthropic's
-// own API wants x-api-key alone; compatible vendors take either, so both.
+// AuthHeaders is how a request to the vendor proves who it is. An agent-backed
+// provider gets the agent's login (no error is reported here; the gateway calls
+// Upstream, which does report one). Otherwise, Anthropic's own API wants
+// x-api-key alone; compatible vendors take either, so both.
 func AuthHeaders(p Provider, proto Protocol) map[string]string {
+	if p.Account != nil {
+		_, h, _ := Upstream(context.Background(), p, proto, nil)
+		return h
+	}
+	return keyHeaders(p, proto)
+}
+
+// keyHeaders is the key-based half of AuthHeaders.
+func keyHeaders(p Provider, proto Protocol) map[string]string {
 	if p.Key == "" {
 		return map[string]string{}
 	}

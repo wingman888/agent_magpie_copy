@@ -31,10 +31,10 @@ var Protocols = []Protocol{Chat, Responses, Anthropic}
 // Provider is one configured vendor.
 type Provider struct {
 	ID     string `json:"id"`
-	Name   string `json:"name"`
+	Name   string `json:"name,omitempty"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key,omitempty"`    // API key, as typed by the user
 
 	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -46,6 +46,10 @@ type Provider struct {
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
+
+	// Account is set for providers backed by an agent's login (codex,
+	// copilot). It is filled in by All() and never stored.
+	Account *Account `json:"account,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
@@ -88,11 +92,28 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added.
+// All lists the configured providers in the order they were added, then each
+// agent login dial can offer. An agent-backed provider appears only while that
+// agent is signed in; its stored entry then holds just the user's model picks.
+// A Claude Code login is never offered.
 func All() []Provider {
-	out := load().Providers
-	for i := range out {
-		out[i] = normalize(out[i])
+	var out []Provider
+	picks := map[string][]string{}
+	for _, p := range load().Providers {
+		p = normalize(p)
+		switch {
+		case p.ID == claudeID:
+			continue
+		case IsAccount(p.ID):
+			picks[p.ID] = p.Models
+			continue
+		}
+		out = append(out, p)
+	}
+	for _, id := range accountIDs {
+		if acc, ok := signedInAs(id); ok {
+			out = append(out, accountProvider(acc, picks[id]))
+		}
 	}
 	return out
 }
@@ -124,6 +145,13 @@ func Save(p Provider) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
+	if p.ID == claudeID {
+		return errors.New("claude is Claude Code's login, not a provider dial offers")
+	}
+	if IsAccount(p.ID) {
+		// The agent's login is never stored here; only the model picks are.
+		return setAccountModels(p.ID, p.Models)
+	}
 	if p.ID == "dial" {
 		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
 	}
@@ -147,8 +175,12 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider.
+// Delete removes a provider. For an agent-backed provider it only clears the
+// model picks: the agent stays signed in and its login is left alone.
 func Delete(id string) error {
+	if IsAccount(id) {
+		return setAccountModels(id, nil)
+	}
 	f := load()
 	keep := f.Providers[:0]
 	found := false
@@ -176,6 +208,7 @@ func keyOptional(p Provider) bool {
 }
 
 func normalize(p Provider) Provider {
+	p.Account = nil // only All() sets this; a stored value is never trusted
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
@@ -276,5 +309,6 @@ func Mask(s string) string {
 	return s[:4] + "…" + s[len(s)-4:]
 }
 
-// Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
+// Ready reports whether the provider can be used: it has a key, needs none,
+// or is an agent login that is signed in.
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
