@@ -1,1 +1,1 @@
-. ./internal/settings ./internal/netproxy ./internal/update ./internal/usage ./internal/tui ./internal/profile
+./. ./internal/provider
