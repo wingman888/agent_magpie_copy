@@ -45,21 +45,6 @@ func readSSE(r io.Reader, fn func(event, data string) error) error {
 	return sc.Err()
 }
 
-// eventStream says whether an upstream reply is a server-sent event stream.
-// The ChatGPT backend sometimes sends no Content-Type on its stream, so when
-// the header is missing or unhelpful the first bytes of the body decide.
-func eventStream(contentType string, head []byte) bool {
-	ct := strings.ToLower(contentType)
-	if strings.HasPrefix(ct, "text/event-stream") {
-		return true
-	}
-	if strings.HasPrefix(ct, "application/json") {
-		return false
-	}
-	head = bytes.TrimLeft(head, " \t\r\n")
-	return bytes.HasPrefix(head, []byte("event:")) || bytes.HasPrefix(head, []byte("data:"))
-}
-
 // sseWriter writes events to a client and flushes each one.
 type sseWriter struct {
 	w     http.ResponseWriter
