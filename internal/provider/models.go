@@ -69,14 +69,24 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic, p.Headers)
+		// each endpoint is asked with a key that may use it; an endpoint
+		// with no such key is skipped
+		q, ok := p.ForProtocol(proto)
+		if !ok {
+			continue
+		}
+		ms, err := catalog.Fetch(ctx, q.Base(proto), q.Key, proto == Anthropic, q.Headers)
 		if err == nil {
-			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
+			return ms, catalog.SaveLive(p.ID, q.Base(proto), ms)
 		}
 		lastErr = err
 	}
 	if lastErr == nil {
-		lastErr = errorf("%s has no endpoint to ask", p.Name)
+		if len(p.Speaks()) > 0 {
+			lastErr = errorf("%s has no key that may use its endpoints", p.Name)
+		} else {
+			lastErr = errorf("%s has no endpoint to ask", p.Name)
+		}
 	}
 	return nil, lastErr
 }

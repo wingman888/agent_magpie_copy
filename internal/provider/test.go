@@ -33,19 +33,25 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
+		// each endpoint is probed with a key that may use it; an endpoint
+		// with no such key is not probed
+		q, ok := p.ForProtocol(proto)
+		if !ok {
+			continue
+		}
 		var url, body string
 		switch proto {
 		case Chat:
-			url = p.Chat + "/chat/completions"
+			url = q.Chat + "/chat/completions"
 			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 		case Responses:
-			url = p.Responses + "/responses"
+			url = q.Responses + "/responses"
 			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
 		case Anthropic:
-			url = p.Anthropic + "/v1/messages"
+			url = q.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		}
-		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
+		out = append(out, probe(ctx, q, proto, url, q.Prepare([]byte(body)), model))
 	}
 	return out
 }

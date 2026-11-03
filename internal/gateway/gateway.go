@@ -213,7 +213,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	p, model, ok := provider.Resolve(modelOf(body))
 	// Claude Subscription generations run through the Claude Code binary. Its
 	// OAuth token must not take a direct HTTP side path just for token counting.
-	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok") {
+	if ok && p.Account != nil && p.Account.Agent == "claude" {
 		req, err := parseAnthropic(body)
 		if err != nil {
 			writeError(w, provider.Anthropic, 400, err.Error())
@@ -223,27 +223,12 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ok {
-		// a relay's OpenAI-only key can't count Anthropic tokens
-		q := p
-		q.Anthropic = ""
-		for _, c := range perKey(p, model, provider.Anthropic) {
-			if c.p.Anthropic != "" {
-				q = c.p
-				break
-			}
-		}
-		p = q
-	}
-	if ok && p.Anthropic != "" {
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-		if err == nil {
+		if res := s.countUpstream(r.Context(), p, model, body, r.Header); res != nil {
 			defer res.Body.Close()
-			if res.StatusCode < 400 {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(res.StatusCode)
-				io.Copy(w, res.Body)
-				return
-			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(res.StatusCode)
+			io.Copy(w, res.Body)
+			return
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -252,6 +237,31 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
+}
+
+// countUpstream asks the provider's Anthropic endpoint to count tokens, with
+// the best fitting key that may reach that endpoint. A key limited to another
+// protocol never does, so a provider with only such keys gets no request here
+// and nil comes back. nil too when no key gets an answer below 400.
+func (s *Server) countUpstream(ctx context.Context, p provider.Provider, model string, body []byte, in http.Header) *http.Response {
+	keys := p.KeysOn()
+	if len(keys) == 0 {
+		keys = []provider.KeyAccount{{}} // a keyless provider still has its endpoint
+	}
+	for _, k := range orderKeys(p, keys, model, provider.Anthropic) {
+		q := p.WithKey(k)
+		if q.Anthropic == "" {
+			continue
+		}
+		res, err := s.forward(ctx, q, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), in)
+		if err == nil && res.StatusCode < 400 {
+			return res
+		}
+		if err == nil {
+			res.Body.Close()
+		}
+	}
+	return nil
 }
 
 // handle is the request path of one client API.
@@ -371,15 +381,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
 		if !last && hw.failed() {
-			s.restAfter(c.rest, hw.status, hw.header, hw.held.Bytes())
+			s.rest(c.rest)
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
 		hw.release()
 		model = c.model
-		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-		}
 		break
 	}
 	if len(skipped) > 0 {
@@ -404,22 +411,6 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
 		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
-	}
-	// Cursor's API belongs to its own clients: its CLI does the talking
-	if p.Account != nil && p.Account.Agent == "cursor" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startCursor(ctx, req, model)
-		}
-		return s.serveSubscription(w, r, from, "Cursor", model, body, &call.Usage, start)
-	}
-	// and so does Grok's
-	if p.Account != nil && p.Account.Agent == "grok" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startGrok(ctx, req, model, p.Account.Home)
-		}
-		return s.serveSubscription(w, r, from, "Grok", model, body, &call.Usage, start)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed

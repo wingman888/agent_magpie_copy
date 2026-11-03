@@ -71,7 +71,6 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
-| DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
 
 Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
@@ -204,7 +203,6 @@ you press *Add*. `magpie import <link>` does the same in a terminal.
 | `models`    | model ids to expose, comma separated                               |
 | `catalog`   | models.dev provider id, for model names and reasoning levels       |
 | `website`, `keys` | the vendor's site and its API-key page (https)               |
-| `icon`      | an https picture of the vendor's own (PNG, JPEG, GIF, WebP, ICO, SVG, at most 1 MB). magpie downloads it once, after you confirm the import, into its icons folder; without one it falls back to the catalog's logo or a plain mark |
 
 Base URLs must be https (plain http only to this machine or the local
 network). Web pages and GitHub don't link custom schemes reliably, so link
@@ -324,59 +322,6 @@ Keys in the terminal version:
 
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
-
-## Backup and restore
-
-`magpie backup` exports everything magpie has configured into one file,
-encrypted with a passphrase you choose:
-
-- every provider, with its keys (including multi-key accounts) and custom headers
-- the icon images you picked for providers
-- global settings, if any
-- all saved profiles
-- the current model and other settings of each agent
-
-```sh
-magpie backup                       # writes ./magpie.magpie-backup
-magpie backup ~/b.magpie-backup     # or choose the file name
-magpie backup --no-keys ~/b.magpie-backup   # leave out every API key and credential-like header
-```
-
-Passphrase: in a terminal it is read without echo and must be entered twice.
-When standard input is not a terminal (for scripts, `echo "pw" | magpie backup`),
-the first line of standard input is used and is not confirmed. An empty
-passphrase is an error and no file is written. The file is readable and
-writable only by you. Keep the passphrase: without it the file cannot be opened.
-
-Restore on the other machine:
-
-```sh
-magpie restore magpie.magpie-backup
-magpie restore --no-agents b.magpie-backup   # leave the agents' model choices alone
-echo "pw" | magpie restore magpie.magpie-backup   # passphrase from a pipe
-```
-
-Restore reads the passphrase once. If the passphrase is wrong or the file has
-been altered, nothing on this machine is changed.
-
-How restore treats existing data:
-
-- Providers are matched by id. A provider with the same id is replaced; otherwise it is added.
-- If the backup has no key for a provider that replaces a local one, the local key is kept.
-- Settings are replaced as a whole when the backup contains them.
-- Profiles are written by name: same name is overwritten, other local profiles are kept.
-- Icon images are written only if no file of that name exists locally.
-- Agent models are applied only to agents installed on this machine. Agents
-  that are not installed, or whose model is not available right now, are
-  listed as skipped. A single failing item does not stop the others.
-
-The summary lists providers added and replaced, whether settings were restored,
-and how many profiles and agent settings changed. Providers that have no usable
-key after restore are listed as **needs a key**; add one with
-`magpie provider key <id>`.
-
-Subscriptions (logins held by an agent on this machine, such as Claude Code or
-Codex) are not in the backup. Sign in again on the new machine.
 
 ## Files
 
