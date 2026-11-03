@@ -223,8 +223,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ok && p.Anthropic != "" {
-		kp, _ := s.readyKey(p)
-		res, err := s.forward(r.Context(), kp, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
 			if res.StatusCode < 400 {
@@ -350,46 +349,24 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary's keys, then its fallbacks' keys, while the request can't
-	// be taken and nothing has been sent yet
-	cands, skipped := s.candidates(p, model)
-	if len(cands) == 0 {
-		msg := p.Name + " has no enabled key"
-		call.Provider, call.Status, call.Error = p.ID, writeError(w, from, 502, msg), msg
-		call.Fallback = strings.Join(skipped, "; ")
-		call.Millis = time.Since(start).Milliseconds()
-		finishCapture()
-		s.record(call)
-		return
-	}
-	// keys of this provider that failed in this request; a named key that
-	// failed under one model is not sent again under another
-	failedKeys := map[string]bool{}
-	var hw *holdWriter
-	for i, a := range cands {
-		key := restKey(a.p.ID, a.cred)
-		if a.named && failedKeys[key] {
-			continue
-		}
-		// the first try that is not the last one may still fail over; the
-		// last one that runs releases whatever it got
-		last := r.Context().Err() != nil || !untried(cands[i+1:], failedKeys)
-		hw = newHoldWriter(w, !last)
-		hw.key = a.p.Key
-		model = a.model
-		call.Provider, call.To, call.Usage = a.p.ID, "", Usage{}
-		status, msg := s.attempt(hw, r, from, a.p, a.model, body, &call)
-		call.Status, call.Error = status, scrub(msg, a.p.Key)
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
+	cands := s.candidates(p, model)
+	var skipped []string
+	for i, c := range cands {
+		last := i == len(cands)-1 || r.Context().Err() != nil
+		hw := newHoldWriter(w, !last)
+		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
 		if !last && hw.failed() {
-			s.rest(key)
-			failedKeys[key] = true
-			skipped = append(skipped, a.label()+": "+call.Error)
+			s.rest(c.rest)
+			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
+		hw.release()
+		model = c.model
 		break
 	}
-	// when the tries ran out after a failure, its held reply goes out now
-	hw.release()
 	if len(skipped) > 0 {
 		call.Fallback = strings.Join(skipped, "; ")
 	}
@@ -411,7 +388,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
@@ -470,7 +447,6 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		noteUpstream(w, b)
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
@@ -613,7 +589,6 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		noteUpstream(w, b)
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
@@ -633,7 +608,6 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 			return dec(data, func(ev Event) {
 				switch ev.Kind {
 				case KError:
-					ev.Text = scrub(ev.Text, p.Key)
 					failed = ev.Text
 				case KStart, KUsage:
 					u.add(ev.Usage)

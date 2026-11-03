@@ -37,11 +37,12 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName names the front key (Key). Keys are the other keys the provider
-	// holds, in the order magpie tries them after the front one. Key stays the
-	// front key, so anything that reads it sees the account magpie uses first.
-	KeyName string     `json:"keyName,omitempty"`
-	Keys    []KeyEntry `json:"keys,omitempty"`
+	// KeyName names the key in use, and Keys are the provider's other
+	// accounts: keys saved to switch to (see keys.go).
+	// KeyProtocol limits the key in use to one protocol; empty means any.
+	KeyName     string       `json:"keyName,omitempty"`
+	KeyProtocol Protocol     `json:"keyProtocol,omitempty"`
+	Keys        []KeyAccount `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -126,8 +127,7 @@ func All() []Provider {
 	picks := map[string]Provider{}
 	var out []Provider
 	for _, p := range stored {
-		// an unusable key list still lists (with no key in use); only Save refuses it
-		p, _ = normalize(p)
+		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			picks[p.ID] = p
 			continue
@@ -186,10 +186,7 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
-	p, err := normalize(p)
-	if err != nil {
-		return err
-	}
+	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
@@ -265,39 +262,10 @@ func keyOptional(p Provider) bool {
 	return strings.HasPrefix(h, "localhost") || strings.HasPrefix(h, "127.0.0.1") || strings.HasPrefix(h, "0.0.0.0")
 }
 
-// normalize tidies a provider as read from or written to the file. The error
-// is for a key list that cannot work: no front key, and every other key
-// disabled. The provider is returned unpromoted in that case.
-func normalize(p Provider) (Provider, error) {
-	var keyErr error
+func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p.Key, p.Keys)
-	if p.Key == "" && len(p.Keys) > 0 {
-		// no front key but others: the first enabled one fronts; disabled
-		// ones ahead of it stay where they are, disabled
-		j := -1
-		for i, k := range p.Keys {
-			if !k.Off {
-				j = i
-				break
-			}
-		}
-		if j < 0 {
-			keyErr = fmt.Errorf("%s has no enabled key", p.Name)
-		} else {
-			front := p.Keys[j]
-			rest := make([]KeyEntry, 0, len(p.Keys)-1)
-			rest = append(rest, p.Keys[:j]...)
-			rest = append(rest, p.Keys[j+1:]...)
-			p.Key, p.KeyName, p.Keys = front.Key, strings.TrimSpace(front.Name), rest
-		}
-	}
-	if p.Key == "" {
-		p.KeyName = ""
-	}
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -327,7 +295,7 @@ func normalize(p Provider) (Provider, error) {
 			p.KeysURL = pr.KeysURL
 		}
 	}
-	return p, keyErr
+	return p
 }
 
 // Catalogs are the models.dev ids the provider's models are looked up in,
@@ -425,10 +393,9 @@ func HostOf(u string) string {
 	return strings.ToLower(u)
 }
 
-// Mask hides all but the ends of a secret. A secret under 16 characters is
-// hidden entirely; a longer one shows its first and last 4 characters.
+// Mask hides all but the ends of a secret.
 func Mask(s string) string {
-	if len(s) < 16 {
+	if len(s) <= 8 {
 		return strings.Repeat("•", len(s))
 	}
 	return s[:4] + "…" + s[len(s)-4:]

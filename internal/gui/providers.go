@@ -43,15 +43,16 @@ type providerJSON struct {
 		Masked   string `json:"masked"`
 		Optional bool   `json:"optional"`
 	} `json:"key"`
-	Ready     bool            `json:"ready"`
-	Chosen    []string        `json:"chosen"`   // the user's explicit picks, if any
-	Fallback  []string        `json:"fallback"` // where requests go when this one can't take them
-	Models    []modelJSON     `json:"models"`   // everything the vendor lists, exposed ones flagged
-	Exposed   int             `json:"exposed"`  // how many reach the agents
-	Fetched   string          `json:"fetched"`  // "3h ago" when the list came from the vendor
-	Agents    []providerAgent `json:"agents"`   // detected agents, current ones flagged
-	Sponsored bool            `json:"sponsored"`
-	Account   *accountJSON    `json:"account,omitempty"` // a signed-in agent, see provider.Account
+	Ready     bool               `json:"ready"`
+	Chosen    []string           `json:"chosen"`   // the user's explicit picks, if any
+	Fallback  []string           `json:"fallback"` // where requests go when this one can't take them
+	Models    []modelJSON        `json:"models"`   // everything the vendor lists, exposed ones flagged
+	Exposed   int                `json:"exposed"`  // how many reach the agents
+	Fetched   string             `json:"fetched"`  // "3h ago" when the list came from the vendor
+	Agents    []providerAgent    `json:"agents"`   // detected agents, current ones flagged
+	Sponsored bool               `json:"sponsored"`
+	KeyList   []provider.KeyInfo `json:"keyList"`           // its keys, in the order requests try them
+	Account   *accountJSON       `json:"account,omitempty"` // a signed-in agent, see provider.Account
 }
 
 type accountJSON struct {
@@ -132,6 +133,10 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 	}
 	out.Key.Set = p.Key != ""
 	out.Key.Masked = provider.Mask(p.Key)
+	out.KeyList = p.KeyList()
+	if out.KeyList == nil {
+		out.KeyList = []provider.KeyInfo{}
+	}
 	if !out.Key.Set && p.Ready() {
 		out.Key.Optional = true
 	}
@@ -194,30 +199,6 @@ func providersState(gw *gateway.Server) providersJSON {
 		s.Gateway.Running = gateway.Running()
 	}
 	return s
-}
-
-// keepKeys carries the stored keys across a save. The form edits only the
-// front key and sends no key list, so the other keys are kept as they were.
-// A front key typed in replaces the old one; if it was one of the others, that
-// account fronts under its own name.
-func keepKeys(in *provider.Provider, old *provider.Provider) {
-	if old == nil || old.Account != nil || in.Keys != nil {
-		return
-	}
-	if in.Key == old.Key {
-		if in.KeyName == "" {
-			in.KeyName = old.KeyName
-		}
-	} else {
-		in.KeyName = ""
-		for _, k := range old.Keys {
-			if k.Key == in.Key {
-				in.KeyName = k.Name
-				break
-			}
-		}
-	}
-	in.Keys = old.Keys
 }
 
 func ago(t time.Time) string {
@@ -288,7 +269,14 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
-			keepKeys(&in, old)
+			if old != nil {
+				// the other keys are kept apart, in the Accounts list
+				in.Keys = old.Keys
+				if in.Key == old.Key {
+					in.KeyName = old.KeyName
+					in.KeyProtocol = old.KeyProtocol
+				}
+			}
 			if in.Icon == "" && old != nil && in.Preset == "" {
 				in.Icon = old.Icon
 			}
@@ -354,6 +342,12 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 		}
 		writeJSON(rw, providersState(gw))
 	})
+	// How much of its allowance each of an agent's accounts has used.
+	mux.HandleFunc("GET /api/login/usage", func(rw http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		defer cancel()
+		writeJSON(rw, provider.LoginUsage(ctx, r.URL.Query().Get("agent")))
+	})
 	// Switching the account an agent is signed in to, among those magpie
 	// remembers, and forgetting one.
 	mux.HandleFunc("POST /api/login/{action}", func(rw http.ResponseWriter, r *http.Request) {
@@ -368,6 +362,37 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			err = provider.SwitchLogin(in.Agent, in.User)
 		case "forget":
 			err = provider.ForgetLogin(in.Agent, in.User)
+		case "on", "off":
+			err = provider.SetLoginOn(in.Agent, in.User, r.PathValue("action") == "on")
+		default:
+			http.NotFound(rw, r)
+			return
+		}
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, providersState(gw))
+	})
+	// A provider's several keys: add one, put one in use, name or remove it.
+	mux.HandleFunc("POST /api/keys/{action}", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ ID, Key, Name, Ref string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		var err error
+		switch r.PathValue("action") {
+		case "add":
+			err = provider.AddKey(in.ID, in.Name, in.Key, "")
+		case "use":
+			err = provider.UseKey(in.ID, in.Ref)
+		case "remove":
+			err = provider.RemoveKey(in.ID, in.Ref)
+		case "rename":
+			err = provider.RenameKey(in.ID, in.Ref, in.Name)
+		case "on", "off":
+			err = provider.SetKeyOn(in.ID, in.Ref, r.PathValue("action") == "on")
 		default:
 			http.NotFound(rw, r)
 			return
