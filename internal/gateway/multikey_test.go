@@ -146,3 +146,50 @@ func TestSingleKeyRecordKeepsItsFormat(t *testing.T) {
 		t.Fatalf("recorded %q", c.Fallback)
 	}
 }
+
+// A resting key still belongs to its provider's group: the fallback is asked
+// only once every key of the primary, resting ones included, has failed.
+func TestRestingKeyIsSpentBeforeFallback(t *testing.T) {
+	personal := &fake{t: t, ctype: "application/json", code: 429, reply: `{"error":{"message":"rate limited"}}`}
+	team := &fake{t: t, ctype: "application/json", code: 429, reply: `{"error":{"message":"rate limited"}}`}
+	spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
+	spareHit, personalFirst := false, false
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.Unlock()
+	planUp := httptest.NewServer(keyRouter{personalKey: personal, teamKey: team})
+	t.Cleanup(planUp.Close)
+	spareUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		spareHit = true
+		personalFirst = personal.got != nil
+		spare.ServeHTTP(w, r)
+	}))
+	t.Cleanup(spareUp.Close)
+	p := provider.Provider{ID: "plan", Name: "Plan", Key: personalKey, KeyName: "个人",
+		Keys: []provider.KeySlot{{Name: "团队", Key: teamKey}}, Models: []string{"m1"}, Fallback: []string{"spare/m2"}, Chat: planUp.URL + "/v1"}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Save(provider.Provider{ID: "spare", Name: "Spare", Key: spareKey, Models: []string{"m2"}, Chat: spareUp.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	restingUntil.Lock()
+	restingUntil.m["plan/"+provider.KeyRef(personalKey)] = time.Now().Add(time.Minute)
+	restingUntil.Unlock()
+
+	s := New()
+	if code, body := sendChat(t, s); code != 200 || !strings.Contains(body, "from-spare") {
+		t.Fatalf("%d %s", code, body)
+	}
+	if team.got == nil {
+		t.Fatal("ready team key was not tried")
+	}
+	if personal.got == nil {
+		t.Fatal("resting personal key was not spent before the fallback")
+	}
+	if !spareHit || !personalFirst {
+		t.Fatalf("fallback reached before the resting key was spent: hit %v, personal first %v", spareHit, personalFirst)
+	}
+}

@@ -54,10 +54,12 @@ func keyed(p provider.Provider, model string) []candidate {
 	return out
 }
 
-// candidates is the primary's keys and then its fallbacks' keys, those
-// resting after a recent failure moved behind the rest.
+// candidates is the primary's keys, then each fallback's keys, group by
+// group: a provider's whole group (resting keys included) is spent before the
+// next provider is asked. Within a group, keys resting after a recent failure
+// move behind the ready ones but stay in that group.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := keyed(p, model)
+	groups := [][]candidate{s.inOrder(keyed(p, model))}
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -65,13 +67,23 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, keyed(fp, fm)...)
+		groups = append(groups, s.inOrder(keyed(fp, fm)))
 	}
-	if len(out) == 1 {
-		return out
+	var out []candidate
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
+}
+
+// inOrder moves the keys of one provider that are resting behind the ready
+// ones. It only reorders: resting keys remain in the group, tried last.
+func (s *Server) inOrder(group []candidate) []candidate {
+	if len(group) <= 1 {
+		return group
 	}
 	var ready, resting []candidate
-	for _, c := range out {
+	for _, c := range group {
 		if s.resting(c.ref) {
 			resting = append(resting, c)
 		} else {
