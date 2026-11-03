@@ -2,8 +2,6 @@ package catalog
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -98,16 +96,14 @@ func TestHTTP1TransportDoesNotNegotiateHTTP2(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 
-	pool := x509.NewCertPool()
-	pool.AddCert(srv.Certificate())
-	base := &http.Transport{
-		ForceAttemptHTTP2: true,
-		TLSClientConfig:   &tls.Config{RootCAs: pool},
-	}
+	// srv.Client() already trusts the test certificate; keep its TLS settings
+	// and only change the protocol negotiation.
+	base := srv.Client().Transport.(*http.Transport)
+	base.ForceAttemptHTTP2 = true
 	c := &http.Client{Transport: HTTP1Transport(base)}
 	res, err := c.Get(srv.URL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("GET %s: %v", srv.URL, err)
 	}
 	defer res.Body.Close()
 	if res.ProtoMajor != 1 {
