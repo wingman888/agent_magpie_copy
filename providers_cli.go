@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ const providerUsage = `usage:
   dial provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog
   dial provider key <id> <key>          change the API key
   dial provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
+                                        (copilot: re-read your account's live model list)
   dial provider test <id>               send a tiny request through each endpoint
   dial provider rm <id>                 remove a provider
 
@@ -31,22 +33,27 @@ const providerUsage = `usage:
        dial provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
 
 // providers: `dial providers`
-func providers() error {
+func providers() error { return writeProviders(os.Stdout) }
+
+// writeProviders prints the provider list, then the notices for agent logins
+// dial sees but does not offer (Claude Code), so the reason is always last.
+func writeProviders(out io.Writer) error {
 	all := provider.All()
 	if len(all) == 0 {
-		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		return nil
+		fmt.Fprintln(out, muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
 	}
 	uses := usesByProvider()
 	type row struct{ name, id, host, key, models, uses string }
 	var rows []row
 	w := [5]int{}
 	for _, p := range all {
-		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" {
+		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: origin(p)}
+		if p.Preset == "" && !provider.IsAccount(p.ID) {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
+		case p.Account != nil:
+			r.key = green.Render("●") + " " + muted.Render(signedInAs(p.Account.User))
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -69,9 +76,29 @@ func providers() error {
 		rows = append(rows, r)
 	}
 	for _, r := range rows {
-		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
+		fmt.Fprintf(out, "  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
+	}
+	for _, n := range provider.Notices() {
+		fmt.Fprintln(out, amber.Render("!"), bold.Render(n.Name), muted.Render(n.Text))
 	}
 	return nil
+}
+
+// signedInAs is the key-column text of a sign-in provider.
+func signedInAs(user string) string {
+	if user == "" {
+		return "signed in"
+	}
+	return "signed in as " + user
+}
+
+// origin is where a provider's models come from, for display: the vendor's
+// host, or for a sign-in provider, the agent whose login supplies it.
+func origin(p provider.Provider) string {
+	if p.Account != nil {
+		return "via " + p.Account.SourceName() + " login"
+	}
+	return p.Host()
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -235,7 +262,7 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), len(ms), "models from", p.Host())
+		fmt.Println(green.Render("✓"), len(ms), "models from", origin(*p))
 		return showProvider(*p)
 	}
 	// `dial provider <id>`
@@ -281,7 +308,7 @@ func addProvider(rest []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if ms, err := saved.Fetch(ctx); err == nil {
-		fmt.Println(green.Render("✓"), len(ms), "models from", saved.Host())
+		fmt.Println(green.Render("✓"), len(ms), "models from", origin(*saved))
 	}
 	n := len(saved.Exposed())
 	if n == 0 {
@@ -299,10 +326,20 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" {
+	if p.Preset == "" && !provider.IsAccount(p.ID) {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
+	if a := p.Account; a != nil {
+		who := green.Render(a.User)
+		if a.User == "" {
+			who = amber.Render("unknown")
+		}
+		if a.Plan != "" {
+			who += muted.Render(" · " + a.Plan + " plan")
+		}
+		kv("account", who+muted.Render(" · from "+a.SourceName()+" (read live, never copied)"))
+	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)

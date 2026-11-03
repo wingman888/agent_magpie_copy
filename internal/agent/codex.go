@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/yetone/dial/internal/catalog"
 	"github.com/yetone/dial/internal/edit"
@@ -31,7 +32,7 @@ func codex(home string) *Agent {
 	routed := func() bool { return get("model_provider") == dialID }
 	models := func() []catalog.Model {
 		if routed() {
-			return dialModelsSkipping(ownAccount("codex"))
+			return dialModels()
 		}
 		return catalog.Codex()
 	}
@@ -70,7 +71,7 @@ func codex(home string) *Agent {
 			); err != nil {
 				return err
 			}
-			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModelsSkipping(ownAccount("codex")))); err != nil {
+			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModels())); err != nil {
 				return err
 			}
 			if err := edit.SetTOMLTop(path,
@@ -130,7 +131,14 @@ func codex(home string) *Agent {
 					if p := get("model_provider"); p != "" && p != dialID {
 						own = group(p, own)
 					}
-					return append(own, viaDialSkipping("", ownAccount("codex"))...)
+					// Codex's own sign-in models are already listed above;
+					// reaching them through dial would only go round in a circle.
+					for _, o := range viaDial("") {
+						if !strings.HasPrefix(o.Value, "codex/") {
+							own = append(own, o)
+						}
+					}
+					return own
 				},
 			},
 			{
