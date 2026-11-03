@@ -115,8 +115,8 @@ func values(r rawRequest, name string) (exact []string, count int) {
 	return exact, count
 }
 
-// isolate points magpie's config and cache at temp dirs.
-func isolate(t *testing.T) {
+// isolateConfig points magpie's config and cache at temp dirs.
+func isolateConfig(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -125,7 +125,7 @@ func isolate(t *testing.T) {
 const modelsBody = `{"data":[{"id":"m1"}]}`
 
 func TestCustomHeadersReachProbeAndModelList(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	up := newRawUpstream(t, modelsBody)
 	p := Provider{
 		ID: "relay", Name: "Relay", Key: "sk-test",
@@ -169,7 +169,7 @@ func TestCustomHeadersReachProbeAndModelList(t *testing.T) {
 }
 
 func TestCustomHeadersKeepCaseOnWire(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	up := newRawUpstream(t, modelsBody)
 	p := Provider{ID: "relay", Name: "Relay", Key: "k", Chat: up.URL + "/v1",
 		Headers: map[string]string{"X-Org-Id": "acme"}}
@@ -191,7 +191,7 @@ func TestCustomHeadersKeepCaseOnWire(t *testing.T) {
 }
 
 func TestCustomHeaderOverridesDefault(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	up := newRawUpstream(t, modelsBody)
 	// the probe sets anthropic-version itself; the custom one must replace it
 	p := Provider{ID: "relay", Name: "Relay", Key: "k", Anthropic: up.URL,
@@ -210,7 +210,7 @@ func TestCustomHeaderOverridesDefault(t *testing.T) {
 }
 
 func TestPresetAndAccountNeverSendCustomHeaders(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	up := newRawUpstream(t, modelsBody)
 	// a preset whose file somehow carries headers
 	p := Provider{ID: "deepseek", Name: "DeepSeek", Key: "k", Preset: "deepseek", Chat: up.URL + "/v1",
@@ -234,7 +234,7 @@ func TestPresetAndAccountNeverSendCustomHeaders(t *testing.T) {
 }
 
 func TestHeaderCleanupOnSave(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	err := Save(Provider{Name: "Relay", Chat: "https://relay.example.com/v1", Key: "k",
 		Headers: map[string]string{
 			"  X-Org-Id  ": "  acme  ",
@@ -261,7 +261,7 @@ func TestHeaderCleanupOnSave(t *testing.T) {
 }
 
 func TestEmptyHeadersNotWritten(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	if err := Save(Provider{Name: "Relay", Chat: "https://relay.example.com/v1", Key: "k",
 		Headers: map[string]string{"": "x", " ": "y"}}); err != nil {
 		t.Fatal(err)
@@ -276,7 +276,7 @@ func TestEmptyHeadersNotWritten(t *testing.T) {
 }
 
 func TestHeadersSurviveReload(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	if err := Save(Provider{Name: "Relay", Chat: "https://relay.example.com/v1", Key: "k",
 		Headers: map[string]string{"X-Org-Id": "acme"}}); err != nil {
 		t.Fatal(err)
