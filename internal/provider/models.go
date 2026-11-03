@@ -18,9 +18,6 @@ const manyModels = 24
 // Available lists every model the vendor is known to serve: its own list
 // when fetched (see Fetch), else the models.dev catalog for the vendor.
 func (p Provider) Available() []catalog.Model {
-	if p.Account != nil {
-		return p.accountModels()
-	}
 	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -42,9 +39,6 @@ func (p Provider) Fetched() (time.Time, bool) {
 
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
-	if p.Account != nil {
-		return p.fetchAccount(ctx)
-	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
 		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key)
@@ -57,24 +51,6 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 		lastErr = errorf("%s has no endpoint to ask", p.Name)
 	}
 	return nil, lastErr
-}
-
-// fetchAccount refreshes an account's model list and remembers it. Codex's
-// list is built in, so it needs no network; Copilot's is asked of the account.
-// Only the list is kept, never a token.
-func (p Provider) fetchAccount(ctx context.Context) ([]catalog.Model, error) {
-	switch p.ID {
-	case "codex":
-		ms := append([]catalog.Model(nil), catalog.Builtin("codex")...)
-		return ms, catalog.SaveLive(p.ID, CodexBase, ms)
-	case "copilot":
-		ms, api, err := refreshCopilot(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return ms, catalog.SaveLive(p.ID, api, ms)
-	}
-	return nil, errorf("%s: unknown account provider", p.ID)
 }
 
 // Exposed lists the models dial offers to agents for this provider: the

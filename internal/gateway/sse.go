@@ -45,32 +45,6 @@ func readSSE(r io.Reader, fn func(event, data string) error) error {
 	return sc.Err()
 }
 
-// replyType settles what kind of reply an upstream sent, and returns the
-// content type to relay with a reader at the start of the body. When sniff is
-// set (account backends, such as ChatGPT's, send no Content-Type at all), a
-// reply without one is an event stream when its first bytes are "data:" or
-// "event:". Otherwise the body is returned as it came, and the type is as sent.
-func replyType(res *http.Response, sniff bool) (string, io.Reader) {
-	ct := res.Header.Get("Content-Type")
-	if ct != "" || !sniff {
-		return ct, res.Body
-	}
-	rd := bufio.NewReaderSize(res.Body, 32<<10)
-	head, _ := rd.Peek(6) // short replies return what they have
-	if bytes.HasPrefix(head, []byte("data:")) || bytes.HasPrefix(head, []byte("event:")) {
-		ct = "text/event-stream"
-	}
-	return ct, rd
-}
-
-// wantsStream reports whether a request body asks for a streamed reply.
-func wantsStream(body []byte) bool {
-	var v struct {
-		Stream bool `json:"stream"`
-	}
-	return json.Unmarshal(body, &v) == nil && v.Stream
-}
-
 // sseWriter writes events to a client and flushes each one.
 type sseWriter struct {
 	w     http.ResponseWriter
