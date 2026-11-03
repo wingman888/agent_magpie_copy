@@ -58,20 +58,23 @@ func Running() bool {
 
 // Call is one request the gateway handled, for the status views.
 type Call struct {
-	Time              time.Time         `json:"time"`
-	Agent             string            `json:"agent"` // who called, from the client's User-Agent
-	Model             string            `json:"model"`
-	Provider          string            `json:"provider"`
-	From              provider.Protocol `json:"from"`
-	To                provider.Protocol `json:"to"`
-	Status            int               `json:"status"`
-	Millis            int64             `json:"ms"`
-	Error             string            `json:"error,omitempty"`
-	Usage             Usage             `json:"usage"`
-	RequestBody       string            `json:"requestBody,omitempty"`
-	ResponseBody      string            `json:"responseBody,omitempty"`
-	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
-	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	Time     time.Time         `json:"time"`
+	Agent    string            `json:"agent"` // who called, from the client's User-Agent
+	Model    string            `json:"model"`
+	Provider string            `json:"provider"`
+	From     provider.Protocol `json:"from"`
+	To       provider.Protocol `json:"to"`
+	Status   int               `json:"status"`
+	Millis   int64             `json:"ms"`
+	Error    string            `json:"error,omitempty"`
+	// Fallback lists the providers that failed before Provider answered, with
+	// why, separated by "; ". Empty when nothing was switched.
+	Fallback          string `json:"fallback,omitempty"`
+	Usage             Usage  `json:"usage"`
+	RequestBody       string `json:"requestBody,omitempty"`
+	ResponseBody      string `json:"responseBody,omitempty"`
+	RequestTruncated  bool   `json:"requestTruncated,omitempty"`
+	ResponseTruncated bool   `json:"responseTruncated,omitempty"`
 }
 
 // Server is the gateway.
@@ -82,6 +85,9 @@ type Server struct {
 	// responseOnly remembers models rejected by Chat Completions, avoiding a
 	// known-failing probe on every Claude Code turn.
 	responseOnly map[string]bool
+	// cooling holds, per provider id, when a failed provider may be tried
+	// first again (see fallback.go). In memory only.
+	cooling      map[string]coolEntry
 	subscription *subscriptionBridge
 	debug        bool
 }
@@ -348,46 +354,82 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	call.Provider = p.ID
-	// A Claude Code subscription must run through the genuine binary. Direct
-	// OAuth HTTP requests are content-classified as third-party traffic when
-	// they carry another agent's harness (Pi, OpenCode, and others).
-	if p.Account != nil && p.Account.Agent == "claude" {
-		call.To = provider.Anthropic
-		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
-		call.Millis = time.Since(start).Milliseconds()
-		finishCapture()
-		s.record(call)
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-		return
-	}
-	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
-	} else {
-		to := p.Speaks()
-		if len(to) == 0 {
-			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
-			writeError(w, from, call.Status, call.Error)
-			call.Millis = time.Since(start).Milliseconds()
-			finishCapture()
-			s.record(call)
-			return
+	// Candidates are tried in turn. A reply that fails with a status a
+	// fallback can recover from is held back and dropped, and the next
+	// candidate takes the request; the client sees only the final outcome.
+	var (
+		final  target
+		g      *gate
+		u      Usage
+		status int
+		msg    string
+		to     provider.Protocol
+		fails  []string
+	)
+	cands := s.candidates(p, model)
+	at := 0
+	for i, c := range cands {
+		at = i
+		g, u = newGate(w), Usage{}
+		status, msg, to = s.attempt(g, r, c, from, body, &u)
+		final = c
+		if !g.sent && status >= 400 && retryable(status, upstreamText(c.p, msg)) {
+			item := failure(c.p, status, msg)
+			s.cool(c.p.ID, item)
+			if i < len(cands)-1 && r.Context().Err() == nil {
+				fails = append(fails, item)
+				continue
+			}
 		}
-		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+		break
+	}
+	g.finish()
+	// Providers still cooling down behind the one that answered were not tried;
+	// the record still says why they are not in use.
+	for _, c := range cands[at+1:] {
+		if item, ok := s.coolingItem(c.p.ID); ok && c.p.ID != final.p.ID {
+			fails = append(fails, item)
+		}
+	}
+	call.Provider, call.To, call.Status, call.Error, call.Usage = final.p.ID, to, status, msg, u
+	if len(fails) > 0 {
+		// the call belongs to whoever answered, under the model they answered with
+		call.Model = final.p.ID + "/" + final.model
+		call.Fallback = strings.Join(fails, "; ")
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: final.p.ID, Model: final.model,
+		Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
+		CacheWrite: u.CacheWrite, Reasoning: u.Reasoning, Millis: call.Millis, Status: status})
+}
+
+// attempt answers the request from one candidate, writing the reply to w. It
+// returns the status, the error text when there was one, and the protocol
+// spoken upstream.
+func (s *Server) attempt(w http.ResponseWriter, r *http.Request, c target, from provider.Protocol, body []byte, u *Usage) (int, string, provider.Protocol) {
+	// A Claude Code subscription must run through the genuine binary. Direct
+	// OAuth HTTP requests are content-classified as third-party traffic when
+	// they carry another agent's harness (Pi, OpenCode, and others).
+	if c.p.Account != nil && c.p.Account.Agent == "claude" {
+		status, msg := s.serveClaudeSubscription(w, r, from, c.model, body, u)
+		return status, msg, provider.Anthropic
+	}
+	// a backend that only streams gets a non-streaming request translated
+	// (the provider is always streamed on that path) rather than relayed
+	relay := c.p.Base(from) != "" && (c.p.Account == nil || !c.p.Account.Stream || streamOf(body))
+	if relay {
+		status, msg := s.passthrough(w, r, c.p, from, c.model, body, u)
+		return status, msg, from
+	}
+	to := c.p.Speaks()
+	if len(to) == 0 {
+		msg := c.p.Name + " has no endpoint configured"
+		return writeError(w, from, 502, msg), msg, ""
+	}
+	status, msg := s.translate(w, r, c.p, from, to[0], c.model, body, u)
+	return status, msg, to[0]
 }
 
 // forward sends a request to the provider.
@@ -413,7 +455,6 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
-	p.ApplyHeaders(req)
 	return s.client.Do(req)
 }
 
