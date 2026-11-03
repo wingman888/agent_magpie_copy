@@ -17,11 +17,16 @@ import (
 // dialID is the provider id agents know the gateway by.
 const dialID = "dial"
 
-// viaDial lists the catalog for a picker, one group per provider.
+// viaDial lists the catalog for a picker, one group per provider. A model
+// from a sign-in provider names the account it comes from, not the vendor.
 func viaDial(prefix string) []Option {
 	var out []Option
 	for _, e := range provider.Catalog() {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
+		note := e.Provider.Name + " · via dial"
+		if a := e.Provider.Account; a != nil && a.User != "" {
+			note = a.User + " · via dial"
+		}
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out

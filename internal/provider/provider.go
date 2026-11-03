@@ -28,6 +28,10 @@ const (
 // Protocols in the order dial prefers them when it has to translate.
 var Protocols = []Protocol{Chat, Responses, Anthropic}
 
+// Gemini is Google's Gemini REST API. The gateway serves it to clients only,
+// so it is not in Protocols: dial never reaches a provider over it.
+const Gemini Protocol = "gemini"
+
 // Provider is one configured vendor.
 type Provider struct {
 	ID     string `json:"id"`
@@ -35,6 +39,10 @@ type Provider struct {
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
+
+	// Account is set only on sign-in providers (codex, copilot) that the
+	// agent's login makes available. It is derived at read time, never saved.
+	Account *Account `json:"account,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -54,6 +62,9 @@ type Provider struct {
 
 type file struct {
 	Providers []Provider `json:"providers"`
+	// SignIns holds the user's model picks for sign-in providers (codex,
+	// copilot), keyed by provider id. Nothing else about them is stored.
+	SignIns map[string][]string `json:"signins,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -88,13 +99,20 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added.
+// All lists the configured providers in the order they were added, then the
+// sign-in providers whose agent is currently signed in. Claude Code never
+// appears.
 func All() []Provider {
-	out := load().Providers
-	for i := range out {
-		out[i] = normalize(out[i])
+	f := load()
+	var out []Provider
+	for _, p := range f.Providers {
+		p = normalize(p)
+		if IsAccount(p.ID) || p.ID == claudeID {
+			continue
+		}
+		out = append(out, p)
 	}
-	return out
+	return append(out, accountProviders(f)...)
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -121,6 +139,13 @@ func Save(p Provider) error {
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
+	if p.ID == claudeID {
+		return errClaudeReserved
+	}
+	if IsAccount(p.ID) {
+		return saveSignIn(p)
+	}
+	p.Account = nil
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
@@ -149,6 +174,10 @@ func Save(p Provider) error {
 
 // Delete removes a provider.
 func Delete(id string) error {
+	if IsAccount(id) {
+		// Only the model picks go; the login stays with its agent.
+		return clearSignIn(id)
+	}
 	f := load()
 	keep := f.Providers[:0]
 	found := false
@@ -168,6 +197,9 @@ func Delete(id string) error {
 
 // keyOptional is true for local servers, which usually have no key.
 func keyOptional(p Provider) bool {
+	if IsAccount(p.ID) {
+		return true // the agent's login stands in for a key
+	}
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
 		return true
 	}
