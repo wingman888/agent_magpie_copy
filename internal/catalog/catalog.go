@@ -26,6 +26,9 @@ type Model struct {
 	Efforts     []string
 	Temperature *bool  // false when the model refuses temperature/top_p
 	Price       *Price // USD per million tokens, when models.dev lists it
+	// Keys, for a vendor whose keys each see models of their own, are the
+	// keys (by fingerprint) whose list has this one; empty is every key.
+	Keys []string `json:",omitempty"`
 }
 
 // Price is what a model costs, in USD per million tokens.
