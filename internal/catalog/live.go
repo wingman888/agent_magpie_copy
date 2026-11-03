@@ -65,7 +65,19 @@ func SaveLive(provider, base string, models []Model) error {
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, Extra{})
+}
+
+// Extra changes how a model-list request is sent, beyond the key: the client
+// to use, and a hook that adds headers after the key's own.
+type Extra struct {
+	Client  *http.Client
+	Headers func(*http.Request)
+}
+
+// FetchWith is Fetch with the request shaped by ex.
+func FetchWith(ctx context.Context, base, key string, anthropic bool, ex Extra) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -92,7 +104,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[st
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key, anthropic, ex)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -109,7 +121,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[st
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, ex Extra) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -125,12 +137,14 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	// The user's own headers, after the defaults so a private auth scheme
-	// wins. Written directly so the name keeps the exact case the user typed.
-	for k, v := range headers {
-		req.Header[k] = []string{v}
+	if ex.Headers != nil {
+		ex.Headers(req)
 	}
-	res, err := http.DefaultClient.Do(req)
+	client := ex.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -183,11 +197,7 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if i := strings.LastIndexByte(m.ID, '/'); !ok && i >= 0 {
-			k, ok = byID[m.ID[i+1:]] // a gateway's "deepseek/deepseek-chat"
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
