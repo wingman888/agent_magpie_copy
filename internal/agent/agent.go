@@ -29,9 +29,6 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
-	// Alias lists extra names Field accepts for this field, typically the
-	// label the agent shows in its own UI. Empty for most fields.
-	Alias []string
 }
 
 // Agent is one supported coding agent.
@@ -81,22 +78,30 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key. Failing that, it accepts one of the field's
-// Alias names (Gemini's "provider" is also addressed as "auth").
+// Field looks a field up by key. For the gemini agent, when no key matches,
+// it also accepts the label the field shows in the picker, case-insensitively
+// (`auth` for the "provider" key of Gemini CLI). Every other agent matches by
+// key only.
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
 			return &a.Fields[i]
 		}
 	}
-	for i := range a.Fields {
-		for _, al := range a.Fields[i].Alias {
-			if al == key {
+	if a.ID == "gemini" {
+		for i := range a.Fields {
+			if strings.EqualFold(a.Fields[i].Label, key) {
 				return &a.Fields[i]
 			}
 		}
 	}
 	return nil
+}
+
+// FieldByName is an alias of Field, kept for callers that name the lookup
+// explicitly.
+func (a *Agent) FieldByName(name string) *Field {
+	return a.Field(name)
 }
 
 // Values reads every field.
