@@ -15,7 +15,7 @@ import (
 // signIn points every credential location at a temporary HOME and signs
 // Codex (ChatGPT) and Copilot in there. With claude set, Claude Code's
 // credential file exists too (its contents are never read by dial).
-func signIn(t *testing.T, claude bool) {
+func cliAcctSignIn(t *testing.T, claude bool) {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -26,16 +26,16 @@ func signIn(t *testing.T, claude bool) {
 	claims := map[string]any{"email": "me@example.com", "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro"}}
 	b, _ := json.Marshal(claims)
 	idTok := "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
-	writeTestFile(t, filepath.Join(root, ".codex", "auth.json"),
+	cliAcctWriteFile(t, filepath.Join(root, ".codex", "auth.json"),
 		`{"auth_mode":"chatgpt","tokens":{"id_token":"`+idTok+`","access_token":"at","account_id":"acc"}}`)
-	writeTestFile(t, filepath.Join(root, "config", "github-copilot", "apps.json"),
+	cliAcctWriteFile(t, filepath.Join(root, "config", "github-copilot", "apps.json"),
 		`{"github.com:Iv1":{"user":"octo","oauth_token":"gho_test"}}`)
 	if claude {
-		writeTestFile(t, filepath.Join(root, "claude", ".credentials.json"), `{"claudeAiOauth":{"accessToken":"secret"}}`)
+		cliAcctWriteFile(t, filepath.Join(root, "claude", ".credentials.json"), `{"claudeAiOauth":{"accessToken":"secret"}}`)
 	}
 }
 
-func writeTestFile(t *testing.T, path, content string) {
+func cliAcctWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func writeTestFile(t *testing.T, path, content string) {
 }
 
 // capture runs fn and returns what it printed to stdout.
-func capture(t *testing.T, fn func() error) string {
+func cliAcctCapture(t *testing.T, fn func() error) string {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -69,7 +69,7 @@ func capture(t *testing.T, fn func() error) string {
 	return out
 }
 
-func lineWith(out, sub string) string {
+func cliAcctLineWith(out, sub string) string {
 	for _, l := range strings.Split(out, "\n") {
 		if strings.Contains(l, sub) {
 			return l
@@ -78,9 +78,9 @@ func lineWith(out, sub string) string {
 	return ""
 }
 
-func TestProvidersListShowsSignedInAccounts(t *testing.T) {
-	signIn(t, false)
-	out := capture(t, providers)
+func TestAcctCLIProvidersListShowsSignedInAccounts(t *testing.T) {
+	cliAcctSignIn(t, false)
+	out := cliAcctCapture(t, providers)
 
 	for _, want := range []string{"signed in as me@example.com", "signed in as octo"} {
 		if !strings.Contains(out, want) {
@@ -99,8 +99,8 @@ func TestProvidersListShowsSignedInAccounts(t *testing.T) {
 
 // The exclusion line is checked with an explicit list: provider.Excluded()
 // caches its answer for a minute, which these tests cannot reset.
-func TestExclusionLineText(t *testing.T) {
-	out := capture(t, func() error {
+func TestAcctCLIExclusionLineText(t *testing.T) {
+	out := cliAcctCapture(t, func() error {
 		printExcluded([]provider.Exclusion{{Agent: "claude", Why: "terms text"}})
 		return nil
 	})
@@ -110,8 +110,8 @@ func TestExclusionLineText(t *testing.T) {
 	}
 }
 
-func TestExclusionLineNoneWhenEmpty(t *testing.T) {
-	out := capture(t, func() error {
+func TestAcctCLIExclusionLineNoneWhenEmpty(t *testing.T) {
+	out := cliAcctCapture(t, func() error {
 		printExcluded(nil)
 		return nil
 	})
@@ -120,9 +120,9 @@ func TestExclusionLineNoneWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestClaudeExclusionDoesNotLeakCredentials(t *testing.T) {
-	signIn(t, true)
-	out := capture(t, providers)
+func TestAcctCLIClaudeExclusionDoesNotLeakCredentials(t *testing.T) {
+	cliAcctSignIn(t, true)
+	out := cliAcctCapture(t, providers)
 	if strings.Contains(out, "secret") {
 		t.Fatal("claude credentials leaked into the list")
 	}
@@ -133,15 +133,15 @@ func TestClaudeExclusionDoesNotLeakCredentials(t *testing.T) {
 	}
 }
 
-func TestShowProviderAccountLine(t *testing.T) {
-	signIn(t, false)
+func TestAcctCLIShowProviderAccountLine(t *testing.T) {
+	cliAcctSignIn(t, false)
 	p, err := provider.Find("codex")
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := capture(t, func() error { return showProvider(*p) })
+	out := cliAcctCapture(t, func() error { return showProvider(*p) })
 
-	if got := lineWith(out, "account"); !strings.Contains(got, "me@example.com (plan: pro) via codex") {
+	if got := cliAcctLineWith(out, "account"); !strings.Contains(got, "me@example.com (plan: pro) via codex") {
 		t.Fatalf("account line = %q", got)
 	}
 	if strings.Contains(out, "custom") {
@@ -149,14 +149,14 @@ func TestShowProviderAccountLine(t *testing.T) {
 	}
 }
 
-func TestModelsNoteShowsLoginUser(t *testing.T) {
-	signIn(t, false)
-	out := capture(t, models)
+func TestAcctCLIModelsNoteShowsLoginUser(t *testing.T) {
+	cliAcctSignIn(t, false)
+	out := cliAcctCapture(t, models)
 
-	if l := lineWith(out, "codex/gpt-5.5"); !strings.Contains(l, "me@example.com") {
+	if l := cliAcctLineWith(out, "codex/gpt-5.5"); !strings.Contains(l, "me@example.com") {
 		t.Fatalf("codex model line should show the login user: %q", l)
 	}
-	if l := lineWith(out, "copilot/claude-sonnet-4.5"); !strings.Contains(l, "octo") {
+	if l := cliAcctLineWith(out, "copilot/claude-sonnet-4.5"); !strings.Contains(l, "octo") {
 		t.Fatalf("copilot model line should show the GitHub user: %q", l)
 	}
 	if strings.Contains(out, "copilot/auto") {
@@ -164,13 +164,13 @@ func TestModelsNoteShowsLoginUser(t *testing.T) {
 	}
 }
 
-func TestCatalogHasAccountModelsAndResolves(t *testing.T) {
-	signIn(t, false)
+func TestAcctCLICatalogHasAccountModelsAndResolves(t *testing.T) {
+	cliAcctSignIn(t, false)
 	ids := provider.IDs()
-	if !contains(ids, "codex/gpt-5.5") || !contains(ids, "copilot/claude-sonnet-4.5") {
+	if !cliAcctContains(ids, "codex/gpt-5.5") || !cliAcctContains(ids, "copilot/claude-sonnet-4.5") {
 		t.Fatalf("catalog ids = %v", ids)
 	}
-	if contains(ids, "copilot/auto") {
+	if cliAcctContains(ids, "copilot/auto") {
 		t.Fatal("copilot/auto leaked into the catalog")
 	}
 	p, model, ok := provider.Resolve("codex/gpt-5.5")
@@ -179,7 +179,7 @@ func TestCatalogHasAccountModelsAndResolves(t *testing.T) {
 	}
 }
 
-func contains(xs []string, x string) bool {
+func cliAcctContains(xs []string, x string) bool {
 	for _, v := range xs {
 		if v == x {
 			return true

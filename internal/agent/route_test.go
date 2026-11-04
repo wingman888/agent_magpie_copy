@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-// accountSandbox signs Codex (ChatGPT) and Copilot in, inside a temporary
+// routeAcctSandbox signs Codex (ChatGPT) and Copilot in, inside a temporary
 // HOME, so no real credential is read or changed.
-func accountSandbox(t *testing.T) {
+func routeAcctSandbox(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -23,12 +23,12 @@ func accountSandbox(t *testing.T) {
 	b, _ := json.Marshal(claims)
 	idTok := "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
 	auth := `{"auth_mode":"chatgpt","tokens":{"id_token":"` + idTok + `","access_token":"at","account_id":"acc"}}`
-	writeFile(t, filepath.Join(root, ".codex", "auth.json"), auth)
-	writeFile(t, filepath.Join(root, "config", "github-copilot", "apps.json"),
+	routeAcctWriteFile(t, filepath.Join(root, ".codex", "auth.json"), auth)
+	routeAcctWriteFile(t, filepath.Join(root, "config", "github-copilot", "apps.json"),
 		`{"github.com:Iv1":{"user":"octo","oauth_token":"gho_test"}}`)
 }
 
-func writeFile(t *testing.T, path, content string) {
+func routeAcctWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -38,7 +38,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func optionValues(opts []Option) []string {
+func routeAcctOptionValues(opts []Option) []string {
 	var out []string
 	for _, o := range opts {
 		out = append(out, o.Value)
@@ -46,28 +46,28 @@ func optionValues(opts []Option) []string {
 	return out
 }
 
-func findOption(t *testing.T, opts []Option, value string) Option {
+func routeAcctFindOption(t *testing.T, opts []Option, value string) Option {
 	t.Helper()
 	for _, o := range opts {
 		if o.Value == value {
 			return o
 		}
 	}
-	t.Fatalf("no option %q in %v", value, optionValues(opts))
+	t.Fatalf("no option %q in %v", value, routeAcctOptionValues(opts))
 	return Option{}
 }
 
-func TestCodexDoesNotOfferItsOwnLoginThroughDial(t *testing.T) {
-	accountSandbox(t)
+func TestAcctRouteCodexDoesNotOfferItsOwnLoginThroughDial(t *testing.T) {
+	routeAcctSandbox(t)
 
 	// Codex's own picker: nothing routed back through its own ChatGPT login.
-	for _, v := range optionValues(viaDialFor("", "codex")) {
+	for _, v := range routeAcctOptionValues(viaDialFor("", "codex")) {
 		if strings.HasPrefix(v, "codex/") {
 			t.Fatalf("codex's own list still offers %q", v)
 		}
 	}
 	found := false
-	for _, v := range optionValues(viaDialFor("", "codex")) {
+	for _, v := range routeAcctOptionValues(viaDialFor("", "codex")) {
 		if v == "copilot/claude-sonnet-4.5" {
 			found = true
 		}
@@ -77,7 +77,7 @@ func TestCodexDoesNotOfferItsOwnLoginThroughDial(t *testing.T) {
 	}
 
 	// Other agents still get the full list, codex included.
-	all := optionValues(viaDial(""))
+	all := routeAcctOptionValues(viaDial(""))
 	if !contains(all, "codex/gpt-5.5") || !contains(all, "copilot/claude-sonnet-4.5") {
 		t.Fatalf("catalog missing account models: %v", all)
 	}
@@ -90,7 +90,7 @@ func TestCodexDoesNotOfferItsOwnLoginThroughDial(t *testing.T) {
 			modelOpts = f.Options(nil)
 		}
 	}
-	for _, v := range optionValues(modelOpts) {
+	for _, v := range routeAcctOptionValues(modelOpts) {
 		if strings.HasPrefix(v, "codex/") {
 			t.Fatalf("codex model picker offers its own login: %q", v)
 		}
@@ -107,17 +107,17 @@ func TestCodexDoesNotOfferItsOwnLoginThroughDial(t *testing.T) {
 	}
 }
 
-func TestAccountNotesShowLoginUser(t *testing.T) {
-	accountSandbox(t)
+func TestAcctRouteAccountNotesShowLoginUser(t *testing.T) {
+	routeAcctSandbox(t)
 
-	gpt := findOption(t, viaDial(""), "codex/gpt-5.5")
+	gpt := routeAcctFindOption(t, viaDial(""), "codex/gpt-5.5")
 	if gpt.Note != "me@example.com · via dial" {
 		t.Fatalf("codex note = %q, want the signed-in user", gpt.Note)
 	}
 	if gpt.Group != "Codex" {
 		t.Fatalf("codex group = %q", gpt.Group)
 	}
-	cp := findOption(t, viaDial(""), "copilot/claude-sonnet-4.5")
+	cp := routeAcctFindOption(t, viaDial(""), "copilot/claude-sonnet-4.5")
 	if cp.Note != "octo · via dial" {
 		t.Fatalf("copilot note = %q, want the GitHub user", cp.Note)
 	}

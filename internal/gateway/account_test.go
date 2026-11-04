@@ -17,9 +17,9 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// codexSandbox points every credential and config location at a fresh
+// gwAcctSandbox points every credential and config location at a fresh
 // directory and restores the provider's stand-in addresses afterwards.
-func codexSandbox(t *testing.T) string {
+func gwAcctSandbox(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -34,7 +34,7 @@ func codexSandbox(t *testing.T) string {
 }
 
 // jwt builds an unsigned token carrying the given claims.
-func jwt(t *testing.T, claims map[string]any) string {
+func gwAcctJWT(t *testing.T, claims map[string]any) string {
 	t.Helper()
 	b, err := json.Marshal(claims)
 	if err != nil {
@@ -44,11 +44,11 @@ func jwt(t *testing.T, claims map[string]any) string {
 	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
-// writeAuth writes a ChatGPT-mode auth.json with the given access token and
+// gwAcctWriteAuth writes a ChatGPT-mode auth.json with the given access token and
 // extra fields, the way the Codex CLI keeps it.
-func writeAuth(t *testing.T, access string, extra map[string]any) string {
+func gwAcctWriteAuth(t *testing.T, access string, extra map[string]any) string {
 	t.Helper()
-	id := jwt(t, map[string]any{"email": "dev@example.com", "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro"}})
+	id := gwAcctJWT(t, map[string]any{"email": "dev@example.com", "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro"}})
 	top := map[string]any{
 		"auth_mode":      "chatgpt",
 		"OPENAI_API_KEY": nil,
@@ -78,20 +78,20 @@ func writeAuth(t *testing.T, access string, extra map[string]any) string {
 	return path
 }
 
-// freshAccess is a token that will not expire soon.
-func freshAccess(t *testing.T) string {
-	return jwt(t, map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+// gwAcctFreshAccess is a token that will not expire soon.
+func gwAcctFreshAccess(t *testing.T) string {
+	return gwAcctJWT(t, map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
 }
 
-// expiringAccess is a token that expires within the refresh slack.
-func expiringAccess(t *testing.T) string {
-	return jwt(t, map[string]any{"exp": time.Now().Add(time.Minute).Unix()})
+// gwAcctExpiringAccess is a token that expires within the refresh slack.
+func gwAcctExpiringAccess(t *testing.T) string {
+	return gwAcctJWT(t, map[string]any{"exp": time.Now().Add(time.Minute).Unix()})
 }
 
-// codexBackend is a stand-in for the ChatGPT Codex backend. It records what
+// gwAcctBackend is a stand-in for the ChatGPT Codex backend. It records what
 // it was sent and replies with a script. A zero contentType sends no
 // Content-Type header at all, as the real backend does.
-type codexBackend struct {
+type gwAcctBackend struct {
 	mu          sync.Mutex
 	body        map[string]any
 	auth        string
@@ -102,7 +102,7 @@ type codexBackend struct {
 	contentType string
 }
 
-func (b *codexBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (b *gwAcctBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -122,16 +122,16 @@ func (b *codexBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, b.reply)
 }
 
-// codexReply is a Responses stream with one message and a completed event.
-const codexReply = "event: response.created\n" +
+// gwAcctReply is a Responses stream with one message and a completed event.
+const gwAcctReply = "event: response.created\n" +
 	`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n" +
 	"event: response.output_item.done\n" +
 	`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello there"}]}}` + "\n\n" +
 	"event: response.completed\n" +
 	`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.5","output":[],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}` + "\n\n"
 
-// postJSON sends a request through the gateway handler and returns the recorder.
-func postJSON(t *testing.T, path, body string) *httptest.ResponseRecorder {
+// gwAcctPostJSON sends a request through the gateway handler and returns the recorder.
+func gwAcctPostJSON(t *testing.T, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
@@ -140,16 +140,16 @@ func postJSON(t *testing.T, path, body string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func TestCodexNonStreamingIsAggregatedAndSentStreamed(t *testing.T) {
-	codexSandbox(t)
-	access := freshAccess(t)
-	writeAuth(t, access, nil)
-	backend := &codexBackend{reply: codexReply, contentType: "text/event-stream"}
+func TestAcctGwCodexNonStreamingIsAggregatedAndSentStreamed(t *testing.T) {
+	gwAcctSandbox(t)
+	access := gwAcctFreshAccess(t)
+	gwAcctWriteAuth(t, access, nil)
+	backend := &gwAcctBackend{reply: gwAcctReply, contentType: "text/event-stream"}
 	srv := httptest.NewServer(backend)
 	t.Cleanup(srv.Close)
 	provider.CodexBase = srv.URL + "/backend-api/codex"
 
-	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"say hi","max_output_tokens":16,"temperature":0.2}`)
+	rec := gwAcctPostJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"say hi","max_output_tokens":16,"temperature":0.2}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -203,15 +203,15 @@ func TestCodexNonStreamingIsAggregatedAndSentStreamed(t *testing.T) {
 	}
 }
 
-func TestCodexStreamingIsRelayedWithoutContentType(t *testing.T) {
-	codexSandbox(t)
-	writeAuth(t, freshAccess(t), nil)
-	backend := &codexBackend{reply: codexReply} // no Content-Type from the backend
+func TestAcctGwCodexStreamingIsRelayedWithoutContentType(t *testing.T) {
+	gwAcctSandbox(t)
+	gwAcctWriteAuth(t, gwAcctFreshAccess(t), nil)
+	backend := &gwAcctBackend{reply: gwAcctReply} // no Content-Type from the backend
 	srv := httptest.NewServer(backend)
 	t.Cleanup(srv.Close)
 	provider.CodexBase = srv.URL
 
-	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true,"max_output_tokens":8}`)
+	rec := gwAcctPostJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true,"max_output_tokens":8}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -229,10 +229,10 @@ func TestCodexStreamingIsRelayedWithoutContentType(t *testing.T) {
 	}
 }
 
-func TestSniffEventStreamLeavesJSONAlone(t *testing.T) {
-	codexSandbox(t)
-	writeAuth(t, freshAccess(t), nil)
-	backend := &codexBackend{reply: `{"ok":true}`} // no Content-Type, not a stream
+func TestAcctGwSniffEventStreamLeavesJSONAlone(t *testing.T) {
+	gwAcctSandbox(t)
+	gwAcctWriteAuth(t, gwAcctFreshAccess(t), nil)
+	backend := &gwAcctBackend{reply: `{"ok":true}`} // no Content-Type, not a stream
 	srv := httptest.NewServer(backend)
 	t.Cleanup(srv.Close)
 	provider.CodexBase = srv.URL
@@ -256,10 +256,10 @@ func TestSniffEventStreamLeavesJSONAlone(t *testing.T) {
 	}
 }
 
-func TestExpiringCodexTokenIsRefreshedAndWrittenBack(t *testing.T) {
-	codexSandbox(t)
-	path := writeAuth(t, expiringAccess(t), map[string]any{"custom_top": map[string]any{"n": 1}})
-	newAccess := freshAccess(t)
+func TestAcctGwExpiringCodexTokenIsRefreshedAndWrittenBack(t *testing.T) {
+	gwAcctSandbox(t)
+	path := gwAcctWriteAuth(t, gwAcctExpiringAccess(t), map[string]any{"custom_top": map[string]any{"n": 1}})
+	newAccess := gwAcctFreshAccess(t)
 
 	var refreshBody map[string]any
 	refresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -271,12 +271,12 @@ func TestExpiringCodexTokenIsRefreshedAndWrittenBack(t *testing.T) {
 	provider.CodexRefreshURL = refresh.URL
 	provider.CodexClientID = "client-under-test"
 
-	backend := &codexBackend{reply: codexReply, contentType: "text/event-stream"}
+	backend := &gwAcctBackend{reply: gwAcctReply, contentType: "text/event-stream"}
 	srv := httptest.NewServer(backend)
 	t.Cleanup(srv.Close)
 	provider.CodexBase = srv.URL
 
-	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+	rec := gwAcctPostJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -321,9 +321,9 @@ func TestExpiringCodexTokenIsRefreshedAndWrittenBack(t *testing.T) {
 	}
 }
 
-func TestFailedCodexRefreshAsksForSignIn(t *testing.T) {
-	codexSandbox(t)
-	writeAuth(t, expiringAccess(t), nil)
+func TestAcctGwFailedCodexRefreshAsksForSignIn(t *testing.T) {
+	gwAcctSandbox(t)
+	gwAcctWriteAuth(t, gwAcctExpiringAccess(t), nil)
 	refresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		io.WriteString(w, `{"error":{"message":"refresh token was revoked"}}`)
@@ -331,12 +331,12 @@ func TestFailedCodexRefreshAsksForSignIn(t *testing.T) {
 	t.Cleanup(refresh.Close)
 	provider.CodexRefreshURL = refresh.URL
 
-	backend := &codexBackend{reply: codexReply, contentType: "text/event-stream"}
+	backend := &gwAcctBackend{reply: gwAcctReply, contentType: "text/event-stream"}
 	srv := httptest.NewServer(backend)
 	t.Cleanup(srv.Close)
 	provider.CodexBase = srv.URL
 
-	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+	rec := gwAcctPostJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status %d; want 401: %s", rec.Code, rec.Body.String())
 	}
@@ -348,9 +348,9 @@ func TestFailedCodexRefreshAsksForSignIn(t *testing.T) {
 	}
 }
 
-func TestSignedOutCodexFailsClearly(t *testing.T) {
-	codexSandbox(t)
-	path := writeAuth(t, freshAccess(t), nil)
+func TestAcctGwSignedOutCodexFailsClearly(t *testing.T) {
+	gwAcctSandbox(t)
+	path := gwAcctWriteAuth(t, gwAcctFreshAccess(t), nil)
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +359,7 @@ func TestSignedOutCodexFailsClearly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+	rec := gwAcctPostJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status %d; want 401: %s", rec.Code, rec.Body.String())
 	}
@@ -368,15 +368,15 @@ func TestSignedOutCodexFailsClearly(t *testing.T) {
 	}
 }
 
-func TestBackendRefusalOfLoginAsksForSignIn(t *testing.T) {
-	codexSandbox(t)
-	writeAuth(t, freshAccess(t), nil)
-	backend := &codexBackend{code: http.StatusUnauthorized, reply: `{"detail":"token expired"}`, contentType: "application/json"}
+func TestAcctGwBackendRefusalOfLoginAsksForSignIn(t *testing.T) {
+	gwAcctSandbox(t)
+	gwAcctWriteAuth(t, gwAcctFreshAccess(t), nil)
+	backend := &gwAcctBackend{code: http.StatusUnauthorized, reply: `{"detail":"token expired"}`, contentType: "application/json"}
 	srv := httptest.NewServer(backend)
 	t.Cleanup(srv.Close)
 	provider.CodexBase = srv.URL
 
-	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","stream":true}`)
+	rec := gwAcctPostJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","stream":true}`)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status %d; want 401: %s", rec.Code, rec.Body.String())
 	}
