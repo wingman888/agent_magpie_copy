@@ -24,7 +24,7 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.<name>
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo (one per header)
   magpie provider icon <id> <file|name|"">  set a custom vendor's icon: your image, a built-in icon name, or "" for the default
   magpie provider key <id> <key>          change the API key
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose

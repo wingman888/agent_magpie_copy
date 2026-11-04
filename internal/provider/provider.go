@@ -37,11 +37,6 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// Headers are extra request headers a custom provider needs, sent on
-	// every request to it, names exactly as the user typed them. Presets
-	// and signed-in accounts send none (see customHeaders).
-	Headers map[string]string `json:"headers,omitempty"`
-
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -64,6 +59,12 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
+
+	// Headers are extra request headers a custom provider needs, sent on
+	// every request to it, names exactly as the user typed them. Presets
+	// and signed-in accounts send none (see customHeaders). Kept as the
+	// last field so the JSON field order of the other fields is unchanged.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type file struct {
