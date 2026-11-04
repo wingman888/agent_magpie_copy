@@ -24,7 +24,7 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo, balance, balance.path
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
   magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
@@ -34,7 +34,8 @@ const providerUsage = `usage:
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
        magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
-       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme`
+       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme
+       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… balance=https://relay.example.com/api/usage/token balance.path='$data.total_available / 500000'`
 
 // providers: `magpie providers`
 func providers() error {
@@ -152,11 +153,27 @@ func models() error {
 	for _, e := range entries {
 		w = max(w, len(e.ID))
 	}
-	last := ""
+	// the routing groups first, in a section of their own, then the providers
+	var ordered []provider.Entry
 	for _, e := range entries {
-		if e.Provider.ID != last {
-			last = e.Provider.ID
-			fmt.Println(faint.Render("  " + e.Provider.Name))
+		if e.Group != nil {
+			ordered = append(ordered, e)
+		}
+	}
+	for _, e := range entries {
+		if e.Group == nil {
+			ordered = append(ordered, e)
+		}
+	}
+	last := ""
+	for _, e := range ordered {
+		key, head := e.Provider.ID, e.Provider.Name
+		if e.Group != nil {
+			key, head = "group", "Routing groups"
+		}
+		if key != last {
+			last = key
+			fmt.Println(faint.Render("  " + head))
 		}
 		line := "  " + pad(e.ID, w)
 		if e.Name != "" && e.Name != e.Model {
@@ -409,6 +426,19 @@ func showProvider(p provider.Provider) error {
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	if amount, ok, err := provider.Balance(ctx, p); ok {
+		from := ""
+		if p.BalanceURL != "" {
+			from = muted.Render("  from " + p.BalanceURL + " " + p.BalancePath)
+		}
+		if err != nil {
+			kv("balance", amber.Render("unavailable")+muted.Render("  "+err.Error())+from)
+		} else {
+			kv("balance", bold.Render(amount)+from)
+		}
+	}
+	cancel()
 	for _, k := range slices.Sorted(maps.Keys(p.Headers)) {
 		kv("header", k+": "+muted.Render(p.Headers[k]))
 	}
@@ -462,6 +492,10 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.Website = v
 		case "keys":
 			p.KeysURL = v
+		case "balance":
+			p.BalanceURL = v
+		case "balance.path":
+			p.BalancePath = v
 		case "icon":
 			// a picture on disk is kept by magpie; anything else is one of
 			// the built-in icons' names
