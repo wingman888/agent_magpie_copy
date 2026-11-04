@@ -141,7 +141,12 @@ func run(args []string) error {
 }
 
 func set(a *agent.Agent, key, value string) error {
-	f := a.Field(key)
+	var f *agent.Field
+	if a.ID == "gemini" {
+		f = a.FieldByName(key)
+	} else {
+		f = a.Field(key)
+	}
 	if f == nil {
 		var keys []string
 		for _, f := range a.Fields {
