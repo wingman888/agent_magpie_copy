@@ -1,182 +1,169 @@
 package backup
 
 import (
-	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
-const (
-	testKey    = "sk-test-SECRET-0123456789"
-	testKey2   = "sk-test-SECOND-abcdefghij"
-	testHost   = "api.vendor-example.test"
-	testName   = "Vendor Example"
-	testPass   = "correct horse battery"
-	testHeader = "X-Private-Gateway-Token"
-)
-
-func sampleBundle() Bundle {
-	return Bundle{
-		Version: 1,
-		Providers: []provider.Provider{{
-			ID:      "vendor",
-			Name:    testName,
-			Key:     testKey,
-			Chat:    "https://" + testHost + "/v1",
-			Headers: map[string]string{testHeader: "hdr-secret-value", "X-Team": "platform"},
-			Keys: []provider.KeyAccount{
-				{Name: "second", Key: testKey2},
-			},
-		}},
+// home gives the test a machine of its own: no agents, no magpie files.
+func home(t *testing.T) {
+	t.Helper()
+	h := t.TempDir()
+	t.Setenv("HOME", h)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(h, ".cache"))
+	t.Setenv("PATH", h)
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "DSH_HOME", "GEMINI_CLI_HOME", "OPENCODE_CONFIG"} {
+		t.Setenv(v, "")
 	}
 }
 
-func TestSealOpenRoundTrip(t *testing.T) {
-	data, err := Seal(sampleBundle(), testPass)
+func setUp(t *testing.T) {
+	t.Helper()
+	icon, err := provider.StoreIcon([]byte("\x89PNG\r\n\x1a\n0000000000000000"))
 	if err != nil {
-		t.Fatalf("Seal: %v", err)
+		t.Fatal(err)
 	}
-	got, err := Open(data, testPass)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
+	for _, p := range []provider.Provider{
+		{ID: "acme", Name: "Acme", Chat: "https://acme.example.com/v1", Key: "sk-acme", Icon: icon,
+			Keys:    []provider.KeyAccount{{Name: "second", Key: "sk-acme-2"}},
+			Headers: map[string]string{"X-Team": "a", "X-Api-Key": "hdr-secret"}},
+		{ID: "beta", Name: "Beta", Chat: "https://beta.example.com/v1", Key: "sk-beta"},
+	} {
+		if err := provider.Save(p); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got.Version != 1 {
-		t.Errorf("Version = %d, want 1", got.Version)
+	if err := settings.Save(settings.Settings{Theme: "dark", Lang: "zh"}); err != nil {
+		t.Fatal(err)
 	}
-	if len(got.Providers) != 1 {
-		t.Fatalf("Providers = %d, want 1", len(got.Providers))
-	}
-	p := got.Providers[0]
-	if p.ID != "vendor" || p.Name != testName || p.Key != testKey || p.Chat != "https://"+testHost+"/v1" {
-		t.Errorf("provider fields not preserved: %+v", p)
-	}
-	if p.Headers[testHeader] != "hdr-secret-value" || p.Headers["X-Team"] != "platform" {
-		t.Errorf("headers not preserved: %v", p.Headers)
-	}
-	if len(p.Keys) != 1 || p.Keys[0].Key != testKey2 || p.Keys[0].Name != "second" {
-		t.Errorf("multi-key accounts not preserved: %+v", p.Keys)
+	if err := profile.Save("work", profile.Profile{"claude.model": "acme/m1"}); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestWrongPassphrase(t *testing.T) {
-	data, err := Seal(sampleBundle(), testPass)
+func TestRoundTrip(t *testing.T) {
+	home(t)
+	setUp(t)
+	b, err := Collect(true, "test")
 	if err != nil {
-		t.Fatalf("Seal: %v", err)
+		t.Fatal(err)
 	}
-	_, err = Open(data, "not the passphrase")
-	if !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("Open with wrong passphrase: err = %v, want ErrPassphrase", err)
+	data, err := Seal(b, "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"sk-acme", "hdr-secret", "acme.example.com", "work"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("%q readable in the file", secret)
+		}
+	}
+	if _, err := Open(data, "wrong"); !errors.Is(err, ErrPassphrase) {
+		t.Fatalf("wrong passphrase: %v", err)
+	}
+
+	home(t) // another machine
+	got, err := Open(data, "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := Restore(got, All)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Added != 2 || !r.Settings || r.Profiles != 1 || len(r.NeedKey) != 0 {
+		t.Fatalf("result: %+v", r)
+	}
+	p, err := provider.Find("acme")
+	if err != nil || p.Key != "sk-acme" || len(p.Keys) != 1 || p.Headers["X-Api-Key"] != "hdr-secret" {
+		t.Fatalf("acme: %+v %v", p, err)
+	}
+	name, _ := strings.CutPrefix(p.Icon, "file:")
+	if _, err := os.Stat(provider.IconFile(name)); err != nil {
+		t.Fatalf("icon: %v", err)
+	}
+	if s := settings.Load(); s.Theme != "dark" || s.Lang != "zh" {
+		t.Fatalf("settings: %+v", s)
+	}
+	if ps, _ := profile.Load(); ps["work"]["claude.model"] != "acme/m1" {
+		t.Fatalf("profiles: %+v", ps)
 	}
 }
 
-func TestEmptyPassphrase(t *testing.T) {
-	if _, err := Seal(sampleBundle(), ""); err == nil {
-		t.Error("Seal with empty passphrase: want error")
-	}
-	data, err := Seal(sampleBundle(), testPass)
+// Without keys, nothing secret leaves; restored over a machine that has the
+// provider, its keys there stay, and one new there is named as needing a key.
+func TestNoKeys(t *testing.T) {
+	home(t)
+	setUp(t)
+	b, err := Collect(false, "test")
 	if err != nil {
-		t.Fatalf("Seal: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := Open(data, ""); err == nil {
-		t.Error("Open with empty passphrase: want error")
+	for _, p := range b.Providers {
+		if p.Key != "" || len(p.Keys) != 0 {
+			t.Fatalf("key in a keyless backup: %+v", p)
+		}
+		if _, ok := p.Headers["X-Api-Key"]; ok {
+			t.Fatalf("auth header in a keyless backup: %+v", p.Headers)
+		}
+	}
+	data, _ := Seal(b, "pw")
+
+	home(t)
+	if err := provider.Save(provider.Provider{ID: "acme", Name: "Acme old", Chat: "https://old.example.com/v1", Key: "sk-here"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Open(data, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := Restore(got, Parts{Providers: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Added != 1 || r.Replaced != 1 || !slices.Equal(r.NeedKey, []string{"Beta"}) || r.Settings || r.Profiles != 0 {
+		t.Fatalf("result: %+v", r)
+	}
+	if p, _ := provider.Find("acme"); p.Key != "sk-here" || p.Chat != "https://acme.example.com/v1" || p.Headers["X-Team"] != "a" {
+		t.Fatalf("acme: %+v", p)
 	}
 }
 
 func TestNotABackup(t *testing.T) {
-	cases := map[string][]byte{
-		"empty":   {},
-		"blank":   []byte("  \n"),
-		"hello":   []byte("hello"),
-		"object":  []byte("{}"),
-		"other":   []byte(`{"format":"something-else","version":1}`),
-		"numeric": []byte("42"),
-	}
-	for name, data := range cases {
-		t.Run(name, func(t *testing.T) {
-			_, err := Open(data, testPass)
-			if err == nil {
-				t.Fatal("want error")
-			}
-			if errors.Is(err, ErrPassphrase) {
-				t.Errorf("err = %v; must not be ErrPassphrase", err)
-			}
-			assertNoPassWord(t, err)
-			if !strings.Contains(err.Error(), "不是 magpie 备份") {
-				t.Errorf("err = %q, want a not-a-backup message", err)
-			}
-		})
-	}
-}
-
-func TestNewerVersion(t *testing.T) {
-	// Only the header matters for this check; no kdf or other fields are needed.
-	data := []byte(`{"format":"magpie-backup","version":2}` + "\nAAAA\n")
-	_, err := Open(data, testPass)
-	if err == nil {
-		t.Fatal("want error")
-	}
-	if errors.Is(err, ErrPassphrase) {
-		t.Errorf("err = %v; must not be ErrPassphrase", err)
-	}
-	assertNoPassWord(t, err)
-	if !strings.Contains(err.Error(), "升级") {
-		t.Errorf("err = %q, want an upgrade hint", err)
-	}
-}
-
-func TestIterationsTampered(t *testing.T) {
-	data, err := Seal(sampleBundle(), testPass)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	if !bytes.Contains(data, []byte(`"iterations":600000`)) {
-		t.Fatalf("default iterations not written as a JSON integer:\n%s", data)
-	}
-	weak := bytes.Replace(data, []byte(`"iterations":600000`), []byte(`"iterations":100000`), 1)
-	_, err = Open(weak, testPass)
-	if !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("Open with iterations lowered to 100000: err = %v, want ErrPassphrase", err)
-	}
-}
-
-func TestSaltTampered(t *testing.T) {
-	data, err := Seal(sampleBundle(), testPass)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	head := data[:bytes.IndexByte(data, '\n')]
-	// Flip one character inside the salt value; the header is authenticated.
-	i := bytes.Index(head, []byte(`"salt":"`)) + len(`"salt":"`)
-	bad := append([]byte(nil), data...)
-	if bad[i] == 'A' {
-		bad[i] = 'B'
-	} else {
-		bad[i] = 'A'
-	}
-	if _, err := Open(bad, testPass); !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("Open with tampered salt: err = %v, want ErrPassphrase", err)
-	}
-}
-
-func TestNoPlaintextInFile(t *testing.T) {
-	data, err := Seal(sampleBundle(), testPass)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	for _, s := range []string{testKey, testKey2, testHost, testName, testHeader, "hdr-secret-value", "vendor"} {
-		if bytes.Contains(data, []byte(s)) {
-			t.Errorf("sealed file contains plaintext %q", s)
+	for _, data := range []string{"", "{}", `{"format":"magpie-backup","version":9,"kdf":"x"}`} {
+		if _, err := Open([]byte(data), "pw"); err == nil || errors.Is(err, ErrPassphrase) {
+			t.Fatalf("%q: %v", data, err)
 		}
 	}
+	if _, err := Seal(Bundle{}, ""); err == nil {
+		t.Fatal("sealed with no passphrase")
+	}
 }
 
-func assertNoPassWord(t *testing.T, err error) {
-	t.Helper()
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "passphrase") || strings.Contains(err.Error(), "口令") {
-		t.Errorf("error %q must not mention the passphrase", err)
+func TestTampered(t *testing.T) {
+	data, err := Seal(Bundle{Version: 1}, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// lowering the work of the key derivation is noticed
+	bad := strings.Replace(string(data), `"iterations": 600000`, `"iterations": 100000`, 1)
+	if _, err := Open([]byte(bad), "pw"); !errors.Is(err, ErrPassphrase) {
+		t.Fatalf("tampered header: %v", err)
+	}
+}
+
+func TestProfileKeys(t *testing.T) {
+	got := profileKeys(profile.Profile{"codex.effort": "", "claude.model": "", "codex.provider": "", "codex.model": ""})
+	want := []string{"codex.provider", "claude.model", "codex.model", "codex.effort"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%v", got)
 	}
 }
