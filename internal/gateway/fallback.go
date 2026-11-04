@@ -64,7 +64,7 @@ func perKey(p provider.Provider, model string, from provider.Protocol) []candida
 // the model.
 func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, left []candidate) {
 	if p.Account != nil {
-		all := []candidate{{p, model, p.ID}}
+		all := []candidate{{p, model, p.ID, false}}
 		for _, q := range p.AlsoOn() {
 			all = append(all, candidate{q, model, p.ID + "@" + q.Account.User, false})
 		}
@@ -104,7 +104,7 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, l
 		out, unlisted = unlisted, nil // no key lists it: try them all the same
 	}
 	if len(out) == 0 {
-		return []candidate{{p, model, p.ID}}, nil
+		return []candidate{{p, model, p.ID, false}}, nil
 	}
 	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
 	return out, unlisted
