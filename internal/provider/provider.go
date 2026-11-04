@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -37,11 +38,6 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// Headers are extra request headers a custom provider needs, sent on
-	// every request to it, names exactly as the user typed them. Presets
-	// and signed-in accounts send none (see customHeaders).
-	Headers map[string]string `json:"headers,omitempty"`
-
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -60,6 +56,11 @@ type Provider struct {
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
 	Hidden bool `json:"hidden,omitempty"`
+
+	// Headers are extra HTTP headers sent with every request to a custom
+	// provider (one with its own URL and key). Names keep the case typed.
+	// Presets and signed-in accounts never send them.
+	Headers map[string]string `json:"headers,omitempty"`
 
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
@@ -99,11 +100,7 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := os.Chmod(p, 0o600); err != nil {
-		return err
-	}
-	pruneIcons(f)
-	return nil
+	return os.Chmod(p, 0o600)
 }
 
 // All lists the configured providers in the order they were added, then
@@ -202,11 +199,11 @@ func Save(p Provider) error {
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			return store(f)
+			return storeAndPrune(f)
 		}
 	}
 	f.Providers = append(f.Providers, p)
-	return store(f)
+	return storeAndPrune(f)
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -217,11 +214,11 @@ func Delete(id string) error {
 		for i := range f.Providers {
 			if f.Providers[i].ID == id {
 				f.Providers[i].Hidden = true
-				return store(f)
+				return storeAndPrune(f)
 			}
 		}
 		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
-		return store(f)
+		return storeAndPrune(f)
 	}
 	f := load()
 	keep := f.Providers[:0]
@@ -237,7 +234,7 @@ func Delete(id string) error {
 		return fmt.Errorf("no provider %q", id)
 	}
 	f.Providers = keep
-	return store(f)
+	return storeAndPrune(f)
 }
 
 // keyOptional is true for local servers, which usually have no key.
@@ -262,7 +259,7 @@ func normalize(p Provider) Provider {
 	p.Models = cleanList(p.Models)
 	p.Headers = cleanHeaders(p.Headers)
 	if pr := Preset(p.Preset); pr != nil {
-		p.Headers = nil // a preset's vendor sets its own headers; the user's are not kept
+		p.Headers = nil // a preset's requests are its own; custom headers do not apply
 		if p.Icon == "" {
 			p.Icon = pr.Icon
 		}
@@ -289,31 +286,37 @@ func cleanList(xs []string) []string {
 	return out
 }
 
-// cleanHeaders trims header names and values and drops entries with no
-// name. It returns nil when nothing is left, so the field is not written.
+// cleanHeaders trims header names and values and drops entries with an empty
+// name. Names are otherwise kept as typed (case-sensitive), so "X-ORG-id" and
+// "X-Org-Id" stay two entries. Returns nil when nothing is left.
 func cleanHeaders(hs map[string]string) map[string]string {
 	var out map[string]string
-	for k, v := range hs {
-		k = strings.TrimSpace(k)
-		if k == "" {
+	keys := make([]string, 0, len(hs))
+	for k := range hs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // a deterministic winner when two keys trim to one name
+	for _, k := range keys {
+		name := strings.TrimSpace(k)
+		if name == "" {
 			continue
 		}
 		if out == nil {
-			out = make(map[string]string, len(hs))
+			out = map[string]string{}
 		}
-		out[k] = strings.TrimSpace(v)
+		out[name] = strings.TrimSpace(hs[k])
 	}
 	return out
 }
 
-// customHeaders are the headers magpie adds to every request to this
-// provider. Only a custom provider (one the user entered by URL and key)
-// has them: a preset's vendor and a signed-in agent send none.
+// customHeaders are the extra headers magpie sends to a custom provider,
+// trimmed the same way a save trims them. Presets and signed-in accounts
+// send none.
 func (p Provider) customHeaders() map[string]string {
 	if p.Account != nil || Preset(p.Preset) != nil {
 		return nil
 	}
-	return p.Headers
+	return cleanHeaders(p.Headers)
 }
 
 func contains(xs []string, x string) bool {
