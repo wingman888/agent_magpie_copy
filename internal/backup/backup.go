@@ -18,7 +18,7 @@ const bundleVersion = 1
 var (
 	// ErrPassphrase means the file could not be opened with the passphrase:
 	// the passphrase is wrong, or the file has been changed.
-	ErrPassphrase = errors.New("备份密码错误或文件已被改动")
+	ErrPassphrase = errors.New("口令错误或文件被改动")
 
 	// ErrNotBackup means the data is not a magpie backup at all.
 	ErrNotBackup = errors.New("不是 magpie 备份文件")
@@ -37,19 +37,10 @@ type Bundle struct {
 	// Icon names a custom image.
 	Icons map[string][]byte `json:"icons,omitempty"`
 
-	// Settings, Profiles and Agents are raw JSON until the parts that
-	// produce and consume them are wired in. Empty means "not in the
-	// backup", and Restore leaves that part alone.
+	// Settings, Profiles and Agents hold the JSON of settings.Settings,
+	// map[string]profile.Profile and map[agentID]map[field]value. Empty
+	// means "not in the backup", and Restore leaves that part alone.
 	Settings json.RawMessage `json:"settings,omitempty"`
 	Profiles json.RawMessage `json:"profiles,omitempty"`
 	Agents   json.RawMessage `json:"agents,omitempty"`
-}
-
-// Collect gathers this machine's configuration into a Bundle. With keys
-// false, no API key and no credential-like header is included. app names
-// the magpie build doing the collecting.
-//
-// Placeholder: the full collection lands in a later step.
-func Collect(keys bool, app string) (Bundle, error) {
-	return Bundle{Version: bundleVersion, App: app}, nil
 }
