@@ -69,8 +69,8 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchWith is Fetch with extra request headers, applied after the standard
-// ones (see ApplyHeaders). A nil or empty map behaves exactly like Fetch.
+// FetchWith is Fetch with extra request headers the endpoint needs, sent
+// as the user named them (see ApplyHeaders).
 func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
@@ -98,7 +98,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOneWith(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,11 +115,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
-	return fetchOneWith(ctx, url, key, anthropic, nil)
-}
-
-func fetchOneWith(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -174,31 +170,6 @@ func fetchOneWith(ctx context.Context, url, key string, anthropic bool, headers 
 	return out, nil
 }
 
-// ApplyHeaders sets a caller's own headers on a request, after the standard
-// ones, so the caller's value wins on a clash. Each name is written exactly as
-// given (no canonical case), which is what a gateway matching names
-// case-sensitively needs. A standard header whose name differs only in case
-// is replaced; headers that differ only in case from each other are all kept.
-func ApplyHeaders(req *http.Request, headers map[string]string) {
-	if len(headers) == 0 {
-		return
-	}
-	for k := range req.Header {
-		if _, own := headers[k]; own {
-			continue
-		}
-		for name := range headers {
-			if strings.EqualFold(k, name) {
-				delete(req.Header, k)
-				break
-			}
-		}
-	}
-	for name, v := range headers {
-		req.Header[name] = []string{v}
-	}
-}
-
 type liveModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -226,4 +197,25 @@ func Decorate(live []Model, known []Model) []Model {
 		out = append(out, m)
 	}
 	return out
+}
+
+// ApplyHeaders adds a provider's own headers to req, after its auth headers.
+// Names are written as the user typed them, not canonicalised. A header
+// already on req with the same name, ignoring case, is replaced by the
+// user's value.
+func ApplyHeaders(req *http.Request, headers map[string]string) {
+	if len(headers) == 0 {
+		return
+	}
+	for k := range req.Header {
+		for name := range headers {
+			if strings.EqualFold(k, name) {
+				delete(req.Header, k)
+				break
+			}
+		}
+	}
+	for k, v := range headers {
+		req.Header[k] = []string{v}
+	}
 }

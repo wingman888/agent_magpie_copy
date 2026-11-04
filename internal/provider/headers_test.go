@@ -3,240 +3,234 @@ package provider
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 )
 
-// wireServer records each request's header lines exactly as they arrive.
-// net/http canonicalises names on the server side, which would hide the case
-// magpie sent, so this reads the raw bytes instead.
-type wireServer struct {
+// rawUpstream answers like a tiny HTTP/1.1 server but keeps every header
+// name exactly as it arrived; net/http would canonicalise them.
+type rawUpstream struct {
 	mu   sync.Mutex
-	reqs [][]string // per request: "Name: value" lines, in order
+	reqs []rawReq
 }
 
-func newWireServer(t *testing.T) (*wireServer, string) {
+type rawReq struct {
+	path    string
+	headers [][2]string // name as sent, value
+}
+
+func newRawUpstream(t *testing.T) (*rawUpstream, string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	ws := &wireServer{}
+	u := &rawUpstream{}
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go ws.serve(c)
+			go u.serve(c)
 		}
 	}()
-	return ws, "http://" + ln.Addr().String()
+	return u, "http://" + ln.Addr().String()
 }
 
-func (ws *wireServer) serve(c net.Conn) {
+func (u *rawUpstream) serve(c net.Conn) {
 	defer c.Close()
 	r := bufio.NewReader(c)
-	var lines []string
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return
+	}
+	var rq rawReq
+	if parts := strings.Fields(line); len(parts) > 1 {
+		rq.path = parts[1]
+	}
 	length := 0
-	first := true
 	for {
-		line, err := r.ReadString('\n')
+		l, err := r.ReadString('\n')
 		if err != nil {
 			return
 		}
-		line = strings.TrimRight(line, "\r\n")
-		if first {
-			first = false // request line
-			continue
-		}
-		if line == "" {
+		l = strings.TrimRight(l, "\r\n")
+		if l == "" {
 			break
 		}
-		lines = append(lines, line)
-		if i := strings.Index(line, ":"); i > 0 && line[:i] == "Content-Length" {
-			length, _ = strconv.Atoi(strings.TrimSpace(line[i+1:]))
+		name, value, _ := strings.Cut(l, ":")
+		value = strings.TrimSpace(value)
+		rq.headers = append(rq.headers, [2]string{name, value})
+		if strings.EqualFold(name, "Content-Length") {
+			length, _ = strconv.Atoi(value)
 		}
 	}
 	io.CopyN(io.Discard, r, int64(length))
-	ws.mu.Lock()
-	ws.reqs = append(ws.reqs, lines)
-	ws.mu.Unlock()
-
+	u.mu.Lock()
+	u.reqs = append(u.reqs, rq)
+	u.mu.Unlock()
 	body := `{"data":[{"id":"m1"}]}`
 	fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
 }
 
-func (ws *wireServer) seen() [][]string {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-	return append([][]string(nil), ws.reqs...)
+func (u *rawUpstream) all() []rawReq {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]rawReq(nil), u.reqs...)
 }
 
-// exactHeader returns the values sent under exactly this name, case included.
-func exactHeader(lines []string, name string) []string {
+// exact reports whether the request carried name with value, name matched
+// byte for byte.
+func (r rawReq) exact(name, value string) bool {
+	for _, h := range r.headers {
+		if h[0] == name && h[1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// fold lists the values of every header whose name matches ignoring case.
+func (r rawReq) fold(name string) []string {
 	var out []string
-	for _, l := range lines {
-		if i := strings.Index(l, ":"); i > 0 && l[:i] == name {
-			out = append(out, strings.TrimSpace(l[i+1:]))
+	for _, h := range r.headers {
+		if strings.EqualFold(h[0], name) {
+			out = append(out, h[1])
 		}
 	}
 	return out
 }
 
-func isolateCache(t *testing.T) {
+func isolateHeaderTest(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 }
 
-func TestCustomHeadersOnEveryRequest(t *testing.T) {
-	isolateCache(t)
-	ws, base := newWireServer(t)
-	p := Provider{ID: "relay", Name: "Relay", Chat: base + "/v1", Key: "sk-1", Headers: map[string]string{
-		"X-Org-Id": "  acme  ",
-		"   ":      "dropped",
-		"X-ORG-id": "  padded  ",
-	}}
-	res := p.Test(context.Background())
+func TestCustomHeadersSentOnFetchAndTest(t *testing.T) {
+	isolateHeaderTest(t)
+	up, base := newRawUpstream(t)
+	p := Provider{ID: "relay", Name: "Relay", Key: "k", Chat: base + "/v1", Models: []string{"m1"},
+		Headers: map[string]string{"X-ORG-id": "acme", "Authorization": "Custom auth"}}
+	ctx := context.Background()
+
+	if _, err := p.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res := p.Test(ctx)
 	if len(res) != 1 || !res[0].OK {
-		t.Fatalf("test: %+v", res)
+		t.Fatalf("test probe failed: %+v", res)
 	}
-	reqs := ws.seen()
-	if len(reqs) != 2 { // the model list, then the probe
-		t.Fatalf("want 2 upstream requests (models, probe), got %d", len(reqs))
+
+	reqs := up.all()
+	if len(reqs) < 2 {
+		t.Fatalf("want a model-list request and a test request, got %d", len(reqs))
 	}
-	for i, lines := range reqs {
-		if got := exactHeader(lines, "X-Org-Id"); len(got) != 1 || got[0] != "acme" {
-			t.Errorf("request %d: X-Org-Id = %q", i, got)
+	var sawList, sawTest bool
+	for _, r := range reqs {
+		if !r.exact("X-ORG-id", "acme") {
+			t.Errorf("%s: X-ORG-id: acme not sent exactly; headers %v", r.path, r.headers)
 		}
-		if got := exactHeader(lines, "X-ORG-id"); len(got) != 1 || got[0] != "padded" {
-			t.Errorf("request %d: X-ORG-id = %q", i, got)
+		if got := r.fold("Authorization"); len(got) != 1 || got[0] != "Custom auth" {
+			t.Errorf("%s: Authorization = %v, want only the user's value", r.path, got)
 		}
-		if got := exactHeader(lines, "Authorization"); len(got) != 1 || got[0] != "Bearer sk-1" {
-			t.Errorf("request %d: Authorization = %q", i, got)
+		switch r.path {
+		case "/v1/models":
+			sawList = true
+		case "/v1/chat/completions":
+			sawTest = true
 		}
+	}
+	if !sawList || !sawTest {
+		t.Errorf("list request seen %v, test request seen %v", sawList, sawTest)
 	}
 }
 
-func TestCustomHeaderWinsOverAuth(t *testing.T) {
-	isolateCache(t)
-	ws, base := newWireServer(t)
-	p := Provider{ID: "relay", Chat: base + "/v1", Key: "sk-1", Headers: map[string]string{
-		"Authorization": "Custom abc",
-		"x-api-key":     "tok-9",
-	}}
+func TestCustomHeaderOverridesAuthCaseInsensitively(t *testing.T) {
+	isolateHeaderTest(t)
+	up, base := newRawUpstream(t)
+	p := Provider{ID: "relay", Name: "Relay", Key: "k", Chat: base + "/v1", Models: []string{"m1"},
+		Headers: map[string]string{"authorization": "Token zzz"}}
 	p.Test(context.Background())
-	reqs := ws.seen()
-	if len(reqs) == 0 {
-		t.Fatal("no upstream requests")
-	}
-	for i, lines := range reqs {
-		if got := exactHeader(lines, "Authorization"); len(got) != 1 || got[0] != "Custom abc" {
-			t.Errorf("request %d: Authorization = %q", i, got)
+	for _, r := range up.all() {
+		if got := r.fold("Authorization"); len(got) != 1 || got[0] != "Token zzz" {
+			t.Errorf("Authorization = %v, want [Token zzz]", got)
 		}
-		if got := exactHeader(lines, "x-api-key"); len(got) != 1 || got[0] != "tok-9" {
-			t.Errorf("request %d: x-api-key = %q", i, got)
+		if !r.exact("authorization", "Token zzz") {
+			t.Errorf("name not kept as typed: %v", r.headers)
 		}
 	}
 }
 
-func TestSignKeepsHeaderCaseAndOverrides(t *testing.T) {
-	p := Provider{ID: "relay", Chat: "https://relay.example/v1", Key: "sk-1", Headers: map[string]string{
-		"X-ORG-id":      "a",
-		"X-Org-Id":      "b",
-		"authorization": "Lower xyz",
-	}}
-	req, _ := http.NewRequest(http.MethodPost, p.Chat+"/chat/completions", nil)
-	if err := p.Sign(context.Background(), req, Chat, nil); err != nil {
+func TestPresetAndAccountSendNoCustomHeaders(t *testing.T) {
+	isolateHeaderTest(t)
+	presetID := Presets()[0].ID
+	up, base := newRawUpstream(t)
+	ctx := context.Background()
+
+	preset := Provider{ID: "vendor", Name: "Vendor", Key: "k", Preset: presetID, Chat: base + "/v1",
+		Models: []string{"m1"}, Headers: map[string]string{"X-ORG-id": "acme"}}
+	preset.Test(ctx)
+
+	acct := Provider{ID: "codex", Name: "Codex", Key: "k", Chat: base + "/v1",
+		Account: &Account{Agent: "codex"}, Headers: map[string]string{"X-ORG-id": "acme"}}
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", nil)
+	if err := acct.Sign(ctx, req, Chat, nil); err != nil {
 		t.Fatal(err)
 	}
-	if v := req.Header["X-ORG-id"]; len(v) != 1 || v[0] != "a" {
-		t.Errorf("X-ORG-id: %q", v)
+	if got := req.Header.Values("X-ORG-id"); len(got) != 0 {
+		t.Errorf("account request carried custom header: %v", got)
 	}
-	if v := req.Header["X-Org-Id"]; len(v) != 1 || v[0] != "b" {
-		t.Errorf("X-Org-Id: %q", v)
+	if got := req.Header.Values("X-Org-Id"); len(got) != 0 {
+		t.Errorf("account request carried custom header: %v", got)
 	}
-	if v := req.Header["authorization"]; len(v) != 1 || v[0] != "Lower xyz" {
-		t.Errorf("authorization: %q", v)
-	}
-	if _, ok := req.Header["Authorization"]; ok {
-		t.Errorf("standard Authorization should be replaced by the user's header")
-	}
-}
 
-func TestPresetSendsNoCustomHeaders(t *testing.T) {
-	isolateCache(t)
-	ws, base := newWireServer(t)
-	p := Provider{ID: "deepseek", Name: "DeepSeek", Preset: "deepseek", Chat: base + "/v1", Key: "sk-1",
-		Headers: map[string]string{"X-Org-Id": "acme"}}
-	if n := normalize(p); n.Headers != nil {
-		t.Errorf("preset kept headers after normalize: %v", n.Headers)
-	}
-	p.Test(context.Background())
-	reqs := ws.seen()
+	reqs := up.all()
 	if len(reqs) == 0 {
-		t.Fatal("no upstream requests")
+		t.Fatal("preset test sent nothing")
 	}
-	for i, lines := range reqs {
-		if got := exactHeader(lines, "X-Org-Id"); len(got) != 0 {
-			t.Errorf("request %d: preset sent custom header: %q", i, got)
+	for _, r := range reqs {
+		if got := r.fold("X-ORG-id"); len(got) != 0 {
+			t.Errorf("preset request carried custom header: %v", got)
 		}
 	}
 }
 
-func TestAccountSendsNoCustomHeaders(t *testing.T) {
-	p := Provider{ID: "codex", Account: &Account{Agent: "codex"}, Responses: "https://chatgpt.example/backend-api/codex",
-		Headers: map[string]string{"X-Org-Id": "acme"}}
-	req, _ := http.NewRequest(http.MethodPost, p.Responses+"/responses", nil)
-	if err := p.Sign(context.Background(), req, Responses, nil); err != nil {
+func TestSaveCleansHeaders(t *testing.T) {
+	isolateHeaderTest(t)
+	_, base := newRawUpstream(t)
+	err := Save(Provider{ID: "relay", Name: "Relay", Key: "k", Chat: base + "/v1",
+		Headers: map[string]string{"  X-A  ": "  v  ", "   ": "dropped", "": "dropped too"}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := req.Header["X-Org-Id"]; ok {
-		t.Errorf("signed-in account sent a custom header")
+	got, err := Find("relay")
+	if err != nil {
+		t.Fatal(err)
 	}
-}
+	if len(got.Headers) != 1 || got.Headers["X-A"] != "v" {
+		t.Errorf("stored headers = %v, want map[X-A:v]", got.Headers)
+	}
 
-func TestCleanHeaders(t *testing.T) {
-	p := normalize(Provider{ID: "relay", Chat: "https://relay.example/v1", Headers: map[string]string{
-		"  X-A  ":  "  1  ",
-		"":          "no name",
-		" \t ":      "blank name",
-		"X-ORG-id": "x",
-		"X-Org-Id": "y",
-	}})
-	want := map[string]string{"X-A": "1", "X-ORG-id": "x", "X-Org-Id": "y"}
-	if len(p.Headers) != len(want) {
-		t.Fatalf("headers = %v, want %v", p.Headers, want)
+	presetID := Presets()[0].ID
+	if err := Save(Provider{ID: "vendor", Name: "Vendor", Key: "k", Preset: presetID, Chat: base + "/v1",
+		Headers: map[string]string{"X-A": "v"}}); err != nil {
+		t.Fatal(err)
 	}
-	for k, v := range want {
-		if p.Headers[k] != v {
-			t.Errorf("%q = %q, want %q", k, p.Headers[k], v)
-		}
+	got, err = Find("vendor")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if n := normalize(Provider{ID: "x", Chat: "https://x.example/v1", Headers: map[string]string{" ": "v"}}); n.Headers != nil {
-		t.Errorf("only-blank names should leave no headers, got %v", n.Headers)
-	}
-}
-
-func TestHeadersJSON(t *testing.T) {
-	b, _ := json.Marshal(Provider{ID: "a", Chat: "https://a.example/v1"})
-	if strings.Contains(string(b), "headers") {
-		t.Errorf("empty headers were written: %s", b)
-	}
-	b, _ = json.Marshal(Provider{ID: "a", Chat: "https://a.example/v1", Headers: map[string]string{"X-Org-Id": "acme"}})
-	if !strings.Contains(string(b), `"headers":{"X-Org-Id":"acme"}`) {
-		t.Errorf("headers not written as expected: %s", b)
+	if len(got.Headers) != 0 {
+		t.Errorf("preset kept headers: %v", got.Headers)
 	}
 }
