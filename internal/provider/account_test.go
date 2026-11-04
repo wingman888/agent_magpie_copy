@@ -539,6 +539,7 @@ func TestClaudeLoginIsExcludedNotOffered(t *testing.T) {
 
 	claudeCreds := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), ".credentials.json")
 	writeTestFile(t, claudeCreds, `{"claudeAiOauth":{"accessToken":"SECRET-CLAUDE-TOKEN"}}`)
+	resetAccountState() // the empty answer above is cached for a minute
 
 	ex := Excluded()
 	if len(ex) != 1 || ex[0].Agent != "claude" || ex[0].Why == "" {
