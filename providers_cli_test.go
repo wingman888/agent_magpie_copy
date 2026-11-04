@@ -21,13 +21,12 @@ func signIn(t *testing.T, claude bool) {
 	t.Setenv("HOME", root)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
-	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 
 	claims := map[string]any{"email": "me@example.com", "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro"}}
 	b, _ := json.Marshal(claims)
 	idTok := "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
-	writeTestFile(t, filepath.Join(root, "codex", "auth.json"),
+	writeTestFile(t, filepath.Join(root, ".codex", "auth.json"),
 		`{"auth_mode":"chatgpt","tokens":{"id_token":"`+idTok+`","access_token":"at","account_id":"acc"}}`)
 	writeTestFile(t, filepath.Join(root, "config", "github-copilot", "apps.json"),
 		`{"github.com:Iv1":{"user":"octo","oauth_token":"gho_test"}}`)
@@ -105,9 +104,9 @@ func TestExclusionLineText(t *testing.T) {
 		printExcluded([]provider.Exclusion{{Agent: "claude", Why: "terms text"}})
 		return nil
 	})
-	want := "Claude Code is signed in but not offered: terms text"
-	if !strings.Contains(out, want) {
-		t.Fatalf("exclusion line = %q, want it to contain %q", out, want)
+	want := "  Claude Code is signed in but not offered: terms text\n"
+	if out != want {
+		t.Fatalf("exclusion line = %q, want exactly %q", out, want)
 	}
 }
 

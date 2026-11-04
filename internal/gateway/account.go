@@ -18,10 +18,11 @@ func wantsStream(body []byte) bool {
 }
 
 // providerError answers a provider reply with an error status. When a
-// borrowed login is refused, the client is told to sign in again rather than
-// shown the backend's own message.
+// borrowed login is refused as unauthorized, the client is told to sign in
+// again rather than shown the backend's own message. A 403 is passed through
+// unchanged, since it may mean something other than a sign-out.
 func providerError(w http.ResponseWriter, proto provider.Protocol, p provider.Provider, res *http.Response) (int, string) {
-	if p.Account != nil && (res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden) {
+	if p.Account != nil && res.StatusCode == http.StatusUnauthorized {
 		msg := provider.SignedOut(p).Error()
 		return writeError(w, proto, http.StatusUnauthorized, msg), msg
 	}

@@ -213,31 +213,39 @@ var (
 )
 
 // copilotSessionFor returns a cached session, exchanging again only when it is
-// close to expiry. The lock also keeps concurrent callers from exchanging at once.
+// close to expiry. The lock is held only to read and write the cache; the
+// network exchange runs without it, so a slow exchange never blocks other
+// callers reading the cache. Two callers that miss at once may both exchange;
+// the later result simply replaces the earlier one.
 func copilotSessionFor(ctx context.Context, oauth string) (copilotSession, error) {
 	sessionMu.Lock()
-	defer sessionMu.Unlock()
-	if s, ok := sessionByOAuth[oauth]; ok && time.Until(s.expires) > sessionSlack {
+	s, ok := sessionByOAuth[oauth]
+	sessionMu.Unlock()
+	if ok && time.Until(s.expires) > sessionSlack {
 		return s, nil
 	}
 	s, err := exchangeCopilot(ctx, oauth)
 	if err != nil {
 		return copilotSession{}, err
 	}
+	sessionMu.Lock()
 	sessionByOAuth[oauth] = s
+	sessionMu.Unlock()
 	return s, nil
 }
 
 // copilotAPIBase is the cached Copilot API address, or the default when no
-// session exists yet. It never touches the network.
+// session exists yet. It never touches the network; the lock is held only for
+// the map read.
 func copilotAPIBase() string {
 	c, ok := loadCopilot()
 	if !ok {
 		return defaultCopilotAPI
 	}
 	sessionMu.Lock()
-	defer sessionMu.Unlock()
-	if s, ok := sessionByOAuth[c.oauth]; ok && s.api != "" {
+	s, ok := sessionByOAuth[c.oauth]
+	sessionMu.Unlock()
+	if ok && s.api != "" {
 		return s.api
 	}
 	return defaultCopilotAPI

@@ -9,10 +9,14 @@ package provider
 // offered. Its contents are never read.
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -90,6 +94,10 @@ func accountSignedIn(id string) bool {
 	}
 	return false
 }
+
+// SignedIn reports whether the agent behind a borrowed-login id is signed in.
+// It is false for any other id.
+func SignedIn(id string) bool { return accountSignedIn(id) }
 
 // Accounts lists the borrowed logins that are signed in and offered as
 // providers. A user-built provider with the same id takes precedence.
@@ -184,10 +192,8 @@ type codexLogin struct {
 	accountID string
 }
 
+// codexHome is the Codex CLI's directory, always $HOME/.codex.
 func codexHome() string {
-	if d := os.Getenv("CODEX_HOME"); d != "" {
-		return d
-	}
 	return filepath.Join(homeDir(), ".codex")
 }
 
@@ -290,13 +296,31 @@ func loadCopilot() (copilotLogin, bool) {
 	return copilotLogin{}, false
 }
 
-// claudeSignedIn only checks that Claude Code's credential file exists. Its
-// contents are not read, and the macOS keychain is not consulted.
+// claudeSignedIn only checks that Claude Code's credentials exist. Their
+// contents are never read. The credential file is checked first; on macOS,
+// where Claude Code may keep its login in the keychain instead, the keychain
+// item is looked up by name only. That lookup runs without -w, so no secret
+// is printed, and only its exit status is read. It never prompts for access
+// because the item's data is not requested.
 func claudeSignedIn() bool {
 	dir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if dir == "" {
 		dir = filepath.Join(homeDir(), ".claude")
 	}
 	info, err := os.Stat(filepath.Join(dir, ".credentials.json"))
-	return err == nil && info.Mode().IsRegular()
+	if err == nil && info.Mode().IsRegular() {
+		return true
+	}
+	return runtime.GOOS == "darwin" && claudeKeychainItem()
+}
+
+// claudeKeychainItem reports whether the macOS keychain has Claude Code's
+// credential item. Only the exit status matters: the output is discarded.
+func claudeKeychainItem() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run() == nil
 }

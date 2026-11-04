@@ -95,7 +95,9 @@ func (p Provider) Exposed() []catalog.Model {
 			return pick(have)
 		}
 	}
-	if len(avail) <= manyModels {
+	// A borrowed login's models are all exposed by default, however many
+	// there are; the threshold only applies to plain providers.
+	if p.Account != nil || len(avail) <= manyModels {
 		return avail
 	}
 	return nil

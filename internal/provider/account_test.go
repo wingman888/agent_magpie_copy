@@ -34,7 +34,6 @@ func sandbox(t *testing.T) {
 	t.Setenv("HOME", root)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
-	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	resetAccountState()
 	oldCodex, oldToken := CodexBase, CopilotTokenURL
@@ -84,10 +83,11 @@ func signInCodex(t *testing.T, email, plan string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, filepath.Join(os.Getenv("CODEX_HOME"), "auth.json"), string(b))
+	writeTestFile(t, codexAuthPath(), string(b))
 }
 
-func codexAuthPath() string { return filepath.Join(os.Getenv("CODEX_HOME"), "auth.json") }
+// codexAuthPath is the Codex CLI's auth.json in the sandbox HOME: $HOME/.codex/auth.json.
+func codexAuthPath() string { return filepath.Join(os.Getenv("HOME"), ".codex", "auth.json") }
 
 // signInCopilot writes a GitHub entry into the sandbox's Copilot hosts.json.
 func signInCopilot(t *testing.T, oauth string) {

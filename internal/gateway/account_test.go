@@ -25,7 +25,6 @@ func codexSandbox(t *testing.T) string {
 	t.Setenv("HOME", root)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
-	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	oldBase, oldRefresh, oldClient := provider.CodexBase, provider.CodexRefreshURL, provider.CodexClientID
 	t.Cleanup(func() {
@@ -69,7 +68,7 @@ func writeAuth(t *testing.T, access string, extra map[string]any) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(os.Getenv("CODEX_HOME"), "auth.json")
+	path := filepath.Join(os.Getenv("HOME"), ".codex", "auth.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}

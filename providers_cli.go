@@ -82,7 +82,7 @@ func providers() error {
 // the provider list, so a missing provider is never a mystery.
 func printExcluded(ex []provider.Exclusion) {
 	for _, e := range ex {
-		fmt.Printf("  %s %s is signed in but not offered: %s\n", amber.Render("!"), agentLabel(e.Agent), muted.Render(e.Why))
+		fmt.Printf("  %s is signed in but not offered: %s\n", agentLabel(e.Agent), e.Why)
 	}
 }
 
@@ -193,6 +193,11 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
+		if p.Account != nil {
+			// A borrowed login authenticates with the agent's own token; a key is ignored.
+			fmt.Println(green.Render("✓"), p.Name, muted.Render("账号类 Provider 不使用 Key，已忽略"))
+			return nil
+		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
 			return err
@@ -209,6 +214,11 @@ func providerCmd(args []string) error {
 		}
 		if err := provider.Delete(p.ID); err != nil {
 			return err
+		}
+		if p.Account != nil {
+			// Deleting a borrowed login only clears the model selection; the login itself is the agent's.
+			fmt.Println(green.Render("✓"), p.Name, "已清除模型选择")
+			return nil
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil

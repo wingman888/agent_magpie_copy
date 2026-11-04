@@ -303,8 +303,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
 		if pid, _, found := strings.Cut(call.Model, "/"); found {
-			if e := provider.SignedOutFor(pid); e != nil {
-				// A model of a borrowed login whose agent has signed out.
+			if e := provider.SignedOutFor(pid); e != nil && !provider.SignedIn(pid) {
+				// A model of a borrowed login whose agent has signed out. A
+				// signed-in login keeps the plain 404: the name simply is not known.
 				call.Status, call.Error = 401, e.Error()
 				s.record(call)
 				writeError(w, from, http.StatusUnauthorized, e.Error())
@@ -382,7 +383,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err != nil {
 		return nil, err
 	}
-	if res.StatusCode < 400 {
+	if p.Account != nil && res.StatusCode < 400 {
 		sniffEventStream(res)
 	}
 	return res, nil
