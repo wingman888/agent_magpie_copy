@@ -51,37 +51,6 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 	return append(ready, resting...)
 }
 
-// try is one request to send: a candidate, and for a provider holding several
-// enabled keys, which of them it uses (keyID is empty otherwise).
-type try struct {
-	c     candidate
-	keyID string
-	label string // the key's name, or its mask when it has none
-}
-
-// expandKeys turns each candidate into one try per enabled key when it has
-// several. A provider with one enabled key is tried as it always was.
-func expandKeys(cands []candidate) []try {
-	var out []try
-	for _, c := range cands {
-		creds := c.p.KeysOn()
-		if len(creds) < 2 {
-			out = append(out, try{c: c})
-			continue
-		}
-		for _, cr := range creds {
-			q := c.p
-			q.Key, q.KeyName = cr.Key, cr.Name
-			label := cr.Name
-			if label == "" {
-				label = provider.Mask(cr.Key)
-			}
-			out = append(out, try{c: candidate{q, c.model}, keyID: cr.ID, label: label})
-		}
-	}
-	return out
-}
-
 var restingUntil = struct {
 	sync.Mutex
 	m map[string]time.Time

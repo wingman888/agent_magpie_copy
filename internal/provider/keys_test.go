@@ -8,256 +8,255 @@ import (
 	"testing"
 )
 
-// keyHome isolates the config and the signed-in agents, as signIn does, but
-// signs nobody in.
-func keyHome(t *testing.T) {
-	t.Helper()
-	isolate(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-}
+const (
+	keyA = "sk-personal-0001"
+	keyB = "sk-team-0002"
+	keyC = "sk-spare-0003"
+)
 
-func addCustom(t *testing.T, id, key string) {
+// keysRelay sets up an isolated config with one legacy single-key provider.
+func keysRelay(t *testing.T) {
 	t.Helper()
-	if err := Save(Provider{ID: id, Name: id, Key: key, Chat: "https://relay.example/v1"}); err != nil {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := Save(Provider{ID: "relay", Name: "Relay", Key: keyA, Chat: "https://relay.example/v1"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func keyMust(t *testing.T, err error) {
+// keyState summarizes KeyList as "id:name:active:on" strings for comparison.
+func keyState(t *testing.T) []string {
 	t.Helper()
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-// keyNames lists the names of a provider's keys in attempt order.
-func keyNames(t *testing.T, id string) []string {
-	t.Helper()
-	p, err := Find(id)
+	p, err := Find("relay")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var out []string
 	for _, k := range p.KeyList() {
-		out = append(out, k.Name)
+		s := k.ID
+		if k.Name != "" {
+			s += ":" + k.Name
+		}
+		if k.Active {
+			s += ":active"
+		}
+		if k.On {
+			s += ":on"
+		} else {
+			s += ":off"
+		}
+		out = append(out, s)
 	}
 	return out
 }
 
-func TestLegacySingleKeyGainsSecondKey(t *testing.T) {
-	keyHome(t)
-	addCustom(t, "relay", "sk-personal-0001")
+func kid(key string) string { return keyID(key) }
 
-	b, err := os.ReadFile(Path())
+func mustNoErr(t *testing.T, err error) {
+	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := string(b); strings.Contains(s, `"keys"`) || strings.Contains(s, `"keyName"`) {
-		t.Fatalf("single-key config grew key fields: %s", s)
-	}
+}
 
-	keyMust(t, AddKey("relay", "团队", "  sk-team-0002  "))
+func mustErr(t *testing.T, err error, what string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s: expected an error", what)
+	}
+	for _, k := range []string{keyA, keyB, keyC} {
+		if strings.Contains(err.Error(), k) {
+			t.Fatalf("%s: error leaks a full key: %v", what, err)
+		}
+	}
+}
+
+func TestLegacySingleKeyUnchanged(t *testing.T) {
+	keysRelay(t)
 	p, err := Find("relay")
-	if err != nil {
+	mustNoErr(t, err)
+	if p.Key != keyA || p.KeyName != "" || len(p.Keys) != 0 {
+		t.Fatalf("legacy provider changed: %+v", p)
+	}
+	list := p.KeyList()
+	if len(list) != 1 || !list[0].Active || !list[0].On || list[0].ID != kid(keyA) {
+		t.Fatalf("KeyList: %+v", list)
+	}
+	if list[0].Masked != Mask(keyA) || strings.Contains(list[0].Masked, keyA) {
+		t.Fatalf("masked key: %q", list[0].Masked)
+	}
+	// the file keeps the legacy shape: no key list fields appear
+	b, err := os.ReadFile(Path())
+	mustNoErr(t, err)
+	if strings.Contains(string(b), `"keys"`) || strings.Contains(string(b), `"keyName"`) {
+		t.Fatalf("legacy config grew key list fields:\n%s", b)
+	}
+}
+
+func TestLegacyFileWithKeyList(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(Path()), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ks := p.KeyList()
-	if len(ks) != 2 {
-		t.Fatalf("KeyList: %+v", ks)
+	cfg := `{"providers":[{"id":"relay","name":"Relay","key":"` + keyA + `","keyName":"个人",` +
+		`"chat":"https://relay.example/v1","keys":[{"name":"团队","key":"` + keyB + `"},` +
+		`{"key":"` + keyC + `","off":true}]}]}`
+	mustNoErr(t, os.WriteFile(Path(), []byte(cfg), 0o600))
+	p, err := Find("relay")
+	mustNoErr(t, err)
+	want := []string{kid(keyA) + ":个人:active:on", kid(keyB) + ":团队:on", kid(keyC) + ":off"}
+	if got := keyState(t); !slices.Equal(got, want) {
+		t.Fatalf("KeyList: got %v want %v", got, want)
 	}
-	if !ks[0].Active || !ks[0].On || ks[0].Name != "" || ks[0].Masked != Mask("sk-personal-0001") {
-		t.Fatalf("first key: %+v", ks[0])
-	}
-	if ks[1].Active || !ks[1].On || ks[1].Name != "团队" || ks[1].Masked != Mask("sk-team-0002") {
-		t.Fatalf("second key: %+v", ks[1])
-	}
-	if p.Key != "sk-personal-0001" {
-		t.Fatalf("the first key moved: %q", p.Key)
-	}
-
-	if err := AddKey("relay", "again", "sk-team-0002"); err == nil {
-		t.Fatal("duplicate key accepted")
-	} else if strings.Contains(err.Error(), "sk-team-0002") {
-		t.Fatalf("error leaks the full key: %v", err)
-	}
-	if err := AddKey("relay", "blank", " \t "); err == nil {
-		t.Fatal("empty key accepted")
-	}
-	if err := AddKey("relay", "dup-first", "sk-personal-0001"); err == nil {
-		t.Fatal("duplicate of the first key accepted")
-	}
-	if got := keyNames(t, "relay"); !slices.Equal(got, []string{"", "团队"}) {
-		t.Fatalf("failed adds changed the keys: %q", got)
+	on := p.KeysOn()
+	if len(on) != 2 || on[0].Key != keyA || on[0].Name != "个人" || on[1].Key != keyB {
+		t.Fatalf("KeysOn: %+v", on)
 	}
 }
 
-func TestUseKeyAndOrder(t *testing.T) {
-	keyHome(t)
-	addCustom(t, "relay", "sk-a-000001")
-	keyMust(t, RenameKey("relay", refOf("sk-a-000001"), "个人"))
-	keyMust(t, AddKey("relay", "团队", "sk-b-000002"))
-	keyMust(t, AddKey("relay", "备份", "sk-c-000003"))
-
-	if got := keyNames(t, "relay"); !slices.Equal(got, []string{"个人", "团队", "备份"}) {
-		t.Fatalf("order after adds: %q", got)
+func TestAddKeyTeam(t *testing.T) {
+	keysRelay(t)
+	mustNoErr(t, AddKey("relay", "团队", "  "+keyB+"  "))
+	p, err := Find("relay")
+	mustNoErr(t, err)
+	list := p.KeyList()
+	if len(list) != 2 {
+		t.Fatalf("want 2 keys, got %+v", list)
 	}
-
-	// the front key is a no-op
-	keyMust(t, UseKey("relay", refOf("sk-a-000001")))
-	if got := keyNames(t, "relay"); !slices.Equal(got, []string{"个人", "团队", "备份"}) {
-		t.Fatalf("UseKey on the front changed order: %q", got)
+	if !list[0].Active || !list[0].On || list[0].ID != kid(keyA) {
+		t.Fatalf("original key should stay front: %+v", list[0])
 	}
-
-	// a later key goes first; the old front stays enabled, right behind it
-	keyMust(t, UseKey("relay", refOf("sk-c-000003")))
-	if got := keyNames(t, "relay"); !slices.Equal(got, []string{"备份", "个人", "团队"}) {
-		t.Fatalf("UseKey order: %q", got)
+	if list[1].Active || !list[1].On || list[1].Name != "团队" || list[1].ID != kid(keyB) {
+		t.Fatalf("new key: %+v", list[1])
 	}
-	p, _ := Find("relay")
-	for _, k := range p.KeyList() {
-		if !k.On {
-			t.Fatalf("UseKey switched a key off: %+v", k)
-		}
+	if p.Key != keyA {
+		t.Fatalf("front key changed: %q", p.Key)
 	}
-	if p.Key != "sk-c-000003" || p.KeyName != "备份" {
-		t.Fatalf("first key fields: %q %q", p.Key, p.KeyName)
-	}
-
-	if err := UseKey("relay", "ffffff"); err == nil {
-		t.Fatal("UseKey accepted an unknown key")
+	mustErr(t, AddKey("relay", "again", keyB), "duplicate key")
+	mustErr(t, AddKey("relay", "again", " "+keyA+" "), "duplicate of front key")
+	mustErr(t, AddKey("relay", "blank", "   "), "blank key")
+	mustErr(t, AddKey("relay", "", ""), "empty key")
+	if len(keyState(t)) != 2 {
+		t.Fatalf("failed adds changed the list: %v", keyState(t))
 	}
 }
 
-func TestSwitchingKeysOffAndRemoving(t *testing.T) {
-	keyHome(t)
-	addCustom(t, "relay", "sk-a-000001")
-	keyMust(t, RenameKey("relay", refOf("sk-a-000001"), "个人"))
-	keyMust(t, AddKey("relay", "团队", "sk-b-000002"))
-	keyMust(t, AddKey("relay", "备份", "sk-c-000003"))
+func TestAddKeyToEmptyProviderBecomesFront(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	mustNoErr(t, Save(Provider{ID: "relay", Name: "Relay", Chat: "http://localhost:11434/v1"}))
+	mustNoErr(t, AddKey("relay", "", keyA))
+	p, err := Find("relay")
+	mustNoErr(t, err)
+	if p.Key != keyA || len(p.KeyList()) != 1 || !p.KeyList()[0].Active {
+		t.Fatalf("first key should be front: %+v", p.KeyList())
+	}
+}
 
-	// switching off the front hands it to the next enabled key; the switched
-	// off one stays in the list
-	keyMust(t, SetKeyOn("relay", refOf("sk-a-000001"), false))
+func TestUseKey(t *testing.T) {
+	keysRelay(t)
+	mustNoErr(t, AddKey("relay", "团队", keyB))
+	mustNoErr(t, UseKey("relay", kid(keyB)))
+	want := []string{kid(keyB) + ":团队:active:on", kid(keyA) + ":on"}
+	if got := keyState(t); !slices.Equal(got, want) {
+		t.Fatalf("after UseKey: got %v want %v", got, want)
+	}
 	p, _ := Find("relay")
-	ks := p.KeyList()
-	if len(ks) != 3 || ks[0].Name != "团队" || !ks[0].Active || !ks[0].On {
-		t.Fatalf("after switching the front off: %+v", ks)
+	if p.Key != keyB {
+		t.Fatalf("front key not switched: %q", p.Key)
 	}
-	if ks[1].Name != "个人" || ks[1].On || ks[1].Active {
-		t.Fatalf("switched-off key: %+v", ks[1])
+	// already front: no change
+	mustNoErr(t, UseKey("relay", kid(keyB)))
+	if got := keyState(t); !slices.Equal(got, want) {
+		t.Fatalf("UseKey on front changed the list: %v", got)
+	}
+	mustErr(t, UseKey("relay", "deadbeef"), "unknown ref")
+	mustErr(t, UseKey("relay", keyC), "secret typed as ref")
+}
+
+func TestSetKeyOnAndRemoveRules(t *testing.T) {
+	keysRelay(t)
+	mustNoErr(t, AddKey("relay", "团队", keyB))
+	mustNoErr(t, AddKey("relay", "备用", keyC))
+
+	// disabling the front hands the front to the next enabled key
+	mustNoErr(t, SetKeyOn("relay", kid(keyA), false))
+	want := []string{kid(keyB) + ":团队:active:on", kid(keyA) + ":off", kid(keyC) + ":备用:on"}
+	if got := keyState(t); !slices.Equal(got, want) {
+		t.Fatalf("after disabling front: got %v want %v", got, want)
+	}
+	p, _ := Find("relay")
+	if on := p.KeysOn(); len(on) != 2 || on[0].Key != keyB || on[1].Key != keyC {
+		t.Fatalf("KeysOn order: %+v", on)
 	}
 
-	// the switched-off key never gets used
-	for _, c := range p.KeysOn() {
-		if c.Key == "sk-a-000001" {
-			t.Fatal("a switched-off key is listed by KeysOn")
-		}
+	// disabling the last enabled key is refused and changes nothing
+	mustNoErr(t, SetKeyOn("relay", kid(keyC), false))
+	before := keyState(t)
+	mustErr(t, SetKeyOn("relay", kid(keyB), false), "disable last enabled")
+	mustErr(t, RemoveKey("relay", kid(keyB)), "remove last enabled")
+	if got := keyState(t); !slices.Equal(got, before) {
+		t.Fatalf("refused change altered config: %v", got)
 	}
 
-	// with only one enabled key left, it can be neither switched off nor removed
-	keyMust(t, SetKeyOn("relay", refOf("sk-c-000003"), false))
-	before := keyNames(t, "relay")
-	if err := SetKeyOn("relay", refOf("sk-b-000002"), false); err == nil {
-		t.Fatal("last enabled key switched off")
-	}
-	if err := RemoveKey("relay", refOf("sk-b-000002")); err == nil {
-		t.Fatal("last enabled key removed")
-	}
-	if got := keyNames(t, "relay"); !slices.Equal(got, before) {
-		t.Fatalf("rejected change altered the keys: %q -> %q", before, got)
-	}
-
-	// enable another key, then the old front can be removed; the rest keep their names
-	keyMust(t, SetKeyOn("relay", refOf("sk-c-000003"), true))
-	keyMust(t, RemoveKey("relay", refOf("sk-b-000002")))
+	// re-enable one, then the old front can go
+	mustNoErr(t, SetKeyOn("relay", kid(keyA), true))
+	mustNoErr(t, RemoveKey("relay", kid(keyB)))
 	p, _ = Find("relay")
-	ks = p.KeyList()
-	if len(ks) != 2 || ks[0].Name != "备份" || !ks[0].Active || ks[1].Name != "个人" || ks[1].On {
-		t.Fatalf("after removing the front: %+v", ks)
+	list := p.KeyList()
+	if len(list) != 2 || list[0].ID != kid(keyA) || !list[0].Active || list[1].ID != kid(keyC) || list[1].On {
+		t.Fatalf("after removing front: %+v", list)
 	}
-	if p.Key != "sk-c-000003" {
-		t.Fatalf("the new front is not stored as key: %q", p.Key)
+}
+
+func TestRemoveLastKeyRefused(t *testing.T) {
+	keysRelay(t)
+	mustErr(t, RemoveKey("relay", kid(keyA)), "remove only key")
+	if len(keyState(t)) != 1 {
+		t.Fatal("only key was removed")
+	}
+}
+
+func TestRemoveNonFrontKey(t *testing.T) {
+	keysRelay(t)
+	mustNoErr(t, AddKey("relay", "团队", keyB))
+	mustNoErr(t, RemoveKey("relay", kid(keyB)))
+	p, _ := Find("relay")
+	if len(p.KeyList()) != 1 || p.Key != keyA {
+		t.Fatalf("after removing second key: %+v", p.KeyList())
 	}
 }
 
 func TestRenameKey(t *testing.T) {
-	keyHome(t)
-	addCustom(t, "relay", "sk-a-000001")
-	keyMust(t, AddKey("relay", "团队", "sk-b-000002"))
-
-	keyMust(t, RenameKey("relay", refOf("sk-b-000002"), "  新名字  "))
-	if got := keyNames(t, "relay"); !slices.Equal(got, []string{"", "新名字"}) {
-		t.Fatalf("rename: %q", got)
+	keysRelay(t)
+	mustNoErr(t, AddKey("relay", "", keyB))
+	mustNoErr(t, RenameKey("relay", kid(keyB), "  团队  "))
+	p, _ := Find("relay")
+	if p.KeyList()[1].Name != "团队" {
+		t.Fatalf("rename: %+v", p.KeyList())
 	}
-	keyMust(t, RenameKey("relay", refOf("sk-b-000002"), "   "))
-	keyMust(t, RenameKey("relay", refOf("sk-a-000001"), "个人"))
-	if got := keyNames(t, "relay"); !slices.Equal(got, []string{"个人", ""}) {
-		t.Fatalf("clearing a name: %q", got)
+	mustNoErr(t, RenameKey("relay", kid(keyB), "   "))
+	p, _ = Find("relay")
+	if p.KeyList()[1].Name != "" {
+		t.Fatalf("clear name: %+v", p.KeyList())
 	}
+	mustNoErr(t, RenameKey("relay", kid(keyA), "个人"))
+	p, _ = Find("relay")
+	if p.KeyList()[0].Name != "个人" || p.KeyName != "个人" {
+		t.Fatalf("front rename: %+v", p.KeyList())
+	}
+	mustErr(t, RenameKey("relay", "deadbeef", "x"), "rename unknown")
 }
 
-func TestUnknownKeyRefIsAnError(t *testing.T) {
-	keyHome(t)
-	addCustom(t, "relay", "sk-a-000001")
-	for name, err := range map[string]error{
-		"UseKey":      UseKey("relay", "ffffff"),
-		"SetKeyOn":    SetKeyOn("relay", "ffffff", false),
-		"RemoveKey":   RemoveKey("relay", "ffffff"),
-		"RenameKey":   RenameKey("relay", "ffffff", "x"),
-		"empty ref":   RenameKey("relay", "", "x"),
-		"no provider": AddKey("nosuch", "x", "sk-z"),
-	} {
-		if err == nil {
-			t.Errorf("%s: no error for an unknown key or provider", name)
-		}
-	}
-	if got := keyNames(t, "relay"); !slices.Equal(got, []string{""}) {
-		t.Fatalf("failed operations changed the keys: %q", got)
-	}
+func TestUnknownProviderRefused(t *testing.T) {
+	keysRelay(t)
+	mustErr(t, AddKey("nope", "", keyB), "unknown provider")
+	mustErr(t, SetKeyOn("relay", "deadbeef", false), "unknown ref on SetKeyOn")
+	mustErr(t, RemoveKey("relay", "deadbeef"), "unknown ref on RemoveKey")
 }
 
-func TestSignedInAccountHasNoKeys(t *testing.T) {
+func TestAccountRefusesKeys(t *testing.T) {
 	signIn(t)
-	if err := AddKey("codex", "x", "sk-z-000009"); err == nil {
-		t.Fatal("AddKey accepted a signed-in account")
-	}
-}
-
-func TestKeysOnRestsFailedKey(t *testing.T) {
-	keyHome(t)
-	addCustom(t, "relay", "sk-a-000001")
-	keyMust(t, AddKey("relay", "团队", "sk-b-000002"))
-
-	ids := func() []string {
-		p, _ := Find("relay")
-		var out []string
-		for _, c := range p.KeysOn() {
-			out = append(out, c.Key)
-		}
-		return out
-	}
-	if got := ids(); !slices.Equal(got, []string{"sk-a-000001", "sk-b-000002"}) {
-		t.Fatalf("KeysOn: %q", got)
-	}
-
-	MarkKeyFailed("relay", refOf("sk-a-000001"))
-	if got := ids(); !slices.Equal(got, []string{"sk-b-000002", "sk-a-000001"}) {
-		t.Fatalf("resting key still first: %q", got)
-	}
-
-	// resting is per key: the other provider is unaffected
-	addCustom(t, "other", "sk-a-000001")
-	p, _ := Find("other")
-	if got := p.KeysOn(); len(got) != 1 || got[0].Key != "sk-a-000001" {
-		t.Fatalf("other provider: %+v", got)
-	}
-
-	// a switched-off key is never listed, resting or not
-	keyMust(t, SetKeyOn("relay", refOf("sk-b-000002"), false))
-	if got := ids(); !slices.Equal(got, []string{"sk-a-000001"}) {
-		t.Fatalf("switched-off key listed: %q", got)
-	}
+	mustErr(t, AddKey("codex", "", keyB), "AddKey on signed-in account")
 }

@@ -264,12 +264,28 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
-			// the form knows only the first key: keep the other accounts, and the
-			// first one's name while it is still the same key
-			if old != nil && len(in.Keys) == 0 {
-				in.Keys = old.Keys
-				if in.KeyName == "" && in.Key == old.Key {
-					in.KeyName = old.KeyName
+			// the form only knows the front key, so the other keys and the
+			// front key's name are carried over; if the front key was swapped
+			// for one of the others, the old front key takes that one's place
+			if old != nil {
+				if in.Key == old.Key {
+					in.KeyName, in.Keys = old.KeyName, old.Keys
+				} else {
+					var rest []provider.StoredKey
+					swapped := false
+					for _, k := range old.Keys {
+						if !swapped && k.Key == in.Key {
+							in.KeyName, swapped = k.Name, true
+							continue
+						}
+						rest = append(rest, k)
+					}
+					if swapped {
+						rest = append([]provider.StoredKey{{Name: old.KeyName, Key: old.Key}}, rest...)
+					} else {
+						in.KeyName, rest = old.KeyName, old.Keys
+					}
+					in.Keys = rest
 				}
 			}
 			if in.Icon == "" && old != nil && in.Preset == "" {

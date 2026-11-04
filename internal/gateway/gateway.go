@@ -349,29 +349,35 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary, then its fallbacks while it can't take the request and
-	// nothing has been sent yet
-	tries := expandKeys(s.candidates(p, model))
+	// the primary's keys in turn, then its fallbacks, while it can't take the
+	// request and nothing has been sent yet
+	plan := s.tries(s.candidates(p, model))
 	var skipped []string
-	for i, t := range tries {
-		c := t.c
-		last := i == len(tries)-1 || r.Context().Err() != nil
+	for i, t := range plan {
+		last := i == len(plan)-1 || r.Context().Err() != nil
 		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+		call.Provider, call.To, call.Usage = t.p.ID, "", Usage{}
+		call.Status, call.Error = s.attempt(hw, r, from, t.p, t.model, body, &call)
+		// scrub holds the secret back from the record, single key or not;
+		// with no key it does nothing
+		call.Error = scrub(call.Error, t.p.Key)
+		if t.multi {
+			call.Error = scrub(call.Error, t.key.Key)
+		}
 		if !last && hw.failed() {
-			if t.keyID != "" {
-				// one of several accounts: only that key rests
-				provider.MarkKeyFailed(c.p.ID, t.keyID)
-				skipped = append(skipped, c.p.ID+"("+t.label+"): "+call.Error)
-			} else {
-				s.rest(c.p.ID)
-				skipped = append(skipped, c.p.ID+": "+call.Error)
+			name := t.p.ID
+			if t.multi {
+				s.rest(keyRest(t.p.ID, t.key.ID))
+				name = accountName(t)
 			}
+			if t.last {
+				s.rest(t.p.ID)
+			}
+			skipped = append(skipped, name+": "+call.Error)
 			continue
 		}
 		hw.release()
-		model = c.model
+		model = t.model
 		break
 	}
 	if len(skipped) > 0 {
