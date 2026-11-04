@@ -147,17 +147,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
 	mux.HandleFunc("GET /v1beta/models/{rest...}", s.geminiModel)
-	mux.HandleFunc("POST /v1beta/models/{rest...}", s.gemini)
+	mux.HandleFunc("POST /v1beta/models/{rest...}", s.geminiPost)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses and /v1/messages; Gemini API: /v1beta/models, /v1beta/models/{model}:generateContent, :streamGenerateContent and :countTokens")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages",
-			"/v1beta/models", "/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:streamGenerateContent", "/v1beta/models/{model}:countTokens"}})
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1beta/models"}})
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -419,7 +418,7 @@ func parse(proto provider.Protocol, body []byte) (*Request, error) {
 		return parseChat(body)
 	case provider.Responses:
 		return parseResponses(body)
-	case provider.Gemini:
+	case geminiProto:
 		return parseGemini(body)
 	}
 	return parseAnthropic(body)
@@ -458,8 +457,8 @@ func encoder(proto provider.Protocol, w *sseWriter, model string) streamEncoder 
 		return &chatEncoder{w: w, model: model}
 	case provider.Responses:
 		return &responsesEncoder{w: w, model: model}
-	case provider.Gemini:
-		return newGeminiEncoder(w, model)
+	case geminiProto:
+		return &geminiEncoder{w: w, model: model}
 	}
 	return &anthropicEncoder{w: w, model: model}
 }
@@ -470,8 +469,9 @@ func render(proto provider.Protocol, res Result, model string) []byte {
 		return renderChat(res, model)
 	case provider.Responses:
 		return renderResponses(res, model)
-	case provider.Gemini:
-		return renderGemini(res, model)
+	case geminiProto:
+		b, _ := renderGemini(res, model)
+		return b
 	}
 	return renderAnthropic(res, model)
 }
@@ -510,6 +510,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // writeError answers in the client's own error shape.
 func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg string) int {
+	if proto == geminiProto {
+		writeJSON(w, status, map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}})
+		return status
+	}
 	typ := "api_error"
 	switch {
 	case status == 400:
@@ -524,10 +528,6 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 		typ = "rate_limit_error"
 	case status == 529:
 		typ = "overloaded_error"
-	}
-	if proto == provider.Gemini {
-		writeJSON(w, status, map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}})
-		return status
 	}
 	var v any
 	if proto == provider.Anthropic {
