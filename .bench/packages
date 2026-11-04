@@ -1,1 +1,1 @@
-. ./build/icon ./internal/agent ./internal/catalog ./internal/edit ./internal/gateway ./internal/profile ./internal/provider ./internal/tui ./internal/usage
+./internal/agent ./internal/gateway ./internal/provider
