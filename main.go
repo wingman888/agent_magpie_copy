@@ -55,6 +55,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
   magpie sync                     refresh the model catalog and vendor model lists
+  magpie backup [--no-keys] [file]     save all of it to one passphrase-sealed file
+  magpie restore [--no-agents] <file>  restore a backup on this machine
   magpie agents                   list every supported agent
   magpie update [check]           install the newest release (check: only say if there is one)
 
@@ -144,6 +146,10 @@ func run(args []string) error {
 		return accountsCmd(args)
 	case "usage":
 		return usageCmd(args)
+	case "backup":
+		return backupCmd(args[1:])
+	case "restore":
+		return restoreCmd(args[1:])
 	case "update":
 		return updateCmd(args)
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
