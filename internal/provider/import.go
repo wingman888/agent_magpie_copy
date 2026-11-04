@@ -1,59 +1,63 @@
 package provider
 
-import (
-	"fmt"
-	"strings"
-)
+// Import writes providers from a configuration backup (see internal/backup).
+// It is Save for many at once and without the sign-in checks: a restored
+// provider may come without a key, which Save refuses, and the user adds
+// that key afterwards with `magpie provider key`.
 
-// IconFileName is the picture file a provider's Icon points at, if it points
-// at one this machine stores ("file:<name>"); ok is false for built-in icons.
-func IconFileName(icon string) (name string, ok bool) {
-	return strings.CutPrefix(icon, iconPrefix)
+import "fmt"
+
+// Imported is what Import wrote: the providers as stored, and the counts.
+type Imported struct {
+	Added    int
+	Replaced int
+	Stored   []Provider
 }
 
-// ValidID reports whether id can name a provider: lowercase letters, digits
-// and dashes, and not the gateway's own name "magpie".
-func ValidID(id string) bool {
-	id = strings.ToLower(strings.TrimSpace(id))
-	return id != "" && id != "magpie" && id == Slug(id)
-}
-
-// Import writes a provider taken from a backup: it replaces the provider with
-// the same id, or adds it. A backup that carries no key at all leaves this
-// machine's key (and its other keys) in place for that id. It returns the
-// provider as stored and whether an existing one was replaced.
-func Import(p Provider) (stored Provider, replaced bool, err error) {
-	p = normalize(p)
-	p.IconURL = ""
-	if !ValidID(p.ID) {
-		return Provider{}, false, fmt.Errorf("provider id %q is not usable", p.ID)
-	}
-	if p.Name == "" {
-		p.Name = p.ID
-	}
-	if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-		return Provider{}, false, fmt.Errorf("%s has no base URL", p.Name)
-	}
-	if a, ok := find(Accounts(), p.ID); ok {
-		// as Save: a signed-in account keeps only the user's model picks
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing}
-	}
-
+// Import merges providers into the stored file, matched by id: one with the
+// same id as a stored provider replaces it, any other is added. A replacement
+// that carries no key keeps the stored one, with its other keys. Entries with
+// an invalid id, the reserved id "magpie", or no base URL are skipped.
+func Import(incoming []Provider) (Imported, error) {
+	var out Imported
 	f := load()
-	for i := range f.Providers {
-		if f.Providers[i].ID != p.ID {
+	for _, p := range incoming {
+		p = normalize(p)
+		p.IconURL = ""
+		if p.ID == "" || p.ID != Slug(p.ID) || p.ID == "magpie" {
 			continue
 		}
-		old := f.Providers[i]
-		if p.Key == "" {
-			p.Key, p.KeyName, p.KeyProtocol = old.Key, old.KeyName, old.KeyProtocol
+		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+			continue
 		}
-		if len(p.Keys) == 0 {
-			p.Keys = old.Keys
+		if p.Name == "" {
+			p.Name = p.ID
 		}
-		f.Providers[i] = p
-		return p, true, store(f)
+		at := -1
+		for i := range f.Providers {
+			if f.Providers[i].ID == p.ID {
+				at = i
+				break
+			}
+		}
+		if at >= 0 {
+			old := f.Providers[at]
+			if p.Key == "" && len(p.Keys) == 0 {
+				p.Key, p.KeyName, p.KeyProtocol, p.Keys = old.Key, old.KeyName, old.KeyProtocol, old.Keys
+			}
+			f.Providers[at] = p
+			out.Replaced++
+		} else {
+			f.Providers = append(f.Providers, p)
+			out.Added++
+		}
+		out.Stored = append(out.Stored, p)
 	}
-	f.Providers = append(f.Providers, p)
-	return p, false, store(f)
+	if out.Added == 0 && out.Replaced == 0 {
+		return out, nil
+	}
+	if err := store(f); err != nil {
+		return Imported{}, fmt.Errorf("write providers: %w", err)
+	}
+	return out, nil
 }
