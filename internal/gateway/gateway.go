@@ -302,6 +302,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
 	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
+		// an agent account that has logged out leaves no provider behind
+		if agent, _, found := strings.Cut(call.Model, "/"); found && accountAgents[agent] {
+			if _, err := provider.Find(agent); err != nil {
+				msg := signedOutMsg(agent)
+				call.Status, call.Error = 401, msg
+				s.record(call)
+				writeError(w, from, 401, msg)
+				return
+			}
+		}
 		call.Status, call.Error = 404, "unknown model"
 		s.record(call)
 		msg := fmt.Sprintf("dial knows no model %q", call.Model)
@@ -314,7 +324,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	if p.Base(from) != "" {
+	if p.Account != nil {
+		call.To = accountProto(p.Account.Agent)
+		call.Status, call.Error = s.account(w, r, p, from, model, body, &call.Usage)
+	} else if p.Base(from) != "" {
 		call.To = from
 		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
 	} else {

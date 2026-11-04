@@ -51,6 +51,7 @@ func setup(t *testing.T, proto provider.Protocol, f *fake) *httptest.Server {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
 	up := httptest.NewServer(f)
 	t.Cleanup(up.Close)
 	p := provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}}
