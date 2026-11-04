@@ -72,6 +72,9 @@ type Call struct {
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	// Fallback says which providers failed before this one answered, when the
+	// request was switched to a fallback: "<providerId>: <reason>" joined by "; ".
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // Server is the gateway.
@@ -84,6 +87,10 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
+	// rests holds providers that recently failed with a switchable error,
+	// keyed by provider id. Memory only.
+	restMu sync.Mutex
+	rests  map[string]restNote
 }
 
 // New makes a gateway.
@@ -348,46 +355,52 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	call.Provider = p.ID
-	// A Claude Code subscription must run through the genuine binary. Direct
-	// OAuth HTTP requests are content-classified as third-party traffic when
-	// they carry another agent's harness (Pi, OpenCode, and others).
-	if p.Account != nil && p.Account.Agent == "claude" {
-		call.To = provider.Anthropic
-		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+	// Candidates are the primary, then its fallbacks. With none configured
+	// the single attempt writes straight to the client, as it always did.
+	cands := s.plan(p, model)
+	var failed []string
+	for i, c := range cands {
+		last := i == len(cands)-1
+		out := http.ResponseWriter(w)
+		var aw *attemptWriter
+		if len(cands) > 1 {
+			aw = newAttemptWriter(w)
+			out = aw
+		}
+		to, status, msg := s.attempt(out, r, from, c.p, c.model, body, &call.Usage)
+		if aw != nil && !aw.committed && !last && r.Context().Err() == nil && retryable(status, c.detail(msg)) {
+			reason := fmt.Sprintf("%d %s", status, c.detail(msg))
+			s.rest(c.p.ID, reason)
+			failed = append(failed, c.p.ID+": "+reason)
+			continue
+		}
+		if aw != nil {
+			aw.flush()
+		}
+		call.Provider = c.p.ID
+		if i > 0 {
+			call.Model = c.model
+		}
+		call.To = to
+		call.Status, call.Error = status, msg
+		notes := failed
+		if i > 0 {
+			// switched: also name the resting providers that were passed over
+			notes = append(append([]string(nil), failed...), s.restingNotes(cands[i+1:])...)
+		}
+		call.Fallback = strings.Join(notes, "; ")
 		call.Millis = time.Since(start).Milliseconds()
 		finishCapture()
 		s.record(call)
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+		if to == "" {
+			// no endpoint was configured, so nothing reached a provider
+			return
+		}
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: c.p.ID, Model: c.model,
 			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 		return
 	}
-	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
-	} else {
-		to := p.Speaks()
-		if len(to) == 0 {
-			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
-			writeError(w, from, call.Status, call.Error)
-			call.Millis = time.Since(start).Milliseconds()
-			finishCapture()
-			s.record(call)
-			return
-		}
-		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
-	}
-	call.Millis = time.Since(start).Milliseconds()
-	finishCapture()
-	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
 // forward sends a request to the provider.
