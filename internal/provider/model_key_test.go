@@ -28,8 +28,8 @@ func TestNormalizeModelKeyVariantsAndDots(t *testing.T) {
 	if got := NormalizeModelKey("x:batch"); got != "x:batch" {
 		t.Errorf("colon variant rewritten: %q", got)
 	}
-	if got := NormalizeModelKey("anthropic/x.5:batch"); got != "x-5:batch" {
-		t.Errorf("colon variant with a version: %q", got)
+	if got := NormalizeModelKey("anthropic/x.5:batch"); got != "x.5:batch" {
+		t.Errorf("colon variant kept as is: %q", got)
 	}
 	if got := NormalizeModelKey("v1.beta"); got != "v1.beta" {
 		t.Errorf("non-version dot rewritten: %q", got)

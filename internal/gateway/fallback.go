@@ -66,7 +66,7 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, l
 	if p.Account != nil {
 		all := []candidate{{p, model, p.ID}}
 		for _, q := range p.AlsoOn() {
-			all = append(all, candidate{q, model, p.ID + "@" + q.Account.User})
+			all = append(all, candidate{q, model, p.ID + "@" + q.Account.User, false})
 		}
 		// an account whose plan lacks the model (a Free one behind a Plus)
 		// would only answer 400; it is tried only when none lists it
@@ -95,10 +95,10 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, l
 		}
 		if !p.Serves(k, model) {
 			// the vendor lists the model to another key only
-			unlisted = append(unlisted, candidate{q, model, rest})
+			unlisted = append(unlisted, candidate{q, model, rest, false})
 			continue
 		}
-		out = append(out, candidate{q, model, rest})
+		out = append(out, candidate{q, model, rest, false})
 	}
 	if len(out) == 0 {
 		out, unlisted = unlisted, nil // no key lists it: try them all the same
