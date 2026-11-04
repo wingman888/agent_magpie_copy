@@ -45,24 +45,6 @@ func readSSE(r io.Reader, fn func(event, data string) error) error {
 	return sc.Err()
 }
 
-// sniffEventStream gives a reply that has no Content-Type a stream type when
-// its body starts like one. The ChatGPT backend sends no Content-Type at all,
-// so the first bytes decide. Anything else is left as it was.
-func sniffEventStream(res *http.Response) {
-	if res.Header.Get("Content-Type") != "" {
-		return
-	}
-	br := bufio.NewReader(res.Body)
-	head, _ := br.Peek(6)
-	res.Body = struct {
-		io.Reader
-		io.Closer
-	}{br, res.Body}
-	if bytes.HasPrefix(head, []byte("data:")) || bytes.HasPrefix(head, []byte("event:")) {
-		res.Header.Set("Content-Type", "text/event-stream")
-	}
-}
-
 // sseWriter writes events to a client and flushes each one.
 type sseWriter struct {
 	w     http.ResponseWriter
