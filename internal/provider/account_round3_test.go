@@ -25,9 +25,10 @@ func TestWriteCodexTokensNilMapsDoNotPanic(t *testing.T) {
 		}
 		raw, err := os.ReadFile(path)
 		acctMustNoErr(t, err)
-		var top map[string]map[string]any
+		var top map[string]any
 		acctMustNoErr(t, json.Unmarshal(raw, &top))
-		if top["tokens"]["access_token"] != "a1" || top["tokens"]["refresh_token"] != "r1" {
+		toks, _ := top["tokens"].(map[string]any)
+		if toks["access_token"] != "a1" || toks["refresh_token"] != "r1" {
 			t.Fatalf("tokens not written for %s: %s", body, raw)
 		}
 	}
