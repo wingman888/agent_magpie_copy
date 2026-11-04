@@ -1,92 +1,75 @@
-// Package backup packs what the user set up in magpie into one file, sealed
-// with a passphrase, to carry to another machine: the providers (their keys
-// too, unless left out), the pictures picked for them, the settings, the
-// profiles and every agent's model. Subscriptions are not in it: each is
-// the sign-in of an agent on this machine, so each machine signs in on its
-// own.
-//
-// The file is JSON: a header naming how it is sealed, and the bundle
-// encrypted with AES-256-GCM under a key derived from the passphrase with
-// PBKDF2-SHA256. Nothing in it can be read without the passphrase.
+// Package backup gathers the whole magpie setup into one passphrase-sealed
+// file and puts it back on another machine. The file holds the providers
+// (keys, accounts, headers), their chosen icons, settings, saved profiles and
+// the agents' current model choices. Subscription logins are not in it: they
+// stay with each agent on each machine.
 package backup
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/pbkdf2"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/json"
-	"errors"
+	"encoding/hex"
 	"fmt"
-	"maps"
 	"os"
-	"path/filepath"
-	"regexp"
-	"slices"
+	"sort"
 	"strings"
-	"time"
 
 	"github.com/yetone/magpie/internal/agent"
-	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// Ext is the extension backups are saved with.
-const Ext = ".magpie-backup"
-
-const (
-	format     = "magpie-backup"
-	iterations = 600_000
-)
-
-// Bundle is what a backup holds.
+// Bundle is everything a backup carries, before sealing.
 type Bundle struct {
-	Version   int                        `json:"version"`
-	Created   time.Time                  `json:"created"`
-	App       string                     `json:"app,omitempty"` // the magpie that made it
-	Keys      bool                       `json:"keys"`          // whether the providers carry their keys
-	Providers []provider.Provider        `json:"providers"`
-	Icons     map[string][]byte          `json:"icons,omitempty"` // pictures picked for providers, by file name
-	Settings  *settings.Settings         `json:"settings,omitempty"`
-	Profiles  map[string]profile.Profile `json:"profiles,omitempty"`
-	Agents    profile.Profile            `json:"agents,omitempty"` // every agent's fields as they are now
+	Version   int                         `json:"version"`
+	App       string                      `json:"app,omitempty"`      // magpie version that made it
+	Providers []provider.Provider         `json:"providers,omitempty"`
+	Icons     map[string][]byte           `json:"icons,omitempty"`    // picture file name → content
+	Settings  *settings.Settings          `json:"settings,omitempty"` // nil when the machine has none
+	Profiles  map[string]profile.Profile  `json:"profiles,omitempty"`
+	Agents    profile.Profile             `json:"agents,omitempty"` // "agent.field" → value
 }
 
-type envelope struct {
-	Format     string `json:"format"`
-	Version    int    `json:"version"`
-	KDF        string `json:"kdf"`
-	Iterations int    `json:"iterations"`
-	Salt       []byte `json:"salt"`
-	Nonce      []byte `json:"nonce"`
-	Data       []byte `json:"data"`
+// Parts selects which parts of a bundle Restore applies.
+type Parts struct {
+	Providers, Settings, Profiles, Agents bool
 }
 
-// ErrPassphrase is a passphrase that does not open the backup.
-var ErrPassphrase = errors.New("wrong passphrase, or the file was changed")
+// All selects every part.
+var All = Parts{Providers: true, Settings: true, Profiles: true, Agents: true}
 
-// Collect gathers the bundle; without keys, providers carry none, nor any
-// header that looks like one.
+// Result says what a restore did.
+type Result struct {
+	Added    int      // providers new to this machine
+	Replaced int      // providers that replaced one with the same id
+	NeedKey  []string // names of providers left with no key at all
+	Settings bool     // settings were restored
+	Profiles int      // profiles written
+	Agents   int      // agent settings changed
+	Skipped  []string // items not applied, with the reason
+}
+
+// Collect gathers this machine's setup. With keys false, no API key is
+// included and credential-looking headers are dropped.
 func Collect(keys bool, app string) (Bundle, error) {
-	b := Bundle{Version: 1, Created: time.Now().UTC(), App: app, Keys: keys}
+	b := Bundle{Version: currentVer, App: app, Icons: map[string][]byte{}}
 	for _, p := range provider.Stored() {
 		if !keys {
-			p = withoutKeys(p)
+			p.Key = ""
+			for i := range p.Keys {
+				p.Keys[i].Key = ""
+			}
+			p.Headers = plainHeaders(p.Headers)
 		}
-		b.Providers = append(b.Providers, p)
 		if name, ok := strings.CutPrefix(p.Icon, "file:"); ok {
-			if f := provider.IconFile(name); f != "" {
-				if data, err := os.ReadFile(f); err == nil {
-					if b.Icons == nil {
-						b.Icons = map[string][]byte{}
-					}
-					b.Icons[name] = data
-				}
+			data, err := readIcon(name)
+			if err != nil {
+				p.Icon = "" // a picture that cannot be read is not carried
+			} else {
+				b.Icons[name] = data
 			}
 		}
+		b.Providers = append(b.Providers, p)
 	}
 	if _, err := os.Stat(settings.Path()); err == nil {
 		s := settings.Load()
@@ -94,140 +77,18 @@ func Collect(keys bool, app string) (Bundle, error) {
 	}
 	ps, err := profile.Load()
 	if err != nil {
-		return b, err
+		return Bundle{}, err
 	}
-	if len(ps) > 0 {
-		b.Profiles = ps
-	}
-	if snap := profile.Snapshot(); len(snap) > 0 {
-		b.Agents = snap
-	}
+	b.Profiles = ps
+	b.Agents = profile.Snapshot()
 	return b, nil
 }
 
-var secretHeader = regexp.MustCompile(`(?i)auth|key|token|secret|cookie|session|password`)
-
-func withoutKeys(p provider.Provider) provider.Provider {
-	p.Key, p.KeyName, p.Keys, p.KeyProtocol = "", "", nil, ""
-	if len(p.Headers) > 0 {
-		h := map[string]string{}
-		for k, v := range p.Headers {
-			if !secretHeader.MatchString(k) {
-				h[k] = v
-			}
-		}
-		p.Headers = h
-	}
-	return p
-}
-
-// Seal encrypts the bundle under the passphrase.
-func Seal(b Bundle, pass string) ([]byte, error) {
-	if pass == "" {
-		return nil, errors.New("a backup needs a passphrase")
-	}
-	plain, err := json.Marshal(b)
-	if err != nil {
-		return nil, err
-	}
-	e := envelope{Format: format, Version: 1, KDF: "pbkdf2-sha256", Iterations: iterations,
-		Salt: make([]byte, 16), Nonce: make([]byte, 12)}
-	rand.Read(e.Salt)
-	rand.Read(e.Nonce)
-	gcm, err := aead(pass, e)
-	if err != nil {
-		return nil, err
-	}
-	e.Data = gcm.Seal(nil, e.Nonce, plain, header(e))
-	return json.MarshalIndent(e, "", "  ")
-}
-
-// Open decrypts a backup.
-func Open(data []byte, pass string) (Bundle, error) {
-	var e envelope
-	if json.Unmarshal(data, &e) != nil || e.Format != format {
-		return Bundle{}, errors.New("not a magpie backup")
-	}
-	if e.Version != 1 || e.KDF != "pbkdf2-sha256" {
-		return Bundle{}, errors.New("this backup was made by a newer magpie; update magpie to open it")
-	}
-	if e.Iterations < 100_000 || e.Iterations > 10_000_000 || len(e.Nonce) != 12 || len(e.Salt) < 16 {
-		return Bundle{}, errors.New("not a magpie backup")
-	}
-	gcm, err := aead(pass, e)
-	if err != nil {
-		return Bundle{}, err
-	}
-	plain, err := gcm.Open(nil, e.Nonce, e.Data, header(e))
-	if err != nil {
-		return Bundle{}, ErrPassphrase
-	}
-	var b Bundle
-	if err := json.Unmarshal(plain, &b); err != nil {
-		return Bundle{}, err
-	}
-	return b, nil
-}
-
-// header is what the sealing covers besides the bundle: the envelope's
-// own fields, so none of them can be changed unnoticed.
-func header(e envelope) []byte {
-	return fmt.Appendf(nil, "%s/%d/%s/%d/%x", e.Format, e.Version, e.KDF, e.Iterations, e.Salt)
-}
-
-func aead(pass string, e envelope) (cipher.AEAD, error) {
-	key, err := pbkdf2.Key(sha256.New, pass, e.Salt, e.Iterations, 32)
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
-}
-
-// Parts picks what a restore puts back.
-type Parts struct {
-	Providers, Settings, Profiles, Agents bool
-}
-
-// All is every part.
-var All = Parts{true, true, true, true}
-
-// Result says what a restore did.
-type Result struct {
-	Added, Replaced int      // providers
-	NeedKey         []string // providers that came without a key and have none here
-	Settings        bool
-	Profiles        int
-	Agents          int      // agent fields changed
-	Skipped         []string // agent fields left alone: the agent is not on this machine, or the value failed
-}
-
-// Restore puts the chosen parts of the bundle in. Providers come first, so
-// the agents' models that go through them resolve. Only agents on this
-// machine are set.
+// Restore applies the selected parts of b to this machine.
 func Restore(b Bundle, parts Parts) (Result, error) {
 	var r Result
-	if parts.Providers {
-		for name, data := range b.Icons {
-			if f := provider.IconFile(name); f != "" && len(data) <= provider.MaxIcon {
-				if _, err := os.Stat(f); err != nil {
-					os.MkdirAll(filepath.Dir(f), 0o755)
-					edit.WriteAtomic(f, data)
-				}
-			}
-		}
-		var err error
-		if r.Added, r.Replaced, err = provider.Restore(b.Providers); err != nil {
-			return r, err
-		}
-		for _, p := range provider.Stored() {
-			if !p.Ready() && slices.ContainsFunc(b.Providers, func(q provider.Provider) bool { return q.ID == p.ID }) {
-				r.NeedKey = append(r.NeedKey, p.Name)
-			}
-		}
+	if b.Version > currentVer {
+		return r, fmt.Errorf("需升级 magpie 到更新版本：备份格式版本为 %d", b.Version)
 	}
 	if parts.Settings && b.Settings != nil {
 		if err := settings.Save(*b.Settings); err != nil {
@@ -235,56 +96,284 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		}
 		r.Settings = true
 	}
-	if parts.Profiles && len(b.Profiles) > 0 {
-		for name, p := range b.Profiles {
-			if err := profile.Save(name, p); err != nil {
-				return r, err
-			}
-			r.Profiles++
+	if parts.Providers {
+		if err := restoreProviders(b, &r); err != nil {
+			return r, err
 		}
 	}
-	if parts.Agents && len(b.Agents) > 0 {
-		here := map[string]bool{}
-		for _, a := range agent.Detected() {
-			here[a.ID] = true
+	if parts.Profiles {
+		if err := restoreProfiles(b, &r); err != nil {
+			return r, err
 		}
-		// one value at a time, so one that fails (a model of a subscription
-		// not signed in here) leaves the rest to go in
-		for _, k := range profileKeys(b.Agents) {
-			id, _, _ := strings.Cut(k, ".")
-			if !here[id] {
-				r.Skipped = append(r.Skipped, k)
-				continue
-			}
-			n, err := profile.Apply(profile.Profile{k: b.Agents[k]})
-			if err != nil {
-				r.Skipped = append(r.Skipped, k)
-				continue
-			}
-			r.Agents += n
-		}
+	}
+	if parts.Agents {
+		restoreAgents(b.Agents, &r)
 	}
 	return r, nil
 }
 
-// profileKeys orders a profile's keys the way Apply does: providers, then
-// models, then the rest.
-func profileKeys(p profile.Profile) []string {
-	rank := func(k string) int {
-		switch {
-		case strings.HasSuffix(k, ".provider"):
-			return 0
-		case strings.HasSuffix(k, ".model"):
-			return 1
-		}
-		return 2
+// restoreProviders merges the bundle's providers into providers.json by id.
+// Icons go in first, then the file is written once.
+func restoreProviders(b Bundle, r *Result) error {
+	out := provider.Stored()
+	pos := map[string]int{}
+	for i, p := range out {
+		pos[p.ID] = i
 	}
-	keys := slices.Collect(maps.Keys(p))
-	slices.SortFunc(keys, func(a, b string) int {
-		if ra, rb := rank(a), rank(b); ra != rb {
-			return ra - rb
+	var accounts map[string]bool // signed-in agents here, looked up on first need
+	written := map[string]bool{}
+	var order []string
+	changed := false
+
+	for _, bp := range b.Providers {
+		id := strings.ToLower(strings.TrimSpace(bp.ID))
+		if id == "" || id == "magpie" || id != provider.Slug(id) {
+			continue
 		}
-		return strings.Compare(a, b)
+		prev, had := pos[id]
+
+		if bp.Chat == "" && bp.Responses == "" && bp.Anthropic == "" {
+			// Model picks for a signed-in agent. Anything else without a
+			// base URL is not a provider and is ignored.
+			if accounts == nil {
+				accounts = map[string]bool{}
+				for _, a := range provider.Accounts() {
+					accounts[a.ID] = true
+				}
+			}
+			if !accounts[id] || (had && out[prev].Chat+out[prev].Responses+out[prev].Anthropic != "") {
+				continue
+			}
+			stub := provider.Provider{ID: id, Models: bp.Models, Fallback: bp.Fallback, Routing: bp.Routing, Hidden: bp.Hidden}
+			if had {
+				out[prev] = stub
+			} else {
+				pos[id] = len(out)
+				out = append(out, stub)
+			}
+			changed = true
+			continue
+		}
+
+		p := bp
+		p.ID = id
+		p.Name = strings.TrimSpace(p.Name)
+		if p.Name == "" {
+			p.Name = id
+		}
+		p.IconURL = ""
+		p.Account = nil
+		p.Keys = usableKeys(p.Keys)
+		if p.Key == "" && len(p.Keys) > 0 {
+			first := p.Keys[0]
+			p.Key, p.KeyName, p.KeyProtocol = first.Key, first.Name, first.Protocol
+			p.Keys = p.Keys[1:]
+		}
+		if p.Key == "" && len(p.Keys) == 0 {
+			// The backup carries no key: keep this machine's own.
+			if had {
+				p.Key, p.KeyName, p.KeyProtocol, p.Keys = out[prev].Key, out[prev].KeyName, out[prev].KeyProtocol, out[prev].Keys
+			} else {
+				p.KeyName, p.KeyProtocol = "", ""
+			}
+		}
+		if name, ok := strings.CutPrefix(p.Icon, "file:"); ok {
+			if !placeIcon(name, b.Icons[name]) {
+				p.Icon = ""
+			}
+		}
+		if had {
+			out[prev] = p
+		} else {
+			pos[id] = len(out)
+			out = append(out, p)
+		}
+		changed = true
+		if !written[id] {
+			written[id] = true
+			order = append(order, id)
+			if had {
+				r.Replaced++
+			} else {
+				r.Added++
+			}
+		}
+	}
+
+	if changed {
+		if err := provider.PutStored(out); err != nil {
+			return err
+		}
+	}
+	for _, id := range order {
+		p := out[pos[id]]
+		if p.Key == "" && len(p.Keys) == 0 && !p.Ready() {
+			r.NeedKey = append(r.NeedKey, p.Name)
+		}
+	}
+	return nil
+}
+
+// usableKeys drops saved accounts that carry no key value.
+func usableKeys(ks []provider.KeyAccount) []provider.KeyAccount {
+	var out []provider.KeyAccount
+	for _, k := range ks {
+		if k.Key != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// placeIcon writes a picture from the bundle unless one of that name is
+// already here. It reports whether the picture is available afterwards.
+func placeIcon(name string, data []byte) bool {
+	path := provider.IconFile(name)
+	if path == "" {
+		return false
+	}
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	if len(data) == 0 || len(data) > provider.MaxIcon {
+		return false
+	}
+	sum := sha256.Sum256(data)
+	if !strings.HasPrefix(name, hex.EncodeToString(sum[:8])+".") {
+		return false
+	}
+	if err := os.MkdirAll(provider.IconDir(), 0o755); err != nil {
+		return false
+	}
+	return os.WriteFile(path, data, 0o644) == nil
+}
+
+func readIcon(name string) ([]byte, error) {
+	path := provider.IconFile(name)
+	if path == "" {
+		return nil, fmt.Errorf("icon %q has an unusable name", name)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if st.Size() > provider.MaxIcon {
+		return nil, fmt.Errorf("icon %q is too large", name)
+	}
+	return os.ReadFile(path)
+}
+
+func restoreProfiles(b Bundle, r *Result) error {
+	names := make([]string, 0, len(b.Profiles))
+	for n := range b.Profiles {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if strings.TrimSpace(n) == "" {
+			continue
+		}
+		p := b.Profiles[n]
+		if p == nil {
+			p = profile.Profile{}
+		}
+		if err := profile.Save(n, p); err != nil {
+			return err
+		}
+		r.Profiles++
+	}
+	return nil
+}
+
+// restoreAgents applies each agent setting on an installed agent, in the
+// order profile.Apply uses: providers, then models, then the rest. A setting
+// that fails is skipped and the others still apply.
+func restoreAgents(vals profile.Profile, r *Result) {
+	byID := map[string]*agent.Agent{}
+	for _, a := range agent.All() {
+		byID[a.ID] = a
+	}
+	installed := map[string]bool{}
+	reported := map[string]bool{}
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if ri, rj := agentRank(keys[i]), agentRank(keys[j]); ri != rj {
+			return ri < rj
+		}
+		return keys[i] < keys[j]
 	})
-	return keys
+	for _, k := range keys {
+		v := vals[k]
+		id, field, ok := strings.Cut(k, ".")
+		if !ok || v == "" {
+			continue
+		}
+		a := byID[id]
+		if a == nil {
+			r.Skipped = append(r.Skipped, fmt.Sprintf("%s：未知的 Agent，已跳过", k))
+			continue
+		}
+		if _, seen := installed[id]; !seen {
+			installed[id] = a.Detected()
+		}
+		if !installed[id] {
+			if !reported[id] {
+				reported[id] = true
+				r.Skipped = append(r.Skipped, fmt.Sprintf("%s：本机未安装，已跳过其设置", a.Name))
+			}
+			continue
+		}
+		f := a.Field(field)
+		if f == nil {
+			r.Skipped = append(r.Skipped, fmt.Sprintf("%s：未知的设置项，已跳过", k))
+			continue
+		}
+		if f.Get() == v {
+			continue
+		}
+		if err := f.Set(v); err != nil {
+			r.Skipped = append(r.Skipped, fmt.Sprintf("%s：暂不可用（%v），已跳过", k, err))
+			continue
+		}
+		r.Agents++
+	}
+}
+
+func agentRank(k string) int {
+	switch {
+	case strings.HasSuffix(k, ".provider"):
+		return 0
+	case strings.HasSuffix(k, ".model"):
+		return 1
+	}
+	return 2
+}
+
+// plainHeaders keeps the headers that do not look like credentials.
+func plainHeaders(h map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range h {
+		if !credentialHeader(k) {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+var credentialWords = []string{"auth", "key", "token", "secret", "cookie", "session", "password"}
+
+func credentialHeader(name string) bool {
+	l := strings.ToLower(name)
+	for _, w := range credentialWords {
+		if strings.Contains(l, w) {
+			return true
+		}
+	}
+	return false
 }
