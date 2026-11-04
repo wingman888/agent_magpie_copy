@@ -48,7 +48,7 @@ func writeTestFile(t *testing.T, path, body string) {
 func writeCodexLogin(t *testing.T, home string, exp time.Time) string {
 	t.Helper()
 	id := fakeJWT(map[string]any{
-		"email":                      "me@example.com",
+		"email":                       "me@example.com",
 		"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro"},
 	})
 	access := fakeJWT(map[string]any{"exp": exp.Unix()})
