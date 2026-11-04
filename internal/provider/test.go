@@ -23,6 +23,9 @@ type Result struct {
 // Test sends the smallest possible request to each endpoint the vendor
 // serves, with the first exposed model, and reports what came back.
 func (p Provider) Test(ctx context.Context) []Result {
+	if p.Account != nil {
+		return p.testAccount(ctx)
+	}
 	p.Fetch(ctx)
 	model := ""
 	if ms := p.Exposed(); len(ms) > 0 {
@@ -66,7 +69,46 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
+// accountProtocol is the protocol a signed-in account speaks upstream: the
+// ChatGPT backend takes Responses, Copilot's session API takes Chat.
+func accountProtocol(agent string) Protocol {
+	if agent == "copilot" {
+		return Chat
+	}
+	return Responses
+}
+
+// testAccount probes a signed-in account the way its agent calls the backend:
+// the body is shaped by Prepare and the request is signed by Sign. Nothing is
+// sent with a key, since an account has none.
+func (p Provider) testAccount(ctx context.Context) []Result {
+	p.Fetch(ctx)
+	model := ""
+	if ms := p.Exposed(); len(ms) > 0 {
+		model = ms[0].ID
+	} else if ms := p.Available(); len(ms) > 0 {
+		model = ms[0].ID
+	}
+	proto := accountProtocol(p.Account.Agent)
+	var body string
+	if proto == Chat {
+		body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
+	} else {
+		body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
+	}
+	pb := p.Prepare([]byte(body))
+	sign := func(req *http.Request) error { return p.Sign(ctx, req, proto, pb) }
+	// the placeholder URL is replaced by Sign with the backend's own address
+	return []Result{probeWith(ctx, proto, "https://account.invalid/", string(pb), model, nil, sign)}
+}
+
 func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string) Result {
+	return probeWith(ctx, proto, url, body, model, headers, nil)
+}
+
+// probeWith is probe, with an optional hook that signs the request before it
+// is sent.
+func probeWith(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string, sign func(*http.Request) error) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -83,6 +125,12 @@ func probe(ctx context.Context, proto Protocol, url, body, model string, headers
 	req.Header.Set("anthropic-version", "2023-06-01")
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	if sign != nil {
+		if err := sign(req); err != nil {
+			r.Error = err.Error()
+			return r
+		}
 	}
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
