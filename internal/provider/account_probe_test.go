@@ -14,8 +14,8 @@ import (
 // request carries the agent's token and account id, and its body is shaped
 // for the backend. Whatever address or key was typed in is never used.
 func TestAccountTestSignsRequest(t *testing.T) {
-	home := isolate(t)
-	access := writeCodexLogin(t, home, time.Now().Add(time.Hour))
+	home := acctIsolate(t)
+	access := acctWriteCodexLogin(t, home, time.Now().Add(time.Hour))
 
 	var gotAuth, gotAcct, gotPath string
 	var gotBody map[string]any
@@ -69,7 +69,7 @@ func TestAccountTestSignsRequest(t *testing.T) {
 
 // Without a login the probe reports the sign-out instead of sending anything.
 func TestAccountTestReportsSignedOut(t *testing.T) {
-	isolate(t)
+	acctIsolate(t)
 	p := Provider{ID: "codex", Name: "Codex", Account: &Account{Agent: "codex", User: "x"}, Models: []string{"gpt-5.5"}}
 	res := p.Test(context.Background())
 	if len(res) != 1 || res[0].OK || res[0].Error == "" {
