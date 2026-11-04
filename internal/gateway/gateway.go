@@ -67,12 +67,14 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
-	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	// Fallback says which providers failed before this one answered, when the
+	// request was switched to a fallback: "<providerId>: <reason>" joined by "; ".
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // Server is the gateway.
@@ -85,6 +87,10 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
+	// rests holds providers that recently failed with a switchable error,
+	// keyed by provider id. Memory only.
+	restMu sync.Mutex
+	rests  map[string]restNote
 }
 
 // New makes a gateway.
@@ -349,74 +355,55 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary's keys in turn, then its fallbacks, while it can't take the
-	// request and nothing has been sent yet
-	plan := s.tries(s.candidates(p, model))
-	var skipped []string
-	for i, t := range plan {
-		last := i == len(plan)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = t.p.ID, "", Usage{}
-		call.Status, call.Error = s.attempt(hw, r, from, t.p, t.model, body, &call)
-		// scrub holds the secret back from the record, single key or not;
-		// with no key it does nothing
-		call.Error = scrub(call.Error, t.p.Key)
-		if t.multi {
-			call.Error = scrub(call.Error, t.key.Key)
+	// Candidates are the primary, then its fallbacks. With none configured
+	// the single attempt writes straight to the client, as it always did.
+	cands := s.plan(p, model)
+	var failed []string
+	for i, c := range cands {
+		last := i == len(cands)-1
+		out := http.ResponseWriter(w)
+		var aw *attemptWriter
+		if len(cands) > 1 {
+			aw = newAttemptWriter(w)
+			out = aw
 		}
-		if !last && hw.failed() {
-			name := t.p.ID
-			if t.multi {
-				s.rest(keyRest(t.p.ID, t.key.ID))
-				name = accountName(t)
-			}
-			if t.last {
-				s.rest(t.p.ID)
-			}
-			skipped = append(skipped, name+": "+call.Error)
+		to, status, msg, raw := s.attempt(out, r, from, c.p, c.model, body, &call.Usage)
+		if aw != nil && !aw.committed && !last && r.Context().Err() == nil && retryable(status, c.detail(msg), raw) {
+			reason := fmt.Sprintf("%d %s", status, c.detail(msg))
+			s.rest(c.p.ID, reason)
+			failed = append(failed, c.p.ID+": "+reason)
 			continue
 		}
-		hw.release()
-		model = t.model
-		break
-	}
-	if len(skipped) > 0 {
-		call.Fallback = strings.Join(skipped, "; ")
-	}
-	call.Millis = time.Since(start).Milliseconds()
-	finishCapture()
-	s.record(call)
-	if call.To != "" {
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
+		if aw != nil {
+			aw.flush()
+		}
+		call.Provider = c.p.ID
+		// switched: someone other than the requested provider and model answered
+		switched := c.p.ID != p.ID || c.model != model
+		if switched {
+			call.Model = c.model
+		}
+		call.To = to
+		call.Status, call.Error = status, msg
+		notes := failed
+		if switched {
+			// also name the resting providers that were passed over
+			notes = append(append([]string(nil), failed...), s.restingNotes(cands[i+1:])...)
+		}
+		call.Fallback = strings.Join(notes, "; ")
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		// as before fallbacks existed: a Claude subscription and a provider
+		// with no endpoint leave no usage record
+		if to == "" || (c.p.Account != nil && c.p.Account.Agent == "claude") {
+			return
+		}
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: c.p.ID, Model: c.model,
 			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
 	}
-}
-
-// attempt sends a request to one provider. call.To stays empty when the
-// provider has no endpoint to send it to.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
-	// A Claude Code subscription must run through the genuine binary. Direct
-	// OAuth HTTP requests are content-classified as third-party traffic when
-	// they carry another agent's harness (Pi, OpenCode, and others).
-	if p.Account != nil && p.Account.Agent == "claude" {
-		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
-	}
-	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		return s.passthrough(w, r, p, from, model, body, &call.Usage)
-	}
-	to := p.Speaks()
-	if len(to) == 0 {
-		msg := p.Name + " has no endpoint configured"
-		return writeError(w, from, 502, msg), msg
-	}
-	call.To = to[0]
-	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 }
 
 // forward sends a request to the provider.
@@ -449,19 +436,26 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	status, msg, _ := s.passthroughRaw(w, r, p, proto, model, body, u)
+	return status, msg
+}
+
+// passthroughRaw is passthrough that also returns the upstream's error body
+// verbatim (empty when there was no error), for the fallback quota check.
+func (s *Server) passthroughRaw(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string, string) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
 	}
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
 	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
+		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), ""
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		return writeError(w, proto, res.StatusCode, msg), msg
+		return writeError(w, proto, res.StatusCode, msg), msg, string(b)
 	}
 	rd, sse := eventStream(res)
 	h := w.Header()
@@ -484,7 +478,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if n > 0 {
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return res.StatusCode, ""
+				return res.StatusCode, "", ""
 			}
 			if f != nil {
 				f.Flush()
@@ -494,7 +488,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			break
 		}
 	}
-	return res.StatusCode, ""
+	return res.StatusCode, "", ""
 }
 
 // eventStream reports whether a reply is server-sent events. The header
@@ -589,21 +583,28 @@ func notChatModel(status int, body []byte) bool {
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
 func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	status, msg, _ := s.translateRaw(w, r, p, from, to, model, body, u)
+	return status, msg
+}
+
+// translateRaw is translate that also returns the upstream's error body
+// verbatim (empty when there was no error), for the fallback quota check.
+func (s *Server) translateRaw(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string, string) {
 	request, err := parse(from, body)
 	if err != nil {
-		return writeError(w, from, 400, err.Error()), err.Error()
+		return writeError(w, from, 400, err.Error()), err.Error(), ""
 	}
 	stream := request.Stream
 	request.Stream = true
 	res, actual, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
 	if err != nil {
-		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
+		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error(), ""
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		return writeError(w, from, res.StatusCode, msg), msg
+		return writeError(w, from, res.StatusCode, msg), msg, string(b)
 	}
 	dec := decoder(actual)
 	rd, sse := eventStream(res)
@@ -612,31 +613,64 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		// event stream would be wrong, so give up cleanly
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
-		return writeError(w, from, 502, msg), msg
+		return writeError(w, from, 502, msg), msg, ""
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), request.Model)
 		var failed string
+		// start and usage events are held until the first real content, so
+		// an error that comes before any output can still switch providers
+		var lead []Event
+		sent := false
 		readSSE(rd, func(_, data string) error {
 			return dec(data, func(ev Event) {
+				if failed != "" && !sent {
+					return
+				}
 				switch ev.Kind {
 				case KError:
 					failed = ev.Text
 				case KStart, KUsage:
 					u.add(ev.Usage)
 				}
+				if sent {
+					enc.event(ev)
+					return
+				}
+				switch ev.Kind {
+				case KStart, KUsage:
+					lead = append(lead, ev)
+					return
+				case KError:
+					return
+				}
+				sent = true
+				for _, l := range lead {
+					enc.event(l)
+				}
+				lead = nil
 				enc.event(ev)
 			})
 		})
+		if !sent {
+			if failed != "" {
+				msg := p.Name + ": " + failed
+				return writeError(w, from, 502, msg), msg, ""
+			}
+			for _, l := range lead {
+				enc.event(l)
+			}
+		}
 		enc.finish()
-		return 200, failed
+		return 200, failed, ""
 	}
 	var col collector
 	readSSE(rd, func(_, data string) error {
 		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {
-		return writeError(w, from, 502, p.Name+": "+col.err), col.err
+		msg := p.Name + ": " + col.err
+		return writeError(w, from, 502, msg), col.err, ""
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)
@@ -644,7 +678,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(out)
-	return 200, col.err
+	return 200, col.err, ""
 }
 
 // ---- protocol tables --------------------------------------------------------

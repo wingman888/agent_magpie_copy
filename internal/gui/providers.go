@@ -44,12 +44,11 @@ type providerJSON struct {
 		Optional bool   `json:"optional"`
 	} `json:"key"`
 	Ready     bool            `json:"ready"`
-	Chosen    []string        `json:"chosen"`   // the user's explicit picks, if any
-	Fallback  []string        `json:"fallback"` // where requests go when this one can't take them
-	Models    []modelJSON     `json:"models"`   // everything the vendor lists, exposed ones flagged
-	Exposed   int             `json:"exposed"`  // how many reach the agents
-	Fetched   string          `json:"fetched"`  // "3h ago" when the list came from the vendor
-	Agents    []providerAgent `json:"agents"`   // detected agents, current ones flagged
+	Chosen    []string        `json:"chosen"`  // the user's explicit picks, if any
+	Models    []modelJSON     `json:"models"`  // everything the vendor lists, exposed ones flagged
+	Exposed   int             `json:"exposed"` // how many reach the agents
+	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
+	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
 	Sponsored bool            `json:"sponsored"`
 	Account   *accountJSON    `json:"account,omitempty"` // a signed-in agent, see provider.Account
 }
@@ -118,10 +117,6 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Headers: p.Headers,
 		Ready:   p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
-		Fallback: p.Fallback,
-	}
-	if out.Fallback == nil {
-		out.Fallback = []string{}
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
@@ -251,7 +246,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			// a preset needs nothing but the key; a saved provider keeps
 			// its key when the form left it blank
 			if pr, err := provider.FromPreset(in.Preset); err == nil && in.Chat == "" && in.Responses == "" && in.Anthropic == "" {
-				pr.Key, pr.Models, pr.Fallback = in.Key, in.Models, in.Fallback
+				pr.Key, pr.Models = in.Key, in.Models
 				if in.Name != "" {
 					pr.Name = in.Name
 				}
@@ -263,30 +258,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			old, _ := provider.Find(in.ID)
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
-			}
-			// the form only knows the front key, so the other keys and the
-			// front key's name are carried over; if the front key was swapped
-			// for one of the others, the old front key takes that one's place
-			if old != nil {
-				if in.Key == old.Key {
-					in.KeyName, in.Keys = old.KeyName, old.Keys
-				} else {
-					var rest []provider.StoredKey
-					swapped := false
-					for _, k := range old.Keys {
-						if !swapped && k.Key == in.Key {
-							in.KeyName, swapped = k.Name, true
-							continue
-						}
-						rest = append(rest, k)
-					}
-					if swapped {
-						rest = append([]provider.StoredKey{{Name: old.KeyName, Key: old.Key}}, rest...)
-					} else {
-						in.KeyName, rest = old.KeyName, old.Keys
-					}
-					in.Keys = rest
-				}
 			}
 			if in.Icon == "" && old != nil && in.Preset == "" {
 				in.Icon = old.Icon
@@ -376,34 +347,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			return
 		}
 		writeJSON(rw, providersState(gw))
-	})
-	// Adding a subscription: magpie opens the vendor's sign-in in the
-	// browser and the window follows it until the account is in.
-	mux.HandleFunc("POST /api/signin", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct{ Agent string }
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			fail(rw, err)
-			return
-		}
-		st, err := provider.StartSignIn(in.Agent)
-		if err != nil {
-			fail(rw, err)
-			return
-		}
-		w.OpenURL(st.URL)
-		writeJSON(rw, st)
-	})
-	mux.HandleFunc("GET /api/signin/{id}", func(rw http.ResponseWriter, r *http.Request) {
-		st, ok := provider.SignInStatus(r.PathValue("id"))
-		if !ok {
-			http.NotFound(rw, r)
-			return
-		}
-		writeJSON(rw, st)
-	})
-	mux.HandleFunc("POST /api/signin/{id}/cancel", func(rw http.ResponseWriter, r *http.Request) {
-		provider.CancelSignIn(r.PathValue("id"))
-		rw.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /api/open", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ URL string }
