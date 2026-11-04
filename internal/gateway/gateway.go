@@ -149,14 +149,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1beta/models/{rest...}", s.geminiModel)
 	mux.HandleFunc("POST /v1beta/models/{rest...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models (Gemini API)")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and /v1beta/models")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1beta/models"}})
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages",
+			"/v1beta/models", "/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:streamGenerateContent", "/v1beta/models/{model}:countTokens"}})
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -458,7 +459,7 @@ func encoder(proto provider.Protocol, w *sseWriter, model string) streamEncoder 
 	case provider.Responses:
 		return &responsesEncoder{w: w, model: model}
 	case provider.Gemini:
-		return &geminiEncoder{w: w, model: model}
+		return newGeminiEncoder(w, model)
 	}
 	return &anthropicEncoder{w: w, model: model}
 }
@@ -524,13 +525,14 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 	case status == 529:
 		typ = "overloaded_error"
 	}
+	if proto == provider.Gemini {
+		writeJSON(w, status, map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}})
+		return status
+	}
 	var v any
-	switch proto {
-	case provider.Anthropic:
+	if proto == provider.Anthropic {
 		v = map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
-	case provider.Gemini:
-		v = map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}}
-	default:
+	} else {
 		v = map[string]any{"error": map[string]any{"message": msg, "type": typ, "code": nil, "param": nil}}
 	}
 	writeJSON(w, status, v)

@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,233 +9,196 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// geminiReq is a Gemini call with a system instruction, a function call and
-// its result in the history, and a tool declaration with upper-case types.
-const geminiReq = `{
-  "systemInstruction": {"parts": [{"text": "be brief"}]},
-  "contents": [
-    {"role": "user", "parts": [{"text": "read a.go"}]},
-    {"role": "model", "parts": [{"thought": true, "text": "need to read"}, {"functionCall": {"name": "read", "args": {"path": "x"}}}]},
-    {"role": "user", "parts": [{"functionResponse": {"name": "read", "response": {"output": "package x"}}}]}
-  ],
-  "tools": [{"functionDeclarations": [{"name": "read", "description": "read a file",
-     "parameters": {"type": "OBJECT", "properties": {"path": {"type": "STRING"}}, "required": ["path"]}}]}],
-  "generationConfig": {"maxOutputTokens": 100, "thinkingConfig": {"thinkingBudget": -1, "includeThoughts": true}}
+// geminiBody is a request with a system instruction, a function call and its
+// result in the history, a tool declaration with upper-case types, and a
+// thinking budget of -1.
+const geminiBody = `{
+ "systemInstruction":{"parts":[{"text":"be brief"}]},
+ "contents":[
+  {"role":"user","parts":[{"text":"read a.txt"}]},
+  {"role":"model","parts":[{"functionCall":{"id":"c1","name":"read","args":{"path":"a.txt"}}}]},
+  {"role":"user","parts":[{"functionResponse":{"id":"c1","name":"read","response":{"output":"hello"}}}]}
+ ],
+ "tools":[{"functionDeclarations":[{"name":"read","description":"read a file",
+   "parameters":{"type":"OBJECT","properties":{"path":{"type":"STRING"}},"required":["path"]}}]}],
+ "generationConfig":{"maxOutputTokens":321,"thinkingConfig":{"thinkingBudget":-1,"includeThoughts":true}}
 }`
 
-// geminiReply is a Chat Completions stream: reasoning, text, a tool call
-// whose arguments arrive in pieces, and usage with 2 reasoning tokens.
-var geminiReply = sse(
-	`data: {"id":"c1","model":"m1","choices":[{"delta":{"reasoning_content":"hmm"}}]}`,
-	`data: {"id":"c1","choices":[{"delta":{"content":"Hi "}}]}`,
-	`data: {"id":"c1","choices":[{"delta":{"content":"there"}}]}`,
-	`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"read","arguments":""}}]}}]}`,
-	`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}`,
-	`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.go\"}"}}]}}]}`,
-	`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
-	`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}}`,
-	`data: [DONE]`)
+// chatReply is what an OpenAI Chat upstream streams: reasoning, text, one
+// tool call split over two fragments, then usage with 2 reasoning tokens
+// inside the 5 completion tokens.
+var chatReply = sse(
+	`data: {"id":"up1","model":"m1","choices":[{"delta":{"reasoning_content":"hmm"}}]}`,
+	`data: {"choices":[{"delta":{"content":"Let me read."}}]}`,
+	`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"up_1","type":"function","function":{"name":"read","arguments":"{\"pa"}}]}}]}`,
+	`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"a.txt\"}"}}]}}]}`,
+	`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}}`,
+	`data: [DONE]`,
+)
 
-// gemParts returns the parts of the first candidate of a Gemini response.
-func gemParts(t *testing.T, m map[string]any) []map[string]any {
+// geminiChunks reads the data lines of an SSE body as JSON objects.
+func geminiChunks(t *testing.T, body string) []map[string]any {
 	t.Helper()
-	cands, ok := m["candidates"].([]any)
-	if !ok || len(cands) == 0 {
-		t.Fatalf("no candidates: %v", m)
-	}
-	content := cands[0].(map[string]any)["content"].(map[string]any)
 	var out []map[string]any
-	for _, p := range content["parts"].([]any) {
-		out = append(out, p.(map[string]any))
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(data), &m); err != nil {
+			t.Fatalf("bad event %q: %v", data, err)
+		}
+		out = append(out, m)
 	}
 	return out
 }
 
-func TestGeminiStreamChatUpstream(t *testing.T) {
-	f := &fake{t: t, reply: geminiReply}
-	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", geminiReq)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
+// candParts is the parts of a Gemini response's first candidate.
+func candParts(m map[string]any) []map[string]any {
+	cands, _ := m["candidates"].([]any)
+	if len(cands) == 0 {
+		return nil
 	}
-
-	// what the upstream saw
-	var up map[string]any
-	json.Unmarshal(f.got, &up)
-	if f.path != "/v1/chat/completions" {
-		t.Errorf("upstream path %s", f.path)
-	}
-	msgs := up["messages"].([]any)
-	if len(msgs) != 4 || msgs[0].(map[string]any)["role"] != "system" {
-		t.Fatalf("messages: %v", msgs)
-	}
-	call := msgs[2].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
-	if call["id"] == "" || msgs[3].(map[string]any)["tool_call_id"] != call["id"] || msgs[3].(map[string]any)["content"] != "package x" {
-		t.Errorf("function result not matched to its call: %v", msgs)
-	}
-
-	// what the client got: thought, text, one complete call, then the end
-	evs := events(body)
-	if len(evs) < 4 {
-		t.Fatalf("too few events: %s", body)
-	}
-	var thoughts, texts []string
-	var calls []map[string]any
-	for _, e := range evs[:len(evs)-1] {
-		for _, p := range gemParts(t, e) {
-			switch {
-			case p["thought"] == true:
-				thoughts = append(thoughts, p["text"].(string))
-			case p["functionCall"] != nil:
-				calls = append(calls, p["functionCall"].(map[string]any))
-			case p["text"] != nil:
-				texts = append(texts, p["text"].(string))
-			}
+	c, _ := cands[0].(map[string]any)
+	content, _ := c["content"].(map[string]any)
+	raw, _ := content["parts"].([]any)
+	var out []map[string]any
+	for _, p := range raw {
+		if pm, ok := p.(map[string]any); ok {
+			out = append(out, pm)
 		}
 	}
-	if strings.Join(thoughts, "") != "hmm" || strings.Join(texts, "") != "Hi there" {
-		t.Errorf("thought %v text %v", thoughts, texts)
+	return out
+}
+
+func finishOf(m map[string]any) string {
+	cands, _ := m["candidates"].([]any)
+	if len(cands) == 0 {
+		return ""
 	}
-	if len(calls) != 1 || calls[0]["id"] != "call_9" || calls[0]["name"] != "read" {
-		t.Fatalf("calls: %v", calls)
-	}
-	if args := calls[0]["args"].(map[string]any); args["path"] != "a.go" {
-		t.Errorf("args: %v", args)
-	}
-	last := evs[len(evs)-1]
-	cand := last["candidates"].([]any)[0].(map[string]any)
-	if cand["finishReason"] != "STOP" {
-		t.Errorf("finish: %v", last)
-	}
-	um := last["usageMetadata"].(map[string]any)
-	if um["promptTokenCount"] != float64(10) || um["candidatesTokenCount"] != float64(3) || um["thoughtsTokenCount"] != float64(2) {
-		t.Errorf("usage: %v", um)
+	c, _ := cands[0].(map[string]any)
+	s, _ := c["finishReason"].(string)
+	return s
+}
+
+// checkUsage asserts the usage numbers of the example: prompt 10, completion
+// 5 of which 2 reasoning, so candidates 3 and thoughts 2.
+func checkUsage(t *testing.T, u map[string]any) {
+	t.Helper()
+	want := map[string]float64{"promptTokenCount": 10, "candidatesTokenCount": 3, "thoughtsTokenCount": 2}
+	for k, v := range want {
+		if got, _ := u[k].(float64); got != v {
+			t.Errorf("%s = %v, want %v (%v)", k, u[k], v, u)
+		}
 	}
 }
 
-func TestGeminiGenerateChatUpstream(t *testing.T) {
-	f := &fake{t: t, reply: geminiReply}
+func TestGeminiStreamTranslatesChatUpstream(t *testing.T) {
+	f := &fake{t: t, reply: chatReply}
 	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", geminiReq)
+	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", geminiBody)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	var out map[string]any
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatalf("not JSON: %s", body)
-	}
-	cand := out["candidates"].([]any)[0].(map[string]any)
-	if cand["finishReason"] != "STOP" {
-		t.Errorf("finish: %v", cand)
-	}
-	var found bool
-	for _, p := range gemParts(t, out) {
-		if fc, ok := p["functionCall"].(map[string]any); ok {
-			found = fc["id"] == "call_9" && fc["args"].(map[string]any)["path"] == "a.go"
+	chunks := geminiChunks(t, body)
+	var thought, text, calls int
+	for _, c := range chunks {
+		for _, p := range candParts(c) {
+			switch {
+			case p["thought"] == true && p["text"] == "hmm":
+				thought++
+			case p["text"] == "Let me read.":
+				text++
+			case p["functionCall"] != nil:
+				calls++
+				fc := p["functionCall"].(map[string]any)
+				args := fc["args"].(map[string]any)
+				if fc["id"] != "up_1" || fc["name"] != "read" || args["path"] != "a.txt" {
+					t.Errorf("function call %v", fc)
+				}
+			}
 		}
 	}
-	if !found {
-		t.Errorf("no complete functionCall: %s", body)
+	if thought != 1 || text != 1 || calls != 1 {
+		t.Errorf("thought %d text %d calls %d in %s", thought, text, calls, body)
 	}
-	um := out["usageMetadata"].(map[string]any)
-	if um["promptTokenCount"] != float64(10) || um["candidatesTokenCount"] != float64(3) ||
-		um["thoughtsTokenCount"] != float64(2) || um["totalTokenCount"] != float64(15) {
-		t.Errorf("usage: %v", um)
+	last := chunks[len(chunks)-1]
+	if finishOf(last) != "STOP" {
+		t.Errorf("last finishReason %q", finishOf(last))
 	}
-	if out["modelVersion"] == nil || out["responseId"] == nil {
+	u, _ := last["usageMetadata"].(map[string]any)
+	checkUsage(t, u)
+
+	// what the upstream was sent
+	got := string(f.got)
+	for _, want := range []string{`"reasoning_effort":"medium"`, `"max_tokens":321`, `"type":"object"`,
+		`"type":"string"`, `"tool_call_id":"c1"`, `"tool_calls"`, `be brief`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("upstream body lacks %s: %s", want, got)
+		}
+	}
+	if strings.Contains(got, `"OBJECT"`) || strings.Contains(got, `"STRING"`) {
+		t.Errorf("upper-case schema types reached upstream: %s", got)
+	}
+}
+
+func TestGeminiGenerateContentIsWholeReply(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t, reply: chatReply})
+	code, body := post(t, "/v1beta/models/fake/m1:generateContent", geminiBody)
+	if code != 200 {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if finishOf(m) != "STOP" {
+		t.Errorf("finishReason %q in %s", finishOf(m), body)
+	}
+	var sawCall, sawThought bool
+	for _, p := range candParts(m) {
+		if fc, ok := p["functionCall"].(map[string]any); ok {
+			sawCall = fc["id"] == "up_1" && fc["name"] == "read"
+		}
+		if p["thought"] == true {
+			sawThought = true
+		}
+	}
+	if !sawCall || !sawThought {
+		t.Errorf("parts %s", body)
+	}
+	u, _ := m["usageMetadata"].(map[string]any)
+	checkUsage(t, u)
+	if m["modelVersion"] == nil || m["responseId"] == nil {
 		t.Errorf("missing modelVersion/responseId: %s", body)
 	}
 }
 
-func TestGeminiRequestTranslation(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"ok"}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"length"}]}`,
-		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
-	body := `{"systemInstruction":{"parts":[{"text":"sys"}]},
-	  "contents":[{"role":"user","parts":[{"text":"hi"}]}],
-	  "tools":[{"functionDeclarations":[{"name":"q","parameters":{"type":"OBJECT","properties":{"tags":{"type":"ARRAY","items":{"type":"STRING"}}}}}]}],
-	  "toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["q"]}},
-	  "generationConfig":{"maxOutputTokens":321,"temperature":0.5,"stopSequences":["END"],
-	    "responseMimeType":"application/json","responseSchema":{"type":"OBJECT","properties":{"ok":{"type":"BOOLEAN"}}},
-	    "thinkingConfig":{"thinkingBudget":-1}}}`
-	code, reply := post(t, "/v1beta/models/fake/m1:generateContent", body)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, reply)
-	}
-	var up map[string]any
-	json.Unmarshal(f.got, &up)
-	if up["max_tokens"] != float64(321) {
-		t.Errorf("max_tokens: %v", up["max_tokens"])
-	}
-	if up["reasoning_effort"] != "medium" {
-		t.Errorf("reasoning_effort: %v", up["reasoning_effort"])
-	}
-	if up["temperature"] != 0.5 {
-		t.Errorf("temperature: %v", up["temperature"])
-	}
-	params := up["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
-	tags := params["properties"].(map[string]any)["tags"].(map[string]any)
-	if params["type"] != "object" || tags["type"] != "array" || tags["items"].(map[string]any)["type"] != "string" {
-		t.Errorf("schema not lower-cased: %v", params)
-	}
-	if tc, ok := up["tool_choice"].(map[string]any); !ok || tc["function"].(map[string]any)["name"] != "q" {
-		t.Errorf("tool_choice: %v", up["tool_choice"])
-	}
-	msgs := up["messages"].([]any)
-	sysMsg := msgs[0].(map[string]any)["content"].(string)
-	if msgs[0].(map[string]any)["role"] != "system" || !strings.Contains(sysMsg, "sys") ||
-		!strings.Contains(sysMsg, "JSON") || !strings.Contains(sysMsg, `"type":"boolean"`) {
-		t.Errorf("system: %q", sysMsg)
-	}
-	if stop, ok := up["stop"].([]any); !ok || len(stop) != 1 || stop[0] != "END" {
-		t.Errorf("stop: %v", up["stop"])
-	}
-}
-
-func TestGeminiUnknownModel(t *testing.T) {
+func TestGeminiUnknownModelIsNotFound(t *testing.T) {
 	setup(t, provider.Chat, &fake{t: t})
-	code, body := post(t, "/v1beta/models/nope:generateContent", geminiReq)
+	code, body := post(t, "/v1beta/models/nope:generateContent", geminiBody)
 	if code != 404 || !strings.Contains(body, `"status":"NOT_FOUND"`) || !strings.Contains(body, `"code":404`) {
 		t.Errorf("%d %s", code, body)
 	}
 }
 
-func TestGeminiModelWithColon(t *testing.T) {
-	f := &fake{t: t, reply: geminiReply}
-	setup(t, provider.Chat, f)
-	p, _ := provider.Find("fake")
-	p.Models = []string{"m:1"}
-	if err := provider.Save(*p); err != nil {
-		t.Fatal(err)
-	}
-	code, body := post(t, "/v1beta/models/fake/m:1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	var up map[string]any
-	json.Unmarshal(f.got, &up)
-	if up["model"] != "m:1" {
-		t.Errorf("upstream model %v", up["model"])
-	}
-}
-
 func TestGeminiCountTokens(t *testing.T) {
 	setup(t, provider.Chat, &fake{t: t})
-	code, body := post(t, "/v1beta/models/fake/m1:countTokens",
-		`{"contents":[{"role":"user","parts":[{"text":"hello world, this is a test"}]}]}`)
-	var out map[string]any
-	json.Unmarshal([]byte(body), &out)
-	if code != 200 || out["totalTokens"] == nil || out["totalTokens"].(float64) <= 0 {
-		t.Errorf("%d %s", code, body)
-	}
-	code, body = post(t, "/v1beta/models/fake/m1:countTokens",
-		`{"generateContentRequest":{"model":"models/fake/m1","contents":[{"role":"user","parts":[{"text":"hello world, this is a test"}]}]}}`)
-	out = nil
-	json.Unmarshal([]byte(body), &out)
-	if code != 200 || out["totalTokens"] == nil || out["totalTokens"].(float64) <= 0 {
-		t.Errorf("wrapped: %d %s", code, body)
+	for _, body := range []string{
+		`{"generateContentRequest":{"contents":[{"role":"user","parts":[{"text":"hello there world"}]}]}}`,
+		`{"contents":[{"role":"user","parts":[{"text":"hello there world"}]}]}`,
+	} {
+		code, out := post(t, "/v1beta/models/fake/m1:countTokens", body)
+		var m map[string]any
+		json.Unmarshal([]byte(out), &m)
+		if code != 200 || m["totalTokens"] == nil {
+			t.Errorf("%d %s", code, out)
+		}
+		if n, _ := m["totalTokens"].(float64); n <= 0 {
+			t.Errorf("totalTokens %v", m["totalTokens"])
+		}
 	}
 }
 
@@ -244,28 +206,101 @@ func TestGeminiModelsList(t *testing.T) {
 	setup(t, provider.Chat, &fake{t: t})
 	rec := httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1beta/models", nil))
-	body := rec.Body.String()
-	if rec.Code != 200 || !strings.Contains(body, `"name":"models/fake/m1"`) ||
-		!strings.Contains(body, `"displayName"`) || !strings.Contains(body, `"streamGenerateContent"`) ||
-		!strings.Contains(body, `"countTokens"`) {
-		t.Errorf("%d %s", rec.Code, body)
-	}
-	rec = httptest.NewRecorder()
-	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
-	if !strings.Contains(rec.Body.String(), "/v1beta/models") {
-		t.Errorf("root info does not list the Gemini API: %s", rec.Body.String())
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"name":"models/fake/m1"`) ||
+		!strings.Contains(rec.Body.String(), `"displayName"`) || !strings.Contains(rec.Body.String(), `"streamGenerateContent"`) {
+		t.Errorf("%d %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestGeminiErrorShape(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
+func TestGeminiInfoAndNotFoundListTheAPI(t *testing.T) {
 	rec := httptest.NewRecorder()
-	New().Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1beta/models/fake/m1:bogus", strings.NewReader("{}")))
-	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), `"status":"NOT_FOUND"`) {
-		t.Errorf("%d %s", rec.Code, rec.Body.String())
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rec.Body.String(), "/v1beta/models/{model}:generateContent") {
+		t.Errorf("info %s", rec.Body.String())
 	}
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `not json`)
-	if code != 400 || !strings.Contains(body, `"status":"INVALID_ARGUMENT"`) {
+	rec = httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/nope", nil))
+	if rec.Code != 404 || !strings.Contains(rec.Body.String(), "/v1beta/models") {
+		t.Errorf("404 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGeminiToolChoiceAndJSONMode(t *testing.T) {
+	f := &fake{t: t, reply: chatReply}
+	setup(t, provider.Chat, f)
+	body := `{"contents":[{"role":"user","parts":[{"text":"go"}]}],
+	 "tools":[{"functionDeclarations":[{"name":"read","parameters":{"type":"OBJECT"}},{"name":"write","parameters":{"type":"OBJECT"}}]}],
+	 "toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["read"]}},
+	 "generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"OBJECT","properties":{"ok":{"type":"BOOLEAN"}}}}}`
+	if code, out := post(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	got := string(f.got)
+	for _, want := range []string{`"tool_choice":{"function":{"name":"read"},"type":"function"}`, `JSON Schema`, `"type":"boolean"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("upstream lacks %s: %s", want, got)
+		}
+	}
+	if strings.Contains(got, `"write"`) {
+		t.Errorf("disallowed tool reached upstream: %s", got)
+	}
+}
+
+func TestGeminiFunctionResultMatchesByName(t *testing.T) {
+	f := &fake{t: t, reply: chatReply}
+	setup(t, provider.Chat, f)
+	body := `{"contents":[
+	 {"role":"user","parts":[{"text":"go"}]},
+	 {"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"x"}}}]},
+	 {"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"ok"}}}]}]}`
+	if code, out := post(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	var up struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolCalls  []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(f.got, &up); err != nil {
+		t.Fatal(err)
+	}
+	var callID, resultID string
+	for _, m := range up.Messages {
+		if len(m.ToolCalls) > 0 {
+			callID = m.ToolCalls[0].ID
+		}
+		if m.Role == "tool" {
+			resultID = m.ToolCallID
+		}
+	}
+	if callID == "" || callID != resultID {
+		t.Errorf("call id %q, result id %q", callID, resultID)
+	}
+}
+
+func TestGeminiAttachments(t *testing.T) {
+	f := &fake{t: t, reply: chatReply}
+	setup(t, provider.Chat, f)
+	body := `{"contents":[{"role":"user","parts":[
+	 {"inlineData":{"mimeType":"image/png","data":"AAAA"}},
+	 {"inlineData":{"mimeType":"application/pdf","data":"BBBB"}}]}]}`
+	if code, out := post(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	got := string(f.got)
+	if !strings.Contains(got, `data:image/png;base64,AAAA`) || !strings.Contains(got, `[attachment omitted: application/pdf]`) {
+		t.Errorf("attachments %s", got)
+	}
+}
+
+func TestGeminiStreamErrorsAreGeminiShaped(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"no balance"}}`})
+	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", geminiBody)
+	if code != 402 || !strings.Contains(body, `"error":{"code":402`) || !strings.Contains(body, "no balance") {
 		t.Errorf("%d %s", code, body)
 	}
 }

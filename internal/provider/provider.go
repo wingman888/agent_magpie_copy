@@ -23,11 +23,13 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini API: a client-facing protocol only, never an upstream
+
+	// Gemini is the Gemini API. Only clients speak it to dial; no upstream
+	// vendor is listed in Protocols for it.
+	Gemini Protocol = "gemini"
 )
 
 // Protocols in the order dial prefers them when it has to translate.
-// Gemini is deliberately absent: vendors are never reached over it.
 var Protocols = []Protocol{Chat, Responses, Anthropic}
 
 // Provider is one configured vendor.
