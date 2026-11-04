@@ -67,12 +67,14 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
-	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	// Fallback says which providers failed before this one answered, when the
+	// request was switched to a fallback: "<providerId>: <reason>" joined by "; ".
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // Server is the gateway.
@@ -85,6 +87,10 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
+	// rests holds providers that recently failed with a switchable error,
+	// keyed by provider id. Memory only.
+	restMu sync.Mutex
+	rests  map[string]restNote
 }
 
 // New makes a gateway.
@@ -349,68 +355,52 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary, then its fallbacks while it can't take the request and
-	// nothing has been sent yet
-	tries := expandKeys(s.candidates(p, model))
-	var skipped []string
-	for i, t := range tries {
-		c := t.c
-		last := i == len(tries)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		if !last && hw.failed() {
-			if t.keyID != "" {
-				// one of several accounts: only that key rests
-				provider.MarkKeyFailed(c.p.ID, t.keyID)
-				skipped = append(skipped, c.p.ID+"("+t.label+"): "+call.Error)
-			} else {
-				s.rest(c.p.ID)
-				skipped = append(skipped, c.p.ID+": "+call.Error)
-			}
+	// Candidates are the primary, then its fallbacks. With none configured
+	// the single attempt writes straight to the client, as it always did.
+	cands := s.plan(p, model)
+	var failed []string
+	for i, c := range cands {
+		last := i == len(cands)-1
+		out := http.ResponseWriter(w)
+		var aw *attemptWriter
+		if len(cands) > 1 {
+			aw = newAttemptWriter(w)
+			out = aw
+		}
+		to, status, msg := s.attempt(out, r, from, c.p, c.model, body, &call.Usage)
+		if aw != nil && !aw.committed && !last && r.Context().Err() == nil && retryable(status, c.detail(msg)) {
+			reason := fmt.Sprintf("%d %s", status, c.detail(msg))
+			s.rest(c.p.ID, reason)
+			failed = append(failed, c.p.ID+": "+reason)
 			continue
 		}
-		hw.release()
-		model = c.model
-		break
-	}
-	if len(skipped) > 0 {
-		call.Fallback = strings.Join(skipped, "; ")
-	}
-	call.Millis = time.Since(start).Milliseconds()
-	finishCapture()
-	s.record(call)
-	if call.To != "" {
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
+		if aw != nil {
+			aw.flush()
+		}
+		call.Provider = c.p.ID
+		if i > 0 {
+			call.Model = c.model
+		}
+		call.To = to
+		call.Status, call.Error = status, msg
+		notes := failed
+		if i > 0 {
+			// switched: also name the resting providers that were passed over
+			notes = append(append([]string(nil), failed...), s.restingNotes(cands[i+1:])...)
+		}
+		call.Fallback = strings.Join(notes, "; ")
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		if to == "" {
+			// no endpoint was configured, so nothing reached a provider
+			return
+		}
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: c.p.ID, Model: c.model,
 			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
 	}
-}
-
-// attempt sends a request to one provider. call.To stays empty when the
-// provider has no endpoint to send it to.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
-	// A Claude Code subscription must run through the genuine binary. Direct
-	// OAuth HTTP requests are content-classified as third-party traffic when
-	// they carry another agent's harness (Pi, OpenCode, and others).
-	if p.Account != nil && p.Account.Agent == "claude" {
-		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
-	}
-	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		return s.passthrough(w, r, p, from, model, body, &call.Usage)
-	}
-	to := p.Speaks()
-	if len(to) == 0 {
-		msg := p.Name + " has no endpoint configured"
-		return writeError(w, from, 502, msg), msg
-	}
-	call.To = to[0]
-	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 }
 
 // forward sends a request to the provider.
