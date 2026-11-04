@@ -1,169 +1,175 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
+	"bufio"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/backup"
+	"github.com/yetone/magpie/internal/provider"
 )
 
-func TestParseBackupArgs(t *testing.T) {
-	o, err := parseBackupArgs(nil)
-	if err != nil || o.noKeys || o.file != "magpie.magpie-backup" {
-		t.Fatalf("defaults: got %+v, %v", o, err)
+// withStdin makes os.Stdin a pipe that holds s, for the duration of the test.
+func withStdin(t *testing.T, s string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	o, err = parseBackupArgs([]string{"--no-keys", "b.magpie-backup"})
-	if err != nil || !o.noKeys || o.file != "b.magpie-backup" {
-		t.Fatalf("--no-keys file: got %+v, %v", o, err)
+	if _, err := w.WriteString(s); err != nil {
+		t.Fatal(err)
 	}
-	o, err = parseBackupArgs([]string{"x.bak", "--no-keys"})
-	if err != nil || !o.noKeys || o.file != "x.bak" {
-		t.Fatalf("file then flag: got %+v, %v", o, err)
-	}
-	if _, err := parseBackupArgs([]string{"--bogus"}); err == nil || !strings.Contains(err.Error(), "未知参数") {
-		t.Fatalf("unknown flag: want usage error, got %v", err)
-	}
-	if _, err := parseBackupArgs([]string{"a", "b"}); err == nil || !strings.Contains(err.Error(), "多余的参数") {
-		t.Fatalf("extra positional: want usage error, got %v", err)
-	}
-	if _, err := parseBackupArgs([]string{"-"}); err == nil {
-		t.Fatalf("lone dash: want usage error")
-	}
+	w.Close()
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = old
+		r.Close()
+	})
 }
 
-func TestParseRestoreArgs(t *testing.T) {
-	o, err := parseRestoreArgs([]string{"--no-agents", "b.magpie-backup"})
-	if err != nil || !o.noAgents || o.file != "b.magpie-backup" {
-		t.Fatalf("ok case: got %+v, %v", o, err)
-	}
-	o, err = parseRestoreArgs([]string{"b.magpie-backup"})
-	if err != nil || o.noAgents {
-		t.Fatalf("plain: got %+v, %v", o, err)
-	}
-	if _, err := parseRestoreArgs(nil); err == nil || !strings.Contains(err.Error(), "usage:") {
-		t.Fatalf("missing file: want usage error, got %v", err)
-	}
-	if _, err := parseRestoreArgs([]string{"--no-agents"}); err == nil {
-		t.Fatalf("only flag: want usage error")
-	}
-	if _, err := parseRestoreArgs([]string{"a", "b"}); err == nil || !strings.Contains(err.Error(), "多余的参数") {
-		t.Fatalf("extra positional: want usage error, got %v", err)
-	}
-	if _, err := parseRestoreArgs([]string{"--force", "a"}); err == nil || !strings.Contains(err.Error(), "未知参数") {
-		t.Fatalf("unknown flag: want usage error, got %v", err)
-	}
+// isolate points every magpie directory at a temp dir.
+func isolate(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
+	return dir
 }
 
-func TestReadPassphraseFromPipeFirstLine(t *testing.T) {
-	cases := map[string]string{
-		"pw\nignored\n": "pw",
-		"pw\r\n":        "pw",
-		"pw":            "pw",
-		"  spaced  \n":  "  spaced  ",
-	}
-	for in, want := range cases {
-		var out bytes.Buffer
-		got, err := readPassphrase("口令: ", false, strings.NewReader(in), &out, true)
-		if err != nil {
-			t.Fatalf("input %q: unexpected error %v", in, err)
-		}
-		if got != want {
-			t.Fatalf("input %q: got %q, want %q", in, got, want)
-		}
-		if out.Len() != 0 {
-			t.Fatalf("input %q: pipe mode should not prompt, wrote %q", in, out.String())
+func TestBackupUsageErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"--bogus"},
+		{"-x", "file"},
+		{"a", "b"},
+	} {
+		if err := backupCmd(args); err == nil || !strings.Contains(err.Error(), "usage:") {
+			t.Errorf("backupCmd(%q) = %v, want usage error", args, err)
 		}
 	}
 }
 
-func TestReadPassphraseEmptyIsError(t *testing.T) {
-	for _, in := range []string{"", "\n", "\r\n"} {
-		var out bytes.Buffer
-		if _, err := readPassphrase("口令: ", false, strings.NewReader(in), &out, true); !errors.Is(err, errEmptyPassphrase) {
-			t.Fatalf("input %q: want empty-passphrase error, got %v", in, err)
+func TestRestoreUsageErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{},
+		{"--bogus", "file"},
+		{"a", "b"},
+		{"--no-agents"},
+	} {
+		if err := restoreCmd(args); err == nil || !strings.Contains(err.Error(), "usage:") {
+			t.Errorf("restoreCmd(%q) = %v, want usage error", args, err)
 		}
 	}
 }
 
-func TestCheckPassphrase(t *testing.T) {
-	if err := checkPassphrase("", "", false); !errors.Is(err, errEmptyPassphrase) {
-		t.Fatalf("empty: got %v", err)
+func TestPassSourceStdinLine(t *testing.T) {
+	s := passSource{tty: false, in: bufio.NewReader(strings.NewReader("secret\r\nother\n"))}
+	got, err := s.ask("")
+	if err != nil || got != "secret" {
+		t.Fatalf("ask = %q, %v; want secret", got, err)
 	}
-	if err := checkPassphrase("", "", true); !errors.Is(err, errEmptyPassphrase) {
-		t.Fatalf("empty confirmed: got %v", err)
-	}
-	if err := checkPassphrase("abc", "abd", true); !errors.Is(err, errPassphraseMismatch) {
-		t.Fatalf("mismatch: got %v", err)
-	}
-	if err := checkPassphrase("abc", "abd", false); err != nil {
-		t.Fatalf("mismatch without confirm should pass: %v", err)
-	}
-	if err := checkPassphrase("abc", "abc", true); err != nil {
-		t.Fatalf("match: got %v", err)
+	got, err = s.ask("")
+	if err != nil || got != "other" {
+		t.Fatalf("second ask = %q, %v; want other", got, err)
 	}
 }
 
-func TestBackupOpenErrorMessages(t *testing.T) {
-	// The messages of these errors are shown to the user as they are.
-	cases := []struct {
-		in   error
-		want string
-	}{
-		{backup.ErrNotBackup, "不是 magpie 备份文件"},
-		{backup.ErrNewerVersion, "请升级 magpie"},
+func TestPassphraseEmptyRejected(t *testing.T) {
+	s := passSource{tty: false, in: bufio.NewReader(strings.NewReader("\n"))}
+	if _, err := s.passphrase(true); err == nil {
+		t.Fatal("empty passphrase accepted")
 	}
-	for _, c := range cases {
-		got := backupOpenError(c.in)
-		if got == nil || !strings.Contains(got.Error(), c.want) {
-			t.Fatalf("%v: got %v, want text containing %q", c.in, got, c.want)
-		}
-		if strings.Contains(strings.ToLower(got.Error()), "passphrase") {
-			t.Fatalf("message mentions passphrase: %q", got)
-		}
-	}
-	other := errors.New("boom")
-	if got := backupOpenError(other); got != other {
-		t.Fatalf("other error should pass through, got %v", got)
+	s = passSource{tty: false, in: bufio.NewReader(strings.NewReader(""))}
+	if _, err := s.passphrase(false); err == nil {
+		t.Fatal("missing passphrase accepted")
 	}
 }
 
-func TestOpenFormatErrorsAreNotPassphraseErrors(t *testing.T) {
-	// Each of these must be reported as a format problem, never as a
-	// wrong passphrase, and their messages must not mention one.
-	samples := map[string][]byte{
-		"empty":  {},
-		"text":   []byte("hello"),
-		"object": []byte("{}"),
-		"newer":  []byte(`{"format":"magpie-backup","version":99}`),
+func TestWriteBackupFileMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "magpie.magpie-backup")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	for name, data := range samples {
-		_, err := backup.Open(data, "pw")
-		if err == nil {
-			t.Fatalf("%s: Open succeeded", name)
-		}
-		if errors.Is(err, backup.ErrPassphrase) {
-			t.Fatalf("%s: got passphrase error %v", name, err)
-		}
-		if msg := backupOpenError(err).Error(); strings.Contains(strings.ToLower(msg), "passphrase") {
-			t.Fatalf("%s: message mentions passphrase: %q", name, msg)
-		}
+	if err := writeBackupFile(path, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("mode = %o, want 600", perm)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "new" {
+		t.Errorf("content = %q", data)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("temp files left behind: %d entries", len(entries))
 	}
 }
 
-func TestCountHelpers(t *testing.T) {
-	if n := countProfiles(json.RawMessage(`{"a":{},"b":{}}`)); n != 2 {
-		t.Fatalf("profiles: got %d", n)
+func TestProviderHasKey(t *testing.T) {
+	if providerHasKey(provider.Provider{}) {
+		t.Error("keyless provider reported a key")
 	}
-	if n := countProfiles(nil); n != 0 {
-		t.Fatalf("nil profiles: got %d", n)
+	if !providerHasKey(provider.Provider{Key: "k"}) {
+		t.Error("main key not seen")
 	}
-	if n := countAgentSettings(json.RawMessage(`{"claude":{"model":"x","effort":"high"},"codex":{"model":"y"}}`)); n != 3 {
-		t.Fatalf("agent settings: got %d", n)
+	if !providerHasKey(provider.Provider{Keys: []provider.KeyAccount{{Key: "k"}}}) {
+		t.Error("multi-key account not seen")
 	}
-	if n := countAgentSettings(nil); n != 0 {
-		t.Fatalf("nil agents: got %d", n)
+}
+
+func TestBackupRestoreRoundTripCLI(t *testing.T) {
+	isolate(t)
+	file := filepath.Join(t.TempDir(), "b"+backup.Ext)
+
+	withStdin(t, "pw-test\n")
+	if err := backupCmd([]string{"--no-keys", file}); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	fi, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("backup mode = %o, want 600", perm)
+	}
+
+	withStdin(t, "wrong\n")
+	err = restoreCmd([]string{file})
+	if err == nil || !strings.Contains(err.Error(), "口令错误或文件被改动") {
+		t.Fatalf("wrong passphrase: err = %v", err)
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "passphrase") {
+		t.Errorf("error mentions passphrase: %v", err)
+	}
+
+	withStdin(t, "pw-test\n")
+	if err := restoreCmd([]string{"--no-agents", file}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+}
+
+func TestRestoreNotBackupNoPrompt(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	for name, content := range map[string]string{"empty": "", "obj": "{}", "text": "hello"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		withStdin(t, "")
+		err := restoreCmd([]string{path})
+		if err == nil || !strings.Contains(err.Error(), "不是 magpie 备份") {
+			t.Errorf("%s: err = %v, want not-a-backup", name, err)
+		}
 	}
 }
