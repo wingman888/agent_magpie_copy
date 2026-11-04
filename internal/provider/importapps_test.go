@@ -2,6 +2,7 @@ package provider
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -142,6 +143,23 @@ func TestImportAppsByName(t *testing.T) {
 	for i := 1; i < len(appReaders); i++ {
 		if strings.ToLower(appReaders[i-1].name) > strings.ToLower(appReaders[i].name) {
 			t.Fatalf("%s listed before %s", appReaders[i-1].name, appReaders[i].name)
+		}
+	}
+}
+
+// An app with nothing to bring over lists no items, not null: the window
+// reads each source's items.
+func TestImportSourcesNeverNull(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
+	os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"model": "opus"}`), 0o644)
+	for _, s := range ImportSources() {
+		b, _ := json.Marshal(s)
+		if s.Items == nil || strings.Contains(string(b), `"items":null`) {
+			t.Fatalf("%s: items is null: %s", s.ID, b)
 		}
 	}
 }
