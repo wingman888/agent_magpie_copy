@@ -65,13 +65,7 @@ func SaveLive(provider, base string, models []Model) error {
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with extra request headers the endpoint needs, sent
-// as the user named them (see ApplyHeaders).
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -131,7 +125,11 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	ApplyHeaders(req, headers)
+	// The user's own headers, after the defaults so a private auth scheme
+	// wins. Written directly so the name keeps the exact case the user typed.
+	for k, v := range headers {
+		req.Header[k] = []string{v}
+	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -185,7 +183,11 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := byID[m.ID]; ok {
+		k, ok := byID[m.ID]
+		if i := strings.LastIndexByte(m.ID, '/'); !ok && i >= 0 {
+			k, ok = byID[m.ID[i+1:]] // a gateway's "deepseek/deepseek-chat"
+		}
+		if ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
@@ -197,25 +199,4 @@ func Decorate(live []Model, known []Model) []Model {
 		out = append(out, m)
 	}
 	return out
-}
-
-// ApplyHeaders adds a provider's own headers to req, after its auth headers.
-// Names are written as the user typed them, not canonicalised. A header
-// already on req with the same name, ignoring case, is replaced by the
-// user's value.
-func ApplyHeaders(req *http.Request, headers map[string]string) {
-	if len(headers) == 0 {
-		return
-	}
-	for k := range req.Header {
-		for name := range headers {
-			if strings.EqualFold(k, name) {
-				delete(req.Header, k)
-				break
-			}
-		}
-	}
-	for k, v := range headers {
-		req.Header[k] = []string{v}
-	}
 }
