@@ -72,6 +72,9 @@ type Call struct {
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	// Fallback lists the providers that failed before this one answered, as
+	// "<providerId>: <reason>" joined by "; ". Empty when nothing switched.
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // Server is the gateway.
@@ -84,6 +87,10 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
+	// fbMu guards resting: providers that recently failed switchably, with
+	// the time until which they are tried last. Process memory only.
+	fbMu    sync.Mutex
+	resting map[string]time.Time
 }
 
 // New makes a gateway.
@@ -349,6 +356,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
+	// A provider with fallbacks goes through the candidate chain; one without
+	// keeps the direct path below, unchanged.
+	if len(p.Fallback) > 0 {
+		s.serveFallback(w, r, from, body, p, model, &call, start, finishCapture)
+		return
+	}
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
@@ -431,6 +444,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		markUpstream(w, res.StatusCode, b)
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
@@ -573,6 +587,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		markUpstream(w, res.StatusCode, b)
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
@@ -588,6 +603,17 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if stream {
 		enc := encoder(from, newSSEWriter(w), request.Model)
 		var failed string
+		const (
+			holding   = iota // only start/usage events so far; they wait
+			streaming        // output has been sent (or none is pending)
+			refused          // the first real event was a retryable error; nothing was sent
+		)
+		state := streaming
+		if isAttempt(w) {
+			state = holding
+		}
+		var pending []Event
+		var refusedText string
 		readSSE(rd, func(_, data string) error {
 			return dec(data, func(ev Event) {
 				switch ev.Kind {
@@ -596,9 +622,32 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 				case KStart, KUsage:
 					u.add(ev.Usage)
 				}
-				enc.event(ev)
+				switch {
+				case state == holding && (ev.Kind == KStart || ev.Kind == KUsage):
+					pending = append(pending, ev)
+				case state == holding && ev.Kind == KError && hasFallbackWord(ev.Text):
+					state = refused
+					refusedText = ev.Text
+				case state == holding:
+					state = streaming
+					for _, pe := range pending {
+						enc.event(pe)
+					}
+					pending = nil
+					enc.event(ev)
+				case state == streaming:
+					enc.event(ev)
+				}
 			})
 		})
+		if state == refused {
+			markVerdict(w, true)
+			msg := p.Name + ": " + refusedText
+			return writeError(w, from, 429, msg), msg
+		}
+		for _, pe := range pending {
+			enc.event(pe)
+		}
 		enc.finish()
 		return 200, failed
 	}

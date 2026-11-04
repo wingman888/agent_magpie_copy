@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -556,6 +557,91 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	_ = os.RemoveAll(run.tmp)
 }
 
+// cliStatusCode matches a status code printed in the CLI's error text, such as
+// "API Error: 503", when it is one that may switch: 402, 408, 429 or 5xx.
+var cliStatusCode = regexp.MustCompile(`\b(402|408|429|5\d\d)\b`)
+
+// cliRetryWords are phrases the CLI prints for a server-side failure that
+// carries no status code. Matched lowercased.
+var cliRetryWords = []string{
+	"internal server error", "service unavailable", "bad gateway", "gateway timeout",
+}
+
+// cliRetryable reports whether the CLI's error text describes a failure that
+// may move to the next candidate. It extends the keyword rule of
+// hasFallbackWord with status codes and server phrases. It is used only for
+// the subscription path under fallback, never on the shared keyword list.
+func cliRetryable(text string) bool {
+	if hasFallbackWord(text) {
+		return true
+	}
+	if cliStatusCode.MatchString(text) {
+		return true
+	}
+	msg := strings.ToLower(text)
+	for _, w := range cliRetryWords {
+		if strings.Contains(msg, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// streamClaude relays the CLI's events as a stream. Under fallback nothing is
+// written before the first real output, so an error that comes first can
+// still move to the next candidate.
+func streamClaude(w http.ResponseWriter, from provider.Protocol, model string, events <-chan Event, usage *Usage) (int, string) {
+	enc := encoder(from, newSSEWriter(w), model)
+	var failed string
+	const (
+		holding    = iota // only start/usage events so far; they wait
+		streaming         // output has been sent (or none is pending)
+		refused           // the first real event was an error; nothing was sent
+	)
+	state := streaming
+	if isAttempt(w) {
+		state = holding
+	}
+	var pending []Event
+	for ev := range events {
+		if ev.Kind == KError {
+			failed = ev.Text
+		}
+		if ev.Kind == KStart || ev.Kind == KUsage {
+			usage.add(ev.Usage)
+		}
+		switch {
+		case state == holding && (ev.Kind == KStart || ev.Kind == KUsage):
+			pending = append(pending, ev)
+		case state == holding && ev.Kind == KError:
+			state = refused
+		case state == holding:
+			state = streaming
+			for _, p := range pending {
+				enc.event(p)
+			}
+			pending = nil
+			enc.event(ev)
+		case state == streaming:
+			enc.event(ev)
+		}
+	}
+	if state == refused {
+		retry := cliRetryable(failed)
+		status := 502
+		if retry {
+			status = 429
+		}
+		markVerdict(w, retry)
+		return writeError(w, from, status, "Claude Code: "+failed), failed
+	}
+	for _, p := range pending {
+		enc.event(p)
+	}
+	enc.finish()
+	return 200, failed
+}
+
 func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) (int, string) {
 	req, err := parse(from, body)
 	if err != nil {
@@ -576,19 +662,7 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 
 	if stream {
-		enc := encoder(from, newSSEWriter(w), req.Model)
-		var failed string
-		for ev := range events {
-			if ev.Kind == KError {
-				failed = ev.Text
-			}
-			if ev.Kind == KStart || ev.Kind == KUsage {
-				usage.add(ev.Usage)
-			}
-			enc.event(ev)
-		}
-		enc.finish()
-		return 200, failed
+		return streamClaude(w, from, req.Model, events, usage)
 	}
 	var col collector
 	for ev := range events {
@@ -596,7 +670,16 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 	if col.err != "" && len(col.res.Parts) == 0 {
 		run.abort()
-		return writeError(w, from, 502, "Claude Code: "+col.err), col.err
+		status, retry := 502, false
+		if isAttempt(w) {
+			// the CLI gives no status code, so the error text decides
+			retry = cliRetryable(col.err)
+			if retry {
+				status = 429
+			}
+			markVerdict(w, retry)
+		}
+		return writeError(w, from, status, "Claude Code: "+col.err), col.err
 	}
 	res := col.finish()
 	usage.add(res.Usage)
