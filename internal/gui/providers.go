@@ -227,6 +227,17 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
+			if old != nil {
+				// the editor does not carry custom headers or the icon, so an
+				// empty value means "keep what is saved", not "clear it"; the
+				// GUI cannot clear an icon (the CLI's provider icon "" can)
+				if in.Headers == nil {
+					in.Headers = old.Headers
+				}
+				if in.Icon == "" {
+					in.Icon = old.Icon
+				}
+			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
 				return

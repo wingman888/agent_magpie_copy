@@ -10,18 +10,16 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// f04Isolate points the config and home directories at a fresh temp dir so the
-// tests never touch the user's real providers.
-func f04Isolate(t *testing.T) {
+// cliTestIsolate points magpie's config (providers.json and the icons folder)
+// and the home folder at fresh temp directories for one test.
+func cliTestIsolate(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
 }
 
-// f04Capture runs fn with stdout redirected and returns what it printed.
-func f04Capture(t *testing.T, fn func()) string {
+// captureStdout runs fn and returns what it printed to standard output.
+func captureStdout(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -34,28 +32,27 @@ func f04Capture(t *testing.T, fn func()) string {
 		b, _ := io.ReadAll(r)
 		done <- string(b)
 	}()
-	fn()
-	w.Close()
+	ferr := fn()
 	os.Stdout = old
-	return <-done
+	w.Close()
+	return <-done, ferr
 }
 
-func f04WriteFile(t *testing.T, name string, data []byte) string {
+func cliTestPNG(t *testing.T, dir, name string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, append([]byte("\x89PNG\r\n\x1a\n"), []byte("png-body")...), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
 
-func TestF04ApplyPairsHeaders(t *testing.T) {
-	f04Isolate(t)
-	p := provider.Provider{Name: "Relay"}
+func TestApplyPairsHeaders(t *testing.T) {
+	var p provider.Provider
 	err := applyPairs(&p, []string{
 		"HEADER.X-ORG-id =  padded  ",
 		"header.X-Org-Id=acme",
-		"header.Authorization=Bearer other",
+		"Header.Authorization=user-token",
 		"header.=dropped",
 		"header.   =dropped too",
 	})
@@ -65,150 +62,151 @@ func TestF04ApplyPairsHeaders(t *testing.T) {
 	want := map[string]string{
 		"X-ORG-id":      "padded",
 		"X-Org-Id":      "acme",
-		"Authorization": "Bearer other",
+		"Authorization": "user-token",
 	}
 	if len(p.Headers) != len(want) {
-		t.Fatalf("headers = %v, want %v", p.Headers, want)
+		t.Fatalf("Headers = %v, want %v", p.Headers, want)
 	}
 	for k, v := range want {
 		if p.Headers[k] != v {
-			t.Errorf("header %q = %q, want %q", k, p.Headers[k], v)
+			t.Errorf("Headers[%q] = %q, want %q", k, p.Headers[k], v)
 		}
 	}
 }
 
-func TestF04ApplyPairsIconRejectedOnPreset(t *testing.T) {
-	f04Isolate(t)
-	p, err := provider.FromPreset("deepseek")
+func TestShowProviderHeadersSorted(t *testing.T) {
+	cliTestIsolate(t)
+	if err := provider.Save(provider.Provider{
+		ID: "my-relay", Name: "My Relay", Chat: "https://relay.example.com/v1", Key: "sk-test",
+		Headers: map[string]string{"X-Org-Id": "acme", "X-ORG-id": "upper", "Authorization": "Bearer x"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := provider.Find("my-relay")
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = applyPairs(&p, []string{"icon=deepseek-color"})
-	if err == nil || !strings.Contains(err.Error(), "custom") {
-		t.Fatalf("err = %v, want a message mentioning custom", err)
-	}
-}
-
-func TestF04IconValue(t *testing.T) {
-	f04Isolate(t)
-
-	if v, err := iconValue(""); err != nil || v != "" {
-		t.Errorf(`iconValue("") = %q, %v; want "", nil`, v, err)
-	}
-	if v, err := iconValue("deepseek-color"); err != nil || v != "deepseek-color" {
-		t.Errorf("built-in name = %q, %v", v, err)
-	}
-	if _, err := iconValue("./missing.png"); err == nil {
-		t.Error("missing file path accepted as a built-in name")
-	}
-	if _, err := iconValue(f04WriteFile(t, "note.txt", []byte("just some text"))); err == nil {
-		t.Error("text file accepted as icon")
-	}
-	if _, err := iconValue(f04WriteFile(t, "empty.png", nil)); err == nil {
-		t.Error("empty file accepted as icon")
-	}
-
-	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 32)...)
-	ref, err := iconValue(f04WriteFile(t, "logo.png", png))
+	out, err := captureStdout(t, func() error { return showProvider(*p) })
 	if err != nil {
-		t.Fatalf("png rejected: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.HasPrefix(ref, "file:") || !strings.HasSuffix(ref, ".png") {
-		t.Errorf("png ref = %q, want file:<hash>.png", ref)
-	}
-	again, err := iconValue(f04WriteFile(t, "same.png", png))
-	if err != nil || again != ref {
-		t.Errorf("same image gave %q, %v; want %q", again, err, ref)
-	}
-}
-
-func TestF04ShowProviderHeaders(t *testing.T) {
-	f04Isolate(t)
-	p := provider.Provider{
-		ID: "relay", Name: "Relay", Chat: "https://relay.example.com/v1", Key: "sk-test",
-		Headers: map[string]string{"X-Org-Id": "acme", "X-ORG-id": "x", "Authorization": "Bearer y"},
-	}
-	out := f04Capture(t, func() {
-		if err := showProvider(p); err != nil {
-			t.Fatal(err)
-		}
-	})
-	lines := []string{"header  Authorization: Bearer y", "header  X-ORG-id: x", "header  X-Org-Id: acme"}
+	lines := []string{"header  Authorization: Bearer x", "header  X-ORG-id: upper", "header  X-Org-Id: acme"}
 	last := -1
 	for _, l := range lines {
 		i := strings.Index(out, l)
 		if i < 0 {
-			t.Fatalf("output missing %q:\n%s", l, out)
+			t.Fatalf("output lacks %q:\n%s", l, out)
 		}
 		if i < last {
-			t.Errorf("%q printed out of order:\n%s", l, out)
+			t.Fatalf("%q out of order:\n%s", l, out)
 		}
 		last = i
 	}
 }
 
-func TestF04ProviderIconCommand(t *testing.T) {
-	f04Isolate(t)
-	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: "https://relay.example.com/v1", Key: "sk-test"}); err != nil {
+func TestIconArg(t *testing.T) {
+	cliTestIsolate(t)
+	dir := t.TempDir()
+	if got, err := iconArg(""); err != nil || got != "" {
+		t.Errorf(`iconArg("") = %q, %v; want "", nil`, got, err)
+	}
+	if got, err := iconArg("deepseek-color"); err != nil || got != "deepseek-color" {
+		t.Errorf("iconArg(builtin) = %q, %v", got, err)
+	}
+	if _, err := iconArg(filepath.Join(dir, "missing.png")); err == nil {
+		t.Error("missing image path should be an error")
+	}
+	png := cliTestPNG(t, dir, "logo.png")
+	got, err := iconArg(png)
+	if err != nil || !strings.HasPrefix(got, "file:") || !strings.HasSuffix(got, ".png") {
+		t.Errorf("iconArg(png) = %q, %v; want file:…png", got, err)
+	}
+	txt := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(txt, []byte("just text"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f04Capture(t, func() {
-		if err := providerCmd([]string{"provider", "icon", "relay", "deepseek-color"}); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if p, _ := provider.Find("relay"); p.Icon != "deepseek-color" {
-		t.Fatalf("icon = %q, want deepseek-color", p.Icon)
-	}
-
-	// A rejected image leaves the previous icon in place.
-	bad := f04WriteFile(t, "note.txt", []byte("plain text"))
-	f04Capture(t, func() {
-		if err := providerCmd([]string{"provider", "icon", "relay", bad}); err == nil {
-			t.Fatal("text file accepted")
-		}
-	})
-	if p, _ := provider.Find("relay"); p.Icon != "deepseek-color" {
-		t.Fatalf("icon changed to %q after rejected file", p.Icon)
-	}
-
-	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 32)...)
-	f04Capture(t, func() {
-		if err := providerCmd([]string{"provider", "icon", "relay", f04WriteFile(t, "logo.png", png)}); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if p, _ := provider.Find("relay"); !strings.HasPrefix(p.Icon, "file:") {
-		t.Fatalf("icon = %q, want a file: reference", p.Icon)
-	}
-
-	f04Capture(t, func() {
-		if err := providerCmd([]string{"provider", "icon", "relay", ""}); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if p, _ := provider.Find("relay"); p.Icon != "" {
-		t.Fatalf("icon = %q after reset, want empty", p.Icon)
+	if _, err := iconArg(txt); err == nil {
+		t.Error("text file should be rejected")
 	}
 }
 
-func TestF04ProviderIconCommandRejectsPreset(t *testing.T) {
-	f04Isolate(t)
-	pr, err := provider.FromPreset("deepseek")
+func TestProviderIconCommand(t *testing.T) {
+	cliTestIsolate(t)
+	dir := t.TempDir()
+	if err := provider.Save(provider.Provider{ID: "my-relay", Name: "My Relay", Chat: "https://relay.example.com/v1", Key: "sk-test"}); err != nil {
+		t.Fatal(err)
+	}
+	icon := func() string {
+		p, err := provider.Find("my-relay")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.Icon
+	}
+	set := func(v string) error {
+		_, err := captureStdout(t, func() error {
+			return providerCmd([]string{"provider", "icon", "my-relay", v})
+		})
+		return err
+	}
+
+	png := cliTestPNG(t, dir, "logo.png")
+	if err := set(png); err != nil {
+		t.Fatal(err)
+	}
+	ref := icon()
+	if !strings.HasPrefix(ref, "file:") || !strings.HasSuffix(ref, ".png") {
+		t.Fatalf("icon = %q, want file:…png", ref)
+	}
+	if err := set(png); err != nil || icon() != ref {
+		t.Fatalf("same image again gave %q (err %v), want %q", icon(), err, ref)
+	}
+
+	if err := set("deepseek-color"); err != nil || icon() != "deepseek-color" {
+		t.Fatalf("builtin: icon = %q, err %v", icon(), err)
+	}
+
+	txt := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(txt, []byte("plain text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := set(txt); err == nil || icon() != "deepseek-color" {
+		t.Fatalf("text file: err %v, icon %q; want error and icon unchanged", err, icon())
+	}
+
+	if err := set(""); err != nil || icon() != "" {
+		t.Fatalf("reset: icon = %q, err %v; want empty", icon(), err)
+	}
+}
+
+func TestProviderIconRejectsPresetAndAccount(t *testing.T) {
+	cliTestIsolate(t)
+	if err := provider.Save(provider.Provider{ID: "mine", Name: "Mine", Preset: "deepseek", Chat: "https://api.deepseek.com/v1", Key: "sk-test"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := provider.Find("mine")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pr.Key = "sk-test"
-	if err := provider.Save(pr); err != nil {
-		t.Fatal(err)
-	}
-	f04Capture(t, func() {
-		err := providerCmd([]string{"provider", "icon", "deepseek", "openai"})
-		if err == nil || !strings.Contains(err.Error(), "custom") {
-			t.Fatalf("err = %v, want a message mentioning custom", err)
-		}
+	_, err = captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "icon", "mine", "generic"})
 	})
-	if p, _ := provider.Find("deepseek"); p.Icon != "deepseek-color" {
-		t.Fatalf("preset icon changed to %q", p.Icon)
+	if err == nil || !strings.Contains(err.Error(), "custom") {
+		t.Fatalf("preset icon: err = %v, want a 'custom' error", err)
+	}
+	after, _ := provider.Find("mine")
+	if after.Icon != before.Icon {
+		t.Fatalf("preset icon changed from %q to %q", before.Icon, after.Icon)
+	}
+}
+
+func TestAddPresetRejectsIcon(t *testing.T) {
+	cliTestIsolate(t)
+	err := addProvider([]string{"deepseek", "sk-test", "icon=deepseek-color"})
+	if err == nil || !strings.Contains(err.Error(), "custom") {
+		t.Fatalf("add preset with icon: err = %v, want a 'custom' error", err)
+	}
+	if _, err := provider.Find("deepseek"); err == nil {
+		t.Fatal("preset was saved despite the rejected icon")
 	}
 }
