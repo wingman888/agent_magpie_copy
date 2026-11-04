@@ -74,9 +74,6 @@ type providersJSON struct {
 	Providers []providerJSON `json:"providers"`
 	Presets   []presetJSON   `json:"presets"`
 	Gateway   gatewayJSON    `json:"gateway"`
-	// logins recognised but not offered as providers, e.g. Claude Code;
-	// omitted when there are none
-	Excluded []provider.Exclusion `json:"excluded,omitempty"`
 }
 
 // currentProvider reads which provider (and model) an agent is routed to now.
@@ -149,7 +146,6 @@ func providersState(gw *gateway.Server) providersJSON {
 	for _, pr := range provider.Presets() {
 		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID]})
 	}
-	s.Excluded = provider.Excluded()
 	s.Gateway = gatewayJSON{URL: gateway.URL(), Models: len(provider.Catalog()), Calls: []gateway.Call{}}
 	if gw != nil {
 		s.Gateway.Running, s.Gateway.Mine = true, true
