@@ -35,6 +35,7 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
+		printExcluded(provider.Excluded())
 		return nil
 	}
 	uses := usesByProvider()
@@ -43,10 +44,12 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" {
+		if p.Account == nil && p.Preset == "" {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
+		case p.Account != nil:
+			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -71,7 +74,29 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
+	printExcluded(provider.Excluded())
 	return nil
+}
+
+// printExcluded lists each login dial sees but does not offer, at the end of
+// the provider list, so a missing provider is never a mystery.
+func printExcluded(ex []provider.Exclusion) {
+	for _, e := range ex {
+		fmt.Printf("  %s %s is signed in but not offered: %s\n", amber.Render("!"), agentLabel(e.Agent), muted.Render(e.Why))
+	}
+}
+
+// agentLabel is the name a person knows an agent by.
+func agentLabel(id string) string {
+	switch id {
+	case "claude":
+		return "Claude Code"
+	case "codex":
+		return "Codex"
+	case "copilot":
+		return "Copilot"
+	}
+	return id
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -141,6 +166,9 @@ func models() error {
 		}
 		if len(e.Efforts) > 0 {
 			line += faint.Render("  " + strings.Join(e.Efforts, "/"))
+		}
+		if e.Provider.Account != nil {
+			line += "  " + muted.Render(e.Provider.Owner())
 		}
 		fmt.Println(line)
 	}
@@ -299,10 +327,17 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" {
+	if p.Account == nil && p.Preset == "" {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
+	if a := p.Account; a != nil {
+		v := a.User
+		if a.Plan != "" {
+			v += " (plan: " + a.Plan + ")"
+		}
+		kv("account", v+" via "+a.Agent)
+	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)

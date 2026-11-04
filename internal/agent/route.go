@@ -19,12 +19,26 @@ const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
 func viaDial(prefix string) []Option {
+	return viaDialFor(prefix, "")
+}
+
+// viaDialFor is viaDial without the borrowed login of agent skip, if any: an
+// agent is not offered its own sign-in routed back through dial.
+func viaDialFor(prefix, skip string) []Option {
 	var out []Option
 	for _, e := range provider.Catalog() {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
+		if ownLogin(e.Provider, skip) {
+			continue
+		}
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Owner() + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
+}
+
+// ownLogin reports whether a provider is the borrowed login of agent id.
+func ownLogin(p provider.Provider, id string) bool {
+	return id != "" && p.Account != nil && p.Account.Agent == id
 }
 
 // isDial reports whether a model value is a catalog reference.
@@ -36,9 +50,17 @@ func isDial(v string) bool {
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
 func dialModels() []catalog.Model {
+	return dialModelsFor("")
+}
+
+// dialModelsFor is dialModels without the borrowed login of agent skip.
+func dialModelsFor(skip string) []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
+		if ownLogin(e.Provider, skip) {
+			continue
+		}
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Owner(), Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }

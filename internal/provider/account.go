@@ -46,6 +46,15 @@ type Exclusion struct {
 	Why   string `json:"why"`
 }
 
+// Owner names whom a provider stands for: the signed-in user for a borrowed
+// login, else the provider's own name. Catalog notes show this.
+func (p Provider) Owner() string {
+	if p.Account != nil && p.Account.User != "" {
+		return p.Account.User
+	}
+	return p.Name
+}
+
 // isAccountID reports whether an id is reserved for a borrowed login.
 func isAccountID(id string) bool { return id == "codex" || id == "copilot" }
 
