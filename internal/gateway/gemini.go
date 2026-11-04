@@ -1,232 +1,50 @@
 package gateway
 
+// The Gemini API, served to clients such as Gemini CLI. Like the other three
+// client APIs, a request is parsed into the shared IR and sent to whichever
+// upstream serves the model; the reply is rendered back in Gemini's shape.
+// No upstream speaks Gemini, so it only ever appears on the client side.
+
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/yetone/dial/internal/provider"
 	"github.com/yetone/dial/internal/usage"
 )
 
-// The Gemini API is served to clients such as Gemini CLI and never spoken
-// upstream. A Gemini call goes through the same translate path as the other
-// three APIs: it is parsed into the shared Request, sent to whichever wire
-// API the chosen provider speaks, and the reply is rendered back as Gemini.
-// Gemini carries the model and the stream flag in the URL, so the handler
-// writes them into the body under the same keys the other APIs use.
+// ---- request shapes -----------------------------------------------------------
 
-// geminiProto is the Gemini API as a client-facing protocol. No provider
-// lists it in Protocols, so it never takes the passthrough path.
-const geminiProto = provider.Protocol("gemini")
+// gInt is an integer Gemini clients may send as a number or as a string.
+type gInt int
 
-var callSeq atomic.Uint64
-
-// geminiCallID makes an id for a function call that arrived without one.
-func geminiCallID() string {
-	return fmt.Sprintf("call_%s_%d", newID(), callSeq.Add(1))
-}
-
-// geminiRespID is the response id: the upstream's when it gave one.
-func geminiRespID(id string) string {
-	if id == "" {
-		return "dial-" + newID()
+func (n *gInt) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	if s == "null" || s == "" {
+		return nil
 	}
-	return id
-}
-
-// geminiUnknownModel is the 404 text for a model dial does not know.
-func geminiUnknownModel(model string) string {
-	msg := fmt.Sprintf("dial knows no model %q", model)
-	if ids := provider.IDs(); len(ids) > 0 {
-		msg += "; it has " + strings.Join(ids, ", ")
-	} else {
-		msg += "; add a provider in dial first"
-	}
-	return msg
-}
-
-// geminiStatus is the gRPC-style status name Gemini uses for an HTTP code.
-func geminiStatus(code int) string {
-	switch {
-	case code == 400:
-		return "INVALID_ARGUMENT"
-	case code == 401:
-		return "UNAUTHENTICATED"
-	case code == 403:
-		return "PERMISSION_DENIED"
-	case code == 404:
-		return "NOT_FOUND"
-	case code == 429:
-		return "RESOURCE_EXHAUSTED"
-	case code == 502 || code == 503 || code == 529:
-		return "UNAVAILABLE"
-	case code == 504:
-		return "DEADLINE_EXCEEDED"
-	case code >= 500:
-		return "INTERNAL"
-	}
-	return "UNKNOWN"
-}
-
-// ---- routes -------------------------------------------------------------------
-
-func geminiModelObject(e provider.Entry) map[string]any {
-	name := e.Name
-	if name == "" {
-		name = e.ID
-	}
-	return map[string]any{"name": "models/" + e.ID, "version": Version, "displayName": name,
-		"description":                name + " via dial (" + e.Provider.Name + ")",
-		"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent", "countTokens"}}
-}
-
-// geminiModels lists the whole catalog as Gemini's model list.
-func (s *Server) geminiModels(w http.ResponseWriter, r *http.Request) {
-	models := []map[string]any{}
-	for _, e := range provider.Catalog() {
-		models = append(models, geminiModelObject(e))
-	}
-	writeJSON(w, 200, map[string]any{"models": models})
-}
-
-// geminiModel answers GET /v1beta/models/{model}.
-func (s *Server) geminiModel(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("rest")
-	for _, e := range provider.Catalog() {
-		if e.ID == id {
-			writeJSON(w, 200, geminiModelObject(e))
-			return
-		}
-	}
-	writeError(w, geminiProto, 404, "models/"+id+" is not found")
-}
-
-// geminiPost routes POST /v1beta/models/{model}:{method}. Model ids may
-// contain slashes and colons, so the method is whatever follows the last
-// colon.
-func (s *Server) geminiPost(w http.ResponseWriter, r *http.Request) {
-	rest := r.PathValue("rest")
-	i := strings.LastIndex(rest, ":")
-	if i < 0 {
-		writeError(w, geminiProto, 404, "dial's Gemini API serves models/{model}:generateContent, :streamGenerateContent and :countTokens")
-		return
-	}
-	model, method := rest[:i], rest[i+1:]
-	switch method {
-	case "generateContent":
-		s.geminiGenerate(w, r, model, false)
-	case "streamGenerateContent":
-		s.geminiGenerate(w, r, model, true)
-	case "countTokens":
-		s.geminiCount(w, r, model)
-	default:
-		writeError(w, geminiProto, 404, "unknown method "+method+" on "+model)
-	}
-}
-
-// geminiGenerate is the request path of generateContent and
-// streamGenerateContent. It mirrors handle, which serves the other APIs.
-func (s *Server) geminiGenerate(w http.ResponseWriter, r *http.Request, model string, stream bool) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		writeError(w, geminiProto, 400, err.Error())
-		return
+		return err
 	}
-	start := time.Now()
-	call := Call{Time: start, From: geminiProto, Model: model, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
-	p, vmodel, ok := provider.Resolve(model)
-	if !ok {
-		call.Status, call.Error = 404, "unknown model"
-		s.record(call)
-		writeError(w, geminiProto, 404, geminiUnknownModel(model))
-		return
-	}
-	call.Provider = p.ID
-	to := p.Speaks()
-	if len(to) == 0 {
-		writeError(w, geminiProto, 502, p.Name+" has no endpoint configured")
-		return
-	}
-	call.To = to[0]
-	call.Status, call.Error = s.translate(w, r, p, geminiProto, to[0], vmodel, geminiEnvelope(body, model, stream), &call.Usage)
-	call.Millis = time.Since(start).Milliseconds()
-	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: vmodel,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+	*n = gInt(f)
+	return nil
 }
-
-// geminiCount answers countTokens with a rough estimate, about four
-// characters to a token, counted over the same parts parseGemini reads.
-func (s *Server) geminiCount(w http.ResponseWriter, r *http.Request, model string) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
-	if err != nil {
-		writeError(w, geminiProto, 400, err.Error())
-		return
-	}
-	if _, _, ok := provider.Resolve(model); !ok {
-		writeError(w, geminiProto, 404, geminiUnknownModel(model))
-		return
-	}
-	var wrap struct {
-		Inner json.RawMessage `json:"generateContentRequest"`
-	}
-	json.Unmarshal(body, &wrap)
-	if len(wrap.Inner) > 0 {
-		body = wrap.Inner
-	}
-	req, err := parseGemini(geminiEnvelope(body, model, false))
-	if err != nil {
-		writeError(w, geminiProto, 400, err.Error())
-		return
-	}
-	n := len(req.System)
-	for _, m := range req.Messages {
-		for _, p := range m.Parts {
-			n += len(p.Text) + len(p.Args) + len(p.Name)
-		}
-	}
-	for _, t := range req.Tools {
-		n += len(t.Name) + len(t.Description) + len(t.Schema)
-	}
-	total := n / 4
-	if total < 1 {
-		total = 1
-	}
-	writeJSON(w, 200, map[string]any{"totalTokens": total})
-}
-
-// geminiEnvelope adds the model and stream flag, which Gemini keeps in the
-// URL, to the body. A body that is not a JSON object is returned unchanged
-// and fails in parseGemini with an error the client can read.
-func geminiEnvelope(body []byte, model string, stream bool) []byte {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var m map[string]any
-	if err := dec.Decode(&m); err != nil || m == nil {
-		return body
-	}
-	m["model"] = model
-	m["stream"] = stream
-	out, err := json.Marshal(m)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
-// ---- request ------------------------------------------------------------------
 
 type gBlob struct {
 	MimeType string `json:"mimeType"`
-	Data     string `json:"data"`    // inlineData, base64
-	FileURI  string `json:"fileUri"` // fileData
+	Data     string `json:"data"`
+}
+
+type gFile struct {
+	MimeType string `json:"mimeType"`
+	FileURI  string `json:"fileUri"`
 }
 
 type gCall struct {
@@ -244,9 +62,8 @@ type gResult struct {
 type gPart struct {
 	Text             string   `json:"text"`
 	Thought          bool     `json:"thought"`
-	ThoughtSignature string   `json:"thoughtSignature"`
 	InlineData       *gBlob   `json:"inlineData"`
-	FileData         *gBlob   `json:"fileData"`
+	FileData         *gFile   `json:"fileData"`
 	FunctionCall     *gCall   `json:"functionCall"`
 	FunctionResponse *gResult `json:"functionResponse"`
 }
@@ -256,37 +73,18 @@ type gContent struct {
 	Parts []gPart `json:"parts"`
 }
 
-type gFuncDecl struct {
+type gFunctionDecl struct {
 	Name                 string          `json:"name"`
 	Description          string          `json:"description"`
 	Parameters           json.RawMessage `json:"parameters"`
 	ParametersJSONSchema json.RawMessage `json:"parametersJsonSchema"`
 }
 
-type gThinking struct {
-	ThinkingBudget  *int   `json:"thinkingBudget"`
-	ThinkingLevel   string `json:"thinkingLevel"`
-	IncludeThoughts bool   `json:"includeThoughts"`
-}
-
-type gGenConfig struct {
-	MaxOutputTokens    int             `json:"maxOutputTokens"`
-	Temperature        *float64        `json:"temperature"`
-	TopP               *float64        `json:"topP"`
-	StopSequences      []string        `json:"stopSequences"`
-	ResponseMimeType   string          `json:"responseMimeType"`
-	ResponseSchema     json.RawMessage `json:"responseSchema"`
-	ResponseJSONSchema json.RawMessage `json:"responseJsonSchema"`
-	ThinkingConfig     *gThinking      `json:"thinkingConfig"`
-}
-
 type gRequest struct {
-	Model             string     `json:"model"`
-	Stream            bool       `json:"stream"`
-	SystemInstruction *gContent  `json:"systemInstruction"`
 	Contents          []gContent `json:"contents"`
+	SystemInstruction *gContent  `json:"systemInstruction"`
 	Tools             []struct {
-		FunctionDeclarations []gFuncDecl `json:"functionDeclarations"`
+		FunctionDeclarations []gFunctionDecl `json:"functionDeclarations"`
 	} `json:"tools"`
 	ToolConfig *struct {
 		FunctionCallingConfig *struct {
@@ -294,48 +92,62 @@ type gRequest struct {
 			AllowedFunctionNames []string `json:"allowedFunctionNames"`
 		} `json:"functionCallingConfig"`
 	} `json:"toolConfig"`
-	GenerationConfig *gGenConfig `json:"generationConfig"`
+	GenerationConfig *struct {
+		MaxOutputTokens    gInt            `json:"maxOutputTokens"`
+		Temperature        *float64        `json:"temperature"`
+		TopP               *float64        `json:"topP"`
+		StopSequences      []string        `json:"stopSequences"`
+		ResponseMimeType   string          `json:"responseMimeType"`
+		ResponseSchema     json.RawMessage `json:"responseSchema"`
+		ResponseJSONSchema json.RawMessage `json:"responseJsonSchema"`
+		ThinkingConfig     *struct {
+			ThinkingBudget  *gInt  `json:"thinkingBudget"`
+			ThinkingLevel   string `json:"thinkingLevel"`
+			IncludeThoughts bool   `json:"includeThoughts"`
+		} `json:"thinkingConfig"`
+	} `json:"generationConfig"`
 }
 
-// geminiCallRef remembers a function call so a result that carries no id
-// can be matched to the latest call of the same name.
-type geminiCallRef struct {
-	name, id string
+// gEnvelope carries what the URL said (model, streaming) next to the body,
+// because translate parses the body itself and has no other way to learn them.
+type gEnvelope struct {
+	Model  string          `json:"model"`
+	Stream bool            `json:"stream"`
+	Body   json.RawMessage `json:"body"`
 }
 
-// parseGemini reads a generateContent body (with the envelope fields
-// geminiEnvelope adds) into the shared Request.
+func geminiEnvelope(model string, stream bool, body []byte) []byte {
+	b, _ := json.Marshal(gEnvelope{Model: model, Stream: stream, Body: body})
+	return b
+}
+
+// parseGemini reads an envelope made by geminiEnvelope.
 func parseGemini(body []byte) (*Request, error) {
+	var env gEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("invalid request: %v", err)
+	}
+	r, err := parseGeminiBody(env.Model, env.Body)
+	if err != nil {
+		return nil, err
+	}
+	r.Stream = env.Stream
+	return r, nil
+}
+
+// parseGeminiBody reads a generateContent request body into the IR.
+func parseGeminiBody(model string, body []byte) (*Request, error) {
 	var g gRequest
 	if err := json.Unmarshal(body, &g); err != nil {
 		return nil, fmt.Errorf("invalid request: %v", err)
 	}
-	r := &Request{Model: g.Model, Stream: g.Stream}
-	var sys []string
-	if si := g.SystemInstruction; si != nil {
-		if s := geminiText(si.Parts); s != "" {
-			sys = append(sys, s)
-		}
+	r := &Request{Model: model}
+	if g.SystemInstruction != nil {
+		r.System = geminiText(g.SystemInstruction.Parts)
 	}
-	if gc := g.GenerationConfig; gc != nil {
-		r.MaxTokens, r.Temp, r.TopP, r.Stop = gc.MaxOutputTokens, gc.Temperature, gc.TopP, gc.StopSequences
-		if tc := gc.ThinkingConfig; tc != nil {
-			r.Effort = geminiEffort(tc.ThinkingBudget, tc.ThinkingLevel)
-			r.Thinking = tc.IncludeThoughts
-		}
-		// Upstreams have no notion of a Gemini JSON mode, so ask in words.
-		schema := gc.ResponseJSONSchema
-		if len(schema) == 0 {
-			schema = gc.ResponseSchema
-		}
-		if gc.ResponseMimeType == "application/json" || len(schema) > 0 {
-			sys = append(sys, jsonInstruction(schema))
-		}
-	}
-	if r.Effort != "" {
-		r.Thinking = true
-	}
-	var refs []geminiCallRef
+
+	// function name -> id of its latest call, for results that carry no id
+	lastCall := map[string]string{}
 	for _, c := range g.Contents {
 		msg := Message{Role: "user"}
 		if c.Role == "model" {
@@ -343,30 +155,41 @@ func parseGemini(body []byte) (*Request, error) {
 		}
 		for _, p := range c.Parts {
 			switch {
+			case p.Thought:
+				if p.Text != "" {
+					msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: p.Text})
+				}
 			case p.FunctionCall != nil:
 				fc := p.FunctionCall
 				id := fc.ID
 				if id == "" {
-					id = geminiCallID()
+					id = "call_" + newID()
 				}
-				refs = append(refs, geminiCallRef{name: fc.Name, id: id})
+				lastCall[fc.Name] = id
 				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: id, Name: fc.Name, Args: geminiArgs(fc.Args)})
 			case p.FunctionResponse != nil:
 				fr := p.FunctionResponse
 				id := fr.ID
 				if id == "" {
-					id = refID(refs, fr.Name)
+					id = lastCall[fr.Name]
+				}
+				if id == "" {
+					id = "call_" + newID()
 				}
 				text, failed := geminiResult(fr.Response)
 				msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: id, Text: text, IsError: failed})
-			case p.Thought:
-				if p.Text != "" {
-					msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: p.Text, Signature: p.ThoughtSignature})
-				}
 			case p.InlineData != nil:
-				msg.Parts = append(msg.Parts, geminiInline(p.InlineData))
+				if strings.HasPrefix(p.InlineData.MimeType, "image/") {
+					msg.Parts = append(msg.Parts, Part{Kind: Image, MediaType: p.InlineData.MimeType, Data: p.InlineData.Data})
+				} else {
+					msg.Parts = append(msg.Parts, placeholder(p.InlineData.MimeType))
+				}
 			case p.FileData != nil:
-				msg.Parts = append(msg.Parts, geminiFile(p.FileData))
+				if strings.HasPrefix(p.FileData.MimeType, "image/") {
+					msg.Parts = append(msg.Parts, Part{Kind: Image, MediaType: p.FileData.MimeType, URL: p.FileData.FileURI})
+				} else {
+					msg.Parts = append(msg.Parts, placeholder(p.FileData.MimeType))
+				}
 			case p.Text != "":
 				msg.Parts = append(msg.Parts, Part{Kind: Text, Text: p.Text})
 			}
@@ -375,149 +198,161 @@ func parseGemini(body []byte) (*Request, error) {
 			r.Messages = append(r.Messages, msg)
 		}
 	}
-	r.System = strings.Join(sys, "\n\n")
+
+	// tools, and which of them the client allows the model to call
+	var mode string
+	var allowed []string
+	if g.ToolConfig != nil && g.ToolConfig.FunctionCallingConfig != nil {
+		mode = strings.ToUpper(g.ToolConfig.FunctionCallingConfig.Mode)
+		allowed = g.ToolConfig.FunctionCallingConfig.AllowedFunctionNames
+	}
 	for _, t := range g.Tools {
 		for _, fd := range t.FunctionDeclarations {
 			schema := fd.ParametersJSONSchema
 			if len(schema) == 0 {
 				schema = fd.Parameters
 			}
-			r.Tools = append(r.Tools, Tool{Name: fd.Name, Description: fd.Description, Schema: lowerSchema(schema)})
+			if len(allowed) > 0 && !containsStr(allowed, fd.Name) {
+				continue
+			}
+			r.Tools = append(r.Tools, Tool{Name: fd.Name, Description: fd.Description, Schema: geminiSchema(schema)})
 		}
 	}
-	if tc := g.ToolConfig; tc != nil && tc.FunctionCallingConfig != nil {
-		fc := tc.FunctionCallingConfig
-		mode := strings.ToUpper(fc.Mode)
-		if mode == "" && len(fc.AllowedFunctionNames) > 0 {
-			mode = "ANY"
-		}
-		switch mode {
-		case "NONE":
-			r.ToolChoice = "none"
-		case "AUTO":
-			r.ToolChoice = "auto"
-		case "ANY":
-			// several allowed names cannot be expressed upstream; "required"
-			// then lets the model pick any tool
+	switch mode {
+	case "NONE":
+		r.ToolChoice = "none"
+	case "ANY":
+		if len(allowed) == 1 {
+			r.ToolChoice = "name:" + allowed[0]
+		} else {
 			r.ToolChoice = "required"
-			if len(fc.AllowedFunctionNames) == 1 {
-				r.ToolChoice = "name:" + fc.AllowedFunctionNames[0]
+		}
+	case "AUTO":
+		r.ToolChoice = "auto"
+	}
+	if len(r.Tools) == 0 && r.ToolChoice != "none" {
+		r.ToolChoice = ""
+	}
+
+	if gc := g.GenerationConfig; gc != nil {
+		r.MaxTokens = int(gc.MaxOutputTokens)
+		r.Temp, r.TopP = gc.Temperature, gc.TopP
+		r.Stop = gc.StopSequences
+		if tc := gc.ThinkingConfig; tc != nil {
+			r.Thinking = tc.IncludeThoughts
+			switch {
+			case tc.ThinkingBudget != nil && int(*tc.ThinkingBudget) == -1:
+				r.Effort = "medium" // the model decides; medium is the middle ground
+			case tc.ThinkingBudget != nil && *tc.ThinkingBudget > 0:
+				r.Effort = effortOfBudget(int(*tc.ThinkingBudget))
+			case tc.ThinkingLevel != "":
+				r.Effort = effortOf(tc.ThinkingLevel)
 			}
+			if r.Effort != "" {
+				r.Thinking = true
+			}
+		}
+		// Gemini's JSON mode has no counterpart in the IR, so the request
+		// asks for JSON in words, with the schema attached.
+		schema := gc.ResponseJSONSchema
+		if len(schema) == 0 {
+			schema = gc.ResponseSchema
+		}
+		if strings.EqualFold(gc.ResponseMimeType, "application/json") || len(schema) > 0 {
+			note := "Respond only with a single valid JSON value: no prose, no comments, no markdown fences."
+			if s := geminiSchema(schema); len(s) > 0 {
+				note += "\nThe JSON must conform to this JSON Schema:\n" + string(s)
+			}
+			r.System = joinNonEmpty("\n\n", r.System, note)
 		}
 	}
 	return r, nil
 }
 
-// geminiText joins the text parts of a content, leaving out thoughts.
+func placeholder(mime string) Part {
+	if mime == "" {
+		mime = "unknown type"
+	}
+	return Part{Kind: Text, Text: fmt.Sprintf("[attachment omitted: %s]", mime)}
+}
+
+func containsStr(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+func joinNonEmpty(sep string, xs ...string) string {
+	var out []string
+	for _, x := range xs {
+		if x != "" {
+			out = append(out, x)
+		}
+	}
+	return strings.Join(out, sep)
+}
+
+// geminiText joins the text parts of a Gemini content.
 func geminiText(parts []gPart) string {
-	var b strings.Builder
+	var out []string
 	for _, p := range parts {
-		if !p.Thought {
-			b.WriteString(p.Text)
+		if p.Text != "" && !p.Thought {
+			out = append(out, p.Text)
 		}
 	}
-	return b.String()
+	return strings.Join(out, "\n\n")
 }
 
-// geminiEffort maps a Gemini thinking budget or level to an effort level.
-// A budget of -1 means the model decides, which is medium here; 0 turns
-// thinking off.
-func geminiEffort(budget *int, level string) string {
-	if budget != nil {
-		n := *budget
-		switch {
-		case n < 0:
-			return "medium"
-		case n == 0:
-			return ""
-		case n <= 4096:
-			return "low"
-		case n <= 12000:
-			return "medium"
-		}
-		return "high"
-	}
-	switch strings.ToUpper(strings.TrimSpace(level)) {
-	case "MINIMAL", "LOW":
-		return "low"
-	case "MEDIUM":
-		return "medium"
-	case "HIGH":
-		return "high"
-	}
-	return ""
-}
-
-// jsonInstruction asks for JSON in words, with the schema when there is one.
-func jsonInstruction(schema json.RawMessage) string {
-	s := "Reply only with a single valid JSON value: no prose, no markdown, no code fences."
-	if sc := lowerSchema(schema); len(sc) > 0 {
-		s += " The JSON must conform to this JSON Schema: " + string(sc)
-	}
-	return s
-}
-
-// geminiArgs is a function call's arguments, nil when there are none.
+// geminiArgs makes a function call's arguments a JSON object, as the IR wants.
 func geminiArgs(raw json.RawMessage) json.RawMessage {
-	if t := bytes.TrimSpace(raw); len(t) == 0 || string(t) == "null" {
-		return nil
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return json.RawMessage("{}")
 	}
-	return raw
+	if json.Valid([]byte(s)) && strings.HasPrefix(s, "{") {
+		return json.RawMessage(s)
+	}
+	return parseArgs(s)
 }
 
-// geminiResult reads a function response into text. An "error" key marks
-// the result as failed; an "output" string is used as is.
+// geminiResult reads a function response. Gemini clients put the output under
+// "output" or, on failure, under "error"; anything else is passed on as JSON.
 func geminiResult(raw json.RawMessage) (string, bool) {
-	if len(bytes.TrimSpace(raw)) == 0 {
+	if len(raw) == 0 {
 		return "", false
 	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) == nil {
-		if e := m["error"]; e != nil {
-			if s, ok := e.(string); ok {
-				return s, true
-			}
-			b, _ := json.Marshal(e)
-			return string(b), true
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s, false
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) == nil {
+		if e, ok := obj["error"]; ok && len(e) > 0 {
+			return stringOrJSON(e), true
 		}
-		if out, ok := m["output"].(string); ok {
-			return out, false
+		if o, ok := obj["output"]; ok && len(o) > 0 {
+			return stringOrJSON(o), false
 		}
 	}
 	return string(raw), false
 }
 
-// refID finds the id of the latest call with this name, or makes one.
-func refID(refs []geminiCallRef, name string) string {
-	for i := len(refs) - 1; i >= 0; i-- {
-		if refs[i].name == name {
-			return refs[i].id
-		}
+func stringOrJSON(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
 	}
-	return geminiCallID()
+	return string(raw)
 }
 
-// geminiInline keeps inline images and stands in text for other attachments.
-func geminiInline(b *gBlob) Part {
-	if strings.HasPrefix(b.MimeType, "image/") {
-		return Part{Kind: Image, MediaType: b.MimeType, Data: b.Data}
-	}
-	return Part{Kind: Text, Text: "[attachment omitted: " + b.MimeType + "]"}
-}
-
-// geminiFile keeps image files that are reachable by URL.
-func geminiFile(b *gBlob) Part {
-	if strings.HasPrefix(b.MimeType, "image/") && strings.HasPrefix(b.FileURI, "http") {
-		return Part{Kind: Image, MediaType: b.MimeType, URL: b.FileURI}
-	}
-	return Part{Kind: Text, Text: "[attachment omitted: " + b.FileURI + "]"}
-}
-
-// lowerSchema turns a schema in Gemini's dialect (OBJECT, STRING, …, with
-// optional nullable and propertyOrdering) into a standard JSON Schema.
-// A schema that does not parse is returned unchanged.
-func lowerSchema(raw json.RawMessage) json.RawMessage {
-	if len(bytes.TrimSpace(raw)) == 0 {
+// geminiSchema turns a Gemini schema into a standard JSON Schema: type names
+// such as OBJECT become object, at every depth.
+func geminiSchema(raw json.RawMessage) json.RawMessage {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
 		return nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -526,50 +361,54 @@ func lowerSchema(raw json.RawMessage) json.RawMessage {
 	if err := dec.Decode(&v); err != nil {
 		return raw
 	}
-	out, err := json.Marshal(lowerValue(v))
+	b, err := json.Marshal(lowerTypes(v))
 	if err != nil {
 		return raw
 	}
-	return out
+	return b
 }
 
-func lowerValue(v any) any {
+func lowerTypes(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
-		out := make(map[string]any, len(x))
+		delete(x, "propertyOrdering") // Gemini-only keyword
+		nullable, _ := x["nullable"].(bool)
+		delete(x, "nullable")
 		for k, val := range x {
-			switch k {
-			case "propertyOrdering":
-				continue
-			case "type":
-				if s, ok := val.(string); ok {
-					out[k] = strings.ToLower(s)
+			if k == "type" {
+				switch t := val.(type) {
+				case string:
+					x[k] = strings.ToLower(t)
+					if nullable {
+						x[k] = []any{strings.ToLower(t), "null"}
+					}
+					continue
+				case []any:
+					for i := range t {
+						if s, ok := t[i].(string); ok {
+							t[i] = strings.ToLower(s)
+						}
+					}
 					continue
 				}
 			}
-			out[k] = lowerValue(val)
+			x[k] = lowerTypes(val)
 		}
-		if n, ok := out["nullable"].(bool); ok {
-			delete(out, "nullable")
-			if t, ok := out["type"].(string); ok && n {
-				out["type"] = []any{t, "null"}
-			}
-		}
-		return out
+		return x
 	case []any:
 		for i := range x {
-			x[i] = lowerValue(x[i])
+			x[i] = lowerTypes(x[i])
 		}
 		return x
 	}
 	return v
 }
 
-// ---- reply --------------------------------------------------------------------
+// ---- response shapes ----------------------------------------------------------
 
-// stopToGemini is the finishReason for a stop reason.
-func stopToGemini(s string) string {
-	switch s {
+// geminiFinish is the finishReason for a stop.
+func geminiFinish(stop string) string {
+	switch stop {
 	case "length":
 		return "MAX_TOKENS"
 	case "filter":
@@ -578,93 +417,121 @@ func stopToGemini(s string) string {
 	return "STOP"
 }
 
-// gemini is the usage block. promptTokenCount includes cached tokens, and
-// thinking tokens are counted apart from candidatesTokenCount.
-func (u Usage) gemini() map[string]any {
+// geminiUsage is usageMetadata. The IR counts reasoning inside Output, so
+// candidates are Output less reasoning; prompt includes cache reads.
+func geminiUsage(u Usage) map[string]any {
 	prompt := u.Input + u.CacheRead
 	cand := u.Output - u.Reasoning
 	if cand < 0 {
 		cand = 0
 	}
-	out := map[string]any{"promptTokenCount": prompt, "candidatesTokenCount": cand, "totalTokenCount": prompt + u.Output}
+	m := map[string]any{
+		"promptTokenCount":     prompt,
+		"candidatesTokenCount": cand,
+		"totalTokenCount":      prompt + cand + u.Reasoning,
+	}
 	if u.CacheRead > 0 {
-		out["cachedContentTokenCount"] = u.CacheRead
+		m["cachedContentTokenCount"] = u.CacheRead
 	}
 	if u.Reasoning > 0 {
-		out["thoughtsTokenCount"] = u.Reasoning
+		m["thoughtsTokenCount"] = u.Reasoning
 	}
-	return out
+	return m
 }
 
-// geminiPart renders one part of a reply.
+// geminiPart is one output part, or nil when the reply has nothing to show.
 func geminiPart(p Part) map[string]any {
 	switch p.Kind {
+	case Text:
+		if p.Text == "" {
+			return nil
+		}
+		return map[string]any{"text": p.Text}
 	case Thinking:
+		if p.Text == "" {
+			return nil
+		}
 		return map[string]any{"text": p.Text, "thought": true}
 	case ToolCall:
 		id := p.ID
 		if id == "" {
-			id = geminiCallID()
+			id = "call_" + newID()
 		}
-		return map[string]any{"functionCall": map[string]any{"id": id, "name": p.Name, "args": argsOf(p)}}
+		return map[string]any{"functionCall": map[string]any{"id": id, "name": p.Name, "args": geminiArgs(argsOf(p))}}
 	}
-	return map[string]any{"text": p.Text}
+	return nil
 }
 
-// renderGemini is the non-streaming reply. model is the name the client used.
+// renderGemini is the non-streaming reply.
 func renderGemini(res Result, model string) []byte {
 	parts := []map[string]any{}
 	for _, p := range res.Parts {
-		if (p.Kind == Text || p.Kind == Thinking) && p.Text == "" {
-			continue
+		if pm := geminiPart(p); pm != nil {
+			parts = append(parts, pm)
 		}
-		parts = append(parts, geminiPart(p))
 	}
-	cand := map[string]any{"content": map[string]any{"role": "model", "parts": parts},
-		"finishReason": stopToGemini(res.Stop), "index": 0}
-	b, _ := json.Marshal(map[string]any{"candidates": []any{cand}, "usageMetadata": res.Usage.gemini(),
-		"modelVersion": model, "responseId": geminiRespID(res.ID)})
+	id := res.ID
+	if id == "" {
+		id = "resp-" + newID()
+	}
+	if res.Model != "" {
+		model = res.Model
+	}
+	b, _ := json.Marshal(map[string]any{
+		"candidates": []map[string]any{{
+			"content":      map[string]any{"role": "model", "parts": parts},
+			"finishReason": geminiFinish(res.Stop),
+			"index":        0,
+		}},
+		"usageMetadata": geminiUsage(res.Usage),
+		"modelVersion":  model,
+		"responseId":    id,
+	})
 	return b
 }
 
-// geminiEncoder writes a reply as Gemini stream events. Each event carries
-// the parts that became known; a function call is held until its arguments
-// are whole and then sent in one piece. The last event has the finishReason
-// and usage.
+// geminiEncoder writes events as a Gemini SSE stream. A function call is
+// held back until it is complete, so a client never sees half of one.
 type geminiEncoder struct {
-	w      *sseWriter
-	model  string
-	id     string
-	tool   *Part // the open function call, nil for none
-	args   strings.Builder
-	tokens Usage
-	stop   string
-	failed bool
+	w     *sseWriter
+	model string
+	id    string
+	col   collector
+
+	open     bool
+	callID   string
+	callName string
+	args     strings.Builder
 }
 
-func (e *geminiEncoder) chunk(parts []map[string]any, finish string) {
-	if e.id == "" {
-		e.id = geminiRespID("")
+func newGeminiEncoder(w *sseWriter, model string) *geminiEncoder {
+	return &geminiEncoder{w: w, model: model, id: "resp-" + newID()}
+}
+
+func (e *geminiEncoder) send(parts []map[string]any, finish string, meta map[string]any) {
+	if parts == nil {
+		parts = []map[string]any{}
 	}
 	cand := map[string]any{"content": map[string]any{"role": "model", "parts": parts}, "index": 0}
-	ev := map[string]any{"candidates": []any{cand}, "modelVersion": e.model, "responseId": e.id}
 	if finish != "" {
 		cand["finishReason"] = finish
-		ev["usageMetadata"] = e.tokens.gemini()
 	}
-	e.w.event("", ev)
+	chunk := map[string]any{"candidates": []map[string]any{cand}, "modelVersion": e.model, "responseId": e.id}
+	if meta != nil {
+		chunk["usageMetadata"] = meta
+	}
+	e.w.event("", chunk)
 }
 
-// flushTool sends the open function call, if any, with its full arguments.
-func (e *geminiEncoder) flushTool() {
-	if e.tool == nil {
+// closeTool sends the open function call, whole, if there is one.
+func (e *geminiEncoder) closeTool() {
+	if !e.open {
 		return
 	}
-	p := *e.tool
-	e.tool = nil
-	args := parseArgs(e.args.String())
+	e.open = false
+	args := geminiArgs(json.RawMessage(e.args.String()))
 	e.args.Reset()
-	e.chunk([]map[string]any{{"functionCall": map[string]any{"id": p.ID, "name": p.Name, "args": args}}}, "")
+	e.send([]map[string]any{{"functionCall": map[string]any{"id": e.callID, "name": e.callName, "args": args}}}, "", nil)
 }
 
 func (e *geminiEncoder) event(ev Event) {
@@ -673,43 +540,202 @@ func (e *geminiEncoder) event(ev Event) {
 		if ev.MsgID != "" {
 			e.id = ev.MsgID
 		}
-		e.tokens.add(ev.Usage)
+		if ev.Model != "" {
+			e.model = ev.Model
+		}
 	case KText:
-		e.flushTool()
+		e.closeTool()
 		if ev.Text != "" {
-			e.chunk([]map[string]any{{"text": ev.Text}}, "")
+			e.send([]map[string]any{{"text": ev.Text}}, "", nil)
 		}
 	case KThink:
-		e.flushTool()
+		e.closeTool()
 		if ev.Text != "" {
-			e.chunk([]map[string]any{{"text": ev.Text, "thought": true}}, "")
+			e.send([]map[string]any{{"text": ev.Text, "thought": true}}, "", nil)
 		}
 	case KToolStart:
-		e.flushTool()
-		id := ev.ID
-		if id == "" {
-			id = geminiCallID()
+		e.closeTool()
+		e.open = true
+		e.callID, e.callName = ev.ID, ev.Name
+		if e.callID == "" {
+			e.callID = "call_" + newID()
 		}
-		e.tool = &Part{Kind: ToolCall, ID: id, Name: ev.Name}
-		e.args.Reset()
 	case KToolArgs:
-		if e.tool != nil {
+		if e.open {
 			e.args.WriteString(ev.Text)
 		}
-	case KStop:
-		e.stop = ev.Stop
-	case KUsage:
-		e.tokens.add(ev.Usage)
 	case KError:
-		e.failed = true
-		e.w.event("", map[string]any{"error": map[string]any{"code": 500, "message": ev.Text, "status": "INTERNAL"}})
+		e.closeTool()
+		e.w.event("", map[string]any{"error": map[string]any{"code": 502, "message": ev.Text, "status": "UNAVAILABLE"}})
 	}
+	e.col.add(ev)
 }
 
 func (e *geminiEncoder) finish() {
-	if e.failed {
+	e.closeTool()
+	res := e.col.finish()
+	e.send(nil, geminiFinish(res.Stop), geminiUsage(res.Usage))
+}
+
+// geminiStatus is the gRPC-style status name Gemini errors carry.
+func geminiStatus(code int) string {
+	switch code {
+	case 400:
+		return "INVALID_ARGUMENT"
+	case 401:
+		return "UNAUTHENTICATED"
+	case 403:
+		return "PERMISSION_DENIED"
+	case 404:
+		return "NOT_FOUND"
+	case 429:
+		return "RESOURCE_EXHAUSTED"
+	case 502, 503, 529:
+		return "UNAVAILABLE"
+	case 504:
+		return "DEADLINE_EXCEEDED"
+	}
+	if code >= 500 {
+		return "INTERNAL"
+	}
+	return "UNKNOWN"
+}
+
+// ---- routes -------------------------------------------------------------------
+
+// unknownModel is the message for a model dial does not know.
+func unknownModel(id string) string {
+	msg := fmt.Sprintf("dial knows no model %q", id)
+	if ids := provider.IDs(); len(ids) > 0 {
+		msg += "; it has " + strings.Join(ids, ", ")
+	} else {
+		msg += "; add a provider in dial first"
+	}
+	return msg
+}
+
+// gemini serves POST /v1beta/models/{model}:{method}. The model can hold
+// slashes, so the method is whatever follows the last colon.
+func (s *Server) gemini(w http.ResponseWriter, r *http.Request) {
+	rest := r.PathValue("rest")
+	i := strings.LastIndex(rest, ":")
+	if i < 0 {
+		writeError(w, provider.Gemini, 404, "dial serves the Gemini methods generateContent, streamGenerateContent and countTokens")
 		return
 	}
-	e.flushTool()
-	e.chunk([]map[string]any{}, stopToGemini(e.stop))
+	model, method := strings.TrimPrefix(rest[:i], "models/"), rest[i+1:]
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if err != nil {
+		writeError(w, provider.Gemini, 400, err.Error())
+		return
+	}
+	switch method {
+	case "generateContent":
+		s.geminiGenerate(w, r, model, false, body)
+	case "streamGenerateContent":
+		s.geminiGenerate(w, r, model, true, body)
+	case "countTokens":
+		s.geminiCount(w, model, body)
+	default:
+		writeError(w, provider.Gemini, 404, fmt.Sprintf("dial has no Gemini method %q", method))
+	}
+}
+
+// geminiGenerate is the request path of generateContent and its streaming form.
+// It mirrors handle: resolve the model, translate, record the call, count usage.
+func (s *Server) geminiGenerate(w http.ResponseWriter, r *http.Request, model string, stream bool, body []byte) {
+	start := time.Now()
+	call := Call{Time: start, From: provider.Gemini, Model: model, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
+	p, upstreamModel, ok := provider.Resolve(model)
+	if !ok {
+		call.Status, call.Error = 404, "unknown model"
+		s.record(call)
+		writeError(w, provider.Gemini, 404, unknownModel(model))
+		return
+	}
+	call.Provider = p.ID
+	to := p.Speaks()
+	if len(to) == 0 {
+		writeError(w, provider.Gemini, 502, p.Name+" has no endpoint configured")
+		return
+	}
+	call.To = to[0]
+	if !json.Valid(body) {
+		call.Status, call.Error = 400, "invalid request: body is not JSON"
+		s.record(call)
+		writeError(w, provider.Gemini, 400, call.Error)
+		return
+	}
+	call.Status, call.Error = s.translate(w, r, p, provider.Gemini, to[0], upstreamModel, geminiEnvelope(upstreamModel, stream, body), &call.Usage)
+	call.Millis = time.Since(start).Milliseconds()
+	s.record(call)
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: upstreamModel,
+		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+}
+
+// geminiCount answers countTokens with a rough estimate: about four bytes a
+// token. The body is either the request itself or wraps it in generateContentRequest.
+func (s *Server) geminiCount(w http.ResponseWriter, model string, body []byte) {
+	if _, _, ok := provider.Resolve(model); !ok {
+		writeError(w, provider.Gemini, 404, unknownModel(model))
+		return
+	}
+	raw := body
+	var wrap struct {
+		GenerateContentRequest json.RawMessage `json:"generateContentRequest"`
+	}
+	if json.Unmarshal(body, &wrap) == nil && len(wrap.GenerateContentRequest) > 0 {
+		raw = wrap.GenerateContentRequest
+	}
+	req, err := parseGeminiBody(model, raw)
+	if err != nil {
+		writeError(w, provider.Gemini, 400, err.Error())
+		return
+	}
+	n := len(req.System)
+	for _, m := range req.Messages {
+		for _, p := range m.Parts {
+			n += len(p.Text) + len(p.Args) + len(p.Name)
+			if p.Kind == Image {
+				n += 1000 // images cost a roughly fixed amount
+			}
+		}
+	}
+	for _, t := range req.Tools {
+		n += len(t.Name) + len(t.Description) + len(t.Schema)
+	}
+	writeJSON(w, 200, map[string]any{"totalTokens": n / 4})
+}
+
+// geminiModelObject describes one catalog model the Gemini way.
+func geminiModelObject(e provider.Entry) map[string]any {
+	return map[string]any{
+		"name":                       "models/" + e.ID,
+		"version":                    "001",
+		"displayName":                e.Name,
+		"description":                e.Name + " via dial",
+		"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent", "countTokens"},
+	}
+}
+
+// geminiModels is GET /v1beta/models: every catalog model.
+func (s *Server) geminiModels(w http.ResponseWriter, r *http.Request) {
+	models := []map[string]any{}
+	for _, e := range provider.Catalog() {
+		models = append(models, geminiModelObject(e))
+	}
+	writeJSON(w, 200, map[string]any{"models": models})
+}
+
+// geminiModel is GET /v1beta/models/{model}.
+func (s *Server) geminiModel(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.PathValue("rest"), "models/")
+	for _, e := range provider.Catalog() {
+		if e.ID == id {
+			writeJSON(w, 200, geminiModelObject(e))
+			return
+		}
+	}
+	writeError(w, provider.Gemini, 404, unknownModel(id))
 }
