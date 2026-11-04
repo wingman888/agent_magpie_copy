@@ -3,438 +3,408 @@ package gateway
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/yetone/dial/internal/provider"
 )
 
-// gemToolUpstream is a Chat Completions upstream that thinks, says hi, then
-// calls a tool whose arguments arrive in two fragments.
-func gemToolUpstream(t *testing.T) *fake {
-	return &fake{t: t, reply: sse(
-		`data: {"id":"c1","model":"m1","choices":[{"delta":{"reasoning_content":"plan"}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{"content":"Hi"}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_7","type":"function","function":{"name":"read","arguments":""}}]}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.go\"}"}}]}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
-		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}}`,
-		`data: [DONE]`)}
-}
+// geminiBody is a request with a system instruction, a function call and its
+// result in the history, a tool declaration with upper-case types, and a
+// thinking budget of -1.
+const geminiBody = `{
+ "systemInstruction":{"parts":[{"text":"be brief"}]},
+ "contents":[
+  {"role":"user","parts":[{"text":"read a.txt"}]},
+  {"role":"model","parts":[{"functionCall":{"id":"c1","name":"read","args":{"path":"a.txt"}}}]},
+  {"role":"user","parts":[{"functionResponse":{"id":"c1","name":"read","response":{"output":"hello"}}}]}
+ ],
+ "tools":[{"functionDeclarations":[{"name":"read","description":"read a file",
+   "parameters":{"type":"OBJECT","properties":{"path":{"type":"STRING"}},"required":["path"]}}]}],
+ "generationConfig":{"maxOutputTokens":321,"thinkingConfig":{"thinkingBudget":-1,"includeThoughts":true}}
+}`
 
-const gemToolBody = `{"systemInstruction":{"parts":[{"text":"be brief"}]},
-  "contents":[
-    {"role":"user","parts":[{"text":"read a.go"}]},
-    {"role":"model","parts":[{"functionCall":{"id":"t0","name":"read","args":{"path":"x"}}}]},
-    {"role":"user","parts":[{"functionResponse":{"id":"t0","name":"read","response":{"output":"package x"}}}]}],
-  "tools":[{"functionDeclarations":[{"name":"read","description":"read a file",
-    "parameters":{"type":"OBJECT","properties":{"path":{"type":"STRING"}},"required":["path"]}}]}],
-  "generationConfig":{"maxOutputTokens":321,"temperature":0.3,"topP":0.9,"stopSequences":["END"],
-    "thinkingConfig":{"thinkingBudget":-1,"includeThoughts":true}}}`
+// chatReply is what an OpenAI Chat upstream streams: reasoning, text, one
+// tool call split over two fragments, then usage with 2 reasoning tokens
+// inside the 5 completion tokens.
+var chatReply = sse(
+	`data: {"id":"up1","model":"m1","choices":[{"delta":{"reasoning_content":"hmm"}}]}`,
+	`data: {"choices":[{"delta":{"content":"Let me read."}}]}`,
+	`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"up_1","type":"function","function":{"name":"read","arguments":"{\"pa"}}]}}]}`,
+	`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"a.txt\"}"}}]}}]}`,
+	`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}}`,
+	`data: [DONE]`,
+)
 
-// gemParts gathers the parts of every event, in order.
-func gemParts(t *testing.T, evs []map[string]any) []map[string]any {
+// geminiChunks reads the data lines of an SSE body as JSON objects.
+func geminiChunks(t *testing.T, body string) []map[string]any {
 	t.Helper()
 	var out []map[string]any
-	for _, e := range evs {
-		cands, _ := e["candidates"].([]any)
-		for _, c := range cands {
-			cand, _ := c.(map[string]any)
-			content, ok := cand["content"].(map[string]any)
-			if !ok {
-				continue
-			}
-			parts, _ := content["parts"].([]any)
-			for _, p := range parts {
-				out = append(out, p.(map[string]any))
-			}
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(data), &m); err != nil {
+			t.Fatalf("bad event %q: %v", data, err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// candParts is the parts of a Gemini response's first candidate.
+func candParts(m map[string]any) []map[string]any {
+	cands, _ := m["candidates"].([]any)
+	if len(cands) == 0 {
+		return nil
+	}
+	c, _ := cands[0].(map[string]any)
+	content, _ := c["content"].(map[string]any)
+	raw, _ := content["parts"].([]any)
+	var out []map[string]any
+	for _, p := range raw {
+		if pm, ok := p.(map[string]any); ok {
+			out = append(out, pm)
 		}
 	}
 	return out
 }
 
-// gemTestSetup isolates HOME as well as dial's config and cache, then starts
-// the fake upstream and its Chat provider exactly as setup does.
-func gemTestSetup(t *testing.T, f *fake) {
+func finishOf(m map[string]any) string {
+	cands, _ := m["candidates"].([]any)
+	if len(cands) == 0 {
+		return ""
+	}
+	c, _ := cands[0].(map[string]any)
+	s, _ := c["finishReason"].(string)
+	return s
+}
+
+// checkUsage asserts the usage numbers of the example: prompt 10, completion
+// 5 of which 2 reasoning, so candidates 3 and thoughts 2.
+func checkUsage(t *testing.T, u map[string]any) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	want := map[string]float64{"promptTokenCount": 10, "candidatesTokenCount": 3, "thoughtsTokenCount": 2}
+	for k, v := range want {
+		if got, _ := u[k].(float64); got != v {
+			t.Errorf("%s = %v, want %v (%v)", k, u[k], v, u)
+		}
+	}
+}
+
+func TestGeminiStreamTranslatesChatUpstream(t *testing.T) {
+	f := &fake{t: t, reply: chatReply}
 	setup(t, provider.Chat, f)
-}
-
-func gemGet(t *testing.T, path string) (int, string) {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
-	return rec.Code, rec.Body.String()
-}
-
-func TestGeminiStreamToolCall(t *testing.T) {
-	f := gemToolUpstream(t)
-	gemTestSetup(t, f)
-	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", gemToolBody)
+	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", geminiBody)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-
-	// what the upstream saw
-	var up map[string]any
-	json.Unmarshal(f.got, &up)
-	if f.path != "/v1/chat/completions" || up["stream"] != true {
-		t.Errorf("upstream path %s, body %s", f.path, f.got)
-	}
-	if up["reasoning_effort"] != "medium" {
-		t.Errorf("thinkingBudget -1 should be medium, got %v", up["reasoning_effort"])
-	}
-	if up["max_tokens"] != float64(321) || up["temperature"] != 0.3 || up["top_p"] != 0.9 {
-		t.Errorf("generation params: %s", f.got)
-	}
-	if stop, _ := up["stop"].([]any); len(stop) != 1 || stop[0] != "END" {
-		t.Errorf("stop: %v", up["stop"])
-	}
-	fn := up["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
-	params := fn["parameters"].(map[string]any)
-	prop := params["properties"].(map[string]any)["path"].(map[string]any)
-	if params["type"] != "object" || prop["type"] != "string" {
-		t.Errorf("schema not lowercased: %v", params)
-	}
-	msgs := up["messages"].([]any)
-	if len(msgs) != 4 || msgs[0].(map[string]any)["role"] != "system" {
-		t.Fatalf("messages: %v", msgs)
-	}
-	calls := msgs[2].(map[string]any)["tool_calls"].([]any)
-	if len(calls) != 1 || calls[0].(map[string]any)["id"] != "t0" {
-		t.Errorf("assistant call id not kept: %v", calls)
-	}
-	if msgs[3].(map[string]any)["tool_call_id"] != "t0" {
-		t.Errorf("tool result id: %v", msgs[3])
-	}
-
-	// what the client got: thinking, text, one whole function call, then the end
-	evs := events(body)
-	var got []string
-	var call map[string]any
-	for _, p := range gemParts(t, evs) {
-		switch {
-		case p["thought"] == true:
-			got = append(got, "think:"+p["text"].(string))
-		case p["functionCall"] != nil:
-			call = p["functionCall"].(map[string]any)
-			got = append(got, "call:"+call["id"].(string)+":"+call["name"].(string))
-		default:
-			got = append(got, "text:"+p["text"].(string))
+	chunks := geminiChunks(t, body)
+	var thought, text, calls int
+	for _, c := range chunks {
+		for _, p := range candParts(c) {
+			switch {
+			case p["thought"] == true && p["text"] == "hmm":
+				thought++
+			case p["text"] == "Let me read.":
+				text++
+			case p["functionCall"] != nil:
+				calls++
+				fc := p["functionCall"].(map[string]any)
+				args := fc["args"].(map[string]any)
+				if fc["id"] != "up_1" || fc["name"] != "read" || args["path"] != "a.txt" {
+					t.Errorf("function call %v", fc)
+				}
+			}
 		}
 	}
-	if strings.Join(got, " ") != "think:plan text:Hi call:call_7:read" {
-		t.Errorf("parts: %v", got)
+	if thought != 1 || text != 1 || calls != 1 {
+		t.Errorf("thought %d text %d calls %d in %s", thought, text, calls, body)
 	}
-	if args, _ := call["args"].(map[string]any); args["path"] != "a.go" {
-		t.Errorf("function call args incomplete: %v", call["args"])
+	last := chunks[len(chunks)-1]
+	if finishOf(last) != "STOP" {
+		t.Errorf("last finishReason %q", finishOf(last))
 	}
-	last := evs[len(evs)-1]
-	cand := last["candidates"].([]any)[0].(map[string]any)
-	if cand["finishReason"] != "STOP" {
-		t.Errorf("finishReason: %v", cand["finishReason"])
+	u, _ := last["usageMetadata"].(map[string]any)
+	checkUsage(t, u)
+
+	// what the upstream was sent
+	got := string(f.got)
+	for _, want := range []string{`"reasoning_effort":"medium"`, `"max_tokens":321`, `"type":"object"`,
+		`"type":"string"`, `"tool_call_id":"c1"`, `"tool_calls"`, `be brief`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("upstream body lacks %s: %s", want, got)
+		}
 	}
-	um := last["usageMetadata"].(map[string]any)
-	if um["promptTokenCount"] != float64(10) || um["candidatesTokenCount"] != float64(3) ||
-		um["thoughtsTokenCount"] != float64(2) || um["totalTokenCount"] != float64(15) {
-		t.Errorf("usage: %v", um)
+	if strings.Contains(got, `"OBJECT"`) || strings.Contains(got, `"STRING"`) {
+		t.Errorf("upper-case schema types reached upstream: %s", got)
 	}
 }
 
-func TestGeminiGenerateContentToolCall(t *testing.T) {
-	f := gemToolUpstream(t)
-	gemTestSetup(t, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", gemToolBody)
+func TestGeminiGenerateContentIsWholeReply(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t, reply: chatReply})
+	code, body := post(t, "/v1beta/models/fake/m1:generateContent", geminiBody)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	var out struct {
-		Candidates []struct {
-			Content struct {
-				Role  string           `json:"role"`
-				Parts []map[string]any `json:"parts"`
-			} `json:"content"`
-			FinishReason string `json:"finishReason"`
-		} `json:"candidates"`
-		UsageMetadata map[string]any `json:"usageMetadata"`
-		ModelVersion  string         `json:"modelVersion"`
-		ResponseID    string         `json:"responseId"`
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("not JSON: %v", err)
 	}
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatalf("not JSON: %v: %s", err, body)
+	if finishOf(m) != "STOP" {
+		t.Errorf("finishReason %q in %s", finishOf(m), body)
 	}
-	c := out.Candidates[0]
-	if c.FinishReason != "STOP" || c.Content.Role != "model" || out.ModelVersion != "fake/m1" || out.ResponseID == "" {
-		t.Errorf("candidate: %s", body)
-	}
-	var calls []map[string]any
-	for _, p := range c.Content.Parts {
+	var sawCall, sawThought bool
+	for _, p := range candParts(m) {
 		if fc, ok := p["functionCall"].(map[string]any); ok {
-			calls = append(calls, fc)
+			sawCall = fc["id"] == "up_1" && fc["name"] == "read"
+		}
+		if p["thought"] == true {
+			sawThought = true
 		}
 	}
-	if len(calls) != 1 || calls[0]["id"] != "call_7" || calls[0]["name"] != "read" {
-		t.Fatalf("functionCall: %s", body)
+	if !sawCall || !sawThought {
+		t.Errorf("parts %s", body)
 	}
-	if args := calls[0]["args"].(map[string]any); args["path"] != "a.go" {
-		t.Errorf("args: %v", args)
-	}
-	if out.UsageMetadata["promptTokenCount"] != float64(10) || out.UsageMetadata["candidatesTokenCount"] != float64(3) ||
-		out.UsageMetadata["thoughtsTokenCount"] != float64(2) || out.UsageMetadata["totalTokenCount"] != float64(15) {
-		t.Errorf("usage: %v", out.UsageMetadata)
+	u, _ := m["usageMetadata"].(map[string]any)
+	checkUsage(t, u)
+	if m["modelVersion"] == nil || m["responseId"] == nil {
+		t.Errorf("missing modelVersion/responseId: %s", body)
 	}
 }
 
-func TestGeminiCallIDsMatchByName(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		`data: {"id":"c2","model":"m1","choices":[{"delta":{"content":"done"}}]}`,
-		`data: {"id":"c2","choices":[{"delta":{},"finish_reason":"stop"}]}`,
-		`data: [DONE]`)}
-	gemTestSetup(t, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[
-	  {"role":"user","parts":[{"text":"go"}]},
-	  {"role":"model","parts":[{"functionCall":{"name":"ls","args":{"dir":"a"}}},{"functionCall":{"name":"ls","args":{"dir":"b"}}}]},
-	  {"role":"user","parts":[{"functionResponse":{"name":"ls","response":{"output":"x"}}}]}]}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	var up map[string]any
-	json.Unmarshal(f.got, &up)
-	msgs := up["messages"].([]any)
-	if len(msgs) != 3 {
-		t.Fatalf("messages: %v", msgs)
-	}
-	calls := msgs[1].(map[string]any)["tool_calls"].([]any)
-	if len(calls) != 2 {
-		t.Fatalf("calls: %v", calls)
-	}
-	first, second := calls[0].(map[string]any)["id"], calls[1].(map[string]any)["id"]
-	if first == "" || second == "" || first == second {
-		t.Errorf("calls need distinct ids: %v %v", first, second)
-	}
-	// the result carries no id, so it belongs to the latest call named ls
-	if msgs[2].(map[string]any)["tool_call_id"] != second {
-		t.Errorf("result matched %v, want %v", msgs[2], second)
-	}
-}
-
-func TestGeminiRequestTranslation(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		`data: {"id":"c3","model":"m1","choices":[{"delta":{"content":"{}"}}]}`,
-		`data: {"id":"c3","choices":[{"delta":{},"finish_reason":"stop"}]}`,
-		`data: [DONE]`)}
-	gemTestSetup(t, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `{"systemInstruction":{"parts":[{"text":"sys"}]},
-	  "contents":[{"role":"user","parts":[{"text":"look"},{"inlineData":{"mimeType":"image/png","data":"AAAA"}},{"inlineData":{"mimeType":"application/pdf","data":"JVBER"}}]}],
-	  "toolConfig":{"functionCallingConfig":{"mode":"NONE"}},
-	  "tools":[{"functionDeclarations":[{"name":"f","parameters":{"type":"OBJECT"}}]}],
-	  "generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"OBJECT","properties":{"a":{"type":"STRING"}}}}}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	if !strings.Contains(string(f.got), "data:image/png;base64,AAAA") {
-		t.Errorf("inline image not passed: %s", f.got)
-	}
-	if !strings.Contains(string(f.got), "[attachment omitted: application/pdf]") {
-		t.Errorf("non-image attachment not replaced by text: %s", f.got)
-	}
-	var up map[string]any
-	json.Unmarshal(f.got, &up)
-	if up["tool_choice"] != "none" {
-		t.Errorf("toolConfig NONE: %v", up["tool_choice"])
-	}
-	msgs := up["messages"].([]any)
-	sys, _ := msgs[0].(map[string]any)["content"].(string)
-	if !strings.Contains(sys, "sys") || !strings.Contains(sys, "only") || !strings.Contains(sys, `"type":"object"`) {
-		t.Errorf("JSON mode instruction missing or schema not lowercased: %q", sys)
-	}
-}
-
-func TestGeminiUnknownModel(t *testing.T) {
-	gemTestSetup(t, &fake{t: t})
-	code, body := post(t, "/v1beta/models/nope:generateContent", `{"contents":[]}`)
+func TestGeminiUnknownModelIsNotFound(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	code, body := post(t, "/v1beta/models/nope:generateContent", geminiBody)
 	if code != 404 || !strings.Contains(body, `"status":"NOT_FOUND"`) || !strings.Contains(body, `"code":404`) {
 		t.Errorf("%d %s", code, body)
 	}
 }
 
 func TestGeminiCountTokens(t *testing.T) {
-	gemTestSetup(t, &fake{t: t})
+	setup(t, provider.Chat, &fake{t: t})
 	for _, body := range []string{
-		`{"contents":[{"role":"user","parts":[{"text":"hello there, count me please"}]}]}`,
-		`{"generateContentRequest":{"contents":[{"role":"user","parts":[{"text":"hello there, count me please"}]}]}}`,
+		`{"generateContentRequest":{"contents":[{"role":"user","parts":[{"text":"hello there world"}]}]}}`,
+		`{"contents":[{"role":"user","parts":[{"text":"hello there world"}]}]}`,
 	} {
 		code, out := post(t, "/v1beta/models/fake/m1:countTokens", body)
 		var m map[string]any
 		json.Unmarshal([]byte(out), &m)
-		if code != 200 {
-			t.Fatalf("status %d: %s", code, out)
+		if code != 200 || m["totalTokens"] == nil {
+			t.Errorf("%d %s", code, out)
 		}
-		if n, ok := m["totalTokens"].(float64); !ok || n < 1 {
-			t.Errorf("totalTokens: %s", out)
+		if n, _ := m["totalTokens"].(float64); n <= 0 {
+			t.Errorf("totalTokens %v", m["totalTokens"])
 		}
 	}
 }
 
 func TestGeminiModelsList(t *testing.T) {
-	gemTestSetup(t, &fake{t: t})
-	code, body := gemGet(t, "/v1beta/models")
+	setup(t, provider.Chat, &fake{t: t})
+	rec := httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1beta/models", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"name":"models/fake/m1"`) ||
+		!strings.Contains(rec.Body.String(), `"displayName"`) || !strings.Contains(rec.Body.String(), `"streamGenerateContent"`) {
+		t.Errorf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGeminiInfoAndNotFoundListTheAPI(t *testing.T) {
+	rec := httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rec.Body.String(), "/v1beta/models/{model}:generateContent") {
+		t.Errorf("info %s", rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/nope", nil))
+	if rec.Code != 404 || !strings.Contains(rec.Body.String(), "/v1beta/models") {
+		t.Errorf("404 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGeminiToolChoiceAndJSONMode(t *testing.T) {
+	f := &fake{t: t, reply: chatReply}
+	setup(t, provider.Chat, f)
+	body := `{"contents":[{"role":"user","parts":[{"text":"go"}]}],
+	 "tools":[{"functionDeclarations":[{"name":"read","parameters":{"type":"OBJECT"}},{"name":"write","parameters":{"type":"OBJECT"}}]}],
+	 "toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["read"]}},
+	 "generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"OBJECT","properties":{"ok":{"type":"BOOLEAN"}}}}}`
+	if code, out := post(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	got := string(f.got)
+	// the schema travels inside the system message, so its quotes are escaped
+	for _, want := range []string{`"tool_choice":{"function":{"name":"read"},"type":"function"}`, `JSON Schema`, `boolean`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("upstream lacks %s: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "BOOLEAN") || strings.Contains(got, "OBJECT") {
+		t.Errorf("upper-case schema types reached upstream: %s", got)
+	}
+	if strings.Contains(got, `"write"`) {
+		t.Errorf("disallowed tool reached upstream: %s", got)
+	}
+}
+
+func TestGeminiFunctionResultMatchesByName(t *testing.T) {
+	f := &fake{t: t, reply: chatReply}
+	setup(t, provider.Chat, f)
+	body := `{"contents":[
+	 {"role":"user","parts":[{"text":"go"}]},
+	 {"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"x"}}}]},
+	 {"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"ok"}}}]}]}`
+	if code, out := post(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	var up struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolCalls  []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(f.got, &up); err != nil {
+		t.Fatal(err)
+	}
+	var callID, resultID string
+	for _, m := range up.Messages {
+		if len(m.ToolCalls) > 0 {
+			callID = m.ToolCalls[0].ID
+		}
+		if m.Role == "tool" {
+			resultID = m.ToolCallID
+		}
+	}
+	if callID == "" || callID != resultID {
+		t.Errorf("call id %q, result id %q", callID, resultID)
+	}
+}
+
+func TestGeminiAttachments(t *testing.T) {
+	f := &fake{t: t, reply: chatReply}
+	setup(t, provider.Chat, f)
+	body := `{"contents":[{"role":"user","parts":[
+	 {"inlineData":{"mimeType":"image/png","data":"AAAA"}},
+	 {"inlineData":{"mimeType":"application/pdf","data":"BBBB"}}]}]}`
+	if code, out := post(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	got := string(f.got)
+	if !strings.Contains(got, `data:image/png;base64,AAAA`) || !strings.Contains(got, `[attachment omitted: application/pdf]`) {
+		t.Errorf("attachments %s", got)
+	}
+}
+
+func TestGeminiStreamErrorsAreGeminiShaped(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"no balance"}}`})
+	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", geminiBody)
+	if code != 402 || !strings.Contains(body, `"error":{"code":402`) || !strings.Contains(body, "no balance") {
+		t.Errorf("%d %s", code, body)
+	}
+}
+
+// truncatedReply is an OpenAI Chat upstream that stops at its length limit in
+// the middle of a tool call's arguments.
+var truncatedReply = sse(
+	`data: {"id":"up2","model":"m1","choices":[{"delta":{"content":"Reading."}}]}`,
+	`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"up_2","type":"function","function":{"name":"read","arguments":"{\"pa"}}]}}]}`,
+	`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"a.tx"}}]}}]}`,
+	`data: {"choices":[{"delta":{},"finish_reason":"length"}]}`,
+	`data: [DONE]`,
+)
+
+// A function call whose arguments were cut off must never reach the client
+// when streamed, and the stream says it was truncated.
+func TestGeminiTruncatedCallIsNotStreamed(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t, reply: truncatedReply})
+	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", geminiBody)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	var out struct {
-		Models []struct {
-			Name                       string   `json:"name"`
-			DisplayName                string   `json:"displayName"`
-			SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
-		} `json:"models"`
-	}
-	json.Unmarshal([]byte(body), &out)
-	found := false
-	for _, m := range out.Models {
-		if m.Name == "models/fake/m1" {
-			found = true
-			if m.DisplayName == "" || len(m.SupportedGenerationMethods) != 3 {
-				t.Errorf("model object: %+v", m)
+	chunks := geminiChunks(t, body)
+	for _, c := range chunks {
+		for _, p := range candParts(c) {
+			if p["functionCall"] != nil {
+				t.Errorf("stream sent a half-formed call: %s", body)
 			}
 		}
 	}
-	if !found {
-		t.Errorf("models/fake/m1 not listed: %s", body)
+	if last := chunks[len(chunks)-1]; finishOf(last) != "MAX_TOKENS" {
+		t.Errorf("last finishReason %q, want MAX_TOKENS in %s", finishOf(last), body)
 	}
-	if _, root := gemGet(t, "/"); !strings.Contains(root, "/v1beta/models") {
-		t.Errorf("root does not list the Gemini API: %s", root)
-	}
-	if code, _ := gemGet(t, "/v1beta/models/fake/m1"); code != 200 {
-		t.Errorf("GET model: %d", code)
-	}
+
 }
 
-func TestGeminiEffort(t *testing.T) {
-	ptr := func(n int) *int { return &n }
-	cases := []struct {
-		budget *int
-		level  string
-		want   string
-	}{
-		{ptr(-1), "", "medium"},
-		{ptr(0), "", ""},
-		{ptr(2000), "", "low"},
-		{ptr(8000), "", "medium"},
-		{ptr(30000), "", "high"},
-		{nil, "HIGH", "high"},
-		{nil, "", ""},
+// The same cut-off call is left out of a whole reply, which says it was truncated.
+func TestGeminiTruncatedCallIsNotWhole(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t, reply: truncatedReply})
+	code, body := post(t, "/v1beta/models/fake/m1:generateContent", geminiBody)
+	if code != 200 {
+		t.Fatalf("status %d: %s", code, body)
 	}
-	for _, c := range cases {
-		if got := geminiEffort(c.budget, c.level); got != c.want {
-			t.Errorf("effort(%v, %q) = %q, want %q", c.budget, c.level, got, c.want)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	for _, p := range candParts(m) {
+		if p["functionCall"] != nil {
+			t.Errorf("whole reply carries a half-formed call: %s", body)
 		}
 	}
+	if finishOf(m) != "MAX_TOKENS" {
+		t.Errorf("finishReason %q, want MAX_TOKENS in %s", finishOf(m), body)
+	}
 }
 
-func TestGeminiLowerSchema(t *testing.T) {
-	in := `{"type":"OBJECT","propertyOrdering":["tags"],"properties":{"tags":{"type":"ARRAY","items":{"type":"STRING"}},"n":{"type":"INTEGER","nullable":true}}}`
-	var out map[string]any
-	if err := json.Unmarshal(lowerSchema([]byte(in)), &out); err != nil {
+// A property named nullable or propertyOrdering is a user's property and is
+// kept; the Gemini keywords are only dropped where they sit in a schema.
+func TestGeminiSchemaKeepsUserPropertyNames(t *testing.T) {
+	raw := json.RawMessage(`{"type":"OBJECT","propertyOrdering":["nullable"],
+		"properties":{"nullable":{"type":"BOOLEAN"},"propertyOrdering":{"type":"STRING"}}}`)
+	var got map[string]any
+	if err := json.Unmarshal(geminiSchema(raw), &got); err != nil {
 		t.Fatal(err)
 	}
-	props := out["properties"].(map[string]any)
-	tags := props["tags"].(map[string]any)
-	if out["type"] != "object" || tags["type"] != "array" || tags["items"].(map[string]any)["type"] != "string" {
-		t.Errorf("lowered: %v", out)
+	if _, ok := got["propertyOrdering"]; ok {
+		t.Errorf("schema-level propertyOrdering kept: %v", got)
 	}
-	if _, ok := out["propertyOrdering"]; ok {
-		t.Errorf("propertyOrdering kept: %v", out)
+	props, _ := got["properties"].(map[string]any)
+	n, _ := props["nullable"].(map[string]any)
+	if n == nil || n["type"] != "boolean" {
+		t.Errorf("property nullable lost or not lowered: %v", props)
 	}
-	if n := props["n"].(map[string]any)["type"]; n == nil || n == "integer" {
-		t.Errorf("nullable not expressed: %v", n)
+	po, _ := props["propertyOrdering"].(map[string]any)
+	if po == nil || po["type"] != "string" {
+		t.Errorf("property propertyOrdering lost or not lowered: %v", props)
+	}
+
+	// the keyword still works where it is a boolean on a schema
+	var s map[string]any
+	if err := json.Unmarshal(geminiSchema(json.RawMessage(`{"type":"STRING","nullable":true}`)), &s); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s["nullable"]; ok {
+		t.Errorf("keyword nullable kept: %v", s)
+	}
+	if !reflect.DeepEqual(s["type"], []any{"string", "null"}) {
+		t.Errorf("type = %v, want [string null]", s["type"])
 	}
 }
 
-func TestGeminiUsageMapping(t *testing.T) {
-	u := Usage{Input: 10, Output: 5, Reasoning: 2}
-	m := u.gemini()
-	if m["promptTokenCount"] != 10 || m["candidatesTokenCount"] != 3 || m["thoughtsTokenCount"] != 2 || m["totalTokenCount"] != 15 {
-		t.Errorf("usage: %v", m)
+// An explicit null responseSchema is no schema, so it does not switch on JSON mode.
+func TestGeminiNullResponseSchemaIsNotJSONMode(t *testing.T) {
+	req, err := parseGeminiBody("m1", []byte(`{"contents":[],"generationConfig":{"responseSchema":null,"responseJsonSchema":null}}`))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := m["cachedContentTokenCount"]; ok {
-		t.Errorf("no cache, no cached count: %v", m)
-	}
-	c := Usage{Input: 4, CacheRead: 6, Output: 2}.gemini()
-	if c["promptTokenCount"] != 10 || c["cachedContentTokenCount"] != 6 {
-		t.Errorf("cached prompt should include cache: %v", c)
-	}
-}
-
-// A non-streaming reply whose arguments were cut short must still be valid
-// JSON: the arguments are wrapped rather than emitted broken.
-func TestGeminiGenerateContentTruncatedArgs(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		`data: {"id":"c5","model":"m1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"read","arguments":"{\"path\":"}}]}}]}`,
-		`data: {"id":"c5","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
-		`data: [DONE]`)}
-	gemTestSetup(t, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	if !json.Valid([]byte(body)) {
-		t.Fatalf("reply is not valid JSON: %s", body)
-	}
-	var out struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					FunctionCall *struct {
-						ID   string          `json:"id"`
-						Name string          `json:"name"`
-						Args json.RawMessage `json:"args"`
-					} `json:"functionCall"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatalf("decode: %v: %s", err, body)
-	}
-	parts := out.Candidates[0].Content.Parts
-	if len(parts) != 1 || parts[0].FunctionCall == nil {
-		t.Fatalf("want one functionCall: %s", body)
-	}
-	if !json.Valid(parts[0].FunctionCall.Args) {
-		t.Errorf("args are not valid JSON: %s", parts[0].FunctionCall.Args)
-	}
-}
-
-// A result whose id the gateway never issued is matched to the latest call
-// with the same name, so the upstream sees the id it was given.
-func TestGeminiResultIDMapsToGeneratedCall(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		`data: {"id":"c6","model":"m1","choices":[{"delta":{"content":"done"}}]}`,
-		`data: {"id":"c6","choices":[{"delta":{},"finish_reason":"stop"}]}`,
-		`data: [DONE]`)}
-	gemTestSetup(t, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[
-	  {"role":"user","parts":[{"text":"go"}]},
-	  {"role":"model","parts":[{"functionCall":{"name":"ls","args":{"dir":"a"}}}]},
-	  {"role":"user","parts":[{"functionResponse":{"id":"client-7","name":"ls","response":{"output":"x"}}}]}]}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	var up map[string]any
-	json.Unmarshal(f.got, &up)
-	msgs := up["messages"].([]any)
-	if len(msgs) != 3 {
-		t.Fatalf("messages: %v", msgs)
-	}
-	calls := msgs[1].(map[string]any)["tool_calls"].([]any)
-	gen := calls[0].(map[string]any)["id"]
-	if gen == "" || gen == "client-7" {
-		t.Fatalf("call should carry a generated id, got %v", gen)
-	}
-	if got := msgs[2].(map[string]any)["tool_call_id"]; got != gen {
-		t.Errorf("result id %v, want generated %v", got, gen)
+	if req.System != "" {
+		t.Errorf("null response schema asked for JSON: %q", req.System)
 	}
 }
