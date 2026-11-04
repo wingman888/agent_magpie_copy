@@ -344,5 +344,8 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 	default:
 		return cs, wg
 	}
+	if p.Account == nil {
+		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, model, from) < keyFit(cs[j].p, model, from) })
+	}
 	return cs, wg
 }

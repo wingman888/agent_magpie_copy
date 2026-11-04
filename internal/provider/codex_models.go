@@ -23,73 +23,9 @@ import (
 )
 
 // codexClientVersion is the Codex CLI version the models list is asked for
-// when neither an installed Codex CLI nor Codex's cache says a newer one: the
-// list leaves out models newer than the client asking.
+// when Codex CLI has not asked itself yet: the list leaves out models newer
+// than the client asking.
 const codexClientVersion = "0.154.0"
-
-// codexLookPath and codexVersionOutput find the installed Codex CLI and ask it
-// its version. They are variables so a test can put in its own.
-var (
-	codexLookPath      = func(file string) (string, error) { return exec.LookPath(file) }
-	codexVersionOutput = func(path string) ([]byte, error) { return exec.Command(path, "--version").Output() }
-)
-
-// codexVersionRE is the version in `codex --version`'s output, "codex-cli 0.155.1".
-var codexVersionRE = regexp.MustCompile(`\d+\.\d+\.\d+`)
-
-// codexVersionCache keeps the client version to ask with for a while, as
-// running the CLI for each list would be needless.
-var codexVersionCache struct {
-	sync.Mutex
-	at time.Time
-	v  string
-}
-
-// codexVersionToAsk is the newest of the installed Codex CLI's version, the
-// one Codex's cache records and the built-in one. It is kept for ten minutes.
-func codexVersionToAsk() string {
-	c := &codexVersionCache
-	c.Lock()
-	defer c.Unlock()
-	if !c.at.IsZero() && time.Since(c.at) < 10*time.Minute {
-		return c.v
-	}
-	best := codexCacheVersion()
-	if path, err := codexLookPath("codex"); err == nil {
-		if out, err := codexVersionOutput(path); err == nil {
-			if v := codexVersionRE.FindString(string(out)); v != "" && compareCodexVersion(v, best) > 0 {
-				best = v
-			}
-		}
-	}
-	if compareCodexVersion(codexClientVersion, best) > 0 {
-		best = codexClientVersion
-	}
-	c.at, c.v = time.Now(), best
-	return best
-}
-
-// compareCodexVersion compares dotted versions part by part as numbers: -1, 0
-// or 1 as a comes before, the same as, or after b.
-func compareCodexVersion(a, b string) int {
-	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
-	for i := 0; i < max(len(pa), len(pb)); i++ {
-		var av, bv int
-		if i < len(pa) {
-			av, _ = strconv.Atoi(pa[i])
-		}
-		if i < len(pb) {
-			bv, _ = strconv.Atoi(pb[i])
-		}
-		switch {
-		case av < bv:
-			return -1
-		case av > bv:
-			return 1
-		}
-	}
-	return 0
-}
 
 // codexModels asks the ChatGPT backend which Codex models the account's own
 // plan has — a Free account lists fewer than a Plus or Pro one, and one it
@@ -97,7 +33,7 @@ func compareCodexVersion(a, b string) int {
 // models_cache.json, but that one is of whichever account Codex CLI last
 // asked with, if it ran at all.
 func codexModels(ctx context.Context, sign func(context.Context, *http.Request, []byte) error) ([]catalog.Model, error) {
-	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexVersionToAsk())
+	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexRequestVersion())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -119,6 +55,95 @@ func codexModels(ctx context.Context, sign func(context.Context, *http.Request, 
 		return nil, errors.New("ChatGPT listed no Codex models")
 	}
 	return ms, nil
+}
+
+// codexCLIVersion is the version the installed Codex CLI reports, "" when
+// there is no CLI or it says nothing. A variable so tests can stand one in.
+var codexCLIVersion = probeCodexCLI
+
+// codexVersionTTL is how long a version worked out for the models list is kept.
+const codexVersionTTL = 10 * time.Minute
+
+var codexVersion struct {
+	sync.Mutex
+	v  string
+	at time.Time
+}
+
+// codexRequestVersion is the client version the models list is asked with:
+// the newest of the installed Codex CLI's, the one Codex's cache records and
+// the built-in default, so a model newer than the cache's still gets listed.
+// The answer is kept for a few minutes.
+func codexRequestVersion() string {
+	codexVersion.Lock()
+	defer codexVersion.Unlock()
+	if codexVersion.v != "" && time.Since(codexVersion.at) < codexVersionTTL {
+		return codexVersion.v
+	}
+	best := codexClientVersion
+	for _, v := range []string{codexCacheVersion(), codexCLIVersion()} {
+		if newerVersion(v, best) {
+			best = v
+		}
+	}
+	codexVersion.v, codexVersion.at = best, time.Now()
+	return best
+}
+
+// forgetCodexVersion drops the kept client version, so the next models list
+// works it out again.
+func forgetCodexVersion() {
+	codexVersion.Lock()
+	defer codexVersion.Unlock()
+	codexVersion.v, codexVersion.at = "", time.Time{}
+}
+
+// probeCodexCLI asks the installed Codex CLI its version, "" when it has none.
+func probeCodexCLI() string {
+	bin, err := exec.LookPath("codex")
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return versionIn(string(out))
+}
+
+var versionRE = regexp.MustCompile(`\d+(\.\d+)+`)
+
+// versionIn finds the first dotted number in s ("codex-cli 0.155.1" gives
+// 0.155.1), "" when there is none.
+func versionIn(s string) string {
+	return versionRE.FindString(s)
+}
+
+// newerVersion says whether version a is later than b, comparing the dotted
+// numbers part by part; an empty or unreadable version is never newer.
+func newerVersion(a, b string) bool {
+	if a == "" {
+		return false
+	}
+	if b == "" {
+		return true
+	}
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(pa) || i < len(pb); i++ {
+		var x, y int
+		if i < len(pa) {
+			x, _ = strconv.Atoi(pa[i])
+		}
+		if i < len(pb) {
+			y, _ = strconv.Atoi(pb[i])
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return false
 }
 
 // codexCacheVersion is the client version Codex CLI last asked with.

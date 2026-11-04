@@ -61,7 +61,7 @@ type Weighed struct {
 	Speaks   provider.Protocol `json:"speaks,omitempty"` // a key made for one protocol only
 	Rest     *Rest             `json:"rest,omitempty"`   // resting after a failure, when the request came
 	Unlisted bool              `json:"unlisted,omitempty"`
-	Aside    bool              `json:"aside,omitempty"` // a key made for a protocol the request suits less: tried after the pool
+	Aside    bool              `json:"aside,omitempty"` // made for another protocol: tried only after the others
 }
 
 // Try is one candidate trying the request.
@@ -101,7 +101,6 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	if wg.tokens != nil {
 		w.Tokens = wg.tokens[c.rest]
 	}
-	w.Aside = c.aside
 	return w
 }
 

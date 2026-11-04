@@ -31,7 +31,7 @@ type candidate struct {
 	p     provider.Provider
 	model string
 	rest  string // what rests after a failure: the provider, or one of its keys
-	aside bool   // a key made for a protocol the request suits less: tried after the pool
+	aside bool   // made for another protocol: tried only after the keys that suit the request
 }
 
 // label names a candidate in a call's record: the provider, and the key
@@ -64,9 +64,9 @@ func perKey(p provider.Provider, model string, from provider.Protocol) []candida
 // the model.
 func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, left []candidate) {
 	if p.Account != nil {
-		all := []candidate{{p: p, model: model, rest: p.ID}}
+		all := []candidate{{p, model, p.ID}}
 		for _, q := range p.AlsoOn() {
-			all = append(all, candidate{p: q, model: model, rest: p.ID + "@" + q.Account.User})
+			all = append(all, candidate{q, model, p.ID + "@" + q.Account.User})
 		}
 		// an account whose plan lacks the model (a Free one behind a Plus)
 		// would only answer 400; it is tried only when none lists it
@@ -95,51 +95,43 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, l
 		}
 		if !p.Serves(k, model) {
 			// the vendor lists the model to another key only
-			unlisted = append(unlisted, candidate{p: q, model: model, rest: rest})
+			unlisted = append(unlisted, candidate{q, model, rest})
 			continue
 		}
-		out = append(out, candidate{p: q, model: model, rest: rest})
+		out = append(out, candidate{q, model, rest})
 	}
 	if len(out) == 0 {
 		out, unlisted = unlisted, nil // no key lists it: try them all the same
 	}
 	if len(out) == 0 {
-		return []candidate{{p: p, model: model, rest: p.ID}}, nil
+		return []candidate{{p, model, p.ID}}, nil
 	}
 	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
-	// the pool is the keys that suit the request best; the rest come after
-	// it, in order of fit, marked aside
-	best := keyFit(out[0].p, model, from)
-	for i := range out {
-		out[i].aside = keyFit(out[i].p, model, from) > best
-	}
 	return out, unlisted
 }
 
-// keyFit ranks how well a key suits a request, best first: 0 is made for the
-// protocol the request is going to, 1 names no protocol, 2 names another one.
-// The protocol a request is going to is its model's own family when the name
-// says (Anthropic for Claude, OpenAI's for GPT), else the one the agent spoke.
-// An OpenAI model is at home on a Responses key too.
+// keyFit ranks how well a key suits a request, best first: 0 fits, 1 needs
+// the request translated, 2 is made for another vendor's models.
 func keyFit(q provider.Provider, model string, from provider.Protocol) int {
-	switch {
-	case q.KeyProtocol == "":
-		return 1
-	case q.KeyProtocol == requestProtocol(model, from):
-		return 0
-	case q.KeyProtocol == provider.Responses && modelFamily(model) == provider.Chat:
+	if q.KeyProtocol == "" {
 		return 0
 	}
-	return 2
-}
-
-// requestProtocol is the protocol a request for model is going to: the
-// model's own family when its name says, else the one the agent spoke.
-func requestProtocol(model string, from provider.Protocol) provider.Protocol {
-	if f := modelFamily(model); f != "" {
-		return f
+	switch modelFamily(model) {
+	case provider.Anthropic:
+		if q.KeyProtocol == provider.Anthropic {
+			return 0
+		}
+		return 2
+	case provider.Chat:
+		if q.KeyProtocol != provider.Anthropic {
+			return 0
+		}
+		return 2
 	}
-	return from
+	if q.Base(from) != "" {
+		return 0
+	}
+	return 1
 }
 
 // modelFamily is the protocol a model is at home in, when its name says:
@@ -171,31 +163,19 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
 	var pl planned
 	add := func(q provider.Provider, m string, fallback bool) []candidate {
-		all, left := perKeyOf(q, m, from)
-		// the pool is routed as its routing says; the keys asides follow it
-		var pool, asides []candidate
-		for _, c := range all {
-			if c.aside {
-				asides = append(asides, c)
-			} else {
-				pool = append(pool, c)
-			}
-		}
-		pool, wg := weigh(q, pool, m, from)
-		for i, c := range pool {
+		cs, left := perKeyOf(q, m, from)
+		cs, wg := weigh(q, cs, m, from)
+		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
-			w.Turn = i == 0 && q.Routing == provider.Rotate && len(pool) > 1
+			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
 			pl.order = append(pl.order, w)
-		}
-		for _, c := range asides {
-			pl.order = append(pl.order, weighed(c, q, wg, fallback, from))
 		}
 		for _, c := range left {
 			w := weighed(c, q, weighing{}, fallback, from)
 			w.Unlisted = true
 			pl.left = append(pl.left, w)
 		}
-		return append(pool, asides...)
+		return cs
 	}
 	out := add(p, model, false)
 	seen := map[string]bool{p.ID + "/" + model: true}
@@ -213,30 +193,18 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 		}
 		return out, pl
 	}
-	// ready ahead of resting, and asides after the pool, each in its order
-	rank := make([]int, len(out))
+	var ready, resting []candidate
+	var wReady, wResting []Weighed
 	for i, c := range out {
 		if r, ok := restOf(c.rest); ok {
 			pl.order[i].Rest = &r
-			rank[i]++
+			resting, wResting = append(resting, c), append(wResting, pl.order[i])
+		} else {
+			ready, wReady = append(ready, c), append(wReady, pl.order[i])
 		}
-		if c.aside {
-			rank[i] += 2
-		}
 	}
-	idx := make([]int, len(out))
-	for i := range idx {
-		idx[i] = i
-	}
-	sort.SliceStable(idx, func(a, b int) bool { return rank[idx[a]] < rank[idx[b]] })
-	ordered := make([]candidate, 0, len(out))
-	ws := make([]Weighed, 0, len(out))
-	for _, i := range idx {
-		ordered = append(ordered, out[i])
-		ws = append(ws, pl.order[i])
-	}
-	pl.order = ws
-	return ordered, pl
+	pl.order = append(wReady, wResting...)
+	return append(ready, resting...), pl
 }
 
 var restingUntil = struct {
