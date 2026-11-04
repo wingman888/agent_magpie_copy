@@ -562,8 +562,6 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 func streamClaude(w http.ResponseWriter, from provider.Protocol, model string, events <-chan Event, usage *Usage) (int, string) {
 	enc := encoder(from, newSSEWriter(w), model)
 	var failed string
-	// Under fallback nothing is written before the first real output, so
-	// an error that comes first can still move to the next candidate.
 	const (
 		holding    = iota // only start/usage events so far; they wait
 		streaming         // output has been sent (or none is pending)
