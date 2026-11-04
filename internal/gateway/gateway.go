@@ -302,13 +302,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
 	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
-		// an agent account that has logged out leaves no provider behind
-		if agent, _, found := strings.Cut(call.Model, "/"); found && accountAgents[agent] {
-			if _, err := provider.Find(agent); err != nil {
-				msg := signedOutMsg(agent)
-				call.Status, call.Error = 401, msg
+		if pid, _, found := strings.Cut(call.Model, "/"); found {
+			if e := provider.SignedOutFor(pid); e != nil {
+				// A model of a borrowed login whose agent has signed out.
+				call.Status, call.Error = 401, e.Error()
 				s.record(call)
-				writeError(w, from, 401, msg)
+				writeError(w, from, http.StatusUnauthorized, e.Error())
 				return
 			}
 		}
@@ -324,12 +323,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	if p.Account != nil {
-		call.To = accountProto(p.Account.Agent)
-		call.Status, call.Error = s.account(w, r, p, from, model, body, &call.Usage)
-	} else if p.Base(from) != "" {
+	if p.Base(from) != "" {
 		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+		if p.Account != nil && from == provider.Responses && !wantsStream(body) {
+			// The Codex backend only streams; the client asked for one reply.
+			call.Status, call.Error = s.aggregateResponses(w, r, p, model, body, &call.Usage)
+		} else {
+			call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+		}
 	} else {
 		to := p.Speaks()
 		if len(to) == 0 {
@@ -348,6 +349,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
+	if p.Account != nil {
+		// A borrowed login's backend has its own rules for the body.
+		body = p.Prepare(body)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -363,10 +368,24 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	for k, v := range provider.AuthHeaders(p, to) {
-		req.Header.Set(k, v)
+	if p.Account != nil {
+		// Sign sets the URL, the account's token and the headers its backend needs.
+		if err := p.Sign(ctx, req, to, body); err != nil {
+			return nil, err
+		}
+	} else {
+		for k, v := range provider.AuthHeaders(p, to) {
+			req.Header.Set(k, v)
+		}
 	}
-	return s.client.Do(req)
+	res, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode < 400 {
+		sniffEventStream(res)
+	}
+	return res, nil
 }
 
 // passthrough relays a request the provider understands as-is, with the
@@ -375,13 +394,11 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), rewriteModel(body, model), r.Header)
 	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
+		return transportError(w, proto, p, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		return writeError(w, proto, res.StatusCode, msg), msg
+		return providerError(w, proto, p, res)
 	}
 	h := w.Header()
 	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
@@ -428,13 +445,11 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
 	if err != nil {
-		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
+		return transportError(w, from, p, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		return writeError(w, from, res.StatusCode, msg), msg
+		return providerError(w, from, p, res)
 	}
 	dec := decoder(to)
 	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {

@@ -1,33 +1,43 @@
 package provider
 
-// Signed-in agent accounts as providers. dial never stores their credentials:
-// each use reads the agent's own files (Codex's auth.json, Copilot's
-// github-copilot/apps.json), so logging out in the agent logs the provider out
-// too. Claude Code logins are detected only to say they are not offered.
+// Account providers borrow the login an agent already keeps on this machine:
+// Codex's ChatGPT sign-in and Copilot's GitHub sign-in. dial never copies
+// those credentials anywhere. Each use reads the agent's own file again, so a
+// logout removes the provider and a token refresh by the agent is picked up.
+//
+// Claude Code's login is only detected, so the CLI can say why it is not
+// offered. Its contents are never read.
 
 import (
-	"context"
+	"encoding/base64"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/yetone/dial/internal/catalog"
 )
 
-// Account describes the agent login behind an account provider. It holds no
-// tokens.
+// CodexBase is the ChatGPT backend Codex talks to. It is a variable so tests
+// can point it at a stand-in server.
+var CodexBase = "https://chatgpt.com/backend-api/codex"
+
+// CopilotTokenURL is where a GitHub OAuth token is exchanged for a short-lived
+// Copilot session token. A variable so tests can point it at a stand-in.
+var CopilotTokenURL = "https://api.github.com/copilot_internal/v2/token"
+
+// defaultCopilotAPI is used for Base until a session tells us the real one.
+const defaultCopilotAPI = "https://api.githubcopilot.com"
+
+const claudeWhy = "Anthropic's terms only allow a Claude subscription to be used by Claude Code itself, " +
+	"so dial does not offer it as a provider. Add an Anthropic API key as a provider instead."
+
+// Account says whose login a provider borrows.
 type Account struct {
-	Agent string `json:"agent"`          // "codex" or "copilot"
-	User  string `json:"user"`           // email or GitHub user name
-	Plan  string `json:"plan,omitempty"` // subscription tier, when the agent says
+	Agent string `json:"agent"` // "codex" or "copilot"
+	User  string `json:"user"`  // who is signed in, for display
+	Plan  string `json:"plan,omitempty"`
 }
 
 // Exclusion is a login dial recognises but does not offer as a provider.
@@ -36,209 +46,248 @@ type Exclusion struct {
 	Why   string `json:"why"`
 }
 
-// signedOutErr marks an error that means the agent's login is gone or can no
-// longer be refreshed. The message is shown to the user as it is.
-type signedOutErr struct{ error }
+// isAccountID reports whether an id is reserved for a borrowed login.
+func isAccountID(id string) bool { return id == "codex" || id == "copilot" }
 
-// SignedOut reports whether err means the agent's login must be renewed.
-func SignedOut(err error) bool {
-	var s signedOutErr
-	return errors.As(err, &s)
+// hasBase reports whether the provider has at least one address of its own.
+func (p Provider) hasBase() bool {
+	return p.Chat != "" || p.Responses != "" || p.Anthropic != ""
 }
 
-// accountIDs are the provider ids an agent account can take.
-var accountIDs = map[string]bool{"codex": true, "copilot": true}
+// isAccountRecord is a stored entry that only holds a model selection for an
+// account provider.
+func isAccountRecord(p Provider) bool { return isAccountID(p.ID) && !p.hasBase() }
 
-var accountNames = map[string]string{"codex": "Codex", "copilot": "Copilot"}
-
-// claudeWhy is shown in place of a Claude Code account. It states no
-// credentials.
-const claudeWhy = "Anthropic's terms allow a Claude subscription to be used only by Claude Code itself, " +
-	"so dial does not offer it as a provider. Add an Anthropic API key as a provider instead."
-
-// accountByID finds the signed-in account provider with this id.
-func accountByID(id string) (Provider, bool) {
-	for _, a := range Accounts() {
-		if a.ID == id {
-			return a, true
-		}
-	}
-	return Provider{}, false
-}
-
-// Accounts lists the signed-in agent accounts that dial offers, read from the
-// agents' files as they are right now.
-func Accounts() []Provider {
-	var out []Provider
-	if c, ok := readCodex(); ok {
-		user, plan := codexAccount(c)
-		out = append(out, accountProvider("codex", Account{Agent: "codex", User: user, Plan: plan}))
-	}
-	if c, ok := readCopilot(); ok {
-		out = append(out, accountProvider("copilot", Account{Agent: "copilot", User: c.user}))
-	}
-	return out
-}
-
-func accountProvider(id string, a Account) Provider {
-	p := Provider{ID: id, Name: accountNames[id], Account: &a}
-	if id == "codex" {
-		p.Icon = "openai"
-	}
-	return p
-}
-
-// Excluded lists logins that dial recognises but does not offer. The files
-// are checked on every call; the macOS keychain, which is slow to ask, is
-// asked at most once a minute. The keychain is only asked for existence and
-// its content is never read.
-func Excluded() []Exclusion {
-	var out []Exclusion
-	if claudeSignedIn() {
-		out = append(out, Exclusion{Agent: "claude", Why: claudeWhy})
-	}
-	return out
-}
-
-// claudeDir is Claude Code's config directory, or "" when there is no home
-// directory to fall back on. An empty directory means "not signed in".
-func claudeDir() string {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return d
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	return filepath.Join(home, ".claude")
-}
-
-func claudeSignedIn() bool {
-	if dir := claudeDir(); dir != "" {
-		if _, err := os.Stat(filepath.Join(dir, ".credentials.json")); err == nil {
+// customStored reports whether the user built their own provider with this id.
+// That one wins over the borrowed login.
+func customStored(f file, id string) bool {
+	for _, p := range f.Providers {
+		if p.ID == id && p.hasBase() {
 			return true
 		}
 	}
-	return claudeKeychain()
+	return false
 }
 
-// claudeKeychainTimeout bounds the `security` probe, so a slow or blocked
-// keychain cannot hang the provider list.
-const claudeKeychainTimeout = 3 * time.Second
-
-var claudeKC struct {
-	sync.Mutex
-	at time.Time
-	ok bool
-}
-
-// claudeKeychain reports whether Claude Code has a keychain item. Only the
-// exit status of `security` is used: no -w flag, so no secret is read and no
-// access prompt is raised.
-func claudeKeychain() bool {
-	if runtime.GOOS != "darwin" {
-		return false
-	}
-	claudeKC.Lock()
-	defer claudeKC.Unlock()
-	if !claudeKC.at.IsZero() && time.Since(claudeKC.at) < time.Minute {
-		return claudeKC.ok
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), claudeKeychainTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials")
-	claudeKC.ok = cmd.Run() == nil
-	claudeKC.at = time.Now()
-	return claudeKC.ok
-}
-
-// builtinModels is the model list of an account before it is refreshed.
-// Copilot's "auto" is a router, not a model, so it is never offered.
-func builtinModels(agent string) []catalog.Model {
-	switch agent {
+// accountSignedIn reports whether the agent behind an account id is signed in.
+func accountSignedIn(id string) bool {
+	switch id {
 	case "codex":
-		return catalog.Builtin("codex")
+		_, ok := loadCodex()
+		return ok
 	case "copilot":
-		var out []catalog.Model
-		for _, m := range catalog.Builtin("copilot") {
-			if m.ID != "auto" {
-				out = append(out, m)
-			}
+		_, ok := loadCopilot()
+		return ok
+	}
+	return false
+}
+
+// Accounts lists the borrowed logins that are signed in and offered as
+// providers. A user-built provider with the same id takes precedence.
+func Accounts() []Provider {
+	f := load()
+	var out []Provider
+	if c, ok := loadCodex(); ok && !customStored(f, "codex") {
+		out = append(out, accountProvider(f, "codex", "Codex", c.acct))
+	}
+	if c, ok := loadCopilot(); ok && !customStored(f, "copilot") {
+		out = append(out, accountProvider(f, "copilot", "Copilot", c.acct))
+	}
+	return out
+}
+
+func accountProvider(f file, id, name string, acct Account) Provider {
+	var models []string
+	for _, p := range f.Providers {
+		if p.ID == id && !p.hasBase() {
+			models = cleanList(p.Models)
 		}
-		return out
+	}
+	return Provider{ID: id, Name: name, Models: models, Account: &acct}
+}
+
+// storedAccountModels is what the user picked for an account provider.
+func storedAccountModels(id string) []string {
+	f := load()
+	for _, p := range f.Providers {
+		if p.ID == id && !p.hasBase() {
+			return cleanList(p.Models)
+		}
 	}
 	return nil
 }
 
-// accountModels is what an account provider can serve: the last refreshed
-// list if there is one, else the built-in list.
-func (p Provider) accountModels() []catalog.Model {
-	if live, _, ok := catalog.Live(p.ID); ok {
-		return live
+// accountBase is the address an account provider talks to for a protocol.
+func accountBase(p Provider, proto Protocol) string {
+	switch {
+	case p.Account.Agent == "codex" && proto == Responses:
+		return CodexBase
+	case p.Account.Agent == "copilot" && proto == Chat:
+		return copilotAPIBase()
 	}
-	return builtinModels(p.Account.Agent)
+	return ""
 }
 
-// refreshAccount re-reads the account's model list and remembers it.
-func (p Provider) refreshAccount(ctx context.Context) ([]catalog.Model, error) {
-	switch p.Account.Agent {
+// accountSpeaks lists the protocols an account provider speaks.
+func accountSpeaks(agent string) []Protocol {
+	switch agent {
 	case "codex":
-		ms := builtinModels("codex")
-		return ms, catalog.SaveLive(p.ID, CodexBase, ms)
+		return []Protocol{Responses}
 	case "copilot":
-		return p.refreshCopilot(ctx)
+		return []Protocol{Chat}
 	}
-	return nil, fmt.Errorf("%s: unknown account", p.ID)
+	return nil
 }
 
-// Sign adds what the upstream needs to know who is asking. A plain provider
-// gets its key, as before. An account provider gets the agent's token and
-// the URL the agent's requests go to.
-func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, body []byte) error {
-	if p.Account == nil {
-		for k, v := range AuthHeaders(p, proto) {
-			req.Header.Set(k, v)
+var exclusions struct {
+	mu  sync.Mutex
+	at  time.Time
+	val []Exclusion
+}
+
+// Excluded lists logins dial recognises but does not offer, with the reason.
+// The answer is cached for about a minute.
+func Excluded() []Exclusion {
+	exclusions.mu.Lock()
+	defer exclusions.mu.Unlock()
+	if exclusions.at.IsZero() || time.Since(exclusions.at) >= time.Minute {
+		var val []Exclusion
+		if claudeSignedIn() {
+			val = append(val, Exclusion{Agent: "claude", Why: claudeWhy})
 		}
+		exclusions.at, exclusions.val = time.Now(), val
+	}
+	return append([]Exclusion{}, exclusions.val...)
+}
+
+// ---- reading the agents' own credential files ------------------------------
+
+func homeDir() string {
+	home, _ := os.UserHomeDir()
+	return home
+}
+
+// codexLogin is a usable ChatGPT sign-in for Codex. The token stays here and
+// is never stored by dial.
+type codexLogin struct {
+	acct      Account
+	access    string
+	accountID string
+}
+
+func codexHome() string {
+	if d := os.Getenv("CODEX_HOME"); d != "" {
+		return d
+	}
+	return filepath.Join(homeDir(), ".codex")
+}
+
+// loadCodex reads ~/.codex/auth.json. API-key mode is not an account.
+func loadCodex() (codexLogin, bool) {
+	b, err := os.ReadFile(filepath.Join(codexHome(), "auth.json"))
+	if err != nil {
+		return codexLogin{}, false
+	}
+	var a struct {
+		AuthMode string `json:"auth_mode"`
+		Tokens   struct {
+			IDToken     string `json:"id_token"`
+			AccessToken string `json:"access_token"`
+			AccountID   string `json:"account_id"`
+		} `json:"tokens"`
+	}
+	if json.Unmarshal(b, &a) != nil {
+		return codexLogin{}, false
+	}
+	if strings.EqualFold(strings.TrimSpace(a.AuthMode), "apikey") || a.Tokens.AccessToken == "" {
+		return codexLogin{}, false
+	}
+	claims := jwtClaims(a.Tokens.IDToken)
+	acct := Account{Agent: "codex", User: "ChatGPT"}
+	if email, _ := claims["email"].(string); email != "" {
+		acct.User = email
+	}
+	if oa, ok := claims["https://api.openai.com/auth"].(map[string]any); ok {
+		acct.Plan, _ = oa["chatgpt_plan_type"].(string)
+	}
+	return codexLogin{acct: acct, access: a.Tokens.AccessToken, accountID: a.Tokens.AccountID}, true
+}
+
+// jwtClaims returns the payload of a JWT without checking its signature. dial
+// only reads display details from it.
+func jwtClaims(tok string) map[string]any {
+	parts := strings.Split(tok, ".")
+	if len(parts) < 2 {
 		return nil
 	}
-	switch p.Account.Agent {
-	case "codex":
-		return signCodex(ctx, req)
-	case "copilot":
-		return signCopilot(ctx, req, body)
-	}
-	return fmt.Errorf("%s: unknown account", p.ID)
-}
-
-// Prepare adjusts a request body to what the upstream accepts. A plain
-// provider's body is returned as it is.
-func (p Provider) Prepare(body []byte) []byte {
-	if p.Account == nil {
-		return body
-	}
-	switch p.Account.Agent {
-	case "codex":
-		return prepareCodex(body)
-	case "copilot":
-		return stripModelPrefix(body, "copilot/")
-	}
-	return body
-}
-
-// stripModelPrefix removes "<prefix>" from the body's model id.
-func stripModelPrefix(body []byte, prefix string) []byte {
-	var m map[string]json.RawMessage
-	if json.Unmarshal(body, &m) != nil || m == nil {
-		return body
-	}
-	var model string
-	if json.Unmarshal(m["model"], &model) != nil || !strings.HasPrefix(model, prefix) {
-		return body
-	}
-	m["model"], _ = json.Marshal(strings.TrimPrefix(model, prefix))
-	out, err := json.Marshal(m)
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
 	if err != nil {
-		return body
+		return nil
 	}
-	return out
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+// copilotLogin is a GitHub sign-in that Copilot uses.
+type copilotLogin struct {
+	acct  Account
+	oauth string
+}
+
+func copilotDir() string {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		base = filepath.Join(homeDir(), ".config")
+	}
+	return filepath.Join(base, "github-copilot")
+}
+
+// loadCopilot reads the github.com entry from apps.json or hosts.json.
+func loadCopilot() (copilotLogin, bool) {
+	for _, name := range []string{"apps.json", "hosts.json"} {
+		b, err := os.ReadFile(filepath.Join(copilotDir(), name))
+		if err != nil {
+			continue
+		}
+		var entries map[string]json.RawMessage
+		if json.Unmarshal(b, &entries) != nil {
+			continue
+		}
+		var keys []string
+		for k := range entries {
+			if strings.HasPrefix(k, "github.com") {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			var e struct {
+				User  string `json:"user"`
+				OAuth string `json:"oauth_token"`
+			}
+			if json.Unmarshal(entries[k], &e) != nil || e.OAuth == "" {
+				continue
+			}
+			user := e.User
+			if user == "" {
+				user = "GitHub"
+			}
+			return copilotLogin{acct: Account{Agent: "copilot", User: user}, oauth: e.OAuth}, true
+		}
+	}
+	return copilotLogin{}, false
+}
+
+// claudeSignedIn only checks that Claude Code's credential file exists. Its
+// contents are not read, and the macOS keychain is not consulted.
+func claudeSignedIn() bool {
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if dir == "" {
+		dir = filepath.Join(homeDir(), ".claude")
+	}
+	info, err := os.Stat(filepath.Join(dir, ".credentials.json"))
+	return err == nil && info.Mode().IsRegular()
 }

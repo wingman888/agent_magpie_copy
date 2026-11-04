@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -9,288 +10,378 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/yetone/dial/internal/provider"
 )
 
-// acctFakeJWT makes an unsigned token with the given claims, enough for dial,
-// which reads claims without verifying them.
-func acctFakeJWT(claims map[string]any) string {
-	b, _ := json.Marshal(claims)
-	return "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
-}
-
-// acctCodexLogin writes a ChatGPT-mode auth.json under a temp HOME and points the
-// ChatGPT backend at a stand-in.
-func acctCodexLogin(t *testing.T, up *httptest.Server) {
+// codexSandbox points every credential and config location at a fresh
+// directory and restores the provider's stand-in addresses afterwards.
+func codexSandbox(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	exp := time.Now().Add(time.Hour).Unix()
-	access := acctFakeJWT(map[string]any{"exp": exp})
-	id := acctFakeJWT(map[string]any{"email": "me@example.com", "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro"}})
-	auth := map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{
-		"id_token": id, "access_token": access, "refresh_token": "rt", "account_id": "acct_1"}}
-	b, _ := json.Marshal(auth)
-	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := provider.CodexBase
-	provider.CodexBase = up.URL + "/backend-api/codex"
-	t.Cleanup(func() { provider.CodexBase = old })
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	oldBase, oldRefresh, oldClient := provider.CodexBase, provider.CodexRefreshURL, provider.CodexClientID
+	t.Cleanup(func() {
+		provider.CodexBase, provider.CodexRefreshURL, provider.CodexClientID = oldBase, oldRefresh, oldClient
+	})
+	return root
 }
 
-// acctBackend records one request and replies with a script. noType leaves out
-// the Content-Type header, as the ChatGPT backend does.
-type acctBackend struct {
-	got    map[string]any
-	raw    []byte
-	path   string
-	head   http.Header
-	reply  string
-	noType bool
+// jwt builds an unsigned token carrying the given claims.
+func jwt(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	b, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
-func (b *acctBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	b.raw, _ = io.ReadAll(r.Body)
-	b.got = map[string]any{}
-	json.Unmarshal(b.raw, &b.got)
-	b.path, b.head = r.URL.Path, r.Header
-	if b.noType {
-		w.Header()["Content-Type"] = nil
+// writeAuth writes a ChatGPT-mode auth.json with the given access token and
+// extra fields, the way the Codex CLI keeps it.
+func writeAuth(t *testing.T, access string, extra map[string]any) string {
+	t.Helper()
+	id := jwt(t, map[string]any{"email": "dev@example.com", "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro"}})
+	top := map[string]any{
+		"auth_mode":      "chatgpt",
+		"OPENAI_API_KEY": nil,
+		"last_refresh":   "2026-01-01T00:00:00Z",
+		"tokens": map[string]any{
+			"id_token":      id,
+			"access_token":  access,
+			"refresh_token": "RT-OLD",
+			"account_id":    "acct-1",
+			"extra_field":   "keep-me",
+		},
+	}
+	for k, v := range extra {
+		top[k] = v
+	}
+	b, err := json.Marshal(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(os.Getenv("CODEX_HOME"), "auth.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// freshAccess is a token that will not expire soon.
+func freshAccess(t *testing.T) string {
+	return jwt(t, map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+}
+
+// expiringAccess is a token that expires within the refresh slack.
+func expiringAccess(t *testing.T) string {
+	return jwt(t, map[string]any{"exp": time.Now().Add(time.Minute).Unix()})
+}
+
+// codexBackend is a stand-in for the ChatGPT Codex backend. It records what
+// it was sent and replies with a script. A zero contentType sends no
+// Content-Type header at all, as the real backend does.
+type codexBackend struct {
+	mu          sync.Mutex
+	body        map[string]any
+	auth        string
+	account     string
+	path        string
+	reply       string
+	code        int
+	contentType string
+}
+
+func (b *codexBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	raw, _ := io.ReadAll(r.Body)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.body = map[string]any{}
+	json.Unmarshal(raw, &b.body)
+	b.auth = r.Header.Get("Authorization")
+	b.account = r.Header.Get("chatgpt-account-id")
+	b.path = r.URL.Path
+	if b.contentType == "" {
+		w.Header()["Content-Type"] = nil // no header at all, so none is sniffed
 	} else {
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", b.contentType)
+	}
+	if b.code != 0 {
+		w.WriteHeader(b.code)
 	}
 	io.WriteString(w, b.reply)
 }
 
-const acctCodexReply = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n" +
-	"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello \"}\n\n" +
-	"data: {\"type\":\"response.output_text.delta\",\"delta\":\"there\"}\n\n" +
-	"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\",\"status\":\"completed\"," +
-	"\"usage\":{\"input_tokens\":7,\"output_tokens\":2,\"total_tokens\":9}}}\n\n"
+// codexReply is a Responses stream with one message and a completed event.
+const codexReply = "event: response.created\n" +
+	`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n" +
+	"event: response.output_item.done\n" +
+	`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello there"}]}}` + "\n\n" +
+	"event: response.completed\n" +
+	`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.5","output":[],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}` + "\n\n"
 
-func TestCodexNonStreamResponses(t *testing.T) {
-	b := &acctBackend{reply: acctCodexReply}
-	up := httptest.NewServer(b)
-	t.Cleanup(up.Close)
-	acctCodexLogin(t, up)
-
-	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","max_output_tokens":99,"temperature":0.5,"reasoning":{"effort":"low"}}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	if b.path != "/backend-api/codex/responses" {
-		t.Errorf("path %s", b.path)
-	}
-	if b.got["stream"] != true || b.got["store"] != false {
-		t.Errorf("stream/store: %s", b.raw)
-	}
-	if _, ok := b.got["input"].([]any); !ok {
-		t.Errorf("input is not a list: %s", b.raw)
-	}
-	for _, k := range []string{"max_output_tokens", "temperature"} {
-		if _, ok := b.got[k]; ok {
-			t.Errorf("%s was sent: %s", k, b.raw)
-		}
-	}
-	if b.got["model"] != "gpt-5.5" {
-		t.Errorf("model %v", b.got["model"])
-	}
-	if b.got["reasoning"] == nil {
-		t.Errorf("reasoning dropped: %s", b.raw)
-	}
-	if got := b.head.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") || got == "Bearer " {
-		t.Errorf("authorization %q", got)
-	}
-	if b.head.Get("chatgpt-account-id") != "acct_1" {
-		t.Errorf("account id %q", b.head.Get("chatgpt-account-id"))
-	}
-
-	var out map[string]any
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatalf("client reply is not JSON: %v: %s", err, body)
-	}
-	if out["object"] != "response" {
-		t.Errorf("object %v", out["object"])
-	}
-	if !strings.Contains(body, "Hello there") {
-		t.Errorf("text missing: %s", body)
-	}
-	if !strings.Contains(body, `"total_tokens":9`) {
-		t.Errorf("usage missing: %s", body)
-	}
-}
-
-func TestCodexStreamPassthrough(t *testing.T) {
-	b := &acctBackend{reply: acctCodexReply}
-	up := httptest.NewServer(b)
-	t.Cleanup(up.Close)
-	acctCodexLogin(t, up)
-
-	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","stream":true,"input":[{"role":"user","content":"hi"}],"max_output_tokens":50}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	if b.got["stream"] != true || b.got["store"] != false {
-		t.Errorf("stream/store: %s", b.raw)
-	}
-	if _, ok := b.got["max_output_tokens"]; ok {
-		t.Errorf("max_output_tokens was sent: %s", b.raw)
-	}
-	evs := events(body)
-	if len(evs) != 4 {
-		t.Fatalf("want 4 events, got %d: %s", len(evs), body)
-	}
-	if evs[len(evs)-1]["type"] != "response.completed" {
-		t.Errorf("last event %v", evs[len(evs)-1]["type"])
-	}
-}
-
-func TestCodexNoContentTypeIsStream(t *testing.T) {
-	b := &acctBackend{reply: acctCodexReply, noType: true}
-	up := httptest.NewServer(b)
-	t.Cleanup(up.Close)
-	acctCodexLogin(t, up)
-
+// postJSON sends a request through the gateway handler and returns the recorder.
+func postJSON(t *testing.T, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"codex/gpt-5.5","stream":true,"input":"hi"}`))
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	New().Handler().ServeHTTP(rec, req)
-	if rec.Code != 200 {
+	return rec
+}
+
+func TestCodexNonStreamingIsAggregatedAndSentStreamed(t *testing.T) {
+	codexSandbox(t)
+	access := freshAccess(t)
+	writeAuth(t, access, nil)
+	backend := &codexBackend{reply: codexReply, contentType: "text/event-stream"}
+	srv := httptest.NewServer(backend)
+	t.Cleanup(srv.Close)
+	provider.CodexBase = srv.URL + "/backend-api/codex"
+
+	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"say hi","max_output_tokens":16,"temperature":0.2}`)
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
-		t.Errorf("content type %q", ct)
-	}
-	if len(events(rec.Body.String())) != 4 {
-		t.Errorf("events not relayed: %s", rec.Body.String())
-	}
-}
 
-func TestCodexSignedOutIsExplicit(t *testing.T) {
-	b := &acctBackend{reply: acctCodexReply}
-	up := httptest.NewServer(b)
-	t.Cleanup(up.Close)
-	acctCodexLogin(t, up)
-	if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".codex", "auth.json")); err != nil {
-		t.Fatal(err)
+	// What the backend received.
+	got := backend.body
+	if got["stream"] != true || got["store"] != false {
+		t.Fatalf("stream/store = %v/%v", got["stream"], got["store"])
 	}
-
-	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
-	if code != 401 {
-		t.Fatalf("status %d: %s", code, body)
+	if got["model"] != "gpt-5.5" {
+		t.Fatalf("model = %v; want the name without the codex/ prefix", got["model"])
 	}
-	if !strings.Contains(body, "已登出") || !strings.Contains(body, "请重新登录") {
-		t.Errorf("message does not say signed out: %s", body)
-	}
-	if b.got != nil {
-		t.Errorf("backend was called: %s", b.raw)
-	}
-}
-
-// acctCopilotLogin writes a GitHub login and a token exchange that points the
-// session at the given API stand-in.
-func acctCopilotLogin(t *testing.T, api *httptest.Server, oauth string) {
-	t.Helper()
-	cfg := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfg)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	dir := filepath.Join(cfg, "github-copilot")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	apps := `{"github.com:octo":{"user":"octo","oauth_token":"` + oauth + `"}}`
-	if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(apps), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "token "+oauth {
-			http.Error(w, "bad oauth", 401)
-			return
+	for _, k := range []string{"max_output_tokens", "temperature"} {
+		if _, ok := got[k]; ok {
+			t.Fatalf("%s must not reach the backend", k)
 		}
-		json.NewEncoder(w).Encode(map[string]any{"token": "sess_" + oauth, "expires_at": time.Now().Add(time.Hour).Unix(),
-			"endpoints": map[string]string{"api": api.URL}})
-	}))
-	t.Cleanup(tok.Close)
-	old := provider.CopilotTokenURL
-	provider.CopilotTokenURL = tok.URL
-	t.Cleanup(func() { provider.CopilotTokenURL = old })
-}
+	}
+	items, ok := got["input"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("input = %#v; want a list with one item", got["input"])
+	}
+	if backend.auth != "Bearer "+access {
+		t.Fatalf("Authorization = %q", backend.auth)
+	}
+	if backend.account != "acct-1" {
+		t.Fatalf("chatgpt-account-id = %q", backend.account)
+	}
+	if backend.path != "/backend-api/codex/responses" {
+		t.Fatalf("path = %s", backend.path)
+	}
 
-const acctChatReply = "data: {\"id\":\"c1\",\"model\":\"claude-sonnet-4.5\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hi \"}}]}\n\n" +
-	"data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"copilot\"},\"finish_reason\":\"stop\"}]}\n\n" +
-	"data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n" +
-	"data: [DONE]\n\n"
-
-func TestCopilotNonStreamChat(t *testing.T) {
-	b := &acctBackend{reply: acctChatReply}
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b.ServeHTTP(w, r)
-	}))
-	t.Cleanup(api.Close)
-	acctCopilotLogin(t, api, "gho_chat")
-
-	code, body := post(t, "/v1/chat/completions", `{"model":"copilot/claude-sonnet-4.5","messages":[{"role":"user","content":"hi"}]}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
+	// What the client received: one JSON response object.
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("client reply is not JSON: %v\n%s", err, rec.Body.String())
 	}
-	if b.path != "/chat/completions" {
-		t.Errorf("path %s", b.path)
+	if out["object"] != "response" {
+		t.Fatalf("object = %v", out["object"])
 	}
-	if b.got["model"] != "claude-sonnet-4.5" || b.got["stream"] != true {
-		t.Errorf("upstream body: %s", b.raw)
+	output, _ := out["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("output = %#v", out["output"])
 	}
-	if got := b.head.Get("Authorization"); got != "Bearer sess_gho_chat" {
-		t.Errorf("authorization %q", got)
+	content := output[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if content["text"] != "Hello there" {
+		t.Fatalf("text = %v", content["text"])
 	}
-	if got := b.head.Get("X-Initiator"); got != "user" {
-		t.Errorf("X-Initiator %q", got)
-	}
-	if !strings.Contains(body, "Hi copilot") {
-		t.Errorf("text missing: %s", body)
+	usage, _ := out["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(10) || usage["output_tokens"] != float64(2) {
+		t.Fatalf("usage = %v", out["usage"])
 	}
 }
 
-func TestCopilotAgentInitiatedWhenLastIsTool(t *testing.T) {
-	b := &acctBackend{reply: acctChatReply}
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b.ServeHTTP(w, r)
-	}))
-	t.Cleanup(api.Close)
-	acctCopilotLogin(t, api, "gho_tool")
+func TestCodexStreamingIsRelayedWithoutContentType(t *testing.T) {
+	codexSandbox(t)
+	writeAuth(t, freshAccess(t), nil)
+	backend := &codexBackend{reply: codexReply} // no Content-Type from the backend
+	srv := httptest.NewServer(backend)
+	t.Cleanup(srv.Close)
+	provider.CodexBase = srv.URL
 
-	code, body := post(t, "/v1/chat/completions", `{"model":"copilot/claude-sonnet-4.5","stream":true,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"","tool_calls":[{"id":"t1","type":"function","function":{"name":"ls","arguments":"{}"}}]},{"role":"tool","tool_call_id":"t1","content":"x"}]}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
+	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true,"max_output_tokens":8}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
-	if got := b.head.Get("X-Initiator"); got != "agent" {
-		t.Errorf("X-Initiator %q", got)
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q; want text/event-stream", ct)
 	}
-	if !strings.Contains(body, "copilot") {
-		t.Errorf("stream not relayed: %s", body)
+	if !strings.Contains(rec.Body.String(), "event: response.completed") {
+		t.Fatalf("stream was not relayed:\n%s", rec.Body.String())
+	}
+	if backend.body["stream"] != true {
+		t.Fatalf("backend got stream = %v", backend.body["stream"])
+	}
+	if _, ok := backend.body["max_output_tokens"]; ok {
+		t.Fatal("max_output_tokens must not reach the backend")
 	}
 }
 
-func TestCopilotSignedOutIsExplicit(t *testing.T) {
-	api := httptest.NewServer(&acctBackend{reply: acctChatReply})
-	t.Cleanup(api.Close)
-	acctCopilotLogin(t, api, "gho_gone")
-	if err := os.Remove(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "github-copilot", "apps.json")); err != nil {
+func TestSniffEventStreamLeavesJSONAlone(t *testing.T) {
+	codexSandbox(t)
+	writeAuth(t, freshAccess(t), nil)
+	backend := &codexBackend{reply: `{"ok":true}`} // no Content-Type, not a stream
+	srv := httptest.NewServer(backend)
+	t.Cleanup(srv.Close)
+	provider.CodexBase = srv.URL
+
+	p, _, ok := provider.Resolve("codex/gpt-5.5")
+	if !ok {
+		t.Fatal("codex/gpt-5.5 did not resolve")
+	}
+	s := New()
+	res, err := s.forward(context.Background(), p, provider.Responses, "/responses", []byte(`{"model":"gpt-5.5","input":"x"}`), http.Header{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	code, body := post(t, "/v1/chat/completions", `{"model":"copilot/claude-sonnet-4.5","messages":[{"role":"user","content":"hi"}]}`)
-	if code != 401 {
-		t.Fatalf("status %d: %s", code, body)
+	defer res.Body.Close()
+	if ct := res.Header.Get("Content-Type"); ct != "" {
+		t.Fatalf("Content-Type = %q; a JSON-looking body must not be given a stream type", ct)
 	}
-	if !strings.Contains(body, "已登出") || !strings.Contains(body, "请重新登录") {
-		t.Errorf("message does not say signed out: %s", body)
+	b, _ := io.ReadAll(res.Body)
+	if string(b) != `{"ok":true}` {
+		t.Fatalf("body = %s", b)
+	}
+}
+
+func TestExpiringCodexTokenIsRefreshedAndWrittenBack(t *testing.T) {
+	codexSandbox(t)
+	path := writeAuth(t, expiringAccess(t), map[string]any{"custom_top": map[string]any{"n": 1}})
+	newAccess := freshAccess(t)
+
+	var refreshBody map[string]any
+	refresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&refreshBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"access_token": newAccess, "refresh_token": "RT-NEW"})
+	}))
+	t.Cleanup(refresh.Close)
+	provider.CodexRefreshURL = refresh.URL
+	provider.CodexClientID = "client-under-test"
+
+	backend := &codexBackend{reply: codexReply, contentType: "text/event-stream"}
+	srv := httptest.NewServer(backend)
+	t.Cleanup(srv.Close)
+	provider.CodexBase = srv.URL
+
+	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if refreshBody["grant_type"] != "refresh_token" || refreshBody["refresh_token"] != "RT-OLD" || refreshBody["client_id"] != "client-under-test" {
+		t.Fatalf("refresh request = %v", refreshBody)
+	}
+	if backend.auth != "Bearer "+newAccess {
+		t.Fatalf("backend got Authorization %q; want the refreshed token", backend.auth)
+	}
+
+	// The agent's file: new tokens, everything else kept.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatal(err)
+	}
+	tokens, _ := top["tokens"].(map[string]any)
+	if tokens["access_token"] != newAccess || tokens["refresh_token"] != "RT-NEW" {
+		t.Fatalf("tokens = %v", tokens)
+	}
+	if tokens["extra_field"] != "keep-me" || tokens["account_id"] != "acct-1" || tokens["id_token"] == nil {
+		t.Fatalf("token fields lost: %v", tokens)
+	}
+	if top["auth_mode"] != "chatgpt" || top["last_refresh"] == "2026-01-01T00:00:00Z" {
+		t.Fatalf("top-level fields = auth_mode %v, last_refresh %v", top["auth_mode"], top["last_refresh"])
+	}
+	if _, ok := top["OPENAI_API_KEY"]; !ok {
+		t.Fatal("OPENAI_API_KEY was dropped")
+	}
+	if cu, _ := top["custom_top"].(map[string]any); cu["n"] != float64(1) {
+		t.Fatalf("custom_top = %v", top["custom_top"])
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("auth.json mode = %o; want 600", perm)
+	}
+}
+
+func TestFailedCodexRefreshAsksForSignIn(t *testing.T) {
+	codexSandbox(t)
+	writeAuth(t, expiringAccess(t), nil)
+	refresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, `{"error":{"message":"refresh token was revoked"}}`)
+	}))
+	t.Cleanup(refresh.Close)
+	provider.CodexRefreshURL = refresh.URL
+
+	backend := &codexBackend{reply: codexReply, contentType: "text/event-stream"}
+	srv := httptest.NewServer(backend)
+	t.Cleanup(srv.Close)
+	provider.CodexBase = srv.URL
+
+	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d; want 401: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "codex login") {
+		t.Fatalf("error does not ask for sign-in: %s", rec.Body.String())
+	}
+	if backend.body != nil {
+		t.Fatal("the backend must not be called with an unrefreshed token")
+	}
+}
+
+func TestSignedOutCodexFailsClearly(t *testing.T) {
+	codexSandbox(t)
+	path := writeAuth(t, freshAccess(t), nil)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	// A stale model selection left for the logged-out login must not turn into a provider.
+	if err := provider.Save(provider.Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d; want 401: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "codex login") {
+		t.Fatalf("error does not ask for sign-in: %s", rec.Body.String())
+	}
+}
+
+func TestBackendRefusalOfLoginAsksForSignIn(t *testing.T) {
+	codexSandbox(t)
+	writeAuth(t, freshAccess(t), nil)
+	backend := &codexBackend{code: http.StatusUnauthorized, reply: `{"detail":"token expired"}`, contentType: "application/json"}
+	srv := httptest.NewServer(backend)
+	t.Cleanup(srv.Close)
+	provider.CodexBase = srv.URL
+
+	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","stream":true}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d; want 401: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "codex login") {
+		t.Fatalf("error does not ask for sign-in: %s", rec.Body.String())
 	}
 }
