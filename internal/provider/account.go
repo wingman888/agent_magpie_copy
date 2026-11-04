@@ -19,7 +19,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -156,25 +155,14 @@ func accountSpeaks(agent string) []Protocol {
 	return nil
 }
 
-var exclusions struct {
-	mu  sync.Mutex
-	at  time.Time
-	val []Exclusion
-}
-
 // Excluded lists logins dial recognises but does not offer, with the reason.
-// The answer is cached for about a minute.
+// Every call checks the credentials again, so a login or logout is seen at once.
 func Excluded() []Exclusion {
-	exclusions.mu.Lock()
-	defer exclusions.mu.Unlock()
-	if exclusions.at.IsZero() || time.Since(exclusions.at) >= time.Minute {
-		var val []Exclusion
-		if claudeSignedIn() {
-			val = append(val, Exclusion{Agent: "claude", Why: claudeWhy})
-		}
-		exclusions.at, exclusions.val = time.Now(), val
+	var out []Exclusion
+	if claudeSignedIn() {
+		out = append(out, Exclusion{Agent: "claude", Why: claudeWhy})
 	}
-	return append([]Exclusion{}, exclusions.val...)
+	return out
 }
 
 // ---- reading the agents' own credential files ------------------------------

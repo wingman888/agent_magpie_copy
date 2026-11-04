@@ -212,14 +212,22 @@ var (
 	sessionByOAuth = map[string]copilotSession{}
 )
 
+// copilotSessionKey identifies a cached session by both the GitHub OAuth token
+// and the exchange address, so a different account or a different stand-in
+// URL never reuses another's session.
+func copilotSessionKey(oauth string) string {
+	return CopilotTokenURL + "\x00" + oauth
+}
+
 // copilotSessionFor returns a cached session, exchanging again only when it is
-// close to expiry. The lock is held only to read and write the cache; the
-// network exchange runs without it, so a slow exchange never blocks other
-// callers reading the cache. Two callers that miss at once may both exchange;
-// the later result simply replaces the earlier one.
+// close to expiry (less than sessionSlack remains). The lock is held only to
+// read and write the cache; the network exchange runs without it, so a slow
+// exchange never blocks other callers reading the cache. Two callers that miss
+// at once may both exchange; the later result simply replaces the earlier one.
 func copilotSessionFor(ctx context.Context, oauth string) (copilotSession, error) {
+	key := copilotSessionKey(oauth)
 	sessionMu.Lock()
-	s, ok := sessionByOAuth[oauth]
+	s, ok := sessionByOAuth[key]
 	sessionMu.Unlock()
 	if ok && time.Until(s.expires) > sessionSlack {
 		return s, nil
@@ -229,7 +237,7 @@ func copilotSessionFor(ctx context.Context, oauth string) (copilotSession, error
 		return copilotSession{}, err
 	}
 	sessionMu.Lock()
-	sessionByOAuth[oauth] = s
+	sessionByOAuth[key] = s
 	sessionMu.Unlock()
 	return s, nil
 }
@@ -243,7 +251,7 @@ func copilotAPIBase() string {
 		return defaultCopilotAPI
 	}
 	sessionMu.Lock()
-	s, ok := sessionByOAuth[c.oauth]
+	s, ok := sessionByOAuth[copilotSessionKey(c.oauth)]
 	sessionMu.Unlock()
 	if ok && s.api != "" {
 		return s.api

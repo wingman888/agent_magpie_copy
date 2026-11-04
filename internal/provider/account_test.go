@@ -16,11 +16,8 @@ import (
 	"time"
 )
 
-// resetAccountState forgets cached Claude detection and Copilot sessions.
+// resetAccountState forgets cached Copilot sessions.
 func resetAccountState() {
-	exclusions.mu.Lock()
-	exclusions.at, exclusions.val = time.Time{}, nil
-	exclusions.mu.Unlock()
 	sessionMu.Lock()
 	sessionByOAuth = map[string]copilotSession{}
 	sessionMu.Unlock()
@@ -517,6 +514,33 @@ func TestCopilotSignHeadersInitiatorAndSessionCache(t *testing.T) {
 	}
 }
 
+// A cached Copilot session is keyed by the exchange address too, so pointing
+// CopilotTokenURL at another stand-in must not reuse the old session.
+func TestCopilotSessionKeyedByTokenURL(t *testing.T) {
+	sandbox(t)
+	_, first := fakeCopilot(t)
+	signInCopilot(t, "gho_TOKEN")
+	p := mustAccount(t, "copilot")
+	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	sign := func() {
+		req, _ := http.NewRequest(http.MethodPost, "http://unused.invalid/", nil)
+		if err := p.Sign(context.Background(), req, Chat, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sign()
+	sign()
+	if n := atomic.LoadInt32(first); n != 1 {
+		t.Fatalf("first server exchanges = %d; want 1", n)
+	}
+
+	_, second := fakeCopilot(t) // a different stand-in URL
+	sign()
+	if n := atomic.LoadInt32(second); n != 1 {
+		t.Fatalf("second server exchanges = %d; want 1 (no reuse across URLs)", n)
+	}
+}
+
 func TestCopilotRejectedLoginNeedsSignIn(t *testing.T) {
 	sandbox(t)
 	fakeCopilot(t)
@@ -539,7 +563,6 @@ func TestClaudeLoginIsExcludedNotOffered(t *testing.T) {
 
 	claudeCreds := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), ".credentials.json")
 	writeTestFile(t, claudeCreds, `{"claudeAiOauth":{"accessToken":"SECRET-CLAUDE-TOKEN"}}`)
-	resetAccountState() // the empty answer above is cached for a minute
 
 	ex := Excluded()
 	if len(ex) != 1 || ex[0].Agent != "claude" || ex[0].Why == "" {
@@ -552,16 +575,31 @@ func TestClaudeLoginIsExcludedNotOffered(t *testing.T) {
 		t.Fatal("claude login must never be offered as a provider")
 	}
 
-	// The answer is cached for about a minute, so removing the file is not
-	// seen until the cache is cleared.
+	// Logout is seen at once: no cache sits between the file and the answer.
 	if err := os.Remove(claudeCreds); err != nil {
 		t.Fatal(err)
 	}
-	if len(Excluded()) != 1 {
-		t.Fatal("Excluded should be cached")
-	}
-	resetAccountState()
 	if len(Excluded()) != 0 {
 		t.Fatal("Excluded should be empty after logout")
+	}
+}
+
+// Excluded reflects credential changes on every call, with no cache step
+// between the file and the answer.
+func TestExcludedIsLive(t *testing.T) {
+	sandbox(t)
+	if n := len(Excluded()); n != 0 {
+		t.Fatalf("excluded without a login: %+v", Excluded())
+	}
+	claudeCreds := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), ".credentials.json")
+	writeTestFile(t, claudeCreds, `{"claudeAiOauth":{"accessToken":"x"}}`)
+	if ex := Excluded(); len(ex) != 1 || ex[0].Agent != "claude" {
+		t.Fatalf("after login Excluded() = %+v; want claude", ex)
+	}
+	if err := os.Remove(claudeCreds); err != nil {
+		t.Fatal(err)
+	}
+	if ex := Excluded(); len(ex) != 0 {
+		t.Fatalf("after logout Excluded() = %+v; want empty", ex)
 	}
 }
