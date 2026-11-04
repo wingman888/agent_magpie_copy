@@ -19,7 +19,7 @@ const manyModels = 24
 // when fetched (see Fetch), else the models.dev catalog for the vendor.
 func (p Provider) Available() []catalog.Model {
 	if p.Account != nil {
-		return accountAvailable(p)
+		return p.accountModels()
 	}
 	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
@@ -43,7 +43,7 @@ func (p Provider) Fetched() (time.Time, bool) {
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	if p.Account != nil {
-		return fetchAccount(ctx, p)
+		return p.refreshAccount(ctx)
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
