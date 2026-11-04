@@ -85,8 +85,18 @@ func (a *Agent) Field(key string) *Field {
 			return &a.Fields[i]
 		}
 	}
+	return nil
+}
+
+// FieldByName is Field, and also accepts the label a field shows in the
+// picker when no key matches (`auth` for the "provider" key of Gemini CLI).
+// Only the gemini command uses it; Field itself is unchanged for every agent.
+func (a *Agent) FieldByName(name string) *Field {
+	if f := a.Field(name); f != nil {
+		return f
+	}
 	for i := range a.Fields {
-		if a.Fields[i].Label == key { // `dial gemini auth …`: the label as shown
+		if strings.EqualFold(a.Fields[i].Label, name) {
 			return &a.Fields[i]
 		}
 	}
