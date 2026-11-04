@@ -23,10 +23,7 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-
-	// Gemini is the Gemini API. Only clients speak it to dial; no upstream
-	// vendor is listed in Protocols for it.
-	Gemini Protocol = "gemini"
+	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -54,6 +51,11 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// Account is set when this provider borrows an agent's sign-in
+	// (codex, copilot). It never carries a token, and it is only ever
+	// written to the file as its id and model selection.
+	Account *Account `json:"account,omitempty"`
 }
 
 type file struct {
@@ -82,7 +84,20 @@ func store(f file) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
+	// Account providers are written as their id and model selection only,
+	// so no address or key from them can reach the file.
+	items := make([]any, 0, len(f.Providers))
+	for _, pr := range f.Providers {
+		if isAccountRecord(pr) {
+			items = append(items, accountRecord{ID: pr.ID, Models: pr.Models})
+			continue
+		}
+		pr.Account = nil
+		items = append(items, pr)
+	}
+	b, err := json.MarshalIndent(struct {
+		Providers []any `json:"providers"`
+	}{items}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -92,12 +107,25 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added.
+// accountRecord is what is kept for a borrowed login: its id and the models
+// the user chose.
+type accountRecord struct {
+	ID     string   `json:"id"`
+	Models []string `json:"models,omitempty"`
+}
+
+// All lists the configured providers in the order they were added, then the
+// borrowed logins that are signed in. A model selection left behind by a
+// logged-out agent does not show up.
 func All() []Provider {
-	out := load().Providers
-	for i := range out {
-		out[i] = normalize(out[i])
+	var out []Provider
+	for _, p := range load().Providers {
+		if isAccountRecord(p) {
+			continue
+		}
+		out = append(out, normalize(p))
 	}
+	out = append(out, Accounts()...)
 	return out
 }
 
@@ -131,6 +159,12 @@ func Save(p Provider) error {
 	if p.ID == "dial" {
 		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
 	}
+	// A borrowed login keeps only the models the user picked. Any address or
+	// key sent with it is ignored, unless the user built their own provider
+	// under the same id, which then takes over.
+	if isAccountID(p.ID) && !customStored(load(), p.ID) {
+		return saveAccountModels(p.ID, p.Models)
+	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
@@ -151,9 +185,43 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider.
+// saveAccountModels stores the model selection for a borrowed login.
+func saveAccountModels(id string, models []string) error {
+	f := load()
+	rec := Provider{ID: id, Models: cleanList(models)}
+	for i := range f.Providers {
+		if f.Providers[i].ID == id && !f.Providers[i].hasBase() {
+			f.Providers[i] = rec
+			return store(f)
+		}
+	}
+	f.Providers = append(f.Providers, rec)
+	return store(f)
+}
+
+// Delete removes a provider. For a borrowed login that only clears the model
+// selection; the provider stays for as long as the agent is signed in.
 func Delete(id string) error {
 	f := load()
+	if isAccountID(id) && !customStored(f, id) {
+		keep := f.Providers[:0]
+		removed := false
+		for _, p := range f.Providers {
+			if p.ID == id && !p.hasBase() {
+				removed = true
+				continue
+			}
+			keep = append(keep, p)
+		}
+		if removed {
+			f.Providers = keep
+			return store(f)
+		}
+		if accountSignedIn(id) {
+			return nil
+		}
+		return fmt.Errorf("no provider %q", id)
+	}
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -228,6 +296,9 @@ func contains(xs []string, x string) bool {
 
 // Base returns the base URL for a protocol, or "" when the vendor lacks it.
 func (p Provider) Base(proto Protocol) string {
+	if p.Account != nil {
+		return accountBase(p, proto)
+	}
 	switch proto {
 	case Chat:
 		return p.Chat
@@ -241,6 +312,9 @@ func (p Provider) Base(proto Protocol) string {
 
 // Speaks lists the protocols the vendor serves natively, preferred first.
 func (p Provider) Speaks() []Protocol {
+	if p.Account != nil {
+		return accountSpeaks(p.Account.Agent)
+	}
 	var out []Protocol
 	for _, pr := range Protocols {
 		if p.Base(pr) != "" {
@@ -281,4 +355,5 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
+// A borrowed login needs no key; it is only listed while the agent is signed in.
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
