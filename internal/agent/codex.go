@@ -29,9 +29,11 @@ func codex(home string) *Agent {
 	catalogPath := filepath.Join(dir, "dial-models.json")
 	get := func(k string) string { v, _ := edit.GetTOMLTop(path, k); return v }
 	routed := func() bool { return get("model_provider") == dialID }
+	// Codex reaches its own ChatGPT login directly, so the codex/… account
+	// models are left out of anything Codex is given through dial.
 	models := func() []catalog.Model {
 		if routed() {
-			return dialModels()
+			return dialModelsExcept("codex")
 		}
 		return catalog.Codex()
 	}
@@ -70,7 +72,7 @@ func codex(home string) *Agent {
 			); err != nil {
 				return err
 			}
-			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModels())); err != nil {
+			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModelsExcept("codex"))); err != nil {
 				return err
 			}
 			if err := edit.SetTOMLTop(path,
@@ -130,7 +132,7 @@ func codex(home string) *Agent {
 					if p := get("model_provider"); p != "" && p != dialID {
 						own = group(p, own)
 					}
-					return append(own, viaDial("")...)
+					return append(own, viaDialExcept("", "codex")...)
 				},
 			},
 			{
