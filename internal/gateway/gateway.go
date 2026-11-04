@@ -378,14 +378,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			aw.flush()
 		}
 		call.Provider = c.p.ID
-		if i > 0 {
+		// switched: someone other than the requested provider and model answered
+		switched := c.p.ID != p.ID || c.model != model
+		if switched {
 			call.Model = c.model
 		}
 		call.To = to
 		call.Status, call.Error = status, msg
 		notes := failed
-		if i > 0 {
-			// switched: also name the resting providers that were passed over
+		if switched {
+			// also name the resting providers that were passed over
 			notes = append(append([]string(nil), failed...), s.restingNotes(cands[i+1:])...)
 		}
 		call.Fallback = strings.Join(notes, "; ")
