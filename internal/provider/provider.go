@@ -23,7 +23,10 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
+
+	// Gemini is the Gemini API. Only clients speak it to dial; no upstream
+	// vendor is listed in Protocols for it.
+	Gemini Protocol = "gemini"
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -32,14 +35,10 @@ var Protocols = []Protocol{Chat, Responses, Anthropic}
 // Provider is one configured vendor.
 type Provider struct {
 	ID     string `json:"id"`
-	Name   string `json:"name,omitempty"`
+	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key,omitempty"`    // API key, as typed by the user
-
-	// Account is set on providers that borrow a signed-in agent's
-	// subscription (see Accounts). Never stored: the agent keeps the login.
-	Account *Account `json:"account,omitempty"`
+	Key    string `json:"key"`              // API key, as typed by the user
 
 	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -93,16 +92,11 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added. Account
-// providers are not here; see Accounts. Residual model picks of an account
-// id that has no address are skipped, so they never show up half-built.
+// All lists the configured providers in the order they were added.
 func All() []Provider {
-	var out []Provider
-	for _, p := range load().Providers {
-		if isAccountID(p.ID) && !userBuilt(p) {
-			continue
-		}
-		out = append(out, normalize(p))
+	out := load().Providers
+	for i := range out {
+		out[i] = normalize(out[i])
 	}
 	return out
 }
@@ -125,14 +119,9 @@ func Slug(name string) string {
 	return strings.Trim(idRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-// Save adds or replaces a provider. For an account id (codex, copilot) with
-// no user-built provider of the same id, only the model picks are kept; any
-// address or key passed in is ignored.
+// Save adds or replaces a provider.
 func Save(p Provider) error {
 	p = normalize(p)
-	if isAccountID(p.ID) && !storedUserBuilt(load().Providers, p.ID) {
-		return saveAccount(p.ID, p.Models)
-	}
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
@@ -162,39 +151,23 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider. For an account provider it only clears the
-// model picks: the provider itself stays as long as the agent is signed in,
-// because signing out is the agent's business.
+// Delete removes a provider.
 func Delete(id string) error {
-	id = strings.ToLower(strings.TrimSpace(id))
 	f := load()
-	idx := -1
-	for i, p := range f.Providers {
+	keep := f.Providers[:0]
+	found := false
+	for _, p := range f.Providers {
 		if p.ID == id {
-			idx = i
-			break
+			found = true
+			continue
 		}
+		keep = append(keep, p)
 	}
-	if isAccountID(id) && (idx < 0 || !userBuilt(f.Providers[idx])) {
-		if idx < 0 && !signedIn(id) {
-			return fmt.Errorf("no provider %q", id)
-		}
-		if idx < 0 {
-			return nil
-		}
-		f.Providers = append(f.Providers[:idx], f.Providers[idx+1:]...)
-		return store(f)
-	}
-	if idx < 0 {
+	if !found {
 		return fmt.Errorf("no provider %q", id)
 	}
-	f.Providers = append(f.Providers[:idx], f.Providers[idx+1:]...)
+	f.Providers = keep
 	return store(f)
-}
-
-// userBuilt is true for a provider the user set up with an address of its own.
-func userBuilt(p Provider) bool {
-	return p.Chat != "" || p.Responses != "" || p.Anthropic != ""
 }
 
 // keyOptional is true for local servers, which usually have no key.
@@ -308,4 +281,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
