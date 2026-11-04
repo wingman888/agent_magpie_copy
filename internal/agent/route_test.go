@@ -23,7 +23,7 @@ func accountSandbox(t *testing.T) {
 	b, _ := json.Marshal(claims)
 	idTok := "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
 	auth := `{"auth_mode":"chatgpt","tokens":{"id_token":"` + idTok + `","access_token":"at","account_id":"acc"}}`
-	writeFile(t, filepath.Join(root, "codex", "auth.json"), auth)
+	writeFile(t, filepath.Join(root, ".codex", "auth.json"), auth)
 	writeFile(t, filepath.Join(root, "config", "github-copilot", "apps.json"),
 		`{"github.com:Iv1":{"user":"octo","oauth_token":"gho_test"}}`)
 }

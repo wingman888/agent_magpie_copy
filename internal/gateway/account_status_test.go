@@ -3,6 +3,8 @@ package gateway
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,13 +16,22 @@ import (
 func TestSignedInLoginWithKeylessCustomProviderIsNotSignedOut(t *testing.T) {
 	codexSandbox(t)
 	writeAuth(t, freshAccess(t), nil)
-	if err := provider.Save(provider.Provider{ID: "codex", Chat: "http://relay.invalid/v1"}); err != nil {
+	// Written straight into dial's config, as the user would have: a keyless
+	// remote address under the id "codex". Save would treat it as a model pick.
+	writeCustom := `{"providers":[{"id":"codex","name":"My Codex","chat":"http://relay.invalid/v1"}]}`
+	if err := os.MkdirAll(filepath.Dir(provider.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(provider.Path(), []byte(writeCustom), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	rec := postJSON(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
-	if rec.Code == http.StatusUnauthorized || strings.Contains(rec.Body.String(), "codex login") {
-		t.Fatalf("status %d; a signed-in login must not be reported as signed out: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status %d; want 404 for a keyless custom provider while signed in: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "codex login") {
+		t.Fatalf("a signed-in login must not be reported as signed out: %s", rec.Body.String())
 	}
 }
 
