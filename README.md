@@ -213,6 +213,35 @@ magpie, and offers the download when it is not installed. The parameters
 stay in the fragment, which browsers never send to a server. The full guide,
 with a link builder: <https://usemagpie.ai/docs/import>.
 
+## Backup and restore
+
+`magpie backup` saves your providers (keys, extra keys, custom headers, their
+icon pictures), settings, saved profiles and every agent's current model into
+one file, sealed with a passphrase you choose:
+
+```sh
+magpie backup                          # ./magpie.magpie-backup, asks for a passphrase twice
+magpie backup ~/b.magpie-backup
+magpie backup --no-keys ~/share.magpie-backup   # no API keys, no credential-like headers: safe to share
+echo "pw" | magpie backup ~/b.magpie-backup     # no prompt: the first line of stdin is the passphrase
+
+magpie restore ~/b.magpie-backup       # on the other machine: asks for the passphrase once
+magpie restore --no-agents ~/b.magpie-backup    # providers, settings and profiles only
+```
+
+- The file is AES-256-GCM encrypted under a PBKDF2-SHA256 key derived from the
+  passphrase, and readable only by you (mode 0600). Lose the passphrase and the
+  file cannot be opened.
+- Restore never removes anything the backup does not carry. A provider with the
+  same id is updated, but a key already on this machine is kept when the backup
+  has none. Providers left without a key are listed as needing one:
+  `magpie provider key <id> <key>`.
+- Icon pictures are written only where this machine has no file of that name.
+- Agent models are set only for agents installed here; the rest are listed as
+  skipped. Running sessions keep their model until restarted.
+- Signed-in subscriptions (Claude Code, Codex accounts) are not in the backup;
+  sign in on each machine with `magpie accounts add`.
+
 ## Install
 
 Download the app for macOS, Windows or Linux from
