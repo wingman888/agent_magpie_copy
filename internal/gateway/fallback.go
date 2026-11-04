@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"bytes"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
