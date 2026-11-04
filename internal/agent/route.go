@@ -18,35 +18,13 @@ import (
 const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
-func viaDial(prefix string) []Option { return viaDialExcept(prefix, "") }
-
-// viaDialExcept is viaDial without the models of one signed-in account (an
-// agent id such as "codex"). An agent that reaches that account on its own
-// does not need it routed back through dial. "" skips nothing.
-func viaDialExcept(prefix, account string) []Option {
+func viaDial(prefix string) []Option {
 	var out []Option
 	for _, e := range provider.Catalog() {
-		if skipAccount(e.Provider, account) {
-			continue
-		}
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: sourceName(e.Provider) + " · via dial",
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
-}
-
-// skipAccount is true for a model of the named signed-in account.
-func skipAccount(p provider.Provider, account string) bool {
-	return account != "" && p.Account != nil && p.Account.Agent == account
-}
-
-// sourceName is the name a catalog note gives a model's source: the signed-in
-// user for an account, else the provider's name.
-func sourceName(p provider.Provider) string {
-	if p.Account != nil && p.Account.User != "" {
-		return p.Account.User
-	}
-	return p.Name
 }
 
 // isDial reports whether a model value is a catalog reference.
@@ -57,16 +35,10 @@ func isDial(v string) bool {
 
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-func dialModels() []catalog.Model { return dialModelsExcept("") }
-
-// dialModelsExcept is dialModels without the models of one signed-in account.
-func dialModelsExcept(account string) []catalog.Model {
+func dialModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		if skipAccount(e.Provider, account) {
-			continue
-		}
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + sourceName(e.Provider), Provider: e.Provider.Catalog, Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }
