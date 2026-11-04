@@ -78,8 +78,7 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key. When no key matches, the label the field
-// shows in the picker works too (`dial gemini auth` for the "provider" key).
+// Field looks a field up by key.
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
@@ -87,7 +86,7 @@ func (a *Agent) Field(key string) *Field {
 		}
 	}
 	for i := range a.Fields {
-		if strings.EqualFold(a.Fields[i].Label, key) {
+		if a.Fields[i].Label == key { // `dial gemini auth …`: the label as shown
 			return &a.Fields[i]
 		}
 	}
