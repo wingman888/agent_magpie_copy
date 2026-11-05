@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,8 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // Site is magpie's home; its /api/latest is the update feed.
@@ -58,15 +55,7 @@ type Asset struct {
 	SHA256 string `json:"sha256"`
 }
 
-var client = &http.Client{Timeout: 10 * time.Minute, Transport: proxiedTransport()}
-
-// proxiedTransport is the default transport with its proxy chosen by netproxy
-// (settings, then environment, then system) rather than the environment alone.
-func proxiedTransport() http.RoundTripper {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.Proxy = func(r *http.Request) (*url.URL, error) { return netproxy.For(r.URL) }
-	return t
-}
+var client = &http.Client{Timeout: 10 * time.Minute}
 
 // Latest asks the feed for the newest release.
 func Latest(ctx context.Context) (*Release, error) {

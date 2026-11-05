@@ -11,13 +11,11 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -85,14 +83,11 @@ type Server struct {
 	debug        bool
 }
 
-// proxyFor sends each upstream request through the proxy netproxy picks.
-func proxyFor(r *http.Request) (*url.URL, error) { return netproxy.For(r.URL) }
-
 // New makes a gateway.
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 proxyFor,
+			Proxy:                 http.ProxyFromEnvironment,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,
@@ -394,8 +389,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
+	// Chat Completions backends reject the developer role; send it as system.
 	if to == provider.Chat {
-		// Chat Completions backends other than OpenAI's reject the developer role
 		body = developerToSystem(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
@@ -405,10 +400,6 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", "magpie/"+Version)
-	if provider.IsOpenCodeHost(req.URL.Hostname()) {
-		// OpenCode's gateway refuses requests that name no session
-		req.Header.Set("x-opencode-session", provider.OpenCodeSession(in, body))
-	}
 	if to == provider.Anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 		for _, h := range []string{"anthropic-version", "anthropic-beta"} {
@@ -416,6 +407,10 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 				req.Header.Set(h, v)
 			}
 		}
+	}
+	// OpenCode's gateway refuses requests without a session id.
+	if p.IsOpenCode() {
+		req.Header.Set(provider.OpenCodeSessionHeader, provider.OpenCodeSession(in, body))
 	}
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
@@ -717,43 +712,6 @@ func modelOf(body []byte) string {
 // rewriteModel swaps the model field, keeping every other field as it was.
 func rewriteModel(body []byte, model string) []byte {
 	return withFields(body, map[string]any{"model": model})
-}
-
-// developerToSystem renames the "developer" message role to "system" in a
-// Chat Completions body. A body without such a message is returned as it is.
-func developerToSystem(body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"developer"`)) {
-		return body
-	}
-	var top map[string]json.RawMessage
-	if json.Unmarshal(body, &top) != nil {
-		return body
-	}
-	var msgs []map[string]json.RawMessage
-	if json.Unmarshal(top["messages"], &msgs) != nil {
-		return body
-	}
-	changed := false
-	for _, m := range msgs {
-		var role string
-		if json.Unmarshal(m["role"], &role) == nil && role == "developer" {
-			m["role"] = json.RawMessage(`"system"`)
-			changed = true
-		}
-	}
-	if !changed {
-		return body
-	}
-	raw, err := json.Marshal(msgs)
-	if err != nil {
-		return body
-	}
-	top["messages"] = raw
-	out, err := json.Marshal(top)
-	if err != nil {
-		return body
-	}
-	return out
 }
 
 // withFields sets top-level fields, keeping every other field as it was.

@@ -9,32 +9,13 @@ import (
 	"strings"
 )
 
-// IsOpenCode reports whether any base URL of the provider is on opencode.ai
-// (or a subdomain of it). Those gateways refuse requests that carry no
-// session id.
-func (p Provider) IsOpenCode() bool {
-	for _, pr := range Protocols {
-		u := p.Base(pr)
-		if u == "" {
-			continue
-		}
-		if parsed, err := url.Parse(u); err == nil && IsOpenCodeHost(parsed.Hostname()) {
-			return true
-		}
-	}
-	return false
-}
+// OpenCodeSessionHeader is the header the OpenCode gateway (opencode.ai)
+// insists on. Requests without it are refused.
+const OpenCodeSessionHeader = "x-opencode-session"
 
-// IsOpenCodeHost is true for opencode.ai and its subdomains, and false for
-// look-alikes such as notopencode.ai.
-func IsOpenCodeHost(host string) bool {
-	h := strings.TrimSuffix(strings.ToLower(host), ".")
-	return h == "opencode.ai" || strings.HasSuffix(h, ".opencode.ai")
-}
-
-// openCodeSessionHeaders are the headers an agent may use to name its session,
-// in the order they are preferred.
-var openCodeSessionHeaders = []string{
+// openCodeSessionSources are the request headers an agent may already carry a
+// session id in, in priority order. The first non-empty value is used as is.
+var openCodeSessionSources = []string{
 	"x-opencode-session",
 	"x-session-affinity",
 	"x-session-id",
@@ -43,26 +24,50 @@ var openCodeSessionHeaders = []string{
 	"x-claude-code-session-id",
 }
 
-// OpenCodeSession picks the x-opencode-session value for a request: the
-// agent's own session id when it sent one, otherwise a stable id derived from
-// the conversation's first user message, so later turns keep the same value.
-func OpenCodeSession(in http.Header, body []byte) string {
-	for _, h := range openCodeSessionHeaders {
-		if v := strings.TrimSpace(in.Get(h)); v != "" {
-			return v
+// IsOpenCode reports whether the provider's API host is opencode.ai or one of
+// its subdomains. Those hosts need OpenCodeSessionHeader.
+func (p Provider) IsOpenCode() bool {
+	for _, pr := range Protocols {
+		if u := p.Base(pr); u != "" && isOpenCodeHost(baseHostname(u)) {
+			return true
+		}
+	}
+	return false
+}
+
+// baseHostname returns the lower-cased host of a base URL without port.
+func baseHostname(u string) string {
+	if pu, err := url.Parse(strings.TrimSpace(u)); err == nil && pu.Hostname() != "" {
+		return strings.ToLower(pu.Hostname())
+	}
+	return strings.ToLower(HostOf(u))
+}
+
+func isOpenCodeHost(h string) bool {
+	return h == "opencode.ai" || strings.HasSuffix(h, ".opencode.ai")
+}
+
+// OpenCodeSession picks the value of OpenCodeSessionHeader for one request.
+// The agent's own session header wins, taken as is. Otherwise the id is
+// derived from the first user message of the conversation, so later turns of
+// the same conversation keep the same id and other conversations get another.
+// h may be nil; body is the JSON request body in any of magpie's client
+// shapes (Chat messages, Responses input, Anthropic messages).
+func OpenCodeSession(h http.Header, body []byte) string {
+	for _, k := range openCodeSessionSources {
+		if h != nil {
+			if v := strings.TrimSpace(h.Get(k)); v != "" {
+				return v
+			}
 		}
 	}
 	sum := sha256.Sum256([]byte(firstUserText(body)))
-	return "magpie-" + hex.EncodeToString(sum[:8])
+	return "magpie-" + hex.EncodeToString(sum[:])[:24]
 }
 
-type chatMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-}
-
-// firstUserText returns the text of the first user message of a Chat
-// Completions (messages) or Responses (input) body, or "" if there is none.
+// firstUserText is the text of the first user message in a request body. It
+// reads "messages" (Chat, Anthropic) or "input" (Responses, where input may
+// also be a bare string, which is then the user's message).
 func firstUserText(body []byte) string {
 	var v struct {
 		Messages json.RawMessage `json:"messages"`
@@ -71,34 +76,42 @@ func firstUserText(body []byte) string {
 	if json.Unmarshal(body, &v) != nil {
 		return ""
 	}
-	if len(v.Messages) > 0 {
-		return firstUserIn(v.Messages)
-	}
-	if len(v.Input) == 0 {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(v.Input, &s) == nil {
-		return s
-	}
-	return firstUserIn(v.Input)
-}
-
-func firstUserIn(raw json.RawMessage) string {
-	var items []chatMessage
-	if json.Unmarshal(raw, &items) != nil {
-		return ""
-	}
-	for _, m := range items {
-		if m.Role == "user" {
-			return contentText(m.Content)
+	if len(v.Input) > 0 {
+		var s string
+		if json.Unmarshal(v.Input, &s) == nil {
+			return s
 		}
+		if t, ok := userTextIn(v.Input); ok {
+			return t
+		}
+	}
+	if t, ok := userTextIn(v.Messages); ok {
+		return t
 	}
 	return ""
 }
 
-// contentText reads message content that is either a string or a list of
-// parts carrying "text".
+// userTextIn scans a JSON array of messages or items for the first one whose
+// role is "user" and returns its text.
+func userTextIn(raw json.RawMessage) (string, bool) {
+	var items []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &items) != nil {
+		return "", false
+	}
+	for _, it := range items {
+		if it.Role != "user" {
+			continue
+		}
+		return contentText(it.Content), true
+	}
+	return "", false
+}
+
+// contentText flattens message content: a string, or an array of parts whose
+// text is concatenated in order.
 func contentText(raw json.RawMessage) string {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
@@ -107,12 +120,12 @@ func contentText(raw json.RawMessage) string {
 	var parts []struct {
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(raw, &parts) != nil {
-		return ""
+	if json.Unmarshal(raw, &parts) == nil {
+		var b strings.Builder
+		for _, p := range parts {
+			b.WriteString(p.Text)
+		}
+		return b.String()
 	}
-	var b strings.Builder
-	for _, p := range parts {
-		b.WriteString(p.Text)
-	}
-	return b.String()
+	return ""
 }

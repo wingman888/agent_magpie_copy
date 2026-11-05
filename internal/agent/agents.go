@@ -162,7 +162,8 @@ func magpieProviderJSON(shape string) any {
 	case "pi":
 		var ms []map[string]any
 		for _, m := range models {
-			ms = append(ms, piModel(m))
+			// reasoning lets Pi offer its thinking levels for the model
+			ms = append(ms, map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0})
 		}
 		if ms == nil {
 			ms = []map[string]any{}
@@ -170,23 +171,6 @@ func magpieProviderJSON(shape string) any {
 		return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
 	}
 	return nil
-}
-
-// piModel is one model entry in Pi's models.json. reasoning lets Pi offer its
-// thinking levels for the model; thinkingLevelMap declares the levels Pi does
-// not know by default (xhigh, max) so it offers them too, under their own names.
-func piModel(m catalog.Model) map[string]any {
-	e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-	levels := map[string]string{}
-	for _, l := range m.Efforts {
-		if l == "max" || l == "xhigh" {
-			levels[l] = l
-		}
-	}
-	if len(levels) > 0 {
-		e["thinkingLevelMap"] = levels
-	}
-	return e
 }
 
 func opencode(home, cfg string) *Agent {

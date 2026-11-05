@@ -2,130 +2,137 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-func TestDeveloperToSystem(t *testing.T) {
-	in := []byte(`{"model":"m1","temperature":0.5,"messages":[{"role":"developer","content":"be terse"},{"role":"user","content":"hi"}]}`)
-	out := developerToSystem(in)
-	var got struct {
-		Model       string           `json:"model"`
-		Temperature float64          `json:"temperature"`
-		Messages    []map[string]any `json:"messages"`
-	}
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("%v: %s", err, out)
-	}
-	if got.Model != "m1" || got.Temperature != 0.5 || len(got.Messages) != 2 {
-		t.Fatalf("other fields changed: %s", out)
-	}
-	if got.Messages[0]["role"] != "system" || got.Messages[0]["content"] != "be terse" || got.Messages[1]["role"] != "user" || got.Messages[1]["content"] != "hi" {
-		t.Errorf("messages: %s", out)
-	}
-
-	plain := []byte(`{"model":"m1","messages":[{"role":"system","content":"x"},{"role":"user","content":"developer"}]}`)
-	if got := developerToSystem(plain); !bytes.Equal(got, plain) {
-		t.Errorf("body without developer role changed: %s", got)
-	}
-	// the word alone, inside content, must not trigger a rewrite either
-	quoted := []byte(`{"messages":[{"role":"user","content":"\"developer\""}]}`)
-	if got := developerToSystem(quoted); !bytes.Equal(got, quoted) {
-		t.Errorf("quoted word changed body: %s", got)
-	}
+// captureTransport records upstream requests instead of sending them.
+type captureTransport struct {
+	reqs []*http.Request
+	bods [][]byte
 }
 
-func TestDeveloperRoleReachesChatUpstreamAsSystem(t *testing.T) {
-	f := &fake{t: t, ctype: "application/json", reply: `{"id":"c1","object":"chat.completion","choices":[]}`}
-	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1/chat/completions", `{"model":"fake/m1","messages":[{"role":"developer","content":"rules"},{"role":"user","content":"hi"}]}`)
-	if code != 200 {
-		t.Fatalf("%d %s", code, body)
-	}
-	if !bytes.Contains(f.got, []byte(`"role":"system"`)) || bytes.Contains(f.got, []byte(`"developer"`)) || !bytes.Contains(f.got, []byte(`"content":"rules"`)) {
-		t.Errorf("upstream body: %s", f.got)
-	}
+func (c *captureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	b, _ := io.ReadAll(r.Body)
+	c.reqs = append(c.reqs, r)
+	c.bods = append(c.bods, b)
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader("{}")), Request: r}, nil
 }
 
-// redirect sends every request to one local address, keeping the URL the
-// gateway built, so tests can exercise hosts such as opencode.ai.
-type redirect struct{ addr string }
-
-func (r redirect) RoundTrip(req *http.Request) (*http.Response, error) {
-	c := req.Clone(req.Context())
-	c.URL.Scheme = "http"
-	c.URL.Host = r.addr
-	c.Host = r.addr
-	return http.DefaultTransport.RoundTrip(c)
-}
-
-func TestOpenCodeGatewaySessionHeader(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	f := &fake{t: t, ctype: "application/json", reply: `{"id":"r1","object":"response","output":[]}`}
-	up := httptest.NewServer(f)
-	defer up.Close()
-	addr := strings.TrimPrefix(up.URL, "http://")
-	if err := provider.Save(provider.Provider{ID: "oc", Name: "OC", Key: "k", Models: []string{"m1"},
-		Responses: "https://opencode.ai/zen/go/v1", Chat: "https://opencode.ai/zen/go/v1"}); err != nil {
+func forwardCapture(t *testing.T, p provider.Provider, to provider.Protocol, body string, in http.Header) (*http.Request, []byte) {
+	t.Helper()
+	ct := &captureTransport{}
+	s := New()
+	s.client = &http.Client{Transport: ct}
+	res, err := s.forward(context.Background(), p, to, pathOf(to), []byte(body), in)
+	if err != nil {
 		t.Fatal(err)
 	}
-	s := New()
-	s.client = &http.Client{Transport: redirect{addr: addr}}
-	send := func(path, body string, hdr map[string]string) {
-		t.Helper()
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", path, strings.NewReader(body))
-		for k, v := range hdr {
-			req.Header.Set(k, v)
-		}
-		s.Handler().ServeHTTP(rec, req)
-		if rec.Code != 200 {
-			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
-		}
+	res.Body.Close()
+	if len(ct.reqs) != 1 {
+		t.Fatalf("want 1 upstream request, got %d", len(ct.reqs))
 	}
+	return ct.reqs[0], ct.bods[0]
+}
 
-	// no agent session: a stable magpie- id for the conversation
-	send("/v1/responses", `{"model":"oc/m1","input":"first question"}`, nil)
-	first := f.head.Get("x-opencode-session")
-	if !strings.HasPrefix(first, "magpie-") {
-		t.Fatalf("no magpie session sent: %q", first)
-	}
-	send("/v1/responses", `{"model":"oc/m1","input":[{"type":"message","role":"user","content":"first question"}]}`, nil)
-	if got := f.head.Get("x-opencode-session"); got != first {
-		t.Errorf("later turn session %q, want %q", got, first)
-	}
-	send("/v1/responses", `{"model":"oc/m1","input":"another chat"}`, nil)
-	if got := f.head.Get("x-opencode-session"); got == first {
-		t.Errorf("different conversation shares session %q", got)
-	}
+func TestDeveloperRoleBecomesSystemForChat(t *testing.T) {
+	in := `{"model":"deepseek-v4","stream":true,"temperature":0.2,"messages":[{"role":"developer","content":"be brief"},{"role":"user","content":"hi"}]}`
+	p := provider.Provider{ID: "deepseek", Chat: "https://api.deepseek.com/v1"}
+	_, body := forwardCapture(t, p, provider.Chat, in, nil)
 
-	// the agent's own session id is used as-is
-	send("/v1/responses", `{"model":"oc/m1","input":"first question"}`, map[string]string{"session_id": "agent-42"})
-	if got := f.head.Get("x-opencode-session"); got != "agent-42" {
-		t.Errorf("agent session %q, want agent-42", got)
+	var got struct {
+		Model       string `json:"model"`
+		Stream      bool   `json:"stream"`
+		Temperature float64
+		Messages    []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
 	}
-
-	// Chat Completions too
-	send("/v1/chat/completions", `{"model":"oc/m1","messages":[{"role":"user","content":"first question"}]}`, nil)
-	if got := f.head.Get("x-opencode-session"); got != first {
-		t.Errorf("chat session %q, want %q", got, first)
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Model != "deepseek-v4" || !got.Stream || got.Temperature != 0.2 {
+		t.Errorf("other fields changed: %s", body)
+	}
+	if len(got.Messages) != 2 || got.Messages[0].Role != "system" || got.Messages[0].Content != "be brief" ||
+		got.Messages[1].Role != "user" || got.Messages[1].Content != "hi" {
+		t.Errorf("messages = %+v, want system/user", got.Messages)
 	}
 }
 
-func TestNonOpenCodeUpstreamGetsNoSessionHeader(t *testing.T) {
-	f := &fake{t: t, ctype: "application/json", reply: `{"id":"r1","object":"response","output":[]}`}
-	setup(t, provider.Responses, f)
-	code, body := post(t, "/v1/responses", `{"model":"fake/m1","input":"hi"}`)
-	if code != 200 {
-		t.Fatalf("%d %s", code, body)
+func TestBodyWithoutDeveloperUnchanged(t *testing.T) {
+	in := `{"model":"m",  "messages" : [ {"role":"system","content":"x"} ] }`
+	if got := developerToSystem([]byte(in)); string(got) != in {
+		t.Errorf("body changed without developer message: %s", got)
 	}
-	if got := f.head.Get("x-opencode-session"); got != "" {
-		t.Errorf("non-OpenCode upstream got session header %q", got)
+	p := provider.Provider{ID: "x", Chat: "https://api.example.com/v1"}
+	_, body := forwardCapture(t, p, provider.Chat, in, nil)
+	if string(body) != in {
+		t.Errorf("forwarded body changed: %s", body)
+	}
+}
+
+func TestDeveloperRewriteOnlyForChat(t *testing.T) {
+	in := `{"model":"m","input":[{"role":"developer","content":"x"}]}`
+	p := provider.Provider{ID: "x", Responses: "https://api.example.com/v1"}
+	_, body := forwardCapture(t, p, provider.Responses, in, nil)
+	if string(body) != in {
+		t.Errorf("responses body rewritten: %s", body)
+	}
+}
+
+func TestOpenCodeSessionHeaderSentOnlyToOpenCode(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	oc := provider.Provider{ID: "opencode-go", Chat: "https://opencode.ai/zen/go/v1"}
+
+	req, _ := forwardCapture(t, oc, provider.Chat, body, nil)
+	got := req.Header.Get("x-opencode-session")
+	if !strings.HasPrefix(got, "magpie-") {
+		t.Fatalf("missing derived session header, got %q", got)
+	}
+	again, _ := forwardCapture(t, oc, provider.Chat, body, nil)
+	if again.Header.Get("x-opencode-session") != got {
+		t.Errorf("same conversation gave a different session")
+	}
+
+	in := http.Header{}
+	in.Set("X-Session-Id", "agent-sess")
+	req, _ = forwardCapture(t, oc, provider.Chat, body, in)
+	if v := req.Header.Get("x-opencode-session"); v != "agent-sess" {
+		t.Errorf("agent session = %q, want agent-sess", v)
+	}
+
+	other := provider.Provider{ID: "deepseek", Chat: "https://api.deepseek.com/v1"}
+	req, _ = forwardCapture(t, other, provider.Chat, body, in)
+	if v := req.Header.Get("x-opencode-session"); v != "" {
+		t.Errorf("non-OpenCode provider received x-opencode-session=%q", v)
+	}
+}
+
+func TestOpenCodeSessionResponsesRequest(t *testing.T) {
+	body := `{"model":"m","input":"hi"}`
+	oc := provider.Provider{ID: "opencode-zen", Responses: "https://opencode.ai/zen/v1"}
+	req, _ := forwardCapture(t, oc, provider.Responses, body, nil)
+	if !strings.HasPrefix(req.Header.Get("x-opencode-session"), "magpie-") {
+		t.Errorf("responses request lacks derived session header")
+	}
+}
+
+func TestDeveloperToSystemKeepsOtherMessages(t *testing.T) {
+	in := `{"messages":[{"role":"developer","content":[{"type":"text","text":"a"}]},{"role":"user","content":"b"}]}`
+	out := developerToSystem([]byte(in))
+	if bytes.Contains(out, []byte(`"developer"`)) || !bytes.Contains(out, []byte(`"system"`)) {
+		t.Errorf("rewrite failed: %s", out)
+	}
+	if !bytes.Contains(out, []byte(`"text":"a"`)) || !bytes.Contains(out, []byte(`"content":"b"`)) {
+		t.Errorf("content lost: %s", out)
 	}
 }

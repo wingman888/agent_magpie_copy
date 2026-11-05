@@ -81,7 +81,7 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	if p.IsOpenCode() {
-		req.Header.Set("x-opencode-session", OpenCodeSession(nil, body))
+		req.Header.Set(OpenCodeSessionHeader, OpenCodeSession(nil, body))
 	}
 	if err := p.Sign(ctx, req, proto, body); err != nil {
 		r.Error = err.Error()

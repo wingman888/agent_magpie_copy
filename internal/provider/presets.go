@@ -117,11 +117,11 @@ var presets = []PresetDef{
 			{ID: "cn", Name: "China Mainland", Chat: "https://cn.yylx.io/v1", Anthropic: "https://cn.yylx.io"},
 		}},
 
-	{ID: "opencode-go", Name: "OpenCode Go", Icon: "opencode", Kind: KindRelay,
+	{ID: "opencode-go", Name: "OpenCode Go", Icon: "opencode", Kind: KindVendor, Catalog: "opencode-go",
 		Chat: "https://opencode.ai/zen/go/v1", Responses: "https://opencode.ai/zen/go/v1", Anthropic: "https://opencode.ai/zen/go",
-		Note:    "monthly subscription · open models",
+		Note:    "monthly subscription · open coding models",
 		Website: "https://opencode.ai/docs/go", KeysURL: "https://opencode.ai/auth"},
-	{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindRelay,
+	{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindRelay, Catalog: "opencode",
 		Chat: "https://opencode.ai/zen/v1", Responses: "https://opencode.ai/zen/v1", Anthropic: "https://opencode.ai/zen",
 		Website: "https://opencode.ai/docs/zen", KeysURL: "https://opencode.ai/auth"},
 
