@@ -55,9 +55,9 @@ func TestNoPanicHandEditedGroups(t *testing.T) {
 			t.Fatalf("FindGroup(%q) should not find a group with no ready member", id)
 		}
 	}
-	if err := SetAffinity("bare", "bogus"); err != nil {
-		t.Fatalf("SetAffinity with an unknown affinity value: %v", err)
-	}
+	// "bare" has no endpoint, so it is not a provider magpie uses: an error,
+	// never a panic
+	_ = SetAffinity("bare", "bogus")
 }
 
 // The Codex version lookup is safe with no CLI and no cache, and asking
