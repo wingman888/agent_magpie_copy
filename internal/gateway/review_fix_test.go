@@ -60,8 +60,10 @@ func TestProviderAffinityReachesGroup(t *testing.T) {
 	gc := &groupCall{group: "x", session: "sess-pf", turns: 2}
 	gc.answered(first[1], 0)
 	cs, _, aff := s.planGroup(provider.Group{ID: "x"}, ms, provider.Chat, gc)
-	if aff == nil || aff.Mode != provider.AffinitySession || aff.Why != "session" || !aff.Kept {
-		t.Fatalf("affinity %+v, want session kept", aff)
+	// the decision is the member provider's session affinity, but the trace
+	// shows the group's own setting, which is unset (I4)
+	if aff == nil || aff.Mode != "" || aff.Why != "session" || !aff.Kept {
+		t.Fatalf("affinity %+v, want group's own mode and session kept", aff)
 	}
 	if cs[0].rest != first[1].rest {
 		t.Fatalf("first is %s, want the answerer %s", cs[0].rest, first[1].rest)
