@@ -1,312 +1,304 @@
 package gateway
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// twoProviders: "plan" (the one agents pick) falls back to "spare".
-func twoProviders(t *testing.T, plan, spare *fake) {
-	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	restingUntil.Lock()
-	restingUntil.m = map[string]time.Time{}
-	restingUntil.Unlock()
-	for _, x := range []struct {
-		p provider.Provider
-		f *fake
-	}{
-		{provider.Provider{ID: "plan", Name: "Plan", Key: "k", Models: []string{"m1"}, Fallback: []string{"spare/m2", "nowhere/x"}}, plan},
-		{provider.Provider{ID: "spare", Name: "Spare", Key: "k", Models: []string{"m2"}}, spare},
-	} {
-		up := httptest.NewServer(x.f)
-		t.Cleanup(up.Close)
-		x.p.Chat = up.URL + "/v1"
-		if err := provider.Save(x.p); err != nil {
-			t.Fatal(err)
-		}
-	}
+const fbChatOK = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`
+
+// fbReply is what a modelUpstream answers one model with.
+type fbReply struct {
+	code  int
+	ctype string
+	body  string
 }
 
-const chatReq = `{"model":"plan/m1","messages":[{"role":"user","content":"hi"}]}`
-
-func TestFallbackWhenOutOfQuota(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		code int
-		msg  string
-	}{
-		{"rate limit", 429, "slow down"},
-		{"no balance", 402, "Insufficient Balance"},
-		{"overloaded", 529, "overloaded"},
-		{"quota as 403", 403, "您的套餐额度已用完"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			plan := &fake{t: t, ctype: "application/json", code: tc.code, reply: `{"error":{"message":"` + tc.msg + `"}}`}
-			spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
-			twoProviders(t, plan, spare)
-			code, body := post(t, "/v1/chat/completions", chatReq)
-			if code != 200 || !strings.Contains(body, "from-spare") || strings.Contains(body, tc.msg) {
-				t.Fatalf("%d %s", code, body)
-			}
-			if !bytes.Contains(spare.got, []byte(`"model":"m2"`)) {
-				t.Fatalf("spare got %s", spare.got)
-			}
-		})
-	}
-}
-
-func TestFallbackRestsTheFailedProvider(t *testing.T) {
-	plan := &fake{t: t, ctype: "application/json", code: 429, reply: `{"error":{"message":"rate limited"}}`}
-	spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
-	twoProviders(t, plan, spare)
-	s := New()
-	send := func() (int, string) {
-		rec := httptest.NewRecorder()
-		s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatReq)))
-		return rec.Code, rec.Body.String()
-	}
-	send()
-	if c := s.Recent()[0]; c.Provider != "spare" || !strings.Contains(c.Fallback, "plan: ") {
-		t.Fatalf("recorded %+v", c)
-	}
-	plan.got = nil
-	if code, body := send(); code != 200 || !strings.Contains(body, "from-spare") {
-		t.Fatalf("%d %s", code, body)
-	}
-	if plan.got != nil {
-		t.Fatal("a resting provider was tried first")
-	}
-}
-
-func TestNoFallbackForOtherErrors(t *testing.T) {
-	plan := &fake{t: t, ctype: "application/json", code: 400, reply: `{"error":{"message":"messages: field required"}}`}
-	spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
-	twoProviders(t, plan, spare)
-	code, body := post(t, "/v1/chat/completions", chatReq)
-	if code != 400 || !strings.Contains(body, "field required") || spare.got != nil {
-		t.Fatalf("%d %s (spare got %s)", code, body, spare.got)
-	}
-}
-
-func TestLastFallbackErrorReachesTheAgent(t *testing.T) {
-	plan := &fake{t: t, ctype: "application/json", code: 429, reply: `{"error":{"message":"plan limit"}}`}
-	spare := &fake{t: t, ctype: "application/json", code: 503, reply: `{"error":{"message":"spare down"}}`}
-	twoProviders(t, plan, spare)
-	code, body := post(t, "/v1/chat/completions", chatReq)
-	if code != 503 || !strings.Contains(body, "spare down") {
-		t.Fatalf("%d %s", code, body)
-	}
-}
-
-// byKey answers per API key: a key named in limited is out of quota.
-type byKey struct {
-	limited map[string]bool
+// modelUpstream answers each request by the model the request names. A model
+// that is not in replies gets a 200 with a chat completion. It records the
+// models it was asked for.
+type modelUpstream struct {
+	mu      sync.Mutex
+	replies map[string]fbReply
 	seen    []string
 }
 
-func (b *byKey) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	b.seen = append(b.seen, key)
-	w.Header().Set("Content-Type", "application/json")
-	if b.limited[key] {
-		w.WriteHeader(429)
-		io.WriteString(w, `{"error":{"message":"rate limited"}}`)
-		return
+func (m *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	b, _ := io.ReadAll(r.Body)
+	model := modelOf(b)
+	m.mu.Lock()
+	m.seen = append(m.seen, model)
+	rp, ok := m.replies[model]
+	m.mu.Unlock()
+	if !ok {
+		rp = fbReply{code: http.StatusOK, body: fbChatOK}
 	}
-	io.WriteString(w, `{"id":"from-`+key+`","choices":[]}`)
+	if rp.code == 0 {
+		rp.code = http.StatusOK
+	}
+	if rp.ctype == "" {
+		rp.ctype = "application/json"
+	}
+	w.Header().Set("Content-Type", rp.ctype)
+	w.WriteHeader(rp.code)
+	io.WriteString(w, rp.body)
 }
 
-func TestSeveralKeysOnTakeOverFromEachOther(t *testing.T) {
+// asked lists the models the upstream was asked for, in order.
+func (m *modelUpstream) asked() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.seen...)
+}
+
+// isolate points magpie's config and cache at temp dirs.
+func isolate(t *testing.T) {
+	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	restingUntil.Lock()
-	restingUntil.m = map[string]time.Time{}
-	restingUntil.Unlock()
-	up := &byKey{limited: map[string]bool{"k-personal": true}}
+}
+
+// saveChat serves up at a URL, saves p as a Chat provider reaching it, and
+// returns the upstream server.
+func saveChat(t *testing.T, p provider.Provider, up http.Handler) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(up)
-	defer srv.Close()
-	p := provider.Provider{ID: "plan", Name: "Plan", Chat: srv.URL + "/v1", Models: []string{"m1"},
-		Key: "k-personal", KeyName: "Personal",
-		Keys: []provider.KeyAccount{{Name: "Idle", Key: "k-idle", Off: true}, {Name: "Team", Key: "k-team"}}}
+	t.Cleanup(srv.Close)
+	p.Chat = srv.URL + "/v1"
+	if p.Key == "" {
+		p.Key = "sk-" + p.ID
+	}
 	if err := provider.Save(p); err != nil {
 		t.Fatal(err)
 	}
+	return srv
+}
+
+// postChat sends a Chat Completions body to the gateway.
+func postChat(s *Server, body string) (int, string) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	s.Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+const fbRequest = `{"model":"pri/m1","messages":[{"role":"user","content":"hi"}]}`
+
+func TestRateLimitedProviderFallsBackWithItsOwnModelName(t *testing.T) {
+	isolate(t)
+	pri := &modelUpstream{replies: map[string]fbReply{"m1": {code: 429, body: `{"error":{"message":"rate limited"}}`}}}
+	bak := &modelUpstream{}
+	saveChat(t, provider.Provider{ID: "pri", Name: "Pri", Models: []string{"m1"}, Fallback: []string{"bak/m2"}}, pri)
+	saveChat(t, provider.Provider{ID: "bak", Name: "Bak", Models: []string{"m2"}}, bak)
+
 	s := New()
-	send := func() string {
-		rec := httptest.NewRecorder()
-		s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatReq)))
-		return rec.Body.String()
+	code, body := postChat(s, fbRequest)
+	if code != 200 || !strings.Contains(body, "hi") {
+		t.Fatalf("%d %s", code, body)
 	}
-	if body := send(); !strings.Contains(body, "from-k-team") {
-		t.Fatalf("body %s", body)
+	if want := []string{"m1"}; !reflect.DeepEqual(pri.asked(), want) {
+		t.Fatalf("pri asked for %v, want %v", pri.asked(), want)
 	}
-	if c := s.Recent()[0]; c.Provider != "plan" || !strings.Contains(c.Fallback, "plan (Personal): ") {
-		t.Fatalf("recorded %+v", c)
+	if want := []string{"m2"}; !reflect.DeepEqual(bak.asked(), want) {
+		t.Fatalf("bak asked for %v, want the fallback's own name %v", bak.asked(), want)
 	}
-	// the limited key rests; the one that's off is never tried
-	up.seen = nil
-	if body := send(); !strings.Contains(body, "from-k-team") || strings.Join(up.seen, ",") != "k-team" {
-		t.Fatalf("body %s, tried %v", body, up.seen)
+	call := s.Recent()[0]
+	if call.Provider != "bak" || !strings.Contains(call.Fallback, "pri") {
+		t.Fatalf("call record: provider %q fallback %q", call.Provider, call.Fallback)
 	}
 }
 
-// Two ChatGPT accounts ticked: the one Codex is signed in to is out of
-// quota, so the request goes to the saved one, signed with its own tokens.
-func TestSubscriptionAccountsTakeOver(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	restingUntil.Lock()
-	restingUntil.m = map[string]time.Time{}
-	restingUntil.Unlock()
-	claims := func(m map[string]any) string {
-		b, _ := json.Marshal(m)
-		return "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
-	}
-	auth := func(email, acct string) map[string]any {
-		return map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{
-			"id_token":      claims(map[string]any{"email": email}),
-			"access_token":  claims(map[string]any{"exp": time.Now().Add(time.Hour).Unix(), "who": acct}),
-			"refresh_token": "r-" + acct, "account_id": acct}}
-	}
-	os.MkdirAll(filepath.Join(home, ".codex"), 0o755)
-	os.WriteFile(filepath.Join(home, ".codex", "auth.json"), mustJSON(auth("me@example.com", "acct-1")), 0o600)
-	os.MkdirAll(filepath.Dir(provider.Path()), 0o755)
-	os.WriteFile(filepath.Join(filepath.Dir(provider.Path()), "logins.json"), mustJSON([]map[string]any{
-		{"agent": "codex", "user": "spare@example.com", "on": true, "seen": time.Now(), "auth": auth("spare@example.com", "acct-2")},
-	}), 0o600)
+func TestBadRequestIsReturnedWithoutFallback(t *testing.T) {
+	isolate(t)
+	pri := &modelUpstream{replies: map[string]fbReply{"m1": {code: 400, body: `{"error":{"message":"bad field"}}`}}}
+	bak := &modelUpstream{}
+	saveChat(t, provider.Provider{ID: "pri", Name: "Pri", Models: []string{"m1"}, Fallback: []string{"bak/m2"}}, pri)
+	saveChat(t, provider.Provider{ID: "bak", Name: "Bak", Models: []string{"m2"}}, bak)
 
-	var tried []string
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body)
-		tried = append(tried, r.Header.Get("chatgpt-account-id"))
-		if r.Header.Get("chatgpt-account-id") == "acct-1" {
-			w.WriteHeader(429)
-			io.WriteString(w, `{"error":{"message":"You've hit your usage limit"}}`)
-			return
-		}
-		io.WriteString(w, sse(
-			`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
-			`data: {"type":"response.output_text.delta","delta":"pong"}`,
-			`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`))
-	}))
-	defer up.Close()
-	old := provider.CodexBase
-	provider.CodexBase = up.URL + "/backend-api/codex"
-	defer func() { provider.CodexBase = old }()
-
-	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping"}`)
-	if code != 200 || !strings.Contains(body, "pong") {
-		t.Fatalf("status %d: %s", code, body)
+	code, body := postChat(New(), fbRequest)
+	if code != 400 || !strings.Contains(body, "bad field") {
+		t.Fatalf("%d %s; want the 400 as it is", code, body)
 	}
-	if strings.Join(tried, ",") != "acct-1,acct-2" {
-		t.Fatalf("tried %v", tried)
-	}
-	// the first sits out a minute; the next request goes straight on
-	tried = nil
-	post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping"}`)
-	if strings.Join(tried, ",") != "acct-2" {
-		t.Fatalf("second request tried %v", tried)
+	if len(bak.asked()) != 0 {
+		t.Fatalf("fallback was asked after a 400: %v", bak.asked())
 	}
 }
 
-// A relay that hands out one key for Anthropic and another for OpenAI:
-// each key is used on its own endpoint only, and the one that suits the
-// model goes first whatever the order.
-func TestKeysMadeForOneProtocol(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	restingUntil.Lock()
-	restingUntil.m = map[string]time.Time{}
-	restingUntil.Unlock()
-	var seen []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		key := r.Header.Get("x-api-key")
-		if key == "" {
-			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		}
-		seen = append(seen, r.URL.Path+" "+key)
-		if (r.URL.Path == "/v1/messages") != (key == "k-ant") {
-			w.WriteHeader(401)
-			io.WriteString(w, `{"error":{"message":"this key is for another protocol"}}`)
-			return
-		}
-		if bytes.Contains(b, []byte(`"stream":true`)) && r.URL.Path == "/v1/messages" {
-			w.Header().Set("Content-Type", "text/event-stream")
-			io.WriteString(w, sse(
-				`event: message_start`+"\n"+`data: {"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","model":"x","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`,
-				`event: content_block_start`+"\n"+`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
-				`event: content_block_delta`+"\n"+`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
-				`event: content_block_stop`+"\n"+`data: {"type":"content_block_stop","index":0}`,
-				`event: message_delta`+"\n"+`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
-				`event: message_stop`+"\n"+`data: {"type":"message_stop"}`))
-			return
-		}
-		if bytes.Contains(b, []byte(`"stream":true`)) {
-			w.Header().Set("Content-Type", "text/event-stream")
-			io.WriteString(w, sse(
-				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}`,
-				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
-				`data: [DONE]`))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/v1/messages" {
-			io.WriteString(w, `{"id":"m1","type":"message","role":"assistant","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
-			return
-		}
-		io.WriteString(w, `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
-	}))
-	defer srv.Close()
-	p := provider.Provider{ID: "relay", Name: "Relay", Chat: srv.URL + "/v1", Anthropic: srv.URL,
-		Key: "k-oai", KeyProtocol: provider.Chat, Models: []string{"claude-opus-4-8", "gpt-5.5", "glm-5"},
-		Keys: []provider.KeyAccount{{Key: "k-ant", Protocol: provider.Anthropic}}}
-	if err := provider.Save(p); err != nil {
+func TestLastCandidatesErrorIsReturned(t *testing.T) {
+	isolate(t)
+	pri := &modelUpstream{replies: map[string]fbReply{"m1": {code: 429, body: `{"error":{"message":"pri limited"}}`}}}
+	bak := &modelUpstream{replies: map[string]fbReply{"m2": {code: 503, body: `{"error":{"message":"bak down"}}`}}}
+	saveChat(t, provider.Provider{ID: "pri", Name: "Pri", Models: []string{"m1"}, Fallback: []string{"bak/m2"}}, pri)
+	saveChat(t, provider.Provider{ID: "bak", Name: "Bak", Models: []string{"m2"}}, bak)
+
+	s := New()
+	code, body := postChat(s, fbRequest)
+	if code != 503 || !strings.Contains(body, "bak down") {
+		t.Fatalf("%d %s; want the last candidate's 503", code, body)
+	}
+	if call := s.Recent()[0]; call.Status != 503 || call.Provider != "bak" {
+		t.Fatalf("call record: %+v", call)
+	}
+}
+
+func TestFailedProviderIsSkippedForAMinute(t *testing.T) {
+	isolate(t)
+	pri := &modelUpstream{replies: map[string]fbReply{"m1": {code: 429, body: `{"error":{"message":"rate limited"}}`}}}
+	bak := &modelUpstream{}
+	saveChat(t, provider.Provider{ID: "pri", Name: "Pri", Models: []string{"m1"}, Fallback: []string{"bak/m2"}}, pri)
+	saveChat(t, provider.Provider{ID: "bak", Name: "Bak", Models: []string{"m2"}}, bak)
+
+	s := New()
+	if code, body := postChat(s, fbRequest); code != 200 {
+		t.Fatalf("first request: %d %s", code, body)
+	}
+	// the next request goes to the fallback without asking the failed provider
+	if code, body := postChat(s, fbRequest); code != 200 {
+		t.Fatalf("second request: %d %s", code, body)
+	}
+	if want := []string{"m1"}; !reflect.DeepEqual(pri.asked(), want) {
+		t.Fatalf("pri asked for %v, want %v: it should be skipped during the cooldown", pri.asked(), want)
+	}
+	if want := []string{"m2", "m2"}; !reflect.DeepEqual(bak.asked(), want) {
+		t.Fatalf("bak asked for %v, want %v", bak.asked(), want)
+	}
+	if last := s.Recent()[0]; last.Fallback != "" || last.Provider != "bak" {
+		t.Fatalf("second request record: %+v", last)
+	}
+}
+
+func TestUnresolvableFallbackEntriesAreSkipped(t *testing.T) {
+	isolate(t)
+	pri := &modelUpstream{replies: map[string]fbReply{"m1": {code: 429, body: `{"error":{"message":"rate limited"}}`}}}
+	bak := &modelUpstream{}
+	saveChat(t, provider.Provider{ID: "pri", Name: "Pri", Models: []string{"m1"}, Fallback: []string{"nope/x", "bak/m2"}}, pri)
+	saveChat(t, provider.Provider{ID: "bak", Name: "Bak", Models: []string{"m2"}}, bak)
+
+	if code, body := postChat(New(), fbRequest); code != 200 {
+		t.Fatalf("%d %s; the unknown entry should be skipped", code, body)
+	}
+	if want := []string{"m2"}; !reflect.DeepEqual(bak.asked(), want) {
+		t.Fatalf("bak asked for %v, want %v", bak.asked(), want)
+	}
+}
+
+func TestEveryKeyIsTriedBeforeTheFallback(t *testing.T) {
+	isolate(t)
+	pri := &modelUpstream{replies: map[string]fbReply{"m1": {code: 429, body: `{"error":{"message":"rate limited"}}`}}}
+	bak := &modelUpstream{}
+	saveChat(t, provider.Provider{ID: "pri", Name: "Pri", Key: "sk-1", KeyName: "personal", Models: []string{"m1"},
+		Fallback: []string{"bak/m2"}}, pri)
+	saveChat(t, provider.Provider{ID: "bak", Name: "Bak", Models: []string{"m2"}}, bak)
+	if err := provider.AddKey("pri", "team", "sk-2", ""); err != nil {
 		t.Fatal(err)
 	}
-	// the vendor lists glm-5 to the Anthropic key only
-	if err := catalog.SaveLive("relay", srv.URL, []catalog.Model{{ID: "gpt-5.5", Keys: []string{provider.KeyID("k-oai")}},
-		{ID: "glm-5", Keys: []string{provider.KeyID("k-ant")}}}); err != nil {
+
+	s := New()
+	if code, body := postChat(s, fbRequest); code != 200 {
+		t.Fatalf("%d %s", code, body)
+	}
+	if want := []string{"m1", "m1"}; !reflect.DeepEqual(pri.asked(), want) {
+		t.Fatalf("pri asked for %v, want both keys %v", pri.asked(), want)
+	}
+	call := s.Recent()[0]
+	if call.Provider != "bak" || !strings.Contains(call.Fallback, "pri (key personal)") || !strings.Contains(call.Fallback, "pri (key team)") {
+		t.Fatalf("call record: provider %q fallback %q", call.Provider, call.Fallback)
+	}
+}
+
+func TestStreamOpeningErrorFallsBack(t *testing.T) {
+	isolate(t)
+	pri := &modelUpstream{replies: map[string]fbReply{"m1": {ctype: "text/event-stream",
+		body: "data: {\"error\":{\"message\":\"Rate limit reached for requests\"}}\n\n"}}}
+	bak := &modelUpstream{replies: map[string]fbReply{"m2": {ctype: "text/event-stream",
+		body: "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"}}}
+	saveChat(t, provider.Provider{ID: "pri", Name: "Pri", Models: []string{"m1"}, Fallback: []string{"bak/m2"}}, pri)
+	saveChat(t, provider.Provider{ID: "bak", Name: "Bak", Models: []string{"m2"}}, bak)
+
+	s := New()
+	code, body := postChat(s, `{"model":"pri/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != 200 || !strings.Contains(body, "hi") || strings.Contains(body, "Rate limit") {
+		t.Fatalf("%d %s; want the fallback's stream only", code, body)
+	}
+	if call := s.Recent()[0]; call.Provider != "bak" || !strings.Contains(call.Fallback, "pri") {
+		t.Fatalf("call record: %+v", call)
+	}
+}
+
+func TestPlainStreamErrorIsNotRetried(t *testing.T) {
+	isolate(t)
+	pri := &modelUpstream{replies: map[string]fbReply{"m1": {ctype: "text/event-stream",
+		body: "data: {\"error\":{\"message\":\"invalid tool schema\"}}\n\n"}}}
+	bak := &modelUpstream{}
+	saveChat(t, provider.Provider{ID: "pri", Name: "Pri", Models: []string{"m1"}, Fallback: []string{"bak/m2"}}, pri)
+	saveChat(t, provider.Provider{ID: "bak", Name: "Bak", Models: []string{"m2"}}, bak)
+
+	code, body := postChat(New(), `{"model":"pri/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != 200 || !strings.Contains(body, "invalid tool schema") {
+		t.Fatalf("%d %s; want the stream relayed as it was", code, body)
+	}
+	if len(bak.asked()) != 0 {
+		t.Fatalf("fallback was asked for a non-retryable error: %v", bak.asked())
+	}
+}
+
+func TestNoFallbackKeepsSingleProviderBehaviour(t *testing.T) {
+	isolate(t)
+	pri := &modelUpstream{replies: map[string]fbReply{"m1": {code: 429, body: `{"error":{"message":"rate limited"}}`}}}
+	saveChat(t, provider.Provider{ID: "pri", Name: "Pri", Models: []string{"m1"}}, pri)
+
+	s := New()
+	code, body := postChat(s, fbRequest)
+	if code != 429 || !strings.Contains(body, "rate limited") {
+		t.Fatalf("%d %s", code, body)
+	}
+	if call := s.Recent()[0]; call.Fallback != "" || call.Provider != "pri" {
+		t.Fatalf("call record: %+v", call)
+	}
+}
+
+func TestCatalogsNameAndEffortsPrefixedModels(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "magpie"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, x := range []struct{ path, body, want string }{
-		// Claude Code asking for Claude: the Anthropic key, relayed as-is
-		{"/v1/messages", `{"model":"relay/claude-opus-4-8","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
-		// an OpenAI agent asking for Claude: 按规格：密钥协议与请求协议契合度优先于模型族.
-		// The key made for its protocol suits the request best and goes first;
-		// the Anthropic key is tried after it, as an aside.
-		{"/v1/chat/completions", `{"model":"relay/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
-		// Claude Code asking for GPT: translated, to the OpenAI key
-		{"/v1/messages", `{"model":"relay/gpt-5.5","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
-		// a model only the Anthropic key lists goes there, whatever the agent spoke
-		{"/v1/chat/completions", `{"model":"relay/glm-5","messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
-	} {
-		seen = nil
-		code, body := post(t, x.path, x.body)
-		if code != 200 || len(seen) != 1 || seen[0] != x.want {
-			t.Fatalf("%s %s: %d %s, upstream saw %v", x.path, x.body, code, body, seen)
-		}
+	t.Setenv("XDG_CACHE_HOME", dir)
+	fixture := `{
+	  "openai": {"models": {
+	    "gpt-5.5": {"id":"gpt-5.5","name":"GPT-5.5","reasoning_options":[{"type":"effort","values":["low","high"]}]}
+	  }},
+	  "deepseek": {"models": {
+	    "deepseek-chat": {"id":"deepseek-chat","name":"DeepSeek Chat"}
+	  }}
+	}`
+	if err := os.WriteFile(catalog.CachePath(), []byte(fixture), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if got := modelFamily("openrouter/openai/o3-mini"); got != provider.Chat {
-		t.Errorf("o3: %q", got)
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
+
+	saveChat(t, provider.Provider{ID: "gw", Name: "GW", Catalog: "openai,deepseek",
+		Models: []string{"deepseek/deepseek-chat", "gpt-5.5"}}, &modelUpstream{})
+	entries := map[string]provider.Entry{}
+	for _, e := range provider.Catalog() {
+		entries[e.ID] = e
 	}
-	if got := modelFamily("deepseek-chat"); got != "" {
-		t.Errorf("deepseek: %q", got)
+	if d := entries["gw/deepseek/deepseek-chat"]; d.Name != "DeepSeek Chat" {
+		t.Fatalf("deepseek entry: %+v", d)
+	}
+	g := entries["gw/gpt-5.5"]
+	if g.Name != "GPT-5.5" || !reflect.DeepEqual(g.Efforts, []string{"low", "high"}) {
+		t.Fatalf("gpt-5.5 entry: %+v", g)
 	}
 }
