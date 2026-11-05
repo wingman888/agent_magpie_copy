@@ -102,6 +102,62 @@ separate Responses endpoint, `catalog=` to borrow a models.dev list, and
 `models=` to name the models to expose. Anything a preset does not know can
 be overridden the same way.
 
+### Import links
+
+A provider can be shared as a link. `magpie://import?<parameters>` describes
+one provider, from a preset or fully custom; every value is URL-encoded.
+Equivalent spellings are accepted: `magpie:import?…`, `magpie:///import?…`
+and `MAGPIE://import/?…` (the scheme is case-insensitive, and a trailing
+slash after `import` is allowed).
+
+| Parameter | Meaning |
+| --- | --- |
+| `preset` | A preset id (see `magpie presets`); its endpoints are used. |
+| `region` | Picks one of the preset's regions. An unknown region is an error. |
+| `name` | Provider name. Required without `preset`; with `preset` it overrides the preset name. |
+| `id` | Provider id. Defaults to a slug of the name (a preset link defaults to the preset's own id). |
+| `key` | API key. Without it, you add the key later. |
+| `chat` | OpenAI Chat Completions base URL (`…/v1`). |
+| `responses` | OpenAI Responses base URL (`…/v1`). |
+| `anthropic` | Anthropic Messages base URL (the root, without `/v1`). |
+| `models` | Model ids to expose, comma-separated. Empty items and surrounding spaces are ignored. |
+| `catalog` | A models.dev provider id, for model names and reasoning levels. Invalid values are ignored. |
+| `website`, `keys` | The vendor's website and its API-key page. Only `https` is accepted; other values are ignored. |
+
+With `preset`, the endpoints come from the preset (and the chosen region), so
+`chat`, `responses`, `anthropic`, `catalog`, `website` and `keys` are not used.
+Without `preset`, give at least one of `chat`, `responses` or `anthropic`.
+Base URLs must be `https`, except for local or LAN addresses (`localhost`,
+loopback, private IPs and `.local` names), which may use `http`. Base URLs
+must not carry credentials, a query or a fragment. Links that break these
+rules are rejected with a message, and nothing is saved.
+
+A link never saves anything by itself. Import it from a terminal:
+
+```sh
+magpie import 'magpie://import?preset=deepseek&key=sk-…'
+```
+
+magpie prints a summary: the name, the id, every host that will receive your
+prompts and key, and the models. It then asks `Add it? [y/N]`. Only `y` or
+`yes` saves the provider, which is then fetched the same way as
+`magpie provider add`. Anything else exits with "nothing added".
+
+- `magpie import -y '<link>'` skips the question. Scripts need it: without a
+  terminal on standard input, `magpie import` refuses to run unless `-y` is given.
+- If the id matches a provider you already have, the summary warns
+  "This will replace the existing provider <id>" before the question.
+- A link without `key` saves a provider that is not yet usable. magpie then
+  prints `magpie provider key <id> <key>` to add the key.
+- The operating system can also open `magpie://` links. The desktop app shows
+  the same summary in a window and waits for your confirmation. A build without
+  a window behaves like `magpie import`. On Linux the desktop entry from
+  `install.sh` registers the scheme.
+
+Websites that offer a link should use
+`https://usemagpie.ai/import#<the same parameters>`. The parameters sit after
+`#`, so the browser never sends them to the server.
+
 ### Signed-in agents as providers
 
 An agent you have signed in to is a subscription with models behind it, so
