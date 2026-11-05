@@ -155,21 +155,29 @@ type accountStatusError struct{ status int }
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
+	return claudeUsage(ctx, claudeToken, func() string {
+		_, plan, _ := claudeIdentity()
+		return plan
+	})
+}
+
+// claudeUsage reads one Claude Code account's windows, with the token from
+// token and its plan from plan (asked only once a token is in hand).
+func claudeUsage(ctx context.Context, token func(context.Context) (string, error), plan func() string) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
-	token, err := claudeToken(ctx)
+	tok, err := token(ctx)
 	if err != nil {
 		q.Error = err.Error()
 		return q
 	}
-	_, plan, _ := claudeIdentity()
-	q.Plan = plan
+	q.Plan = plan()
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
+	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", tok, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
@@ -201,8 +209,15 @@ func (w quotaWire) window(name string) QuotaWindow {
 }
 
 func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota {
+	return codexUsage(ctx, func(ctx context.Context) (string, string, error) {
+		return codexToken(ctx, path)
+	})
+}
+
+// codexUsage reads one ChatGPT account's windows, with the token from token.
+func codexUsage(ctx context.Context, token func(context.Context) (string, string, error)) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "codex", Name: "Codex", Icon: "codex-color", Windows: []QuotaWindow{}}
-	token, accountID, err := codexToken(ctx, path)
+	tok, accountID, err := token(ctx)
 	if err != nil {
 		q.Error = err.Error()
 		return q
@@ -215,7 +230,7 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	err = accountJSON(ctx, base+"/wham/usage", tok, map[string]string{"chatgpt-account-id": accountID}, &data)
 	if err != nil {
 		q.Error = err.Error()
 		return q

@@ -26,6 +26,9 @@ type candidate struct {
 
 // key names the candidate for the cooldown table.
 func (c candidate) key() string {
+	if c.p.Account != nil {
+		return c.p.ID + "\x00account\x00" + strings.ToLower(c.p.Account.User)
+	}
 	if c.p.Key == "" {
 		return c.p.ID
 	}
@@ -35,6 +38,9 @@ func (c candidate) key() string {
 // label names the candidate in a call's Fallback: its provider, and its key
 // when the key has a name.
 func (c candidate) label() string {
+	if c.p.Account != nil {
+		return fmt.Sprintf("%s (account %s)", c.p.ID, c.p.Account.User)
+	}
 	if c.p.KeyName == "" {
 		return c.p.ID
 	}

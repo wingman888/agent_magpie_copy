@@ -352,10 +352,15 @@ func (p Provider) withKey(k ExtraKey) Provider {
 // Candidates lists the ways to send a request for model, which arrived in the
 // client's protocol from, in the order to try them. Each is a copy of p with
 // one enabled key in use; a key limited to a protocol the provider lacks is
-// left out. A provider without keys is its own only candidate.
+// left out. A provider without keys is its own only candidate. A subscription
+// account is its own candidate, then the other accounts that are on.
 func (p Provider) Candidates(model string, from Protocol) []Provider {
+	if p.Account != nil {
+		// the account in use, then the remembered accounts that are on
+		return append([]Provider{p}, p.Account.alts...)
+	}
 	ks := allKeys(p)
-	if p.Account != nil || len(ks) == 0 {
+	if len(ks) == 0 {
 		return []Provider{p}
 	}
 	speaks := p.Speaks()
