@@ -2,11 +2,11 @@ package backup
 
 import (
 	"bytes"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -15,284 +15,389 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// isolate points every magpie file and the home directory at a fresh temp dir.
+// isolate points HOME and the config dirs at a fresh folder, and empties
+// PATH so no agent counts as installed.
 func isolate(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	return dir
-}
-
-func pngBytes() []byte {
-	return append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0}, 64)...)
-}
-
-func sampleBundle() Bundle {
-	return Bundle{
-		Version: 1,
-		Providers: []provider.Provider{{
-			ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1",
-			Key:     "sk-SECRET-123456",
-			KeyName: "personal",
-			Keys:    []provider.KeyAccount{{Name: "team", Key: "sk-TEAM-998877"}},
-			Headers: map[string]string{"X-Team": "platform", "X-Api-Key": "hdr-SECRET-42"},
-		}},
-		Profiles: map[string]profile.Profile{"profile-zq7": {"claude.model": "deepseek/pro"}},
-	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("PATH", t.TempDir())
+	return home
 }
 
 func TestSealOpenRoundTrip(t *testing.T) {
-	isolate(t)
-	b := sampleBundle()
-	data, err := Seal(b, "pw-one")
+	b := Bundle{Version: 1, Providers: []provider.Provider{{
+		ID: "relay", Name: "Relay", Chat: "https://relay.example.com/v1", Key: "sk-live-123456789",
+	}}}
+	data, err := Seal(b, "correct horse")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, leak := range []string{"sk-SECRET-123456", "sk-TEAM-998877", "hdr-SECRET-42", "api.deepseek.com", "profile-zq7", "platform", "DeepSeek"} {
-		if bytes.Contains(data, []byte(leak)) {
-			t.Errorf("sealed file leaks %q", leak)
-		}
-	}
-	m := regexp.MustCompile(`"iterations"\s*:\s*(\d+)`).FindSubmatch(data)
-	if m == nil || string(m[1]) != "600000" {
-		t.Fatalf("header iterations = %q, want 600000", m)
-	}
-	got, err := Open(data, "pw-one")
+	got, err := Open(data, "correct horse")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Open: %v", err)
 	}
-	if got.Version != 1 || len(got.Providers) != 1 {
-		t.Fatalf("unexpected bundle: %+v", got)
-	}
-	p := got.Providers[0]
-	if p.Key != "sk-SECRET-123456" || p.KeyName != "personal" || len(p.Keys) != 1 || p.Keys[0].Key != "sk-TEAM-998877" {
-		t.Errorf("keys not preserved: %+v", p)
-	}
-	if p.Headers["X-Api-Key"] != "hdr-SECRET-42" || p.Headers["X-Team"] != "platform" {
-		t.Errorf("headers not preserved: %v", p.Headers)
-	}
-	if got.Profiles["profile-zq7"]["claude.model"] != "deepseek/pro" {
-		t.Errorf("profiles not preserved: %v", got.Profiles)
+	if len(got.Providers) != 1 || got.Providers[0].Key != "sk-live-123456789" || got.Providers[0].Chat != "https://relay.example.com/v1" {
+		t.Fatalf("round trip lost data: %+v", got.Providers)
 	}
 }
 
-func TestSealEmptyPassphrase(t *testing.T) {
-	if _, err := Seal(sampleBundle(), ""); err == nil {
-		t.Fatal("empty passphrase accepted")
+func TestSealDefaultIterations(t *testing.T) {
+	data, err := Seal(Bundle{Version: 1}, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"iterations":600000`)) {
+		t.Fatalf("header does not carry 600000 iterations: %s", data)
+	}
+}
+
+func TestSealRejectsEmptyPassphrase(t *testing.T) {
+	if _, err := Seal(Bundle{Version: 1}, ""); err == nil {
+		t.Fatal("empty password sealed")
+	}
+}
+
+func TestSecretsNotInFile(t *testing.T) {
+	b := Bundle{
+		Version: 1,
+		Providers: []provider.Provider{{
+			ID: "secretrelay", Name: "Secret Relay", Chat: "https://secret-vendor.example/v1",
+			Key: "sk-SECRET-KEY-42", Keys: []provider.KeyAccount{{Name: "team", Key: "sk-OTHER-KEY-99"}},
+			Headers: map[string]string{"X-Team": "teamvalue-xyz"},
+		}},
+		Profiles: map[string]profile.Profile{"work-profile-name": {"claude.model": "m"}},
+	}
+	data, err := Seal(b, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"sk-SECRET-KEY-42", "sk-OTHER-KEY-99", "teamvalue-xyz", "secret-vendor.example", "work-profile-name", "secretrelay"} {
+		if bytes.Contains(data, []byte(s)) {
+			t.Errorf("backup file contains %q in plain text", s)
+		}
 	}
 }
 
 func TestWrongPassphrase(t *testing.T) {
-	data, err := Seal(sampleBundle(), "right")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = Open(data, "wrong")
+	data, _ := Seal(Bundle{Version: 1}, "right")
+	_, err := Open(data, "wrong")
 	if !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("err = %v, want ErrPassphrase", err)
+		t.Fatalf("wrong password: err = %v", err)
 	}
 }
 
-func TestIterationsTamperedRejected(t *testing.T) {
-	data, err := Seal(sampleBundle(), "pw")
+func TestTamperedIterationsRejected(t *testing.T) {
+	data, err := Seal(Bundle{Version: 1, Providers: []provider.Provider{{ID: "a", Name: "A", Chat: "https://a.example/v1", Key: "k"}}}, "pw")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tampered := bytes.Replace(data, []byte(`"iterations":600000`), []byte(`"iterations":100000`), 1)
 	if bytes.Equal(tampered, data) {
-		t.Fatal("test setup: iterations not found in header")
+		t.Fatal("test did not change the header")
 	}
-	if _, err := Open(tampered, "pw"); !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("err = %v, want ErrPassphrase", err)
-	}
-}
-
-func TestHeaderFieldTamperedRejected(t *testing.T) {
-	data, err := Seal(sampleBundle(), "pw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tampered := bytes.Replace(data, []byte(`"kdf":"pbkdf2-sha256"`), []byte(`"kdf":"pbkdf2-sha256 "`), 1)
-	if _, err := Open(tampered, "pw"); !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("err = %v, want ErrPassphrase", err)
+	_, err = Open(tampered, "pw")
+	if !errors.Is(err, ErrPassphrase) {
+		t.Fatalf("lowered iterations: err = %v, want ErrPassphrase", err)
 	}
 }
 
-func TestNotBackupFiles(t *testing.T) {
-	for _, in := range []string{"", "hello", "{}", `{"format":"other","version":1}`} {
+func TestNotBackup(t *testing.T) {
+	for _, in := range []string{"", "   \n", "hello", "{}", `{"format":"other"}`} {
 		_, err := Open([]byte(in), "pw")
 		if err == nil {
-			t.Fatalf("%q: no error", in)
+			t.Errorf("Open(%q) accepted", in)
+			continue
 		}
 		if errors.Is(err, ErrPassphrase) {
-			t.Errorf("%q: classified as passphrase error", in)
+			t.Errorf("Open(%q) reported a password error: %v", in, err)
 		}
-		if !strings.Contains(err.Error(), "不是 magpie 备份") {
-			t.Errorf("%q: err = %v", in, err)
+		if !errors.Is(err, ErrNotBackup) {
+			t.Errorf("Open(%q) err = %v, want ErrNotBackup", in, err)
 		}
-		if strings.Contains(strings.ToLower(err.Error()), "passphrase") || strings.Contains(err.Error(), "口令") {
-			t.Errorf("%q: message mentions passphrase: %v", in, err)
+		if msg := err.Error(); strings.Contains(msg, "passphrase") || strings.Contains(msg, "口令") {
+			t.Errorf("Open(%q) message mentions the password: %q", in, msg)
 		}
 	}
 }
 
 func TestNewerVersionRejected(t *testing.T) {
-	data, err := Seal(sampleBundle(), "pw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	newer := bytes.Replace(data, []byte(`"version":1,`), []byte(`"version":2,`), 1)
-	_, err = Open(newer, "pw")
-	if err == nil {
-		t.Fatal("version 2 accepted")
+	data := []byte(`{"format":"magpie-backup","version":2,"kdf":"future","iterations":"many"}` + "\nAAAA\n")
+	_, err := Open(data, "pw")
+	if !errors.Is(err, ErrNewer) {
+		t.Fatalf("version 2: err = %v, want ErrNewer", err)
 	}
 	if errors.Is(err, ErrPassphrase) {
-		t.Fatal("version 2 classified as passphrase error")
-	}
-	if !strings.Contains(err.Error(), "需升级 magpie") {
-		t.Errorf("err = %v", err)
-	}
-	if strings.Contains(strings.ToLower(err.Error()), "passphrase") || strings.Contains(err.Error(), "口令") {
-		t.Errorf("message mentions passphrase: %v", err)
+		t.Fatal("newer-version error reported as a password error")
 	}
 }
 
 func TestCollectNoKeys(t *testing.T) {
 	isolate(t)
-	if err := provider.Save(provider.Provider{
-		ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "sk-1",
-		Headers: map[string]string{"X-Api-Key": "h1", "X-Team": "t1", "Cookie-Jar": "c", "X-Session-Id": "s", "X-Pw-Password": "p", "X-Secret": "x", "X-Token": "t"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := provider.AddKey("deepseek", "team", "sk-2", ""); err != nil {
+	if err := provider.WriteStored([]provider.Provider{{
+		ID: "relay", Name: "Relay", Chat: "https://relay.example/v1", Key: "sk-main", KeyName: "Personal",
+		Keys:    []provider.KeyAccount{{Name: "Team", Key: "sk-team"}},
+		Headers: map[string]string{"X-Api-Key": "abc", "X-Team": "blue", "Authorization": "Bearer x", "Cookie": "c"},
+	}}); err != nil {
 		t.Fatal(err)
 	}
 
-	withKeys, err := Collect(true, "test")
+	b, err := Collect(false, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withKeys.Version != 1 || len(withKeys.Providers) != 1 || withKeys.Providers[0].Key != "sk-1" {
-		t.Fatalf("with keys: %+v", withKeys.Providers)
+	if b.Version != 1 || len(b.Providers) != 1 {
+		t.Fatalf("bundle = %+v", b)
+	}
+	p := b.Providers[0]
+	if p.Key != "" || p.KeyName != "" || len(p.Keys) != 0 {
+		t.Errorf("keys leaked with keys=false: %+v", p)
+	}
+	if len(p.Headers) != 1 || p.Headers["X-Team"] != "blue" {
+		t.Errorf("headers with keys=false = %v, want only X-Team", p.Headers)
 	}
 
-	noKeys, err := Collect(false, "test")
+	b, err = Collect(true, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := noKeys.Providers[0]
-	if p.Key != "" {
-		t.Errorf("key kept: %q", p.Key)
-	}
-	for _, k := range p.Keys {
-		if k.Key != "" {
-			t.Errorf("account key kept: %q", k.Key)
-		}
-	}
-	if len(p.Headers) != 1 || p.Headers["X-Team"] != "t1" {
-		t.Errorf("headers = %v, want only X-Team", p.Headers)
+	p = b.Providers[0]
+	if p.Key != "sk-main" || len(p.Keys) != 1 || len(p.Headers) != 4 {
+		t.Errorf("keys=true lost data: %+v", p)
 	}
 }
 
 func TestRestoreKeepsLocalKey(t *testing.T) {
 	isolate(t)
-	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://old.example/v1", Key: "local-key"}); err != nil {
+	if err := provider.WriteStored([]provider.Provider{{
+		ID: "relay", Name: "Old", Chat: "https://old.example/v1", Key: "sk-local",
+		Keys: []provider.KeyAccount{{Name: "Spare", Key: "sk-spare"}},
+	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := provider.AddKey("deepseek", "spare", "local-spare", ""); err != nil {
+	b := Bundle{Version: 1, Providers: []provider.Provider{{ID: "relay", Name: "New", Chat: "https://new.example/v1"}}}
+	res, err := Restore(b, All)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if res.Replaced != 1 || res.Added != 0 {
+		t.Errorf("counts: added %d replaced %d", res.Added, res.Replaced)
+	}
+	if len(res.NeedKey) != 0 {
+		t.Errorf("NeedKey = %v, want none: local key kept", res.NeedKey)
+	}
+	got := provider.Stored()
+	if len(got) != 1 {
+		t.Fatalf("stored %d providers", len(got))
+	}
+	p := got[0]
+	if p.Key != "sk-local" || len(p.Keys) != 1 || p.Keys[0].Key != "sk-spare" {
+		t.Errorf("local keys not kept: %+v", p)
+	}
+	if p.Chat != "https://new.example/v1" || p.Name != "New" {
+		t.Errorf("other fields not updated: %+v", p)
+	}
+}
+
+func TestRestoreNeedKeyUsesName(t *testing.T) {
+	isolate(t)
 	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "deepseek", Name: "DeepSeek", Chat: "https://new.example/v1"},
-		{ID: "relay", Name: "Relay", Anthropic: "https://relay.example"},
+		{ID: "fresh", Name: "Fresh Relay", Chat: "https://fresh.example/v1"},
+		{ID: "withkey", Name: "With Key", Chat: "https://wk.example/v1", Key: "sk-x"},
 	}}
-	r, err := Restore(b, All)
+	res, err := Restore(b, All)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Replaced != 1 || r.Added != 1 {
-		t.Errorf("added/replaced = %d/%d, want 1/1", r.Added, r.Replaced)
+	if res.Added != 2 {
+		t.Errorf("added %d, want 2", res.Added)
 	}
-	if len(r.NeedKey) != 1 || r.NeedKey[0] != "Relay" {
-		t.Errorf("NeedKey = %v, want [Relay]", r.NeedKey)
-	}
-	ds, err := provider.Find("deepseek")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ds.Key != "local-key" || ds.Chat != "https://new.example/v1" || len(ds.Keys) != 1 {
-		t.Errorf("deepseek after restore: key=%q chat=%q keys=%d", ds.Key, ds.Chat, len(ds.Keys))
+	if len(res.NeedKey) != 1 || res.NeedKey[0] != "Fresh Relay" {
+		t.Errorf("NeedKey = %v, want [Fresh Relay]", res.NeedKey)
 	}
 }
 
 func TestRestoreIgnoresInvalidIDs(t *testing.T) {
 	isolate(t)
 	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "magpie", Name: "M", Chat: "https://a.example/v1", Key: "k"},
-		{ID: "Bad Id", Name: "B", Chat: "https://a.example/v1", Key: "k"},
-		{ID: "", Name: "E", Chat: "https://a.example/v1", Key: "k"},
+		{ID: "Bad ID", Chat: "https://a.example/v1", Key: "k"},
+		{ID: "magpie", Chat: "https://b.example/v1", Key: "k"},
+		{ID: "", Chat: "https://c.example/v1", Key: "k"},
 	}}
-	r, err := Restore(b, All)
+	res, err := Restore(b, All)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Added != 0 || r.Replaced != 0 || len(r.NeedKey) != 0 {
-		t.Errorf("result = %+v, want nothing counted", r)
+	if res.Added != 0 || res.Replaced != 0 {
+		t.Errorf("counts added %d replaced %d, want 0", res.Added, res.Replaced)
 	}
-	if len(provider.Stored()) != 0 {
-		t.Errorf("stored providers = %v", provider.Stored())
+	if n := len(provider.Stored()); n != 0 {
+		t.Errorf("%d providers stored, want 0", n)
 	}
 }
 
-func TestRestorePartsOnly(t *testing.T) {
-	isolate(t)
-	b := sampleBundle()
-	b.Settings = &settings.Settings{Theme: "dark", Lang: "en", Tray: "panel"}
-	r, err := Restore(b, Parts{Profiles: true})
+func TestRestoreManualBundleProvidersOnly(t *testing.T) {
+	home := isolate(t)
+	b := Bundle{Version: 1, Providers: []provider.Provider{{ID: "x", Name: "X", Chat: "https://x.example/v1", Key: "k"}}}
+	res, err := Restore(b, All)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Settings || r.Agents != 0 || r.Added != 0 || r.Replaced != 0 {
-		t.Errorf("unselected parts touched: %+v", r)
+	if res.Added != 1 || res.Settings || res.Profiles != 0 || res.Agents != 0 {
+		t.Errorf("result = %+v", res)
 	}
-	if r.Profiles != 1 {
-		t.Errorf("profiles = %d, want 1", r.Profiles)
-	}
-	if _, err := provider.Find("deepseek"); err == nil {
-		t.Error("provider restored though Providers was not selected")
-	}
-	if s := settings.Load(); s.Theme != "system" {
-		t.Errorf("settings changed: %+v", s)
+	if _, err := os.Stat(filepath.Join(home, ".config", "magpie", "settings.json")); err == nil {
+		t.Error("settings written though the bundle had none")
 	}
 }
 
-func TestRestoreVersionOneProvidersOnly(t *testing.T) {
-	isolate(t)
-	b := Bundle{Version: 1, Providers: []provider.Provider{{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k"}}}
-	r, err := Restore(b, All)
+func TestRestorePartsNotSelectedUntouched(t *testing.T) {
+	home := isolate(t)
+	s := settings.Settings{Lang: "en"}
+	b := Bundle{
+		Version:   1,
+		Providers: []provider.Provider{{ID: "x", Name: "X", Chat: "https://x.example/v1", Key: "k"}},
+		Settings:  &s,
+		Profiles:  map[string]profile.Profile{"work": {"claude.model": "m"}},
+		Agents:    map[string]string{"claude.model": "sonnet"},
+	}
+	res, err := Restore(b, Parts{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Added != 1 || r.Settings || r.Profiles != 0 || r.Agents != 0 || len(r.NeedKey) != 0 {
-		t.Errorf("result = %+v", r)
+	if res.Added != 0 || res.Replaced != 0 || len(res.NeedKey) != 0 || res.Settings || res.Profiles != 0 || res.Agents != 0 || len(res.Skipped) != 0 {
+		t.Errorf("result = %+v, want zero", res)
+	}
+	if n := len(provider.Stored()); n != 0 {
+		t.Errorf("providers written with no part selected: %d", n)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "magpie", "settings.json")); err == nil {
+		t.Error("settings written with no part selected")
 	}
 }
 
-func TestRoundTripIconsSettingsProfiles(t *testing.T) {
+func TestRestoreSettingsAndProfiles(t *testing.T) {
 	isolate(t)
-	name, err := provider.StoreIcon(pngBytes())
+	s := settings.Settings{Lang: "en", Theme: "dark"}
+	b := Bundle{
+		Version:  1,
+		Settings: &s,
+		Profiles: map[string]profile.Profile{"work": {"claude.model": "m"}},
+	}
+	res, err := Restore(b, All)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "sk-1", Icon: name}); err != nil {
+	if !res.Settings || res.Profiles != 1 {
+		t.Errorf("result = %+v", res)
+	}
+	if got := settings.Load(); got.Lang != "en" || got.Theme != "dark" {
+		t.Errorf("settings = %+v", got)
+	}
+	ps, err := profile.Load()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := settings.Save(settings.Settings{Theme: "dark", Lang: "en", Tray: "panel"}); err != nil {
+	if ps["work"]["claude.model"] != "m" {
+		t.Errorf("profiles = %v", ps)
+	}
+}
+
+func TestRestoreAgentsSkipsUninstalled(t *testing.T) {
+	isolate(t)
+	b := Bundle{Version: 1, Agents: map[string]string{"gemini.model": "gemini-2.5-pro", "claude.model": "sonnet"}}
+	res, err := Restore(b, All)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := profile.Save("profile-zq7", profile.Profile{"claude.model": "deepseek/pro"}); err != nil {
+	if res.Agents != 0 {
+		t.Errorf("Agents = %d, want 0 with nothing installed", res.Agents)
+	}
+	joined := strings.Join(res.Skipped, "\n")
+	if !strings.Contains(joined, "本机未安装") {
+		t.Errorf("Skipped = %v, want the uninstalled agents listed", res.Skipped)
+	}
+
+	res, err = Restore(b, Parts{Providers: true, Settings: true, Profiles: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Agents != 0 || len(res.Skipped) != 0 {
+		t.Errorf("agents touched with Agents=false: %+v", res)
+	}
+}
+
+func TestRestoreIcons(t *testing.T) {
+	isolate(t)
+	png := []byte("\x89PNG\r\n\x1a\nicon-bytes-for-test")
+	sum := sha256.Sum256(png)
+	name := hex.EncodeToString(sum[:8]) + ".png"
+	b := Bundle{
+		Version:   1,
+		Providers: []provider.Provider{{ID: "x", Name: "X", Chat: "https://x.example/v1", Key: "k", Icon: "file:" + name}},
+		Icons:     map[string][]byte{name: png},
+	}
+	if _, err := Restore(b, All); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(provider.IconFile(name))
+	if err != nil || !bytes.Equal(got, png) {
+		t.Fatalf("icon not written: %v", err)
+	}
+
+	// a picture already on disk is not overwritten
+	if err := os.WriteFile(provider.IconFile(name), []byte("local-copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(b, All); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(provider.IconFile(name)); string(got) != "local-copy" {
+		t.Errorf("existing icon overwritten: %q", got)
+	}
+}
+
+func TestRestoreDropsOversizedIcon(t *testing.T) {
+	isolate(t)
+	big := make([]byte, provider.MaxIcon+1)
+	copy(big, "\x89PNG\r\n\x1a\n")
+	sum := sha256.Sum256(big)
+	name := hex.EncodeToString(sum[:8]) + ".png"
+	b := Bundle{
+		Version:   1,
+		Providers: []provider.Provider{{ID: "x", Name: "X", Chat: "https://x.example/v1", Key: "k", Icon: "file:" + name}},
+		Icons:     map[string][]byte{name: big},
+	}
+	if _, err := Restore(b, All); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(provider.IconFile(name)); err == nil {
+		t.Error("oversized icon written")
+	}
+	if got := provider.Stored(); got[0].Icon != "" {
+		t.Errorf("icon reference kept for a dropped picture: %q", got[0].Icon)
+	}
+}
+
+func TestRoundTripAcrossMachines(t *testing.T) {
+	isolate(t)
+	icon, err := provider.StoreIcon([]byte("\x89PNG\r\n\x1a\nround-trip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.WriteStored([]provider.Provider{{
+		ID: "relay", Name: "Relay", Chat: "https://relay.example/v1", Key: "sk-rt", Icon: icon,
+		Headers: map[string]string{"X-Team": "t"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	s := settings.Settings{Lang: "zh"}
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := profile.Save("daily", profile.Profile{"claude.model": "sonnet"}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := Collect(true, "test")
@@ -303,162 +408,27 @@ func TestRoundTripIconsSettingsProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(data, []byte("profile-zq7")) {
-		t.Error("profile name in sealed file")
-	}
-	got, err := Open(data, "pw")
+
+	isolate(t) // a fresh machine
+	opened, err := Open(data, "pw")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Fresh machine.
-	isolate(t)
-	r, err := Restore(got, All)
+	res, err := Restore(opened, All)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Added != 1 || !r.Settings || r.Profiles != 1 || len(r.NeedKey) != 0 {
-		t.Errorf("result = %+v", r)
+	if res.Added != 1 || !res.Settings || res.Profiles != 1 || len(res.NeedKey) != 0 {
+		t.Errorf("result = %+v", res)
 	}
-	if s := settings.Load(); s.Theme != "dark" {
-		t.Errorf("settings theme = %q", s.Theme)
+	p := provider.Stored()[0]
+	if p.Key != "sk-rt" || p.Headers["X-Team"] != "t" || p.Icon != icon {
+		t.Errorf("provider = %+v", p)
 	}
-	if ps, _ := profile.Load(); ps["profile-zq7"]["claude.model"] != "deepseek/pro" {
-		t.Errorf("profiles = %v", ps)
+	if _, err := os.Stat(provider.IconFile(strings.TrimPrefix(icon, "file:"))); err != nil {
+		t.Errorf("icon file missing after restore: %v", err)
 	}
-	if p, err := provider.Find("deepseek"); err != nil || p.Icon != name || p.Key != "sk-1" {
-		t.Fatalf("provider = %+v, err %v", p, err)
-	}
-	path := provider.IconFile(strings.TrimPrefix(name, "file:"))
-	content, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(content, pngBytes()) {
-		t.Errorf("icon file not restored at %q: %v", path, err)
-	}
-}
-
-func TestRestoreKeepsExistingIcon(t *testing.T) {
-	isolate(t)
-	name, err := provider.StoreIcon(pngBytes())
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := provider.IconFile(strings.TrimPrefix(name, "file:"))
-	// Same name, different bytes on this machine: the local one stays.
-	if err := os.WriteFile(path, []byte("local"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	b := Bundle{Version: 1, Icons: map[string][]byte{strings.TrimPrefix(name, "file:"): pngBytes()},
-		Providers: []provider.Provider{{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Icon: name}}}
-	if _, err := Restore(b, All); err != nil {
-		t.Fatal(err)
-	}
-	if content, _ := os.ReadFile(path); string(content) != "local" {
-		t.Errorf("existing icon overwritten: %q", content)
-	}
-}
-
-func TestHeaderVersionZeroIsPassphraseError(t *testing.T) {
-	data, err := Seal(sampleBundle(), "pw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	zero := bytes.Replace(data, []byte(`"version":1,`), []byte(`"version":0,`), 1)
-	if bytes.Equal(zero, data) {
-		t.Fatal("test setup: version not found in header")
-	}
-	_, err = Open(zero, "pw")
-	if !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("err = %v, want ErrPassphrase", err)
-	}
-}
-
-func TestHeaderIterationsWrongTypeIsPassphraseError(t *testing.T) {
-	data, err := Seal(sampleBundle(), "pw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bad := bytes.Replace(data, []byte(`"iterations":600000`), []byte(`"iterations":"600000"`), 1)
-	if bytes.Equal(bad, data) {
-		t.Fatal("test setup: iterations not found in header")
-	}
-	_, err = Open(bad, "pw")
-	if !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("err = %v, want ErrPassphrase", err)
-	}
-}
-
-func TestHeaderVersionWrongTypeIsPassphraseError(t *testing.T) {
-	data, err := Seal(sampleBundle(), "pw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bad := bytes.Replace(data, []byte(`"version":1,`), []byte(`"version":"1",`), 1)
-	_, err = Open(bad, "pw")
-	if !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("err = %v, want ErrPassphrase", err)
-	}
-}
-
-func TestEmptyObjectIsNotBackup(t *testing.T) {
-	_, err := Open([]byte("{}"), "pw")
-	if err == nil || errors.Is(err, ErrPassphrase) || !strings.Contains(err.Error(), "不是 magpie 备份") {
-		t.Fatalf("err = %v, want not-a-backup", err)
-	}
-}
-
-// signCodexIn makes the Codex account look signed in under home.
-func signCodexIn(t *testing.T, home string) {
-	t.Helper()
-	dir := filepath.Join(home, ".codex")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := json.Marshal(map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{"access_token": "tok", "refresh_token": "r", "account_id": "acct-1"}})
-	if err := os.WriteFile(filepath.Join(dir, "auth.json"), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestRestoreStubPicksNeedAgentsPart(t *testing.T) {
-	home := isolate(t)
-	signCodexIn(t, home)
-	b := Bundle{Version: 1, Providers: []provider.Provider{{ID: "codex", Models: []string{"gpt-x"}, Routing: "round-robin"}}}
-
-	r, err := Restore(b, Parts{Providers: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Added != 0 || r.Replaced != 0 {
-		t.Errorf("stub counted without agents part: %+v", r)
-	}
-	if n := len(provider.Stored()); n != 0 {
-		t.Errorf("stub written without agents part: %+v", provider.Stored())
-	}
-
-	r, err = Restore(b, All)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := provider.Stored()
-	if len(st) != 1 || st[0].ID != "codex" || len(st[0].Models) != 1 || st[0].Models[0] != "gpt-x" || st[0].Routing != "round-robin" {
-		t.Errorf("stub not applied with agents part: %+v", st)
-	}
-	if len(r.Skipped) != 0 {
-		t.Errorf("signed-in stub reported as skipped: %v", r.Skipped)
-	}
-}
-
-func TestRestoreStubSkippedWhenNotSignedIn(t *testing.T) {
-	isolate(t)
-	b := Bundle{Version: 1, Providers: []provider.Provider{{ID: "codex", Models: []string{"gpt-x"}}}}
-	r, err := Restore(b, All)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(provider.Stored()) != 0 || r.Added != 0 {
-		t.Errorf("stub written for signed-out account: %+v", provider.Stored())
-	}
-	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0], "订阅账号未登录") {
-		t.Errorf("Skipped = %v, want one signed-out entry", r.Skipped)
+	if got := settings.Load(); got.Lang != "zh" {
+		t.Errorf("settings = %+v", got)
 	}
 }

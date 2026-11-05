@@ -299,20 +299,7 @@ magpie profiles
 magpie rm work
 
 magpie sync                     # refresh the models.dev catalog and every live model list
-
-magpie backup                   # seal providers, keys, icons, settings, profiles and agent models
-                                #   into magpie.magpie-backup (asks for a passphrase twice)
-magpie backup --no-keys b.magpie-backup   # the same without API keys or credential headers
-magpie restore magpie.magpie-backup       # on another machine; --no-agents leaves agent models alone
 ```
-
-A backup is one file encrypted with AES-256-GCM under a key derived from your
-passphrase (PBKDF2-SHA256). Subscription logins are not in it: sign in to them
-on each machine. Without the passphrase the file cannot be opened, and there
-is no recovery. Restoring replaces providers with the same id; a provider
-restored without keys keeps the keys it already has here. Providers that end
-up with no key are listed so you can add one with `magpie provider key <id>`.
-Piped input works too: `echo "pw" | magpie backup`.
 
 In the app, click any value to open a filtered list; type to search or to
 enter something that is not listed; `esc` closes the panel. Profiles are the
