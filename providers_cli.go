@@ -277,15 +277,23 @@ func addProvider(rest []string) error {
 	if err := applyPairs(&p, rest); err != nil {
 		return err
 	}
+	_, err := saveProvider(p)
+	return err
+}
+
+// saveProvider saves p, reports it, fetches its model list and says what is
+// still missing. Shared by `provider add` and `import`; it returns the saved
+// provider as stored.
+func saveProvider(p provider.Provider) (*provider.Provider, error) {
 	if err := provider.Save(p); err != nil {
-		return err
+		return nil, err
 	}
 	saved, err := provider.Find(p.ID)
 	if err != nil {
 		saved, err = provider.Find(p.Name)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Println(green.Render("✓"), "added", saved.Name, muted.Render("("+saved.ID+")"))
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -299,7 +307,7 @@ func addProvider(rest []string) error {
 	} else {
 		fmt.Printf("  %d models in the catalog · %s\n", n, muted.Render("magpie models"))
 	}
-	return nil
+	return saved, nil
 }
 
 func showProvider(p provider.Provider) error {
