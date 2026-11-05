@@ -107,8 +107,21 @@ func TestImportWithYesSavesWithoutAsking(t *testing.T) {
 	if strings.Contains(out.String(), "Add it?") {
 		t.Errorf("asked a question despite -y")
 	}
-	if !strings.Contains(out.String(), "magpie provider key local <key>") {
-		t.Errorf("keyless provider should hint at magpie provider key:\n%s", out.String())
+}
+
+func TestImportKeylessRemoteRefused(t *testing.T) {
+	isolate(t)
+	var out bytes.Buffer
+	link := "magpie://import?name=Remote&chat=https://relay.example/v1"
+	err := runImport(link, true, nil, &out, false)
+	if err == nil || !strings.Contains(err.Error(), "key") {
+		t.Fatalf("err = %v, want refusal about the missing key", err)
+	}
+	if strings.Contains(out.String(), "Add it?") {
+		t.Errorf("asked before refusing")
+	}
+	if len(provider.All()) != 0 {
+		t.Fatalf("a keyless remote provider was saved")
 	}
 }
 

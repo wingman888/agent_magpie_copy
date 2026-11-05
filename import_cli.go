@@ -50,6 +50,12 @@ func runImport(link string, yes bool, in io.Reader, out io.Writer, interactive b
 	if err != nil {
 		return err
 	}
+	// provider.Save (and so `provider add`) refuses a remote provider without a
+	// key. Check before asking, so the user is not asked to confirm something
+	// that cannot be saved.
+	if !p.Ready() {
+		return fmt.Errorf("%s has no API key in the link, and magpie will not save a remote provider without one; add key=… to the link, or use magpie provider add with a key", p.Name)
+	}
 	for _, a := range provider.Accounts() {
 		if a.ID == p.ID {
 			return fmt.Errorf("%q is the id of a signed-in agent account; the link needs another id or name", p.ID)
@@ -86,7 +92,7 @@ func runImport(link string, yes bool, in io.Reader, out io.Writer, interactive b
 		return err
 	}
 	if !saved.Ready() {
-		fmt.Println(amber.Render("!"), "no API key yet · add one with", "magpie provider key "+saved.ID+" <key>")
+		fmt.Fprintln(out, amber.Render("!"), "no API key yet · add one with", "magpie provider key "+saved.ID+" <key>")
 	}
 	return nil
 }
