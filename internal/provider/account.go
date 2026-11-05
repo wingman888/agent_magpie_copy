@@ -252,7 +252,7 @@ func forgetClaudeCredential() {
 	claudeCacheAt = time.Time{}
 	claudeCacheMu.Unlock()
 	claudeStatusMu.Lock()
-	claudeStatusAt = time.Time{}
+	claudeStatusAt, claudeStatusOut = time.Time{}, false
 	claudeStatusMu.Unlock()
 }
 
@@ -307,9 +307,15 @@ func claudeIdentity() (user, plan string, loggedOut bool) {
 		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 	}
 	claudeStatusAt = time.Now()
+	// unknown: keep the credential-based judgement, so an old "signed out"
+	// answer must not stick once the command stops giving one
+	unknown := func() (string, string, bool) {
+		claudeStatusOut = false
+		return claudeStatusUser, claudeStatusPlan, false
+	}
 	path := claudeExecutable()
 	if path == "" {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return unknown()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -322,7 +328,7 @@ func claudeIdentity() (user, plan string, loggedOut bool) {
 		SubscriptionType string `json:"subscriptionType"`
 	}
 	if json.Unmarshal(out, &status) != nil || status.LoggedIn == nil {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return unknown()
 	}
 	if !*status.LoggedIn {
 		claudeStatusUser, claudeStatusPlan, claudeStatusOut = "", "", true
