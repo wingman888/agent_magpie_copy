@@ -62,7 +62,6 @@ func TestImportParseRejectsBadLinks(t *testing.T) {
 		"magpie://import?preset=deepseek&key=sk-abc%0A",
 		"magpie://import?preset=deepseek&key=sk%0Dabc",
 		"magpie://import?preset=deepseek&key=" + strings.Repeat("k", 4097),
-		"magpie://import?name=Relay&chat=https://relay.example/v1&models=" + importTestManyModels(201),
 	} {
 		if p, err := ParseImport(link); err == nil {
 			t.Errorf("%q: expected an error, got %+v", link, p)
@@ -248,6 +247,29 @@ func TestImportParseModels(t *testing.T) {
 	}
 	if len(p.Models) != 200 {
 		t.Errorf("models = %d, want 200", len(p.Models))
+	}
+
+	// More than 200 models: the list is truncated to the first 200, not rejected.
+	p, err = ParseImport("magpie://import?name=Relay&chat=https://relay.example/v1&models=" + importTestManyModels(201))
+	if err != nil {
+		t.Fatalf("201 models: unexpected error: %v", err)
+	}
+	if len(p.Models) != 200 {
+		t.Fatalf("models = %d, want truncated to 200", len(p.Models))
+	}
+	if p.Models[0] != "m0" || p.Models[199] != "m199" {
+		t.Errorf("models kept %q..%q, want m0..m199", p.Models[0], p.Models[199])
+	}
+
+	// Duplicates and empty items are removed before truncation, so the cut
+	// keeps the first 200 unique models.
+	raw := "m0,,m0," + importTestManyModels(201)
+	p, err = ParseImport("magpie://import?name=Relay&chat=https://relay.example/v1&models=" + raw)
+	if err != nil {
+		t.Fatalf("duplicates before truncation: unexpected error: %v", err)
+	}
+	if len(p.Models) != 200 || p.Models[199] != "m199" {
+		t.Errorf("models = %d, last %q; want 200 unique ending m199", len(p.Models), p.Models[len(p.Models)-1])
 	}
 }
 

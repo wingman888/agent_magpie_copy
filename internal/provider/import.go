@@ -241,6 +241,8 @@ func importHTTPSOnly(raw string) string {
 
 // importModels splits the comma-separated model list. Empty items and
 // surrounding spaces are dropped; duplicates are dropped too, as elsewhere.
+// Lists longer than the limit are truncated to the first importMaxModels
+// models rather than rejected.
 func importModels(raw string) ([]string, error) {
 	ms := cleanList(strings.Split(raw, ","))
 	for _, m := range ms {
@@ -249,7 +251,7 @@ func importModels(raw string) ([]string, error) {
 		}
 	}
 	if len(ms) > importMaxModels {
-		return nil, fmt.Errorf("import link lists %d models; the limit is %d", len(ms), importMaxModels)
+		ms = ms[:importMaxModels]
 	}
 	return ms, nil
 }
