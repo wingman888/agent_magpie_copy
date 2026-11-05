@@ -193,21 +193,6 @@ func piThinkingLevels(efforts []string) map[string]string {
 	return out
 }
 
-// piThinkingLevels maps the levels Pi does not offer by default (xhigh, max)
-// to themselves, so it offers them; nil when the model declares neither.
-func piThinkingLevels(efforts []string) map[string]string {
-	var out map[string]string
-	for _, e := range efforts {
-		if e == "xhigh" || e == "max" {
-			if out == nil {
-				out = map[string]string{}
-			}
-			out[e] = e
-		}
-	}
-	return out
-}
-
 func opencode(home, cfg string) *Agent {
 	dir := filepath.Join(cfg, "opencode")
 	path := filepath.Join(dir, "opencode.json")
