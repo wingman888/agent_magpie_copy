@@ -13,32 +13,43 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// accUpstream is a Chat upstream that records who called it, and answers
-// with status (per Authorization and session header) when set.
+// accUpstream is a fake vendor that records who called it. status, when set,
+// answers with its code for a call (by the key used and the request body,
+// since the session header is not forwarded upstream).
 type accUpstream struct {
 	mu     sync.Mutex
 	calls  []accCall
-	status func(key, session string) int
+	status func(key, body string) int
 }
 
 type accCall struct {
-	key, session, body string
+	key, body string
 }
+
+const accAnthropicReply = `{"id":"m1","type":"message","role":"assistant","model":"m1","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
 
 func (u *accUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(r.Body)
-	c := accCall{key: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), session: r.Header.Get("x-session-id"), body: string(b)}
+	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if key == "" {
+		key = r.Header.Get("x-api-key")
+	}
+	c := accCall{key: key, body: string(b)}
 	u.mu.Lock()
 	u.calls = append(u.calls, c)
 	code := 0
 	if u.status != nil {
-		code = u.status(c.key, c.session)
+		code = u.status(c.key, c.body)
 	}
 	u.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	if code != 0 {
 		w.WriteHeader(code)
 		io.WriteString(w, `{"error":{"message":"slow down","type":"rate_limit_error"}}`)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/messages") {
+		io.WriteString(w, accAnthropicReply)
 		return
 	}
 	io.WriteString(w, groupChatReply)
@@ -62,18 +73,29 @@ func (u *accUpstream) keys(model string) []string {
 // the protocol of their "proto:key" prefix when given.
 func accSetup(t *testing.T, u *accUpstream, keys ...string) {
 	t.Helper()
+	// resting is process-wide and keyed by key fingerprint, so start clean and
+	// leave clean: a key that rested in another test would rest here too
+	accClearResting()
+	t.Cleanup(accClearResting)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	up := httptest.NewServer(u)
 	t.Cleanup(up.Close)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: keys[0], Chat: up.URL + "/v1", Models: []string{"m1", "m2"}}); err != nil {
+	p := provider.Provider{ID: "fake", Name: "Fake", Key: keys[0], Chat: up.URL + "/v1", Models: []string{"m1", "m2"}}
+	for _, k := range keys {
+		if strings.HasSuffix(k, ":"+string(provider.Anthropic)) {
+			// a key made for Anthropic needs an Anthropic endpoint to be used
+			p.Anthropic = up.URL
+		}
+	}
+	if err := provider.Save(p); err != nil {
 		t.Fatal(err)
 	}
 	for _, k := range keys[1:] {
 		proto := provider.Protocol("")
-		if name, p, ok := strings.Cut(k, ":"); ok {
-			k, proto = name, provider.Protocol(p)
+		if name, pr, ok := strings.Cut(k, ":"); ok {
+			k, proto = name, provider.Protocol(pr)
 		}
 		if err := provider.AddKey("fake", k, k, proto); err != nil {
 			t.Fatal(err)
@@ -81,8 +103,27 @@ func accSetup(t *testing.T, u *accUpstream, keys ...string) {
 	}
 }
 
+// accClearResting forgets every key that is resting.
+func accClearResting() {
+	restingUntil.Lock()
+	defer restingUntil.Unlock()
+	for k := range restingUntil.m {
+		delete(restingUntil.m, k)
+	}
+	for k := range restingUntil.note {
+		delete(restingUntil.note, k)
+	}
+}
+
 // accRoute runs one request under session (none when empty) and returns the status.
 func accRoute(t *testing.T, s *Server, session, body string) int {
+	t.Helper()
+	code, _ := accRouteBody(t, s, session, body)
+	return code
+}
+
+// accRouteBody is accRoute with the response body too.
+func accRouteBody(t *testing.T, s *Server, session, body string) (int, string) {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
@@ -90,7 +131,7 @@ func accRoute(t *testing.T, s *Server, session, body string) int {
 		req.Header.Set("x-session-id", session)
 	}
 	s.Handler().ServeHTTP(rec, req)
-	return rec.Code
+	return rec.Code, rec.Body.String()
 }
 
 // accLast is the route the last request traced.
@@ -101,6 +142,20 @@ func accLast(t *testing.T, s *Server) (r Route) {
 		t.Fatal("no route traced")
 	}
 	return st.Routes[len(st.Routes)-1]
+}
+
+// accDump logs the last route's candidates and tries, for diagnosis.
+func accDump(t *testing.T, s *Server) {
+	t.Helper()
+	r := accLast(t, s)
+	t.Logf("DUMP orders=%d tries=%d", len(r.Order), len(r.Tries))
+	for i, w := range r.Order {
+		t.Logf("DUMP order idx=%d id=%s provider=%s model=%s aside=%v fit=%d speaks=%s rest=%v", i, w.ID, w.Provider, w.Model, w.Aside, w.Fit, w.Speaks, w.Rest != nil)
+	}
+	for _, x := range r.Tries {
+		t.Logf("DUMP try id=%s status=%d fail=%s err=%s", x.ID, x.Status, x.Fail, x.Error)
+	}
+	t.Logf("DUMP left=%d status=%d", len(r.Left), r.Status)
 }
 
 // accBody is a request in group "mine" whose conversation has n user turns.
@@ -132,6 +187,8 @@ func accToolBody(model string, turns int) string {
 // (2) group Mine: b first (its 429 sends the request on), then a. The trace
 // names group mine, and its candidates follow the member order.
 func TestAccGroupMembersInOrder(t *testing.T) {
+	accClearResting()
+	t.Cleanup(accClearResting)
 	bUp := &accUpstream{status: func(string, string) int { return 429 }}
 	aUp := &accUpstream{}
 	bSrv := httptest.NewServer(bUp)
@@ -218,8 +275,13 @@ func TestAccAffinitySession(t *testing.T) {
 		if c := accRoute(t, s, sess, accBody("group/mine", turn)); c != 200 {
 			t.Fatalf("turn %d: %d", turn, c)
 		}
-		if why := accLast(t, s).Affinity.Why; why != "session" {
-			t.Errorf("turn %d why = %q", turn, why)
+		// the first turn has no answer to keep yet
+		want := "session"
+		if turn == 1 {
+			want = "first"
+		}
+		if why := accLast(t, s).Affinity.Why; why != want {
+			t.Errorf("turn %d why = %s, want %s", turn, why, want)
 		}
 	}
 	keys := u.keys("m1")
@@ -296,32 +358,37 @@ func TestAccRestingAndFirst(t *testing.T) {
 	if k := u.keys("m1"); len(k) != 1 || k[0] != "k1" {
 		t.Fatalf("first request used %v, want k1", k)
 	}
-	// k1 gets rate limited in another session, so it rests
+	// k1 gets rate limited for a request of another conversation (marked by
+	// its text), so it rests; that other conversation is answered by k2
 	u.mu.Lock()
-	u.status = func(key, session string) int {
-		if key == "k1" && session == "sess-other" {
+	u.status = func(key, body string) int {
+		if key == "k1" && strings.Contains(body, "OTHER") {
 			return 429
 		}
 		return 0
 	}
 	u.mu.Unlock()
-	if c := accRoute(t, s, "sess-other", accBody("group/mine", 1)); c != 200 {
+	other := `{"model":"group/mine","messages":[{"role":"user","content":"OTHER"}]}`
+	if c := accRoute(t, s, "sess-other", other); c != 200 {
 		t.Fatalf("other session: %d", c)
+	}
+	if k := u.keys("m1"); len(k) != 3 || k[1] != "k1" || k[2] != "k2" {
+		t.Fatalf("other session calls %v, want k1 (429) then k2", k)
 	}
 	if c := accRoute(t, s, sess, accToolBody("group/mine", 1)); c != 200 {
 		t.Fatalf("resting: %d", c)
 	}
 	if why := accLast(t, s).Affinity.Why; why != "resting" {
-		t.Errorf("why = %q, want resting", why)
+		t.Errorf("why = %s, want resting", why)
 	}
-	if k := u.keys("m1"); k[len(k)-1] != "k2" {
-		t.Errorf("request while k1 rests went to %v", k)
+	if k := u.keys("m1"); len(k) != 4 || k[3] != "k2" {
+		t.Errorf("request while k1 rests went to %v, want k2", k)
 	}
 	if c := accRoute(t, s, "sess-new", accBody("group/mine", 1)); c != 200 {
 		t.Fatalf("new session: %d", c)
 	}
 	if why := accLast(t, s).Affinity.Why; why != "first" {
-		t.Errorf("new session why = %q, want first", why)
+		t.Errorf("new session why = %s, want first", why)
 	}
 }
 
@@ -340,9 +407,13 @@ func TestAccProtocolTiers(t *testing.T) {
 		if c := accRoute(t, s, sess, accBody("group/mine", turn)); c != 200 {
 			t.Fatalf("turn %d: %d", turn, c)
 		}
+		if turn == 1 {
+			accDump(t, s)
+		}
 	}
 	keys := u.keys("m1")
 	if fmt.Sprint(keys) != "[k1 k2 k1]" {
+		accDump(t, s)
 		t.Errorf("chat requests went to %v, want k1 k2 k1 only", keys)
 	}
 	// main pool fails: the aside key answers
@@ -354,8 +425,16 @@ func TestAccProtocolTiers(t *testing.T) {
 		return 429
 	}
 	u.mu.Unlock()
-	if c := accRoute(t, s, sess, accBody("group/mine", 4)); c != 200 {
-		t.Fatalf("with the main pool failing: %d", c)
+	if g, ms, ok := provider.FindGroup("group/mine"); ok {
+		cs, _ := s.planGroup(g, ms, provider.Chat, convo{id: sess, model: "group/mine", turns: 4})
+		t.Logf("PLAN count=%d", len(cs))
+		for i, c := range cs {
+			t.Logf("PLAN idx=%d rest=%s aside=%v key=%s", i, c.rest, c.aside, c.p.KeyProtocol)
+		}
+	}
+	if c, body := accRouteBody(t, s, sess, accBody("group/mine", 4)); c != 200 {
+		accDump(t, s)
+		t.Fatalf("with the main pool failing: %d body %s", c, body)
 	}
 	r := accLast(t, s)
 	last := r.Order[len(r.Order)-1]
