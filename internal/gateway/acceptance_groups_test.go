@@ -73,6 +73,10 @@ func (u *accUpstream) keys(model string) []string {
 // the protocol of their "proto:key" prefix when given.
 func accSetup(t *testing.T, u *accUpstream, keys ...string) {
 	t.Helper()
+	// resting is process-wide and keyed by key fingerprint, so start clean and
+	// leave clean: a key that rested in another test would rest here too
+	accClearResting()
+	t.Cleanup(accClearResting)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
@@ -96,6 +100,18 @@ func accSetup(t *testing.T, u *accUpstream, keys ...string) {
 		if err := provider.AddKey("fake", k, k, proto); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// accClearResting forgets every key that is resting.
+func accClearResting() {
+	restingUntil.Lock()
+	defer restingUntil.Unlock()
+	for k := range restingUntil.m {
+		delete(restingUntil.m, k)
+	}
+	for k := range restingUntil.note {
+		delete(restingUntil.note, k)
 	}
 }
 
@@ -163,6 +179,8 @@ func accToolBody(model string, turns int) string {
 // (2) group Mine: b first (its 429 sends the request on), then a. The trace
 // names group mine, and its candidates follow the member order.
 func TestAccGroupMembersInOrder(t *testing.T) {
+	accClearResting()
+	t.Cleanup(accClearResting)
 	bUp := &accUpstream{status: func(string, string) int { return 429 }}
 	aUp := &accUpstream{}
 	bSrv := httptest.NewServer(bUp)
