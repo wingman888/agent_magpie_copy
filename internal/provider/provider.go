@@ -36,6 +36,7 @@ type Provider struct {
 	Icon   string `json:"icon,omitempty"`   // a built-in icon name, or "file:<name>" in the icons folder
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
+
 	// KeyName names the key in use; KeyProtocol limits it to one protocol's
 	// endpoint (empty: any). Keys are the others (see keys.go).
 	KeyName     string     `json:"keyName,omitempty"`
