@@ -1,15 +1,13 @@
-// Package netproxy decides which proxy magpie uses for its own outgoing
-// requests to model vendors. The order, from highest to lowest, is:
+// Package netproxy decides which proxy magpie's own outbound requests (to the
+// model vendors) go through. The order, highest first, is:
 //
 //  1. the "proxy" setting: "direct" means no proxy, anything else is the proxy;
-//  2. the proxy environment variables (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY,
-//     NO_PROXY and their lowercase forms), read with the standard semantics;
+//  2. the environment: HTTPS_PROXY / HTTP_PROXY / ALL_PROXY and NO_PROXY,
+//     with their lowercase forms;
 //  3. the operating system's proxy settings (macOS and Windows only);
 //  4. no proxy.
 //
-// Loopback hosts are always direct. Install makes the default HTTP transport
-// follow the same rules, so code that never passes through the gateway does
-// not bypass them.
+// Loopback hosts are never proxied, whatever the level.
 package netproxy
 
 import (
@@ -26,225 +24,249 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// Install makes http.DefaultTransport use For. It is safe to call more than once.
-func Install() {
-	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		t.Proxy = proxyFunc
+// systemCacheTTL bounds how stale the operating system's proxy reading may be.
+const systemCacheTTL = 10 * time.Second
+
+// systemProxyFunc reads the operating system's proxy settings. It is a variable
+// so tests can replace it. Platform files define readSystemProxy.
+var systemProxyFunc = readSystemProxy
+
+// systemConfig is one reading of the operating system's proxy settings.
+// proxy is "" when no usable system proxy is enabled.
+type systemConfig struct {
+	proxy  string
+	bypass []string
+}
+
+var sysCache struct {
+	mu     sync.Mutex
+	valid  bool
+	at     time.Time
+	config systemConfig
+}
+
+// systemConfigCached returns the system proxy reading, refreshing it at most
+// every systemCacheTTL.
+func systemConfigCached() systemConfig {
+	sysCache.mu.Lock()
+	defer sysCache.mu.Unlock()
+	if sysCache.valid && time.Since(sysCache.at) < systemCacheTTL {
+		return sysCache.config
 	}
+	sysCache.config = systemProxyFunc()
+	sysCache.at = time.Now()
+	sysCache.valid = true
+	return sysCache.config
 }
 
-func proxyFunc(r *http.Request) (*url.URL, error) {
-	return For(r.URL)
+// resetSystemCache forces the next lookup to read the system settings again.
+func resetSystemCache() {
+	sysCache.mu.Lock()
+	defer sysCache.mu.Unlock()
+	sysCache.valid = false
 }
 
-// For returns the proxy to use when reaching u, or nil to connect directly.
-// It returns an error when a proxy is configured but cannot be used, so the
-// request fails instead of quietly going direct.
+// For returns the proxy to use when reaching u, or nil for a direct connection.
+// It reads the settings on every call, so a change takes effect immediately.
+// An unusable configured proxy is returned as an error, never as a silent
+// direct connection.
 func For(u *url.URL) (*url.URL, error) {
-	if u == nil {
-		return nil, errors.New("netproxy: nil URL")
-	}
-	p, _, err := decide(u, settings.Load().Proxy, os.Getenv, systemCached)
+	p, _, err := resolve(u)
 	return p, err
 }
 
-// probe is the request Describe asks about: an HTTPS request to a vendor
-// host that no exception list is likely to name.
-var probe = &url.URL{Scheme: "https", Host: "vendor.invalid"}
-
-// Describe reports the proxy that outgoing requests to vendors use now, and
-// where it comes from: settings, off (the setting is "direct"), environment,
-// system or none. The proxy is empty for off and none.
+// Describe reports the proxy that requests to ordinary external hosts use now,
+// and where it comes from: "settings", "off" (set to direct), "environment",
+// "system" or "none". proxy is "" for "off" and "none". The proxy's password,
+// if any, is redacted. If the proxy at the level that applies is unusable,
+// Describe returns ("", src) where src names that level: "settings",
+// "environment" or "system".
 func Describe() (proxy, source string) {
-	set := settings.Load().Proxy
-	p, src, err := decide(probe, set, os.Getenv, systemCached)
+	probe, _ := url.Parse("https://example.invalid/")
+	p, src, err := resolve(probe)
 	if err != nil {
-		// The source of the error tells which setting cannot be used; For
-		// returns this error for every request.
-		var se *sourceError
-		if errors.As(err, &se) && se.source == "environment" {
-			return "", "environment"
-		}
-		return strings.TrimSpace(set), "settings"
-	}
-	if src == "off" {
-		return "", "off"
+		return "", src
 	}
 	if p == nil {
-		return "", "none"
+		return "", src
 	}
 	return p.Redacted(), src
 }
 
-// decide applies the priority order to one request. set is the settings
-// value, get reads environment variables and sys reads the system settings.
-// For and Describe both call it, so they always agree.
-func decide(u *url.URL, set string, get func(string) string, sys func() sysConf) (*url.URL, string, error) {
-	host := u.Hostname()
+// Install makes http.DefaultTransport follow the same rules as For.
+// Call it once at program start.
+func Install() {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		t.Proxy = func(r *http.Request) (*url.URL, error) { return For(r.URL) }
+	}
+}
+
+// resolve applies the priority order to u and reports the source it used.
+func resolve(u *url.URL) (*url.URL, string, error) {
+	if u == nil {
+		return nil, "none", errors.New("netproxy: nil URL")
+	}
+	host := strings.ToLower(u.Hostname())
 	if isLoopback(host) {
 		return nil, "none", nil
 	}
 
-	set = strings.TrimSpace(set)
-	if strings.EqualFold(set, "direct") {
+	// 1. The setting.
+	s := strings.TrimSpace(settings.Load().Proxy)
+	if s == "direct" {
 		return nil, "off", nil
 	}
-	if set != "" {
-		v, err := settings.ValidateProxy(set)
-		if err != nil {
-			return nil, "", &sourceError{source: "settings", err: err}
+	if s != "" {
+		if err := settings.ValidateProxy(s); err != nil {
+			return nil, "settings", err
 		}
-		p, err := toProxyURL(v)
+		p, err := parseProxy(s)
 		if err != nil {
-			return nil, "", &sourceError{source: "settings", err: err}
+			return nil, "settings", err
 		}
 		return p, "settings", nil
 	}
 
-	if raw := envRaw(get, u.Scheme); raw != "" {
-		// Once the environment names a proxy, NO_PROXY decides, as it always has.
-		if noProxyMatch(host, envGet(get, "NO_PROXY", "no_proxy")) {
+	// 2. The environment.
+	if name, raw := envProxy(u.Scheme); raw != "" {
+		if noProxyMatches(getEnvAny("NO_PROXY", "no_proxy"), host, portOf(u)) {
 			return nil, "environment", nil
 		}
-		p, err := toProxyURL(raw)
+		p, err := parseProxy(raw)
 		if err != nil {
-			return nil, "", &sourceError{
-				source: "environment",
-				err:    fmt.Errorf("netproxy: proxy from environment %q is not usable: %w", raw, err),
-			}
+			return nil, "environment", fmt.Errorf("%s: %w", name, err)
 		}
 		return p, "environment", nil
 	}
 
-	sc := sys()
-	if sc.proxy == nil || matchException(host, sc.exceptions) {
-		return nil, "none", nil
+	// 3. The operating system.
+	sys := systemConfigCached()
+	if sys.proxy != "" {
+		if matchBypass(host, sys.bypass) {
+			return nil, "system", nil
+		}
+		p, err := parseProxy(sys.proxy)
+		if err != nil {
+			return nil, "system", err
+		}
+		return p, "system", nil
 	}
-	return sc.proxy, "system", nil
+
+	// 4. Nothing.
+	return nil, "none", nil
 }
 
-// sourceError marks which level of the priority order produced an error, so
-// Describe can report the right source.
-type sourceError struct {
-	source string
-	err    error
-}
-
-func (e *sourceError) Error() string { return e.err.Error() }
-func (e *sourceError) Unwrap() error { return e.err }
-
-// envRaw returns the proxy variable that applies to scheme, or "".
-func envRaw(get func(string) string, scheme string) string {
-	switch scheme {
-	case "https":
-		return envGet(get, "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
-	case "http":
-		return envGet(get, "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+// envProxy returns the name and value of the first proxy variable that applies
+// to scheme. Empty when none is set.
+func envProxy(scheme string) (string, string) {
+	var names []string
+	if scheme == "http" {
+		names = []string{"HTTP_PROXY", "http_proxy"}
+	} else {
+		names = []string{"HTTPS_PROXY", "https_proxy"}
 	}
-	return ""
-}
-
-// envGet returns the first non-empty variable among names.
-func envGet(get func(string) string, names ...string) string {
+	names = append(names, "ALL_PROXY", "all_proxy")
 	for _, n := range names {
-		if v := strings.TrimSpace(get(n)); v != "" {
+		if v := strings.TrimSpace(os.Getenv(n)); v != "" {
+			return n, v
+		}
+	}
+	return "", ""
+}
+
+func getEnvAny(names ...string) string {
+	for _, n := range names {
+		if v := strings.TrimSpace(os.Getenv(n)); v != "" {
 			return v
 		}
 	}
 	return ""
 }
 
-// noProxyMatch applies a NO_PROXY list with the standard library's rules: "*"
-// matches everything, an IP or CIDR matches addresses, and a domain matches
-// itself and its subdomains (with or without a leading dot).
-func noProxyMatch(host, list string) bool {
-	host = strings.ToLower(host)
-	ip := net.ParseIP(host)
-	for _, entry := range strings.Split(list, ",") {
-		e := stripEntryPort(strings.ToLower(strings.TrimSpace(entry)))
-		switch {
-		case e == "":
-		case e == "*":
-			return true
-		case strings.Contains(e, "/"):
-			if _, n, err := net.ParseCIDR(e); err == nil && ip != nil && n.Contains(ip) {
-				return true
-			}
-		case net.ParseIP(e) != nil:
-			if ip != nil && ip.Equal(net.ParseIP(e)) {
-				return true
-			}
-		default:
-			if domainMatch(host, strings.TrimPrefix(e, ".")) {
-				return true
-			}
-		}
+// parseProxy turns a proxy address into a URL. A bare host:port is HTTP.
+// Only http, https, socks5 and socks5h schemes are accepted.
+func parseProxy(s string) (*url.URL, error) {
+	raw := s
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
 	}
-	return false
-}
-
-// stripEntryPort removes a port from a NO_PROXY entry such as "example.com:443"
-// or "[::1]:8080", as the standard library does. Entries that are plain IPs,
-// CIDRs, "*" or have no port are returned unchanged.
-func stripEntryPort(e string) string {
-	if e == "*" || strings.Contains(e, "/") || net.ParseIP(e) != nil {
-		return e
-	}
-	if h, _, err := net.SplitHostPort(e); err == nil {
-		return h
-	}
-	if strings.HasPrefix(e, "[") && strings.HasSuffix(e, "]") {
-		return e[1 : len(e)-1]
-	}
-	return e
-}
-
-// isLoopback reports whether host is localhost, a name under .localhost, or a
-// loopback IP address. The host must not carry a port or brackets.
-func isLoopback(host string) bool {
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
-		return true
-	}
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
-}
-
-// toProxyURL parses a proxy address. A value without a scheme is an HTTP proxy.
-func toProxyURL(s string) (*url.URL, error) {
-	s = strings.TrimSpace(s)
-	if !strings.Contains(s, "://") {
-		s = "http://" + s
-	}
-	u, err := url.Parse(s)
+	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("netproxy: proxy %q cannot be parsed: %w", s, err)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, fmt.Errorf("netproxy: proxy %q has unsupported scheme %q", s, u.Scheme)
 	}
 	if u.Hostname() == "" {
-		return nil, fmt.Errorf("proxy %q has no host", s)
+		return nil, fmt.Errorf("netproxy: proxy %q has no host", s)
 	}
 	return u, nil
 }
 
-const systemTTL = 5 * time.Second
-
-var (
-	sysMu    sync.Mutex
-	sysCache sysConf
-	sysAt    time.Time
-	sysSet   bool
-)
-
-// systemCached returns the system proxy setting, reading it again after
-// systemTTL so that a change in the OS settings takes effect within seconds.
-func systemCached() sysConf {
-	sysMu.Lock()
-	defer sysMu.Unlock()
-	if sysSet && time.Since(sysAt) < systemTTL {
-		return sysCache
+// portOf returns the port of u, or the scheme's default port.
+func portOf(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
 	}
-	sysCache = readSystem()
-	sysAt = time.Now()
-	sysSet = true
-	return sysCache
+	if u.Scheme == "http" {
+		return "80"
+	}
+	return "443"
+}
+
+// isLoopback reports whether host (lowercase, without brackets) is localhost,
+// *.localhost, or a loopback IP address.
+func isLoopback(host string) bool {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// noProxyMatches reports whether host:port is listed in a NO_PROXY value.
+// It follows the conventions of Go's net/http: "*" matches everything;
+// entries are comma-separated; an entry may be an IP, a CIDR block, a domain
+// (matching the domain and its subdomains; a leading "." or "*." is allowed),
+// optionally with a port.
+func noProxyMatches(list, host, port string) bool {
+	hostIP := net.ParseIP(host)
+	for _, e := range strings.Split(list, ",") {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if e == "*" {
+			return true
+		}
+		if _, ipnet, err := net.ParseCIDR(e); err == nil {
+			if hostIP != nil && ipnet.Contains(hostIP) {
+				return true
+			}
+			continue
+		}
+		if h, p, err := net.SplitHostPort(e); err == nil {
+			if p != port {
+				continue
+			}
+			e = h
+		}
+		e = strings.TrimPrefix(e, "*")
+		if ip := net.ParseIP(e); ip != nil {
+			if hostIP != nil && ip.Equal(hostIP) {
+				return true
+			}
+			continue
+		}
+		e = strings.TrimPrefix(e, ".")
+		if e != "" && (host == e || strings.HasSuffix(host, "."+e)) {
+			return true
+		}
+	}
+	return false
 }

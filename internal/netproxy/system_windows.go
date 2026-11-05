@@ -4,20 +4,26 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// readSystem reads the manual proxy from the current user's Internet Settings.
-// When it is off, or the keys cannot be read, there is no system proxy.
-func readSystem() sysConf {
+// readSystemProxy reads the manual proxy from "Internet Options". Any failure,
+// including a missing key, means there is no system proxy.
+func readSystemProxy() systemConfig {
 	k, err := registry.OpenKey(registry.CURRENT_USER,
 		`Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.QUERY_VALUE)
 	if err != nil {
-		return sysConf{}
+		return systemConfig{}
 	}
 	defer k.Close()
-	enable, _, err := k.GetIntegerValue("ProxyEnable")
-	if err != nil || enable != 1 {
-		return sysConf{}
+
+	if enable, _, err := k.GetIntegerValue("ProxyEnable"); err != nil || enable != 1 {
+		return systemConfig{}
 	}
-	server, _, _ := k.GetStringValue("ProxyServer")
+	server, _, err := k.GetStringValue("ProxyServer")
+	if err != nil {
+		return systemConfig{}
+	}
 	override, _, _ := k.GetStringValue("ProxyOverride")
-	return winSystem(server, override)
+	return systemConfig{
+		proxy:  parseWindowsProxyServer(server),
+		bypass: parseBypassList(override),
+	}
 }
