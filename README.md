@@ -3,6 +3,8 @@
 One place to pick every agent's model: Codex on DeepSeek, Claude Code
 on Kimi, Gemini CLI on GLM, from the menu bar. [usemagpie.ai](https://usemagpie.ai)
 
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/vGSnD3ZKQF)
+
 `magpie` is a single screen that lists each AI agent on your machine and
 the model it is set to. Click a value, pick a model. That is the whole app.
 
@@ -72,8 +74,10 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
 | DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
+| Command Code | `~/.commandcode/settings.json` (+ `providers.json`) | model |
+| omp (oh-my-pi) | `~/.omp/agent/config.yml` (+ `models.yml`) | model |
 
-Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
+Provider-scoped agents (OpenCode, Pi, Goose, Crush, omp) take `provider/model`.
 Only agents that are installed or configured are shown.
 
 ## Providers and the gateway
@@ -325,40 +329,24 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
-## Backup and restore
-
-`magpie backup` saves your whole setup to one file: providers with their keys
-and extra headers, the icons you picked, settings, every profile, and each
-agent's current model. The file is sealed with a passphrase (AES-256-GCM, key
-from PBKDF2-SHA256), and nothing in it is readable as text.
+### Moving to another machine
 
 ```sh
-magpie backup                           # ./magpie.magpie-backup, passphrase typed twice
-magpie backup ~/b.magpie-backup         # choose the file
-magpie backup --no-keys ~/b.magpie-backup   # no API keys, no credential-looking headers: safe to share
-echo "pw" | magpie backup ~/b.magpie-backup   # passphrase from standard input (first line)
-
-magpie restore magpie.magpie-backup     # on the other machine, typed once
-magpie restore --no-agents b.magpie-backup  # leave the agents' model choices alone
-echo "pw" | magpie restore b.magpie-backup
+magpie backup                   # writes magpie.magpie-backup, asks for a passphrase twice
+magpie backup --no-keys ~/b.magpie-backup   # the same with no API keys in it
+magpie restore magpie.magpie-backup         # on the other machine
+magpie restore --no-agents b.magpie-backup  # providers, settings, profiles; agents left as they are
 ```
 
-On restore, a provider with the same id is replaced, but a key this machine
-already has is kept when the backup has none. Providers the machine does not
-have are added, and the ones with no key are listed so you can add it with
-`magpie provider key <id> <key>`. Settings are replaced as a whole; profiles
-are written by name, and the other profiles stay. An agent's model is set only
-when that agent is installed here; the ones that are not are listed as skipped.
-A wrong passphrase, or a file that was changed, changes nothing.
-
-Keep these in mind:
-
-- The passphrase is not stored anywhere. A lost passphrase means the backup
-  cannot be opened.
-- Subscription sign-ins (Claude Code, Codex accounts) are not in the backup.
-  Sign in again on the new machine with `magpie accounts add <agent>`.
-- Agents read their config at startup, so a running session keeps its old
-  model until it is restarted.
+A backup holds your providers (with their keys, unless `--no-keys`), the
+pictures picked for them, the settings, the profiles and every agent's model.
+It is encrypted on your machine (AES-256-GCM, the key derived from the
+passphrase with PBKDF2-SHA256); nothing in it can be read without the
+passphrase. Restoring replaces providers with the same id and adds the rest;
+one that came without a key keeps the key already there. Agent models are set
+only for agents installed on that machine. Subscriptions are not in it: sign
+in to them on each machine. Piped in, the passphrase is the first line of
+stdin.
 
 ## Files
 
@@ -370,6 +358,12 @@ Keep these in mind:
 - `~/.cache/magpie/models/<provider>.json` — model lists fetched from vendors
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are respected.
+
+## Community
+
+Questions, setups worth sharing, ideas, bugs: come talk to us and other
+magpie users on [Discord](https://discord.gg/vGSnD3ZKQF). Issues and pull
+requests are welcome here too.
 
 ## License
 
