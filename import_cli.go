@@ -40,9 +40,6 @@ func importCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if accountConflict(p.ID, provider.Accounts()) {
-		return fmt.Errorf("id %q is already used by an account", p.ID)
-	}
 	replacing := false
 	for _, q := range provider.All() {
 		if q.ID == p.ID {
@@ -101,17 +98,6 @@ func isCharDeviceNotNull(fi os.FileInfo) bool {
 		return true
 	}
 	return !os.SameFile(fi, null)
-}
-
-// accountConflict reports whether id is already used by one of the signed-in
-// agent accounts, which an import must not overwrite.
-func accountConflict(id string, accounts []provider.Provider) bool {
-	for _, a := range accounts {
-		if a.ID == id {
-			return true
-		}
-	}
-	return false
 }
 
 // confirmYes accepts only y or yes, in any case. Empty input, or anything

@@ -18,19 +18,6 @@ func TestImportCLIDevNullIsNotTerminal(t *testing.T) {
 	}
 }
 
-func TestImportCLIAccountConflict(t *testing.T) {
-	accounts := []provider.Provider{{ID: "claude"}, {ID: "codex"}}
-	if !accountConflict("claude", accounts) {
-		t.Error("claude should conflict with an account")
-	}
-	if accountConflict("deepseek", accounts) {
-		t.Error("deepseek should not conflict with an account")
-	}
-	if accountConflict("claude", nil) {
-		t.Error("no accounts means no conflict")
-	}
-}
-
 func TestImportCLIReplaceNoKeyNote(t *testing.T) {
 	p := provider.Provider{ID: "relay", Name: "Relay", Chat: "https://relay.example/v1"}
 	s := importSummary(p, true)
