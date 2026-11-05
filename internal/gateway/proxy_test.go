@@ -2,36 +2,43 @@ package gateway
 
 import (
 	"net/http"
+	"net/url"
 	"testing"
+
+	"github.com/yetone/magpie/internal/netproxy"
 )
 
-// The vendor transport must consult netproxy: loopback URLs go direct even
-// when an environment proxy is configured, and vendor URLs use it.
-func TestVendorTransportProxy(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
-		t.Setenv(k, "")
+// The vendor transport must consult netproxy for every request, not the
+// environment alone, and must never be left with a nil Proxy (which would
+// bypass the proxy rules entirely).
+func TestVendorTransportUsesNetproxy(t *testing.T) {
+	tr, ok := New().client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("vendor transport is %T, want *http.Transport", New().client.Transport)
 	}
-	s := New()
-	tr, ok := s.client.Transport.(*http.Transport)
-	if !ok || tr.Proxy == nil {
-		t.Fatalf("vendor transport has no Proxy func: %#v", s.client.Transport)
+	if tr.Proxy == nil {
+		t.Fatal("vendor transport has nil Proxy; requests would bypass netproxy")
 	}
 
-	loop, _ := http.NewRequest("POST", "http://127.0.0.1:3425/v1/messages", nil)
-	if u, err := tr.Proxy(loop); u != nil || err != nil {
-		t.Errorf("loopback should be direct, got %v, %v", u, err)
+	for _, raw := range []string{"https://chatgpt.com/backend-api/x", "http://127.0.0.1:3425/", "http://localhost/"} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, wantErr := netproxy.For(u)
+		got, gotErr := tr.Proxy(&http.Request{URL: u})
+		if (wantErr == nil) != (gotErr == nil) {
+			t.Fatalf("%s: error mismatch: got %v, want %v", raw, gotErr, wantErr)
+		}
+		if gotStr, wantStr := urlString(got), urlString(want); gotStr != wantStr {
+			t.Errorf("%s: transport proxy %q, netproxy.For %q", raw, gotStr, wantStr)
+		}
 	}
-	local, _ := http.NewRequest("POST", "http://localhost:3425/v1/messages", nil)
-	if u, err := tr.Proxy(local); u != nil || err != nil {
-		t.Errorf("localhost should be direct, got %v, %v", u, err)
-	}
+}
 
-	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
-	vendor, _ := http.NewRequest("POST", "https://chatgpt.com/backend-api/x", nil)
-	u, err := tr.Proxy(vendor)
-	if err != nil || u == nil || u.String() != "http://127.0.0.1:7890" {
-		t.Errorf("vendor should use env proxy, got %v, %v", u, err)
+func urlString(u *url.URL) string {
+	if u == nil {
+		return ""
 	}
+	return u.String()
 }

@@ -90,31 +90,19 @@ type Server struct {
 // New makes a gateway.
 func New() *Server {
 	return &Server{
-		client:       &http.Client{Transport: newVendorTransport()},
+		// Vendor requests follow netproxy: settings, then environment,
+		// then the OS proxy, with loopback always direct.
+		client: &http.Client{Transport: &http.Transport{
+			Proxy:                 func(r *http.Request) (*url.URL, error) { return netproxy.For(r.URL) },
+			ResponseHeaderTimeout: 10 * time.Minute,
+			MaxIdleConnsPerHost:   8,
+			IdleConnTimeout:       90 * time.Second,
+			ForceAttemptHTTP2:     true,
+		}},
 		responseOnly: make(map[string]bool),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
-}
-
-// newVendorTransport makes the transport for requests to model vendors. Its
-// proxy is looked up on every request through netproxy.For, so settings
-// changes apply to new requests without a restart. Loopback URLs get no proxy.
-func newVendorTransport() *http.Transport {
-	return &http.Transport{
-		Proxy:                 vendorProxy,
-		ResponseHeaderTimeout: 10 * time.Minute,
-		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       90 * time.Second,
-		ForceAttemptHTTP2:     true,
-	}
-}
-
-// vendorProxy picks the proxy for one request. An error (for example an
-// unparsable proxy in settings) fails the request; it never falls back to
-// a direct connection.
-func vendorProxy(r *http.Request) (*url.URL, error) {
-	return netproxy.For(r.URL)
 }
 
 // Recent lists the last calls, newest first.
