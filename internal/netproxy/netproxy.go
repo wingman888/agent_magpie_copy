@@ -78,13 +78,14 @@ func For(u *url.URL) (*url.URL, error) {
 // Describe reports the proxy that requests to ordinary external hosts use now,
 // and where it comes from: "settings", "off" (set to direct), "environment",
 // "system" or "none". proxy is "" for "off" and "none". The proxy's password,
-// if any, is redacted. If the configured proxy is unusable, Describe returns
-// ("", "settings").
+// if any, is redacted. If the proxy at the level that applies is unusable,
+// Describe returns ("", src) where src names that level: "settings",
+// "environment" or "system".
 func Describe() (proxy, source string) {
 	probe, _ := url.Parse("https://example.invalid/")
 	p, src, err := resolve(probe)
 	if err != nil {
-		return "", "settings"
+		return "", src
 	}
 	if p == nil {
 		return "", src

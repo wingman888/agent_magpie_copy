@@ -160,6 +160,14 @@ func TestEnvironmentSchemeSelection(t *testing.T) {
 	}
 }
 
+func TestDescribeInvalidEnvironmentReportsEnvironment(t *testing.T) {
+	isolate(t, systemConfig{})
+	t.Setenv("HTTPS_PROXY", "ftp://x")
+	if p, src := Describe(); p != "" || src != "environment" {
+		t.Fatalf("Describe = %q, %q; want \"\", environment", p, src)
+	}
+}
+
 func TestSystemProxyAndBypass(t *testing.T) {
 	isolate(t, sysHTTP)
 	if got := forString(t, "https://chatgpt.com/..."); got != "http://127.0.0.1:7890" {
