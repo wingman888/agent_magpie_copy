@@ -3,107 +3,131 @@ package provider
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
 
-// withCodexVersions stands in for the Codex CLI's version (cli, "" for no
-// CLI) and for the models cache's (cache, "" for none), and clears the
-// cached answer, for the length of the test.
-func withCodexVersions(t *testing.T, cli, cache string) {
+func resetCodexVersion() {
+	codexVersionMu.Lock()
+	codexVersion, codexVersionAt = "", time.Time{}
+	codexVersionMu.Unlock()
+}
+
+// codexAsked runs a models list with the Codex CLI reporting cli (or none),
+// and Codex CLI's cache recording cache (or none), and says the client version
+// the list was asked with.
+func codexAsked(t *testing.T, cli func() (string, error), cache string) string {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "models_cache.json")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	if cache != "" {
-		if err := os.WriteFile(path, []byte(`{"client_version":"`+cache+`"}`), 0o600); err != nil {
+		if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"client_version":"` + cache + `"}`
+		if err := os.WriteFile(filepath.Join(home, ".codex", "models_cache.json"), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	oldPath, oldCLI := codexCachePath, codexCLIOutput
-	codexCachePath = func() string { return path }
-	codexCLIOutput = func(context.Context) ([]byte, error) {
-		if cli == "" {
-			return nil, errors.New("codex: not found")
-		}
-		return []byte("codex-cli " + cli + "\n"), nil
-	}
-	codexVersionCache.Lock()
-	codexVersionCache.v, codexVersionCache.at = "", time.Time{}
-	codexVersionCache.Unlock()
+	oldCLI := codexVersionFromCLI
+	codexVersionFromCLI = cli
+	resetCodexVersion()
 	t.Cleanup(func() {
-		codexCachePath, codexCLIOutput = oldPath, oldCLI
-		codexVersionCache.Lock()
-		codexVersionCache.v, codexVersionCache.at = "", time.Time{}
-		codexVersionCache.Unlock()
+		codexVersionFromCLI = oldCLI
+		resetCodexVersion()
 	})
+
+	var mu sync.Mutex
+	var asked []string
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.Query().Get("client_version"))
+		mu.Unlock()
+		w.Write([]byte(`{"models": [{"slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list", "priority": 1}]}`))
+	}))
+	defer fake.Close()
+	old := CodexBase
+	CodexBase = fake.URL + "/backend-api/codex"
+	t.Cleanup(func() { CodexBase = old })
+
+	noSign := func(context.Context, *http.Request, []byte) error { return nil }
+	if ms, err := codexModels(context.Background(), noSign); err != nil || len(ms) != 1 {
+		t.Fatalf("models: %v %+v", err, ms)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 1 {
+		t.Fatalf("asked %d times, want 1", len(asked))
+	}
+	return asked[0]
 }
 
-func TestCodexVersionPicksNewest(t *testing.T) {
-	ctx := context.Background()
+func cliReports(v string) func() (string, error) {
+	return func() (string, error) { return v, nil }
+}
 
-	withCodexVersions(t, "0.155.1", "0.154.0")
-	if got := codexVersion(ctx); got != "0.155.1" {
-		t.Errorf("CLI 0.155.1, cache 0.154.0: got %s", got)
-	}
+func noCLI() (string, error) { return "", errors.New("codex: executable file not found") }
 
-	withCodexVersions(t, "", "0.154.0")
-	if got := codexVersion(ctx); got != "0.154.0" {
-		t.Errorf("no CLI, cache 0.154.0: got %s", got)
-	}
-
-	withCodexVersions(t, "", "")
-	if got := codexVersion(ctx); got != codexClientVersion {
-		t.Errorf("no CLI, no cache: got %s, want built-in %s", got, codexClientVersion)
-	}
-
-	withCodexVersions(t, "0.150.0", "0.154.0")
-	if got := codexVersion(ctx); got != "0.154.0" {
-		t.Errorf("older CLI: got %s", got)
+// The CLI is newer than the cache: the list is asked with the CLI's version.
+func TestCodexModelsAskWithTheCLIVersion(t *testing.T) {
+	if got := codexAsked(t, cliReports("0.155.1"), "0.154.0"); got != "0.155.1" {
+		t.Fatalf("client_version = %q, want 0.155.1", got)
 	}
 }
 
-func TestCodexVersionIsCached(t *testing.T) {
-	ctx := context.Background()
-	withCodexVersions(t, "0.155.1", "")
-	if got := codexVersion(ctx); got != "0.155.1" {
-		t.Fatalf("first: %s", got)
+// Without a CLI, the cache's version is asked with.
+func TestCodexModelsWithoutCLIUseTheCache(t *testing.T) {
+	if got := codexAsked(t, noCLI, "0.154.0"); got != "0.154.0" {
+		t.Fatalf("client_version = %q, want 0.154.0", got)
 	}
+}
+
+// Without a CLI and without a cache, the built-in default is asked with.
+func TestCodexModelsWithoutAnythingUseTheDefault(t *testing.T) {
+	if got := codexAsked(t, noCLI, ""); got != codexClientVersion {
+		t.Fatalf("client_version = %q, want %s", got, codexClientVersion)
+	}
+}
+
+// The newest of the three wins, whichever it is.
+func TestCodexClientVersionIsTheNewest(t *testing.T) {
+	if got := codexAsked(t, cliReports("0.150.0"), "0.156.0"); got != "0.156.0" {
+		t.Fatalf("cache newer than CLI: %q", got)
+	}
+	if got := codexAsked(t, cliReports("0.100.0"), ""); got != codexClientVersion {
+		t.Fatalf("default newer than CLI: %q", got)
+	}
+}
+
+// The version resolved is kept for a while, not looked up again each time.
+func TestCodexClientVersionIsCached(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldCLI := codexVersionFromCLI
+	t.Cleanup(func() {
+		codexVersionFromCLI = oldCLI
+		resetCodexVersion()
+	})
+	resetCodexVersion()
 	calls := 0
-	old := codexCLIOutput
-	codexCLIOutput = func(ctx context.Context) ([]byte, error) {
+	codexVersionFromCLI = func() (string, error) {
 		calls++
-		return old(ctx)
+		return "0.155.1", nil
 	}
-	if got := codexVersion(ctx); got != "0.155.1" || calls != 0 {
-		t.Errorf("within the TTL: got %s, CLI run %d times", got, calls)
+	if got := codexClientVersionNow(); got != "0.155.1" {
+		t.Fatalf("first: %q", got)
 	}
-	codexVersionCache.Lock()
-	codexVersionCache.at = time.Now().Add(-codexVersionTTL - time.Second)
-	codexVersionCache.Unlock()
-	codexVersion(ctx)
-	if calls != 1 {
-		t.Errorf("after the TTL the CLI is asked again: %d", calls)
+	if got := codexClientVersionNow(); got != "0.155.1" || calls != 1 {
+		t.Fatalf("second: %q, CLI asked %d times", got, calls)
 	}
-}
-
-func TestCompareVersions(t *testing.T) {
-	for _, c := range []struct {
-		a, b string
-		want int
-	}{
-		{"0.155.1", "0.154.0", 1},
-		{"0.154.0", "0.155.1", -1},
-		{"1.0", "1.0.0", 0},
-		{"0.10.0", "0.9.9", 1},
-		{"2.0", "10.0", -1},
-	} {
-		if got := compareVersions(c.a, c.b); got != c.want {
-			t.Errorf("compareVersions(%s, %s) = %d, want %d", c.a, c.b, got, c.want)
-		}
-	}
-	if v := firstVersion("codex-cli 0.155.1 (build 7)"); v != "0.155.1" {
-		t.Errorf("firstVersion: %q", v)
+	codexVersionMu.Lock()
+	codexVersionAt = time.Now().Add(-codexVersionTTL - time.Second)
+	codexVersionMu.Unlock()
+	if codexClientVersionNow(); calls != 2 {
+		t.Fatalf("after the TTL the CLI is asked again: %d calls", calls)
 	}
 }

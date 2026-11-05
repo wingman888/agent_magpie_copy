@@ -100,14 +100,20 @@ func providers() error {
 
 // usesByProvider maps provider ids to the agents currently routed to them.
 func usesByProvider() map[string][]string {
+	return usesOf(agent.Detected())
+}
+
+// usesOf is usesByProvider over the given agents. An agent routed to a
+// routing group ("group/<id>") is not counted for any provider.
+func usesOf(agents []*agent.Agent) map[string][]string {
 	out := map[string][]string{}
-	for _, a := range agent.Detected() {
+	for _, a := range agents {
 		if len(a.Fields) == 0 {
 			continue
 		}
 		v := a.Fields[0].Get()
 		v = strings.TrimPrefix(v, "magpie/")
-		if pid, _, ok := strings.Cut(v, "/"); ok {
+		if pid, _, ok := strings.Cut(v, "/"); ok && pid != "group" {
 			out[pid] = append(out[pid], a.Name)
 		}
 	}
@@ -144,30 +150,43 @@ func presets() error {
 
 // models: `magpie models` — the catalog every agent sees
 func models() error {
-	entries := provider.Catalog()
-	if len(entries) == 0 {
+	catalog := provider.Catalog()
+	if len(catalog) == 0 {
 		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
 	}
-	// routing groups head the list, ahead of the providers they draw on
-	var groups, rest []provider.Entry
-	for _, e := range entries {
+	for _, line := range modelLines(catalog) {
+		fmt.Println(line)
+	}
+	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
+	return nil
+}
+
+// modelLines renders the catalog as `magpie models` lists it: routing groups
+// first, in a section of their own ("Routing groups"), then each provider.
+func modelLines(catalog []provider.Entry) []string {
+	// routing groups first, in a section of their own
+	var entries []provider.Entry
+	for _, e := range catalog {
 		if e.Group != "" {
-			groups = append(groups, e)
-		} else {
-			rest = append(rest, e)
+			entries = append(entries, e)
 		}
 	}
-	entries = append(groups, rest...)
+	for _, e := range catalog {
+		if e.Group == "" {
+			entries = append(entries, e)
+		}
+	}
 	w := 0
 	for _, e := range entries {
 		w = max(w, len(e.ID))
 	}
+	var out []string
 	last := ""
 	for _, e := range entries {
 		if e.Provider.ID != last {
 			last = e.Provider.ID
-			fmt.Println(faint.Render("  " + e.Provider.Name))
+			out = append(out, faint.Render("  "+e.Provider.Name))
 		}
 		line := "  " + pad(e.ID, w)
 		if e.Name != "" && e.Name != e.Model {
@@ -176,10 +195,9 @@ func models() error {
 		if len(e.Efforts) > 0 {
 			line += faint.Render("  " + strings.Join(e.Efforts, "/"))
 		}
-		fmt.Println(line)
+		out = append(out, line)
 	}
-	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
-	return nil
+	return out
 }
 
 // providerCmd: `magpie provider <verb> …`
