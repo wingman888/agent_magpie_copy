@@ -75,7 +75,7 @@ func TestProviderIconCommandRejects(t *testing.T) {
 	if err := provider.Save(provider.Provider{ID: "gw", Name: "GW", Key: "sk-1", Chat: "http://127.0.0.1:9/v1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := provider.Save(provider.Provider{ID: "openai", Preset: "openai", Key: "sk-2"}); err != nil {
+	if err := provider.Save(provider.Provider{ID: "openai", Name: "OpenAI", Preset: "openai", Key: "sk-2", Chat: "https://api.openai.com/v1"}); err != nil {
 		t.Fatal(err)
 	}
 	png := writeTemp(t, "ok.png", append([]byte("\x89PNG\r\n\x1a\n"), []byte("x")...))
