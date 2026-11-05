@@ -72,6 +72,12 @@ type Call struct {
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	// Fallback names the candidates that failed before this call succeeded:
+	// a provider id, with the key's name when it has one.
+	Fallback string `json:"fallback,omitempty"`
+	// Key names the API key that completed the call when it was a provider
+	// key: its name, or its fingerprint when it has none.
+	Key string `json:"key,omitempty"`
 }
 
 // Server is the gateway.
@@ -82,6 +88,8 @@ type Server struct {
 	// responseOnly remembers models rejected by Chat Completions, avoiding a
 	// known-failing probe on every Claude Code turn.
 	responseOnly map[string]bool
+	// rests holds the candidates that failed recently, until the time shown.
+	rests        map[string]time.Time
 	subscription *subscriptionBridge
 	debug        bool
 }
@@ -221,16 +229,26 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok && p.Anthropic != "" {
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-		if err == nil {
-			defer res.Body.Close()
+	// Only keys that reach an Anthropic endpoint can count Anthropic tokens;
+	// a key limited to OpenAI is left out here.
+	if ok {
+		for _, c := range p.Choices(provider.Anthropic, model) {
+			q := c.Provider
+			if q.Anthropic == "" {
+				continue
+			}
+			res, err := s.forward(r.Context(), q, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+			if err != nil {
+				continue
+			}
 			if res.StatusCode < 400 {
+				defer res.Body.Close()
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(res.StatusCode)
 				io.Copy(w, res.Body)
 				return
 			}
+			res.Body.Close()
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -349,43 +367,78 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	// A Claude Code subscription must run through the genuine binary. Direct
-	// OAuth HTTP requests are content-classified as third-party traffic when
-	// they carry another agent's harness (Pi, OpenCode, and others).
-	if p.Account != nil && p.Account.Agent == "claude" {
-		call.To = provider.Anthropic
-		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+	// Each key the provider holds is a candidate, most suitable first, then the
+	// keys of its fallback targets. A reply that fails before anything is sent
+	// moves on to the next candidate.
+	cands := candidates(p, from, model)
+	if len(cands) == 0 {
+		call.Status, call.Error = 502, p.Name+" has no key that reaches this API"
+		writeError(w, from, call.Status, call.Error)
 		call.Millis = time.Since(start).Milliseconds()
 		finishCapture()
 		s.record(call)
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 		return
 	}
-	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
-	} else {
-		to := p.Speaks()
-		if len(to) == 0 {
-			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
-			writeError(w, from, call.Status, call.Error)
-			call.Millis = time.Since(start).Milliseconds()
-			finishCapture()
-			s.record(call)
-			return
+	var failed []string
+	var used candidate
+	order := s.orderCandidates(cands)
+	for i, cand := range order {
+		c := cand.choice
+		q := c.Provider
+		used = cand
+		call.Provider = q.ID
+		held := &attemptWriter{dst: w}
+		switch {
+		case q.Account != nil && q.Account.Agent == "claude":
+			// A Claude Code subscription must run through the genuine binary. Direct
+			// OAuth HTTP requests are content-classified as third-party traffic when
+			// they carry another agent's harness (Pi, OpenCode, and others).
+			call.To = provider.Anthropic
+			env, done, err := q.AgentEnv(r.Context())
+			if err != nil {
+				call.Status, call.Error = 502, err.Error()
+				writeError(held, from, call.Status, call.Error)
+				break
+			}
+			ctx := context.WithValue(r.Context(), agentEnvKey{}, env)
+			call.Status, call.Error = s.serveClaudeSubscription(held, r.WithContext(ctx), from, cand.model, body, &call.Usage)
+			done()
+		case q.Base(from) != "" && (q.Account == nil || !q.Account.Stream || streamOf(body)):
+			// relay (a backend that only streams gets a non-streaming request
+			// translated instead; the provider is always streamed on that path)
+			call.To = from
+			call.Status, call.Error = s.passthrough(held, r, q, from, cand.model, body, &call.Usage)
+		default:
+			to := q.Speaks()
+			if len(to) == 0 {
+				call.Status, call.Error = 502, q.Name+" has no endpoint configured"
+				writeError(held, from, call.Status, call.Error)
+			} else {
+				call.To = to[0]
+				call.Status, call.Error = s.translate(held, r, q, from, to[0], cand.model, body, &call.Usage)
+			}
 		}
-		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+		if held.retryable() && i < len(order)-1 {
+			s.rest(c)
+			failed = append(failed, candidateLabel(c))
+			continue
+		}
+		held.flush()
+		break
+	}
+	if len(failed) > 0 {
+		call.Fallback = strings.Join(failed, ", ")
+	}
+	if c := used.choice; call.Error == "" && call.Status < 400 && c.Ref != "" && c.Provider.Account == nil {
+		call.Key = c.Name
+		if call.Key == "" {
+			call.Key = c.Ref
+		}
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: used.choice.Provider.ID, Model: used.model,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
@@ -413,7 +466,6 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
-	provider.ApplyHeaders(p, req)
 	return s.client.Do(req)
 }
 
