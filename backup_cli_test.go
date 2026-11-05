@@ -3,94 +3,182 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/backup"
 )
 
 func TestParseBackupArgs(t *testing.T) {
-	noKeys, file, err := parseBackupArgs(nil)
-	if err != nil || noKeys || file != "magpie.magpie-backup" {
-		t.Fatalf("defaults: got noKeys=%v file=%q err=%v", noKeys, file, err)
+	cases := []struct {
+		name    string
+		args    []string
+		want    backupArgs
+		wantErr bool
+	}{
+		{name: "defaults", args: nil, want: backupArgs{file: "magpie.magpie-backup"}},
+		{name: "no keys", args: []string{"--no-keys"}, want: backupArgs{noKeys: true, file: "magpie.magpie-backup"}},
+		{name: "file", args: []string{"/tmp/x.magpie-backup"}, want: backupArgs{file: "/tmp/x.magpie-backup"}},
+		{name: "flag after file", args: []string{"b.magpie-backup", "--no-keys"}, want: backupArgs{noKeys: true, file: "b.magpie-backup"}},
+		{name: "help", args: []string{"--help"}, want: backupArgs{help: true}},
+		{name: "unknown flag", args: []string{"--bogus"}, wantErr: true},
+		{name: "single dash", args: []string{"-"}, wantErr: true},
+		{name: "extra positional", args: []string{"a", "b"}, wantErr: true},
+		{name: "empty file name", args: []string{""}, wantErr: true},
 	}
-	noKeys, file, err = parseBackupArgs([]string{"--no-keys", "b.magpie-backup"})
-	if err != nil || !noKeys || file != "b.magpie-backup" {
-		t.Fatalf("--no-keys file: got noKeys=%v file=%q err=%v", noKeys, file, err)
-	}
-	if _, _, err := parseBackupArgs([]string{"--bogus"}); err == nil || !strings.Contains(err.Error(), "usage") {
-		t.Fatalf("unknown option: want usage error, got %v", err)
-	}
-	if _, _, err := parseBackupArgs([]string{"a", "b"}); err == nil || !strings.Contains(err.Error(), "usage") {
-		t.Fatalf("extra positional: want usage error, got %v", err)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseBackupArgs(c.args)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("parseBackupArgs(%q) = %+v, want usage error", c.args, got)
+				}
+				if !strings.Contains(err.Error(), "用法") && !strings.Contains(err.Error(), "参数") && !strings.Contains(err.Error(), "文件名") {
+					t.Fatalf("error %q does not explain the usage", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseBackupArgs(%q): %v", c.args, err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("parseBackupArgs(%q) = %+v, want %+v", c.args, got, c.want)
+			}
+		})
 	}
 }
 
 func TestParseRestoreArgs(t *testing.T) {
-	noAgents, file, err := parseRestoreArgs([]string{"--no-agents", "b.magpie-backup"})
-	if err != nil || !noAgents || file != "b.magpie-backup" {
-		t.Fatalf("got noAgents=%v file=%q err=%v", noAgents, file, err)
+	cases := []struct {
+		name    string
+		args    []string
+		want    restoreArgs
+		wantErr bool
+	}{
+		{name: "no file", args: nil, wantErr: true},
+		{name: "file", args: []string{"b.magpie-backup"}, want: restoreArgs{file: "b.magpie-backup"}},
+		{name: "no agents", args: []string{"--no-agents", "b"}, want: restoreArgs{noAgents: true, file: "b"}},
+		{name: "unknown flag", args: []string{"--force", "b"}, wantErr: true},
+		{name: "two files", args: []string{"a", "b"}, wantErr: true},
+		{name: "help", args: []string{"-h"}, want: restoreArgs{help: true}},
 	}
-	for _, args := range [][]string{nil, {"--no-agents"}, {"a", "b"}, {"--x", "a"}} {
-		if _, _, err := parseRestoreArgs(args); err == nil || !strings.Contains(err.Error(), "usage") {
-			t.Fatalf("%v: want usage error, got %v", args, err)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseRestoreArgs(c.args)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("parseRestoreArgs(%q) = %+v, want usage error", c.args, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseRestoreArgs(%q): %v", c.args, err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("parseRestoreArgs(%q) = %+v, want %+v", c.args, got, c.want)
+			}
+		})
+	}
+}
+
+// pipeWith returns the read end of a pipe holding s, which is not a terminal.
+func pipeWith(t *testing.T, s string) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	t.Cleanup(func() { r.Close() })
+	return r
+}
+
+func TestPassphraseFromPipeTakesFirstLine(t *testing.T) {
+	got, err := passphrase(pipeWith(t, "s3cret\r\nignored\n"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "s3cret" {
+		t.Fatalf("passphrase = %q, want the first line without its line ending", got)
+	}
+}
+
+func TestPassphraseFromPipeRejectsEmpty(t *testing.T) {
+	for _, in := range []string{"", "\n", "\r\nabc\n"} {
+		if _, err := passphrase(pipeWith(t, in), false); err == nil {
+			t.Fatalf("passphrase(%q) accepted an empty line", in)
 		}
 	}
 }
 
-func TestReadPassphraseFromPipe(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	if _, err := w.WriteString("pw\r\nsecond line\n"); err != nil {
-		t.Fatal(err)
-	}
-	w.Close()
-	pass, err := readPassphrase(r, "Passphrase: ", true)
-	if err != nil || pass != "pw" {
-		t.Fatalf("got %q, %v; want first line only", pass, err)
-	}
-}
-
-func TestReadPassphraseEmptyPipe(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	w.Close()
-	pass, err := readPassphrase(r, "Passphrase: ", true)
-	if err != nil || pass != "" {
-		t.Fatalf("got %q, %v; want empty passphrase and no error", pass, err)
-	}
-}
-
-func TestWriteBackupPrivate(t *testing.T) {
+func TestWriteSecretFileOwnerOnly(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("file modes are not meaningful on windows")
+		t.Skip("file modes are not meaningful on Windows")
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "magpie.magpie-backup")
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeBackup(path, []byte("new")); err != nil {
+	if err := writeSecretFile(path, []byte("new")); err != nil {
 		t.Fatal(err)
 	}
 	st, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, want 0600", st.Mode().Perm())
+	if mode := st.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("mode = %o, want 0600", mode)
 	}
 	data, _ := os.ReadFile(path)
 	if string(data) != "new" {
-		t.Fatalf("content = %q", data)
+		t.Fatalf("contents = %q", data)
 	}
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Fatalf("temporary files left behind: %d entries", len(entries))
+	}
+}
+
+// A wrong passphrase, or a file that is not a backup, must fail before
+// Restore runs, so the machine's configuration is never touched.
+func TestRestoreDataFailsBeforeRestore(t *testing.T) {
+	sealed, err := backup.Seal(backup.Bundle{Version: backup.FormatVersion}, "right")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		data []byte
+		pass string
+		want string
+	}{
+		{name: "wrong passphrase", data: sealed, pass: "wrong", want: "口令错误或文件已被改动"},
+		{name: "empty file", data: nil, pass: "x", want: "不是 magpie 备份文件"},
+		{name: "plain text", data: []byte("hello"), pass: "x", want: "不是 magpie 备份文件"},
+		{name: "unrelated json", data: []byte("{}"), pass: "x", want: "不是 magpie 备份文件"},
+		{name: "newer version", data: []byte(`{"format":"magpie-backup","version":99}` + "\nAAAA\n"), pass: "x", want: "升级 magpie"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := restoreData(c.data, c.pass, backup.All)
+			if err == nil {
+				t.Fatal("restoreData succeeded")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("error = %q, want it to contain %q", err, c.want)
+			}
+			if strings.Contains(strings.ToLower(err.Error()), "passphrase") {
+				t.Fatalf("error %q mentions passphrase", err)
+			}
+			if !reflect.DeepEqual(res, backup.Result{}) {
+				t.Fatalf("result = %+v, want zero: nothing should be restored", res)
+			}
+		})
 	}
 }

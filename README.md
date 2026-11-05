@@ -327,34 +327,38 @@ until you start a new one.
 
 ## Backup and restore
 
-Move your whole setup to another machine in one file:
+`magpie backup` saves your whole setup to one file: providers with their keys
+and extra headers, the icons you picked, settings, every profile, and each
+agent's current model. The file is sealed with a passphrase (AES-256-GCM, key
+from PBKDF2-SHA256), and nothing in it is readable as text.
 
 ```sh
-magpie backup                   # writes magpie.magpie-backup (asks for a passphrase twice)
-magpie backup ~/b.magpie-backup
-magpie backup --no-keys b.magpie-backup   # no API keys, no credential-looking headers: safe to share
+magpie backup                           # ./magpie.magpie-backup, passphrase typed twice
+magpie backup ~/b.magpie-backup         # choose the file
+magpie backup --no-keys ~/b.magpie-backup   # no API keys, no credential-looking headers: safe to share
+echo "pw" | magpie backup ~/b.magpie-backup   # passphrase from standard input (first line)
 
-magpie restore magpie.magpie-backup       # asks for the passphrase once
-magpie restore --no-agents b.magpie-backup   # providers, settings and profiles only; leave agents alone
-
-echo "pw" | magpie backup       # passphrase from standard input (first line), for scripts
-echo "pw" | magpie restore magpie.magpie-backup
+magpie restore magpie.magpie-backup     # on the other machine, typed once
+magpie restore --no-agents b.magpie-backup  # leave the agents' model choices alone
+echo "pw" | magpie restore b.magpie-backup
 ```
 
-The file holds your providers (keys, extra keys, custom headers), their
-icons, settings, saved profiles and each agent's model choice. It is sealed
-with AES-256-GCM under a key derived from the passphrase (PBKDF2-SHA256), and
-it is written readable only by you. Lose the passphrase and the file cannot
-be opened.
+On restore, a provider with the same id is replaced, but a key this machine
+already has is kept when the backup has none. Providers the machine does not
+have are added, and the ones with no key are listed so you can add it with
+`magpie provider key <id> <key>`. Settings are replaced as a whole; profiles
+are written by name, and the other profiles stay. An agent's model is set only
+when that agent is installed here; the ones that are not are listed as skipped.
+A wrong passphrase, or a file that was changed, changes nothing.
 
-- Subscriptions (Claude Code, Codex and the like) are not in the file: their
-  sign-in stays with each agent, so sign in again on the new machine.
-- Restoring replaces a provider with the same id. A backup without keys keeps
-  the keys this machine already has. Providers left without a key are listed
-  so you can add one with `magpie provider key <id> <key>`.
-- Agent model choices are applied only to agents installed on this machine;
-  the others, and any value that cannot be applied, are listed as skipped.
-- Running agents keep their current model until they are restarted.
+Keep these in mind:
+
+- The passphrase is not stored anywhere. A lost passphrase means the backup
+  cannot be opened.
+- Subscription sign-ins (Claude Code, Codex accounts) are not in the backup.
+  Sign in again on the new machine with `magpie accounts add <agent>`.
+- Agents read their config at startup, so a running session keeps its old
+  model until it is restarted.
 
 ## Files
 
