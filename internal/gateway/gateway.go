@@ -83,7 +83,7 @@ type Server struct {
 	recent []Call
 	// unavailable remembers the (provider, model, endpoint) combinations that
 	// answered the model is not served there, so no request tries them again.
-	unavailable map[string]bool
+	unavailable  map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
 	trace        trace // what routing did with each request, for the Gateway view
