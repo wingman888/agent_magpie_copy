@@ -631,10 +631,7 @@ func codexAccount(home string) (Provider, bool) {
 		return Provider{}, false
 	}
 	id := jwtClaims(a.Tokens.IDToken)
-	user, plan := claimString(id, "email"), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")
-	if user == "" {
-		user = "ChatGPT"
-	}
+	user, plan := codexUser(id, codexAccountID(a)), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")
 	if raw, err := os.ReadFile(path); err == nil {
 		rememberLive("codex", user, plan, raw)
 	}

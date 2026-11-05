@@ -16,6 +16,15 @@ var loginUsageCache = struct {
 	data map[string]map[string]SubscriptionQuota // agent -> account email -> quota
 }{at: map[string]time.Time{}, data: map[string]map[string]SubscriptionQuota{}}
 
+// invalidateLoginUsage makes the next LoginUsage ask again, after accounts
+// were switched, added, forgotten or changed. Last known answers are kept for
+// failed queries, so nothing is lost.
+func invalidateLoginUsage() {
+	loginUsageCache.Lock()
+	loginUsageCache.at = map[string]time.Time{}
+	loginUsageCache.Unlock()
+}
+
 // usageAccount is one remembered account and how to ask for its usage.
 type usageAccount struct {
 	user  string
@@ -56,11 +65,15 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 
 	loginUsageCache.Lock()
 	defer loginUsageCache.Unlock()
-	prev := loginUsageCache.data[agent]
+	// accounts are matched case-insensitively, as the rest of the store does
+	prev := map[string]SubscriptionQuota{}
+	for k, v := range loginUsageCache.data[agent] {
+		prev[strings.ToLower(k)] = v
+	}
 	next := map[string]SubscriptionQuota{}
 	for i, a := range accts {
 		q := results[i]
-		if old, ok := prev[a.user]; ok && q.Error != "" && old.Error == "" {
+		if old, ok := prev[strings.ToLower(a.user)]; ok && q.Error != "" && old.Error == "" {
 			q = old // a failed query keeps the last known answer
 		}
 		next[a.user] = q

@@ -86,7 +86,8 @@ func rememberedFile(t *testing.T, agent, user string) string {
 func TestRememberedCodexAccountsSwitch(t *testing.T) {
 	home := loginHome(t)
 	codexSignIn(t, home, "a@example.com", "ra")
-	Accounts() // the first account is remembered, not on
+	Accounts()          // the first account is remembered, not on
+	keepSignIn("codex") // as magpie accounts add does, before the sign-in is replaced
 	codexSignIn(t, home, "b@example.com", "rb")
 	Accounts() // the second one is remembered and on by default
 
@@ -187,7 +188,8 @@ func TestClaudeSwitchKeepsOtherFieldsAndOffAgentStore(t *testing.T) {
 	home := loginHome(t)
 	credPath := filepath.Join(home, ".claude", ".credentials.json")
 	claudeLoginFile(t, home, "pro", "acc-pro", "refresh-pro-1", "pro-state")
-	Accounts() // Claude Pro, remembered first
+	Accounts()           // Claude Pro, remembered first
+	keepSignIn("claude") // as magpie accounts add does, before the sign-in is replaced
 	claudeLoginFile(t, home, "max", "acc-max", "refresh-max-1", "max-state")
 	Accounts() // Claude Max, the second: on by default
 

@@ -11,10 +11,20 @@ package provider
 //	accounts/<file>.json   each account's credentials, as the agent keeps them
 //
 // Refresh tokens have one holder at a time. The account the agent is signed
-// in to is refreshed by the agent's own file (magpie only copies it into the
-// remembered file, so a switch never loses the latest tokens). Every other
-// account is refreshed from its remembered file, and only there. Nothing
-// marked "on" is ever written into the agent's own store.
+// in to is refreshed only by the agent's own file, so the remembered copy of
+// that account keeps its access token but not its refresh token (see
+// withoutRefresh). When a switch replaces it, its whole sign-in, refresh token
+// included, is saved back into its remembered file, so no latest token is
+// lost. The account a switch brings in has its refresh token removed from its
+// remembered file once it is written into the agent's file. Every other
+// account keeps its full sign-in and is refreshed from its remembered file,
+// and only there. Nothing marked "on" is ever written into the agent's own
+// store.
+//
+// A name that stands in for a missing email (see standIn) is not a key: two
+// different accounts that show the same stand-in are never merged. Such a name
+// is only reused when the stored sign-in has the same refresh token, or none
+// (the copy kept while the account was signed in).
 
 import (
 	"bytes"
@@ -46,6 +56,10 @@ type rememberedAccount struct {
 	Plan  string `json:"plan,omitempty"`
 	On    bool   `json:"on,omitempty"`
 	File  string `json:"file"`
+	// Fp is a digest of the refresh token last seen for this account. It is
+	// not usable as a token; it tells apart stand-in names whose copy kept no
+	// refresh token.
+	Fp string `json:"fp,omitempty"`
 }
 
 type accountIndex struct {
@@ -142,7 +156,10 @@ func rememberLive(agent, user, plan string, blob []byte) {
 	accountsMu.Lock()
 	defer accountsMu.Unlock()
 	ix := loadIndex()
-	i := ix.find(agent, user)
+	i, ok := ownEntry(&ix, agent, user, blob)
+	if !ok {
+		return // another account with the same stand-in name; never overwrite it
+	}
 	changed := false
 	if i < 0 {
 		ix.Accounts = append(ix.Accounts, rememberedAccount{Agent: agent, User: user, Plan: plan,
@@ -153,15 +170,152 @@ func rememberLive(agent, user, plan string, blob []byte) {
 		ix.Accounts[i].Plan = plan
 		changed = true
 	}
+	if fp := fingerprint(refreshOf(agent, blob)); ix.Accounts[i].Fp != fp {
+		ix.Accounts[i].Fp = fp
+		changed = true
+	}
+	// the agent's file keeps the refresh token; the copy here does not
+	kept := withoutRefresh(agent, blob)
 	path := ix.Accounts[i].path()
-	if old, err := os.ReadFile(path); err != nil || !bytes.Equal(old, blob) {
-		if writeSecret(path, blob) != nil {
+	if old, err := os.ReadFile(path); err != nil || !bytes.Equal(old, kept) {
+		if writeSecret(path, kept) != nil {
 			return
 		}
 	}
 	if changed {
 		saveIndex(ix)
+		invalidateLoginUsage()
 	}
+}
+
+// standIn reports whether a name is the placeholder magpie shows when the
+// sign-in carries no email and no account id.
+func standIn(user string) bool {
+	return !strings.Contains(user, "@") && !strings.HasPrefix(user, "ChatGPT ")
+}
+
+// codexUser names a ChatGPT sign-in: its email, else its account id, which is
+// stable, else a stand-in.
+func codexUser(id map[string]any, accountID string) string {
+	if u := claimString(id, "email"); u != "" {
+		return u
+	}
+	if accountID != "" {
+		return "ChatGPT " + accountID
+	}
+	return "ChatGPT"
+}
+
+// refreshOf is the refresh token in a sign-in blob, or "".
+func refreshOf(agent string, blob []byte) string {
+	var m map[string]any
+	if json.Unmarshal(blob, &m) != nil {
+		return ""
+	}
+	switch agent {
+	case "claude":
+		o, _ := m["claudeAiOauth"].(map[string]any)
+		s, _ := o["refreshToken"].(string)
+		return s
+	case "codex":
+		t, _ := m["tokens"].(map[string]any)
+		s, _ := t["refresh_token"].(string)
+		return s
+	}
+	return ""
+}
+
+// withoutRefresh is a sign-in with its refresh token removed. It is what
+// magpie keeps for the account the agent is signed in to, whose refresh token
+// belongs to the agent's own file. The access token stays, so the gateway can
+// still use the copy while it is fresh.
+func withoutRefresh(agent string, blob []byte) []byte {
+	var m map[string]any
+	if json.Unmarshal(blob, &m) != nil || m == nil {
+		return blob
+	}
+	switch agent {
+	case "claude":
+		o, _ := m["claudeAiOauth"].(map[string]any)
+		if o == nil {
+			return blob
+		}
+		delete(o, "refreshToken")
+		delete(o, "refreshTokenExpiresAt")
+	case "codex":
+		t, _ := m["tokens"].(map[string]any)
+		if t == nil {
+			return blob
+		}
+		delete(t, "refresh_token")
+	default:
+		return blob
+	}
+	out, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return blob
+	}
+	return append(out, '\n')
+}
+
+// fingerprint digests a refresh token for Fp; "" for none.
+func fingerprint(rt string) string {
+	if rt == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(rt))
+	return hex.EncodeToString(sum[:])
+}
+
+// ownEntry finds the index entry a sign-in belongs to. ok is false when the
+// sign-in may be a different account that shares a stand-in name with the
+// entry; then nothing may be written there. i is -1 when the account is new.
+// The caller holds accountsMu.
+//
+// A stand-in name is the same account when the entry's file holds the same
+// refresh token. When the file has none (the account was signed in, so its
+// copy was stripped), the fingerprint last seen must match. Anything else is
+// treated as a different account, so nothing is merged or overwritten.
+func ownEntry(ix *accountIndex, agent, user string, blob []byte) (i int, ok bool) {
+	i = ix.find(agent, user)
+	if i < 0 || !standIn(user) {
+		return i, true
+	}
+	rt := refreshOf(agent, blob)
+	if stored, err := os.ReadFile(ix.Accounts[i].path()); err == nil {
+		if srt := refreshOf(agent, stored); srt != "" {
+			return i, srt == rt
+		}
+	}
+	fp := ix.Accounts[i].Fp
+	return i, fp == "" || fp == fingerprint(rt)
+}
+
+// ambiguousAccount is the error when the signed-in account shows a stand-in
+// name that magpie already holds for a different account.
+func ambiguousAccount(agent, user string) error {
+	return fmt.Errorf("the %s account %q may be another account already remembered under that name; sign in again so it has an email, then retry", agentName(agent), user)
+}
+
+// rememberFull saves a sign-in whole, refresh token included, as the entry of
+// an account that is not the one the agent uses now. It returns the entry's
+// index. The caller holds accountsMu.
+func rememberFull(ix *accountIndex, agent string, cur login) (int, error) {
+	j, ok := ownEntry(ix, agent, cur.user, cur.blob)
+	if !ok {
+		return -1, ambiguousAccount(agent, cur.user)
+	}
+	if j < 0 {
+		ix.Accounts = append(ix.Accounts, rememberedAccount{Agent: agent, User: cur.user,
+			On: ix.count(agent) > 0, File: credFile(agent, cur.user)})
+		j = len(ix.Accounts) - 1
+	}
+	ix.Accounts[j].Plan = cur.plan
+	ix.Accounts[j].Fp = fingerprint(refreshOf(agent, cur.blob))
+	if err := writeSecret(ix.Accounts[j].path(), cur.blob); err != nil {
+		return -1, err
+	}
+	return j, nil
 }
 
 // withAlternates adds the remembered accounts of the same agent that are on,
@@ -296,10 +450,7 @@ func agentLogin(agent string) (login, bool) {
 			return login{}, false
 		}
 		id := jwtClaims(a.Tokens.IDToken)
-		user, plan := claimString(id, "email"), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")
-		if user == "" {
-			user = "ChatGPT"
-		}
+		user, plan := codexUser(id, codexAccountID(a)), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")
 		return login{user: user, plan: plan, blob: raw}, true
 	}
 	return login{}, false
@@ -323,7 +474,21 @@ func writeLogin(agent string, live *login, target []byte) error {
 		if raw == nil {
 			raw = map[string]any{}
 		}
-		raw["claudeAiOauth"] = tc.raw["claudeAiOauth"]
+		// replace only the login fields inside claudeAiOauth; anything else
+		// the agent keeps there stays
+		oauth, _ := raw["claudeAiOauth"].(map[string]any)
+		if oauth == nil {
+			oauth = map[string]any{}
+		}
+		src, _ := tc.raw["claudeAiOauth"].(map[string]any)
+		for _, k := range claudeLoginKeys {
+			if v, ok := src[k]; ok {
+				oauth[k] = v
+			} else {
+				delete(oauth, k)
+			}
+		}
+		raw["claudeAiOauth"] = oauth
 		return saveClaudeCredential(loc, claudeCredentials{raw: raw, OAuth: tc.OAuth})
 	case "codex":
 		var tgt map[string]any
@@ -332,9 +497,12 @@ func writeLogin(agent string, live *login, target []byte) error {
 		}
 		raw := map[string]any{}
 		path := codexAuthPath()
-		readJSON(path, &raw)
-		if raw == nil {
-			raw = map[string]any{}
+		if b, err := os.ReadFile(path); err == nil {
+			if json.Unmarshal(b, &raw) != nil || raw == nil {
+				return fmt.Errorf("%s is not valid JSON; not overwriting it", path)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
 		}
 		for _, k := range []string{"auth_mode", "tokens", "last_refresh"} {
 			if v, ok := tgt[k]; ok {
@@ -361,8 +529,22 @@ func SwitchAccount(agent, user string) error {
 		return err
 	}
 	Accounts() // remembers the sign-in in use first
+
+	// The agent's refresh token is rotated by the agent and by claudeToken /
+	// codexToken, under these locks. Hold the same lock for the whole switch so
+	// no refresh writes the agent's file between reading the sign-in in use
+	// and replacing it. Accounts() above takes no lock held here, and nothing
+	// below takes these locks again.
+	mu := &claudeMu
+	if agent == "codex" {
+		mu = &codexMu
+	}
+	mu.Lock()
+	defer mu.Unlock()
 	accountsMu.Lock()
 	defer accountsMu.Unlock()
+	defer invalidateLoginUsage()
+
 	ix := loadIndex()
 	t := ix.find(agent, user)
 	if t < 0 {
@@ -373,30 +555,71 @@ func SwitchAccount(agent, user string) error {
 	if err != nil {
 		return fmt.Errorf("%s account %s has no saved sign-in: %v", agentName(agent), target.User, err)
 	}
-	cur, has := agentLogin(agent)
-	if has && strings.EqualFold(cur.user, target.User) {
-		return nil
+	if refreshOf(agent, tb) == "" {
+		// its copy was kept while it was signed in, and the agent was then
+		// signed in to another account outside magpie, taking the refresh token
+		return fmt.Errorf("the saved %s sign-in for %s has no refresh token; sign in to it again with magpie accounts add %s",
+			agentName(agent), target.User, agent)
 	}
+	cur, has := agentLogin(agent)
 	if has {
-		j := ix.find(agent, cur.user)
-		if j < 0 {
-			ix.Accounts = append(ix.Accounts, rememberedAccount{Agent: agent, User: cur.user, File: credFile(agent, cur.user)})
-			j = len(ix.Accounts) - 1
+		j, ok := ownEntry(&ix, agent, cur.user, cur.blob)
+		if !ok {
+			return ambiguousAccount(agent, cur.user)
 		}
-		ix.Accounts[j].Plan = cur.plan
-		ix.Accounts[j].On = target.On
-		if err := writeSecret(ix.Accounts[j].path(), cur.blob); err != nil {
-			return err
+		if j == t {
+			return nil
 		}
 	}
 	var live *login
 	if has {
+		// the account replaced keeps its latest sign-in, refresh token included
+		j, err := rememberFull(&ix, agent, cur)
+		if err != nil {
+			return err
+		}
+		ix.Accounts[j].On = target.On
 		live = &cur
 	}
 	if err := writeLogin(agent, live, tb); err != nil {
 		return err
 	}
+	// the target's refresh token now belongs to the agent's file alone
+	ix.Accounts[t].Fp = fingerprint(refreshOf(agent, tb))
+	if err := writeSecret(target.path(), withoutRefresh(agent, tb)); err != nil {
+		return err
+	}
 	return saveIndex(ix)
+}
+
+// claudeLoginKeys are the fields of claudeAiOauth that a sign-in owns.
+var claudeLoginKeys = []string{"accessToken", "refreshToken", "expiresAt", "refreshTokenExpiresAt",
+	"scopes", "subscriptionType", "rateLimitTier"}
+
+// codexAccountID is the account id of a Codex sign-in, from the file or the
+// id token.
+func codexAccountID(a codexAuth) string {
+	if a.Tokens.AccountID != "" {
+		return a.Tokens.AccountID
+	}
+	return claimString(jwtClaims(a.Tokens.IDToken), "https://api.openai.com/auth", "chatgpt_account_id")
+}
+
+// keepSignIn saves the sign-in in use, whole, before an agent's own login
+// replaces it, so the account it leaves stays usable. The caller must not
+// hold accountsMu.
+func keepSignIn(agent string) {
+	cur, has := agentLogin(agent)
+	if !has {
+		return
+	}
+	accountsMu.Lock()
+	defer accountsMu.Unlock()
+	ix := loadIndex()
+	if _, err := rememberFull(&ix, agent, cur); err != nil {
+		return
+	}
+	saveIndex(ix)
 }
 
 // ForgetAccount drops a remembered account. The one signed in to cannot be
@@ -419,6 +642,7 @@ func ForgetAccount(agent, user string) error {
 	}
 	os.Remove(ix.Accounts[i].path())
 	ix.Accounts = append(ix.Accounts[:i], ix.Accounts[i+1:]...)
+	invalidateLoginUsage()
 	return saveIndex(ix)
 }
 
@@ -480,7 +704,7 @@ func Login(agent string) error {
 	if err := checkAgent(agent); err != nil {
 		return err
 	}
-	Accounts()
+	keepSignIn(agent)
 	var cmd *exec.Cmd
 	if agent == "claude" {
 		exe := claudeExecutable()
@@ -505,5 +729,6 @@ func Login(agent string) error {
 		return fmt.Errorf("%s is still signed out", agentName(agent))
 	}
 	Accounts()
+	invalidateLoginUsage()
 	return nil
 }
