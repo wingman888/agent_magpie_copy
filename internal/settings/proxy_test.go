@@ -9,16 +9,16 @@ import (
 
 func TestValidateProxyAccepts(t *testing.T) {
 	cases := map[string]string{
-		"":                         "",
-		"   ":                      "",
-		"direct":                   "direct",
-		"  direct  ":               "direct",
-		"127.0.0.1:7890":           "127.0.0.1:7890",
-		"  127.0.0.1:7890\t":       "127.0.0.1:7890",
-		"http://127.0.0.1:7890":    "http://127.0.0.1:7890",
-		"https://proxy.local":      "https://proxy.local",
-		"socks5://127.0.0.1:1080":  "socks5://127.0.0.1:1080",
-		"socks5h://127.0.0.1:1080": "socks5h://127.0.0.1:1080",
+		"":                          "",
+		"   ":                       "",
+		"direct":                    "direct",
+		"  direct  ":                "direct",
+		"127.0.0.1:7890":            "127.0.0.1:7890",
+		"  127.0.0.1:7890\t":        "127.0.0.1:7890",
+		"http://127.0.0.1:7890":     "http://127.0.0.1:7890",
+		"https://proxy.local":       "https://proxy.local",
+		"socks5://127.0.0.1:1080":   "socks5://127.0.0.1:1080",
+		"socks5h://127.0.0.1:1080":  "socks5h://127.0.0.1:1080",
 		" socks5://127.0.0.1:1080 ": "socks5://127.0.0.1:1080",
 	}
 	for in, want := range cases {
