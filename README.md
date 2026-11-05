@@ -102,6 +102,53 @@ separate Responses endpoint, `catalog=` to borrow a models.dev list, and
 `models=` to name the models to expose. Anything a preset does not know can
 be overridden the same way.
 
+### Import links
+
+A vendor or relay can offer its provider as a link, so the user adds it
+with one click or one command:
+
+```sh
+magpie import 'magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…'
+magpie import 'magpie://import?preset=deepseek&key=sk-…'
+magpie import -y 'magpie://import?preset=yylx&region=cn&key=sk-…'   # no question asked
+```
+
+`magpie import` shows what the link would add (name, the hosts requests go
+to, the models, the key masked to its first characters) and asks
+`Add it? [y/N]`. Nothing is saved before you answer yes. `-y` skips the
+question; without a terminal, `-y` is required. A link that replaces a
+provider you already have says so first. A link without a key leaves it for
+you: `magpie provider key <id> <key>`.
+
+Parameters (values are URL-encoded):
+
+| Parameter | Meaning |
+| --- | --- |
+| `preset` | a preset id from `magpie presets`; its endpoints are used |
+| `region` | which region of a preset with several (`preset=yylx&region=cn`) |
+| `name` | the name; required without `preset`, overrides the preset's name otherwise (at most 80 characters) |
+| `id` | the id; by default derived from the name (`Acme Relay` → `acme-relay`) |
+| `key` | the API key; without it you add the key later |
+| `chat`, `responses`, `anthropic` | base URLs; `anthropic` is the root without `/v1` |
+| `models` | comma-separated model ids (at most 200) |
+| `catalog` | a models.dev provider id, for model names and reasoning levels |
+| `website`, `keys` | the vendor's site and API-key page; only `https` is kept |
+
+A link is refused as a whole when it is malformed: a custom link needs a
+`name` and at least one base URL; base URLs must be `https`, except for
+`localhost`, loopback, private-network addresses and `.local` names; they
+may not carry a username, password, query or fragment; an id must be
+lowercase letters, digits and dashes; a key may not contain control
+characters and is at most 4096 characters. The scheme is `magpie://import`
+(also `magpie:import` and `magpie:///import`); other actions are refused.
+
+Web pages and GitHub often cannot open custom schemes. Link to the same
+parameters in the fragment instead; a fragment is never sent to the server:
+
+```
+https://usemagpie.ai/import#name=Acme%20Relay&chat=https://api.acme.example/v1
+```
+
 ### Signed-in agents as providers
 
 An agent you have signed in to is a subscription with models behind it, so
@@ -162,6 +209,15 @@ and the recent calls; `MAGPIE_DEBUG=1` logs every call to the terminal.
 **Claude Code** gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and the
 model variables in the `env` block of `settings.json`; picking a native
 model (`opus`, `sonnet`…) removes them and restores whatever was there.
+
+Claude Code has four model tiers: `opus`, `sonnet`, `haiku` and `fable`.
+Each tier follows the main model unless you pin it with
+`magpie claude <opus|sonnet|haiku|fable> <model>`; `magpie claude <tier> ""`
+makes it follow the main model again. Pinning a tier stops Claude Code from
+forcing one model on every subagent, and `haiku` also serves as its small,
+fast model. Changing the main model moves the tiers that follow it and
+leaves the pinned ones alone. Setting a tier needs a main model through
+magpie first, and the model must be a magpie one (`provider/model`).
 
 **Codex** gets a `[model_providers.magpie]` table, `model_catalog_json`
 pointing at `~/.codex/magpie-models.json` (written from the catalog, so the
@@ -251,6 +307,8 @@ magpie codex effort high        # other fields
 magpie codex xhigh              # bare effort levels are recognised too
 magpie codex deepseek/deepseek-chat   # any catalog model, through the gateway
 magpie claude moonshot/kimi-k2.5
+magpie claude haiku deepseek/flash   # one Claude Code tier: opus, sonnet, haiku or fable
+magpie claude haiku ""               # that tier follows the main model again
 magpie gemini auth api-key
 magpie opencode anthropic/claude-sonnet-5
 magpie oc small anthropic/claude-haiku-4-5
