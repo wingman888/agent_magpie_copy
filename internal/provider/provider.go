@@ -432,30 +432,6 @@ func (p Provider) Speaks() []Protocol {
 	return out
 }
 
-// TranslationOrder is the protocols magpie tries, in order, when it has to
-// translate a request into one the vendor serves for model. OpenAI's own
-// API, and Copilot's OpenAI models, prefer Responses; every other vendor
-// prefers Chat Completions. Anthropic is not in the order: a request that
-// needs translating is not Anthropic's to begin with.
-func TranslationOrder(p Provider, model string) []Protocol {
-	if (p.Host() == "api.openai.com" || (p.Account != nil && p.Account.Agent == "copilot")) && isOpenAIModel(model) {
-		return []Protocol{Responses, Chat}
-	}
-	return []Protocol{Chat, Responses}
-}
-
-// isOpenAIModel is whether a model id names an OpenAI model: gpt-*, codex*,
-// or o followed by a digit, with any "vendor/" prefix ignored.
-func isOpenAIModel(model string) bool {
-	id := strings.ToLower(model)
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		id = id[i+1:]
-	}
-	return strings.HasPrefix(id, "gpt-") || strings.HasPrefix(id, "codex") || openAIOSeries.MatchString(id)
-}
-
-var openAIOSeries = regexp.MustCompile(`^o[0-9]`)
-
 // Host is the vendor's API host, for display.
 func (p Provider) Host() string {
 	for _, pr := range Protocols {

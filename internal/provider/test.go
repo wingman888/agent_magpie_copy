@@ -81,29 +81,9 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		pools = append(pools, ms)
 	}
 	pools = append(pools, p.Available())
-	// When the vendor's list says which endpoints serve each model, only a
-	// model it says this endpoint serves will do; none is no model to try.
-	listed := false
-	for _, pool := range pools {
-		for _, m := range pool {
-			if len(p.APIs(m.ID)) > 0 {
-				listed = true
-			}
-		}
-	}
-	if listed {
-		for _, pool := range pools {
-			for _, m := range pool {
-				if slices.Contains(p.APIs(m.ID), proto) && (k.Key == "" || p.Serves(k, m.ID)) {
-					return m.ID
-				}
-			}
-		}
-		return ""
-	}
 	for _, want := range []func(string) bool{
-		func(id string) bool { return proto != Anthropic || isClaude(id) },
-		func(string) bool { return true },
+		func(id string) bool { return (proto != Anthropic || isClaude(id)) && p.declaresAPI(id, proto) },
+		func(id string) bool { return p.declaresAPI(id, proto) },
 	} {
 		for _, pool := range pools {
 			for _, m := range pool {
@@ -114,6 +94,13 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		}
 	}
 	return ""
+}
+
+// declaresAPI is whether model may be asked at proto: its list entry says so,
+// or the list says nothing about it (unknown).
+func (p Provider) declaresAPI(model string, proto Protocol) bool {
+	apis := p.APIs(model)
+	return apis == nil || slices.Contains(apis, proto)
 }
 
 func isClaude(id string) bool {

@@ -63,28 +63,47 @@ func (p Provider) Fetched() (time.Time, bool) {
 	return t, ok
 }
 
-// APIs are the protocols the vendor's last model list says model is served
-// on, in the order the list gives them; nil when the list says nothing about
-// it (or there is no list). Ids match exactly.
+// APIs are the endpoints the vendor's last model list declares for model,
+// in the order listed; nil when the list does not say (or has no such model),
+// which means every protocol the vendor speaks may be tried.
 func (p Provider) APIs(model string) []Protocol {
 	live, _, ok := catalog.Live(p.ID)
 	if !ok {
 		return nil
 	}
+	var apis []string
+	found := false
 	for _, m := range live {
-		if m.ID != model {
-			continue
+		if m.ID == model {
+			apis, found = m.APIs, true
+			break
 		}
-		var out []Protocol
-		for _, a := range m.APIs {
-			switch Protocol(a) {
-			case Chat, Responses, Anthropic:
-				out = append(out, Protocol(a))
+	}
+	if !found {
+		// a gateway's "vendor/model" is listed as "model", and the reverse
+		for _, m := range live {
+			if bare(m.ID) == bare(model) {
+				apis = m.APIs
+				break
 			}
 		}
-		return out
 	}
-	return nil
+	var out []Protocol
+	for _, a := range apis {
+		switch Protocol(a) {
+		case Chat, Responses, Anthropic:
+			out = append(out, Protocol(a))
+		}
+	}
+	return out
+}
+
+// bare is a model id without its "vendor/" prefix.
+func bare(id string) string {
+	if i := strings.LastIndexByte(id, '/'); i >= 0 {
+		return id[i+1:]
+	}
+	return id
 }
 
 // Fetch asks the vendor which models it serves and remembers the answer.
