@@ -58,8 +58,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie agents                   list every supported agent
   magpie update [check]           install the newest release (check: only say if there is one)
 
-  magpie backup [--no-keys] [file]   save all your configuration to one file, sealed with a passphrase
-  magpie restore [--no-agents] <file> put a backup back (subscriptions sign in again on each machine)
+  magpie backup [--no-keys] [file]   save all of it as one file, sealed with a passphrase
+  magpie restore [--no-agents] <file>  restore a backup on this machine (keys already here are kept)
 
 agents: claude (cc), codex, gemini, opencode (oc), pi, goose, cursor, copilot, crush
 `
@@ -86,6 +86,14 @@ func run(args []string) error {
 	// for a token often; nothing else of magpie's needs to start for it
 	if len(args) == 3 && args[0] == "grok-token" {
 		return provider.GrokToken(os.Stdout, args[1], args[2], os.Getenv("GROK_AUTH_EXPIRED") == "1")
+	}
+	// backup and restore run before the startup migrations, which would
+	// otherwise rewrite the settings and agent files they are about to save or restore
+	if len(args) > 0 && args[0] == "backup" {
+		return backupCmd(args[1:])
+	}
+	if len(args) > 0 && args[0] == "restore" {
+		return restoreCmd(args[1:])
 	}
 	settings.Migrate()
 	agent.RenameLegacy()
@@ -149,10 +157,6 @@ func run(args []string) error {
 		return usageCmd(args)
 	case "update":
 		return updateCmd(args)
-	case "backup":
-		return backupCmd(args)
-	case "restore":
-		return restoreCmd(args)
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 		return claudebridge.RunMCP(args[1:])
 	}
