@@ -17,13 +17,18 @@ import (
 // magpieID is the provider id agents know the gateway by.
 const magpieID = "magpie"
 
-// viaMagpie lists the catalog for a picker, one group per provider. The
-// routing groups come first, in a section of their own.
+// viaMagpie lists the catalog for a picker, one group per provider. Routing
+// groups come first, in a section of their own.
 func viaMagpie(prefix string) []Option {
-	var groups, out []Option
-	for _, e := range provider.Catalog() {
+	var out []Option
+	cat := provider.Catalog()
+	for _, e := range cat {
 		if e.Group != "" {
-			groups = append(groups, groupOption(prefix, e))
+			out = append(out, groupOption(prefix, e))
+		}
+	}
+	for _, e := range cat {
+		if e.Group != "" {
 			continue
 		}
 		note := e.Provider.Name + " · via magpie"
@@ -33,29 +38,23 @@ func viaMagpie(prefix string) []Option {
 		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
 			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
 	}
-	return append(groups, out...)
+	return out
 }
 
-// groupOption is a routing group's picker option: its name, and the icons of
-// the providers its members come from, each provider once.
+// groupOption is the picker entry for a routing group. Its icons are the
+// logos of the ready providers behind it, each provider's once.
 func groupOption(prefix string, e provider.Entry) Option {
-	o := Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
-		Group: e.Provider.Name, Ref: e.ID}
 	_, ms, _ := provider.FindGroup(e.ID)
+	var icons []string
 	seen := map[string]bool{}
 	for _, m := range ms {
-		if seen[m.Provider.ID] {
-			continue
-		}
-		seen[m.Provider.ID] = true
-		if m.Provider.Icon != "" {
-			o.Icons = append(o.Icons, m.Provider.Icon)
+		if ic := m.Provider.Icon; ic != "" && !seen[ic] {
+			seen[ic] = true
+			icons = append(icons, ic)
 		}
 	}
-	if len(o.Icons) > 0 {
-		o.Icon = o.Icons[0]
-	}
-	return o
+	return Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
+		Icons: icons, Group: e.Provider.Name, Ref: e.ID}
 }
 
 // viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going

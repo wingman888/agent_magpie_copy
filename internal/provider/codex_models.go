@@ -9,15 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 )
@@ -33,7 +28,7 @@ const codexClientVersion = "0.154.0"
 // models_cache.json, but that one is of whichever account Codex CLI last
 // asked with, if it ran at all.
 func codexModels(ctx context.Context, sign func(context.Context, *http.Request, []byte) error) ([]catalog.Model, error) {
-	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexVersion(ctx))
+	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexClientVersionNow())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -57,102 +52,16 @@ func codexModels(ctx context.Context, sign func(context.Context, *http.Request, 
 	return ms, nil
 }
 
-// codexCacheVersion is the client version Codex CLI last asked with, or the
-// built-in one when its cache says none.
+// codexCacheVersion is the client version Codex CLI last asked with.
 func codexCacheVersion() string {
+	home, _ := os.UserHomeDir()
 	var c struct {
 		ClientVersion string `json:"client_version"`
 	}
-	if b, err := os.ReadFile(codexCachePath()); err == nil && json.Unmarshal(b, &c) == nil && c.ClientVersion != "" {
+	if b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json")); err == nil && json.Unmarshal(b, &c) == nil && c.ClientVersion != "" {
 		return c.ClientVersion
 	}
 	return codexClientVersion
-}
-
-// codexCachePath is where Codex CLI keeps the models list it last fetched.
-// A variable, so a test can point it somewhere else.
-var codexCachePath = func() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".codex", "models_cache.json")
-}
-
-// codexCLIOutput is what `codex --version` prints. A variable, so a test
-// can stand in for the CLI, or for there being none.
-var codexCLIOutput = func(ctx context.Context) ([]byte, error) {
-	return exec.CommandContext(ctx, "codex", "--version").Output()
-}
-
-// codexVersionCache keeps the version the models list was last asked with
-// for codexVersionTTL, so the CLI isn't run for every list.
-var codexVersionCache struct {
-	sync.Mutex
-	v  string
-	at time.Time
-}
-
-const codexVersionTTL = 10 * time.Minute
-
-// codexVersion is the client version the models list is asked with: the
-// newest of the installed Codex CLI's version, the one its cache records,
-// and the built-in one. Without a CLI it is the newest of the other two.
-func codexVersion(ctx context.Context) string {
-	codexVersionCache.Lock()
-	defer codexVersionCache.Unlock()
-	if codexVersionCache.v != "" && time.Since(codexVersionCache.at) < codexVersionTTL {
-		return codexVersionCache.v
-	}
-	v := codexClientVersion
-	for _, c := range []string{codexCacheVersion(), cliCodexVersion(ctx)} {
-		if c != "" && compareVersions(c, v) > 0 {
-			v = c
-		}
-	}
-	codexVersionCache.v, codexVersionCache.at = v, time.Now()
-	return v
-}
-
-// cliCodexVersion is the version `codex --version` reports, or "" when there
-// is no CLI or it says none.
-func cliCodexVersion(ctx context.Context) string {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	out, err := codexCLIOutput(ctx)
-	if err != nil {
-		return ""
-	}
-	return firstVersion(string(out))
-}
-
-var versionWord = regexp.MustCompile(`\d+(?:\.\d+)+`)
-
-// firstVersion is the first dotted number in s ("codex-cli 0.155.1" gives
-// 0.155.1), or "".
-func firstVersion(s string) string {
-	return versionWord.FindString(s)
-}
-
-// compareVersions compares two dotted versions part by part as numbers: -1,
-// 0 or 1 as a is before, the same as, or after b. A missing part is zero.
-func compareVersions(a, b string) int {
-	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
-	for i := 0; i < max(len(pa), len(pb)); i++ {
-		x, y := versionPart(pa, i), versionPart(pb, i)
-		switch {
-		case x < y:
-			return -1
-		case x > y:
-			return 1
-		}
-	}
-	return 0
-}
-
-func versionPart(p []string, i int) int {
-	if i >= len(p) {
-		return 0
-	}
-	n, _ := strconv.Atoi(strings.TrimLeftFunc(p[i], func(r rune) bool { return r < '0' || r > '9' }))
-	return n
 }
 
 // parseCodexModels reads the backend's list, the listed ones in its order.
