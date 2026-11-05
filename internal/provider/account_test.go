@@ -110,8 +110,12 @@ func TestAccountsAreProviders(t *testing.T) {
 	if err := Delete("codex"); err != nil {
 		t.Fatal(err)
 	}
-	if codex, _ = find(All(), "codex"); len(codex.Models) != 0 || codex.Account == nil {
-		t.Fatalf("after delete: %+v", codex)
+	// removing a signed-in account hides it (the sign-in stays), keeping its picks
+	if _, ok := find(All(), "codex"); ok {
+		t.Fatal("removed account still listed")
+	}
+	if got := picksIn(load().Providers, "codex"); len(got) != 1 || got[0] != "gpt-5.5" {
+		t.Fatalf("picks lost on removal: %v", got)
 	}
 
 	// signed out: gone, and a stale picks entry is not a provider
