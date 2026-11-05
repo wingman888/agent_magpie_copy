@@ -6,7 +6,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"

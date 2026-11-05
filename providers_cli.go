@@ -35,6 +35,9 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
+		for _, n := range provider.Notes() {
+			fmt.Println(amber.Render("!"), n)
+		}
 		return nil
 	}
 	uses := usesByProvider()
