@@ -150,19 +150,19 @@ func TestResponsesClientMovesToChatAndRemembers(t *testing.T) {
 // Acceptance 3: a vendor list that says where each model is served sends
 // every client's request to that one endpoint, with no probing.
 func TestDeclaredAPIsAreTheOnlyEndpoints(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	f := &scriptedUpstream{calls: map[string]int{}, routes: map[string]scripted{
+		"/v1/chat/completions": {0, chatSSEReply},
+		"/v1/responses":        {0, responsesSSEReply},
+		"/v1/messages":         {0, `{"id":"a1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`},
+	}}
+	// endpointUpstream sets the cache directory, so the list goes in after it
+	endpointUpstream(t, f, provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"gpt-x", "claude-x"}})
 	if err := catalog.SaveLive("fake", "https://fake.test", []catalog.Model{
 		{ID: "gpt-x", APIs: []string{"responses"}},
 		{ID: "claude-x", APIs: []string{"chat"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f := &scriptedUpstream{calls: map[string]int{}, routes: map[string]scripted{
-		"/v1/chat/completions": {0, chatSSEReply},
-		"/v1/responses":        {0, responsesSSEReply},
-		"/v1/messages":         {0, `{"id":"a1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`},
-	}}
-	endpointUpstream(t, f, provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"gpt-x", "claude-x"}})
 	h := New().Handler()
 	for _, tc := range []struct {
 		name, path, body string
