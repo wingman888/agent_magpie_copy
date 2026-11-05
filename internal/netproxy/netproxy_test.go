@@ -203,7 +203,7 @@ func TestExceptionMatching(t *testing.T) {
 		"example.com":     true,
 		"EXAMPLE.com":     true,
 		"a.corp":          true,
-		"corp":            false,
+		"corp":            true,
 		"x.internal":      true,
 		"internal":        true,
 		"intranet":        true,

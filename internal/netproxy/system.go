@@ -37,7 +37,7 @@ func matchException(host string, list []string) bool {
 				return true
 			}
 		case strings.Contains(e, "/"):
-			if _, n, err := net.ParseCIDR(e); err == nil && ip != nil && n.Contains(ip) {
+			if n := parseLooseCIDR(e); n != nil && ip != nil && n.Contains(ip) {
 				return true
 			}
 		default:
@@ -47,6 +47,31 @@ func matchException(host string, list []string) bool {
 		}
 	}
 	return false
+}
+
+// parseLooseCIDR parses a CIDR whose address may have fewer than four
+// octets, as macOS writes it: "169.254/16" means 169.254.0.0/16. It returns
+// nil when e is not such a network.
+func parseLooseCIDR(e string) *net.IPNet {
+	if _, n, err := net.ParseCIDR(e); err == nil {
+		return n
+	}
+	addr, bits, ok := strings.Cut(e, "/")
+	if !ok || strings.Contains(addr, ":") {
+		return nil
+	}
+	parts := strings.Split(addr, ".")
+	if len(parts) > 4 {
+		return nil
+	}
+	for len(parts) < 4 {
+		parts = append(parts, "0")
+	}
+	_, n, err := net.ParseCIDR(strings.Join(parts, ".") + "/" + bits)
+	if err != nil {
+		return nil
+	}
+	return n
 }
 
 // domainMatch reports whether host is base or a subdomain of base.
