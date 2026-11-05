@@ -1,26 +1,42 @@
 package catalog
 
 import (
-	"reflect"
+	"os"
+	"slices"
+	"strings"
 	"testing"
 )
 
 func TestLiveKeepsAPIs(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	if err := SaveLive("apis-roundtrip", "https://x.test", []Model{
-		{ID: "gpt-x", APIs: []string{"responses"}},
-		{ID: "plain"},
-	}); err != nil {
+	in := []Model{
+		{ID: "gpt-x", Name: "gpt-x", APIs: []string{"responses"}},
+		{ID: "plain", Name: "plain"},
+	}
+	if err := SaveLive("relay", "https://relay.example/v1", in); err != nil {
 		t.Fatal(err)
 	}
-	ms, _, ok := Live("apis-roundtrip")
-	if !ok || len(ms) != 2 {
-		t.Fatalf("live: %v %+v", ok, ms)
+	b, err := os.ReadFile(LivePath("relay"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(ms[0].APIs, []string{"responses"}) {
-		t.Fatalf("apis lost: %+v", ms[0])
+	if strings.Count(string(b), `"apis"`) != 1 {
+		t.Fatalf("apis should be written only where declared: %s", b)
 	}
-	if ms[1].APIs != nil {
-		t.Fatalf("undeclared apis should stay nil: %+v", ms[1])
+	got, _, ok := Live("relay")
+	if !ok || len(got) != 2 {
+		t.Fatalf("live: %+v ok=%v", got, ok)
+	}
+	if !slices.Equal(got[0].APIs, []string{"responses"}) || got[1].APIs != nil {
+		t.Fatalf("apis round trip: %+v", got)
+	}
+}
+
+func TestDecorateKeepsLiveAPIs(t *testing.T) {
+	live := []Model{{ID: "claude-x", APIs: []string{"chat", "anthropic"}}}
+	known := []Model{{ID: "claude-x", Name: "Claude X", Released: "2026-01-01"}}
+	out := Decorate(live, known)
+	if len(out) != 1 || !slices.Equal(out[0].APIs, []string{"chat", "anthropic"}) || out[0].Name != "Claude X" {
+		t.Fatalf("decorate: %+v", out)
 	}
 }

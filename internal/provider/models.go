@@ -50,34 +50,6 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
-// APIs lists the protocols the provider's last model list declares for model,
-// in the order the list gives them. Nil when the list has no such model or
-// does not say which APIs it is served on.
-func (p Provider) APIs(model string) []Protocol {
-	ms, _, ok := catalog.Live(p.ID)
-	if !ok {
-		return nil
-	}
-	for _, m := range ms {
-		if m.ID != model {
-			continue
-		}
-		var out []Protocol
-		for _, a := range m.APIs {
-			switch a {
-			case "chat":
-				out = append(out, Chat)
-			case "responses":
-				out = append(out, Responses)
-			case "anthropic":
-				out = append(out, Anthropic)
-			}
-		}
-		return out
-	}
-	return nil
-}
-
 func (p Provider) firstCatalog() string {
 	if cs := p.Catalogs(); len(cs) > 0 {
 		return cs[0]
@@ -89,6 +61,30 @@ func (p Provider) firstCatalog() string {
 func (p Provider) Fetched() (time.Time, bool) {
 	_, t, ok := catalog.Live(p.ID)
 	return t, ok
+}
+
+// APIs are the protocols the vendor's last model list says model is served
+// on, in the order the list gives them; nil when the list says nothing about
+// it (or there is no list). Ids match exactly.
+func (p Provider) APIs(model string) []Protocol {
+	live, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return nil
+	}
+	for _, m := range live {
+		if m.ID != model {
+			continue
+		}
+		var out []Protocol
+		for _, a := range m.APIs {
+			switch Protocol(a) {
+			case Chat, Responses, Anthropic:
+				out = append(out, Protocol(a))
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // Fetch asks the vendor which models it serves and remembers the answer.

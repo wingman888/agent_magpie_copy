@@ -81,14 +81,27 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		pools = append(pools, ms)
 	}
 	pools = append(pools, p.Available())
-	// a model the vendor's list says is served on this endpoint first; then
-	// the ones it says nothing of
-	declares := func(id string) bool {
-		return slices.Contains(p.APIs(id), proto)
+	// When the vendor's list says which endpoints serve each model, only a
+	// model it says this endpoint serves will do; none is no model to try.
+	listed := false
+	for _, pool := range pools {
+		for _, m := range pool {
+			if len(p.APIs(m.ID)) > 0 {
+				listed = true
+			}
+		}
+	}
+	if listed {
+		for _, pool := range pools {
+			for _, m := range pool {
+				if slices.Contains(p.APIs(m.ID), proto) && (k.Key == "" || p.Serves(k, m.ID)) {
+					return m.ID
+				}
+			}
+		}
+		return ""
 	}
 	for _, want := range []func(string) bool{
-		func(id string) bool { return declares(id) && (proto != Anthropic || isClaude(id)) },
-		func(id string) bool { return declares(id) },
 		func(id string) bool { return proto != Anthropic || isClaude(id) },
 		func(string) bool { return true },
 	} {
