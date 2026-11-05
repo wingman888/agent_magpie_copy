@@ -121,4 +121,3 @@ func mergeWeighing(dst *weighing, src weighing) {
 		dst.tokens[k] = v
 	}
 }
-
