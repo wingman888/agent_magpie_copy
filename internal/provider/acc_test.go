@@ -150,17 +150,17 @@ func TestAccA10CodexClientVersion(t *testing.T) {
 	oldCmd := codexVersionCommand
 	t.Cleanup(func() {
 		codexVersionCommand = oldCmd
-		resetCodexVersion()
+		accResetCodexVersion()
 	})
 
 	codexVersionCommand = func() (string, error) { return "codex-cli 0.155.1\n", nil }
-	resetCodexVersion()
+	accResetCodexVersion()
 	if v := codexVersionNow(); v != "0.155.1" {
 		t.Errorf("with a CLI reporting 0.155.1 and a cache of 0.154.0: %s, want 0.155.1", v)
 	}
 
 	codexVersionCommand = func() (string, error) { return "", errors.New("codex: not found") }
-	resetCodexVersion()
+	accResetCodexVersion()
 	if v := codexVersionNow(); v != "0.154.0" {
 		t.Errorf("without a CLI: %s, want 0.154.0", v)
 	}
@@ -176,14 +176,14 @@ func TestAccA10CodexClientVersion(t *testing.T) {
 	t.Cleanup(func() { CodexBase = oldBase })
 	CodexBase = srv.URL
 	codexVersionCommand = func() (string, error) { return "codex-cli 0.155.1\n", nil }
-	resetCodexVersion()
+	accResetCodexVersion()
 	_, _ = codexModels(context.Background(), func(context.Context, *http.Request, []byte) error { return nil })
 	if asked != "0.155.1" {
 		t.Errorf("models list asked with client_version %q, want 0.155.1", asked)
 	}
 }
 
-func resetCodexVersion() {
+func accResetCodexVersion() {
 	codexVersion.Lock()
 	codexVersion.v = ""
 	codexVersion.Unlock()

@@ -397,19 +397,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	routeKey := p.ID + "/" + strings.ToLower(model)
 	mode := p.Affinity
 	if grp != nil {
+		// a group's affinity is its own; unset, it is the default, automatic
 		routeKey = "group/" + grp.ID
 		mode = grp.Affinity
-		if mode == "" {
-			mode = members[0].Provider.Affinity
-		}
 	}
 	mode = affinityMode(mode)
-	// a provider's rotation counts per provider, as it always has; a group's
-	// per group ("group/<id>" never equals a provider's id)
-	t := &turnScope{key: p.ID, within: within}
-	if grp != nil {
-		t.key = routeKey
-	}
+	// rotation counts turns per route: a provider's model, or a routing group.
+	// Another model's requests, even on the same provider, don't move it.
+	t := &turnScope{key: routeKey, within: within}
 	if conv, have := conversationOf(sid, routeKey, start); have && within {
 		t.start = conv.start
 	}

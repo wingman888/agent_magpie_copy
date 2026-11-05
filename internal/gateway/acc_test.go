@@ -341,13 +341,12 @@ func TestAccSessionHeaderOrder(t *testing.T) {
 	}
 	h.Set("x-session-id", "c")
 	h.Set("x-session-affinity", "b")
+	if got := sessionID(h); got != "b" {
+		t.Errorf("x-session-affinity before x-session-id: %q, want b", got)
+	}
+	h.Del("x-session-affinity")
 	if got := sessionID(h); got != "c" {
 		t.Errorf("x-session-id: %q, want c", got)
-	}
-	h.Set("x-session-affinity", "b")
-	h.Del("x-session-id")
-	if got := sessionID(h); got != "b" {
-		t.Errorf("x-session-affinity: %q, want b", got)
 	}
 	h.Set("x-opencode-session", "a")
 	if got := sessionID(h); got != "a" {
