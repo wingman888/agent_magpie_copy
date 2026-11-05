@@ -214,6 +214,29 @@ func (p Provider) RejectsTemperature(model string) bool {
 	return false
 }
 
+// APIs lists the wire APIs the vendor's last model list declares for model,
+// in Protocols order. Nil means unknown: no list, the model is not in it,
+// or it declares none that magpie speaks.
+func (p Provider) APIs(model string) []Protocol {
+	live, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return nil
+	}
+	for _, m := range live {
+		if m.ID != model {
+			continue
+		}
+		var out []Protocol
+		for _, pr := range Protocols {
+			if slices.Contains(m.APIs, string(pr)) {
+				out = append(out, pr)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // Chosen reports whether a model is exposed.
 func (p Provider) Chosen(id string) bool {
 	for _, m := range p.Exposed() {

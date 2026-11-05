@@ -29,8 +29,9 @@ type Model struct {
 	// Keys, for a vendor whose keys each see models of their own, are the
 	// keys (by fingerprint) whose list has this one; empty is every key.
 	Keys []string `json:",omitempty"`
-	// APIs, for a model whose vendor says which APIs serve it, are those
-	// APIs: "chat", "responses", "anthropic". Empty is unknown.
+	// APIs are the wire APIs the vendor says serve this model: "chat",
+	// "responses", "anthropic". Empty means unknown. Only a vendor's own
+	// list fills it in; models.dev does not say.
 	APIs []string `json:",omitempty"`
 }
 

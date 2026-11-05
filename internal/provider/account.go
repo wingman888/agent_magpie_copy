@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -874,10 +875,10 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
 		req.Header.Set("X-Initiator", "agent")
-		if userTurn(body) {
+		if lastRole(body) == "user" {
 			req.Header.Set("X-Initiator", "user")
 		}
-		if hasImage(body) {
+		if bytes.Contains(body, []byte(`"image_url"`)) {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
@@ -963,9 +964,10 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	var v struct {
 		Data []struct {
-			ID           string `json:"id"`
-			Name         string `json:"name"`
-			Picker       bool   `json:"model_picker_enabled"`
+			ID           string   `json:"id"`
+			Name         string   `json:"name"`
+			Picker       bool     `json:"model_picker_enabled"`
+			Endpoints    []string `json:"supported_endpoints"` // "/chat/completions" and the like; absent is unknown
 			Capabilities struct {
 				Type     string `json:"type"`
 				Supports struct {
@@ -975,7 +977,6 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 			Policy *struct {
 				State string `json:"state"`
 			} `json:"policy"`
-			SupportedEndpoints []string `json:"supported_endpoints"`
 		} `json:"data"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(b, &v) != nil {
@@ -990,12 +991,36 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		if !m.Picker && (m.Policy == nil || m.Policy.State != "enabled") {
 			continue
 		}
-		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: copilotAPIs(m.SupportedEndpoints)})
+		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: copilotAPIs(m.Endpoints)})
 	}
 	if len(out) == 0 {
 		return nil, errors.New("Copilot lists no chat model for this account")
 	}
 	return out, nil
+}
+
+// copilotAPIs maps a model's supported_endpoints to magpie's API names. Paths
+// magpie does not speak (websocket, embeddings, ...) are ignored. Nil when none
+// of the listed paths is one magpie speaks, so the model's APIs stay unknown.
+func copilotAPIs(endpoints []string) []string {
+	var out []string
+	for _, e := range endpoints {
+		var api string
+		switch e {
+		case "/chat/completions":
+			api = "chat"
+		case "/responses":
+			api = "responses"
+		case "/v1/messages":
+			api = "anthropic"
+		default:
+			continue
+		}
+		if !slices.Contains(out, api) {
+			out = append(out, api)
+		}
+	}
+	return out
 }
 
 // forgetClaudeStatus drops what `claude auth status` said; tests use it.
