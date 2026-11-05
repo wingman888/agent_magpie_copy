@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,15 +20,6 @@ type QuotaWindow struct {
 	ResetsAt  *time.Time `json:"resetsAt,omitempty"`
 	ResetSecs int64      `json:"resetSecs,omitempty"`
 	Display   string     `json:"display,omitempty"`
-
-	// For routing (see Allowances): how long the window runs, zero when
-	// not known; the only models it counts, by a word in their ids
-	// ("opus"), when it doesn't count them all; and Aside when using it up
-	// doesn't stop the account — on-demand spending past the allowance,
-	// or Copilot's code completions, which no request here makes.
-	Span  time.Duration `json:"-"`
-	Model string        `json:"-"`
-	Aside bool          `json:"-"`
 }
 
 // SubscriptionQuota is provider-reported allowance usage. This is separate
@@ -39,9 +29,7 @@ type SubscriptionQuota struct {
 	Name     string        `json:"name"`
 	Icon     string        `json:"icon"`
 	Plan     string        `json:"plan,omitempty"`
-	User     string        `json:"user,omitempty"` // the account, so two of one vendor tell apart
 	Windows  []QuotaWindow `json:"windows"`
-	Balance  string        `json:"balance,omitempty"` // what is left on an API key, instead of windows
 	Error    string        `json:"error,omitempty"`
 }
 
@@ -114,38 +102,23 @@ func fetchSubscriptionUsage() []SubscriptionQuota {
 		hidden[p.ID] = p.Hidden
 	}
 	var fetches []func() SubscriptionQuota
-	if p, ok := claudeAccount(); ok && !hidden["claude"] {
-		if ls := accountsOf("claude"); len(ls) > 1 {
-			fetches = append(fetches, perLogin(ctx, ls, "Claude Code", "claude-color")...)
-		} else {
-			fetches = append(fetches, withUser(p.Account.User, func() SubscriptionQuota { return claudeSubscriptionUsage(ctx) }))
-		}
-	}
-	if user, plan, ok := cursorIdentity(); ok && !hidden["cursor"] {
-		fetches = append(fetches, withUser(user, func() SubscriptionQuota { return cursorSubscriptionUsage(ctx, plan) }))
+	if _, ok := claudeAccount(); ok && !hidden["claude"] {
+		fetches = append(fetches, func() SubscriptionQuota { return claudeSubscriptionUsage(ctx) })
 	}
 	if _, ok := grokAccount(); ok && !hidden["grok"] {
 		fetches = append(fetches, func() SubscriptionQuota { return grokSubscriptionUsage(ctx) })
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if p, ok := codexAccount(home); ok && !hidden["codex"] {
-			if ls := accountsOf("codex"); len(ls) > 1 {
-				fetches = append(fetches, perLogin(ctx, ls, "Codex", "codex-color")...)
-			} else {
-				auth := filepath.Join(home, ".codex", "auth.json")
-				fetches = append(fetches, withUser(p.Account.User, func() SubscriptionQuota { return codexSubscriptionUsage(ctx, auth) }))
-			}
+		if _, ok := codexAccount(home); ok && !hidden["codex"] {
+			auth := filepath.Join(home, ".codex", "auth.json")
+			fetches = append(fetches, func() SubscriptionQuota { return codexSubscriptionUsage(ctx, auth) })
 		}
 		cfg := os.Getenv("XDG_CONFIG_HOME")
 		if cfg == "" {
 			cfg = filepath.Join(home, ".config")
 		}
 		if app, ok := copilotLogin(cfg); ok && !hidden["copilot"] {
-			if ls := copilotLoginList(); len(ls) > 1 {
-				fetches = append(fetches, perLogin(ctx, ls, "Copilot", "githubcopilot")...)
-			} else {
-				fetches = append(fetches, withUser(app.User, func() SubscriptionQuota { return copilotSubscriptionUsage(ctx, app.Token) }))
-			}
+			fetches = append(fetches, func() SubscriptionQuota { return copilotSubscriptionUsage(ctx, app.Token) })
 		}
 	}
 	out := make([]SubscriptionQuota, len(fetches))
@@ -155,36 +128,6 @@ func fetchSubscriptionUsage() []SubscriptionQuota {
 		go func() { defer wg.Done(); out[i] = f() }()
 	}
 	wg.Wait()
-	return out
-}
-
-// accountsOf is every account magpie remembers for agent, the one it is
-// signed in to first.
-func accountsOf(agent string) []Login {
-	ls := Logins(agent)
-	sort.SliceStable(ls, func(i, j int) bool { return ls[i].Active && !ls[j].Active })
-	return ls
-}
-
-// withUser names the account a fetch is for.
-func withUser(user string, f func() SubscriptionQuota) func() SubscriptionQuota {
-	return func() SubscriptionQuota {
-		q := f()
-		q.User = user
-		return q
-	}
-}
-
-// perLogin fetches each account's allowance on a card of its own.
-func perLogin(ctx context.Context, ls []Login, name, icon string) []func() SubscriptionQuota {
-	var out []func() SubscriptionQuota
-	for _, l := range ls {
-		out = append(out, func() SubscriptionQuota {
-			q := loginQuota(ctx, l)
-			q.Name, q.Icon, q.User = name, icon, l.User
-			return q
-		})
-	}
 	return out
 }
 
@@ -245,17 +188,12 @@ func claudeWindows(ctx context.Context, token string) ([]QuotaWindow, error) {
 		return []QuotaWindow{}, err
 	}
 	out := []QuotaWindow{}
-	const week = 7 * 24 * time.Hour
 	for _, x := range []struct {
-		name, model string
-		span        time.Duration
-		w           *quotaWire
-	}{{"5 hours", "", 5 * time.Hour, data.FiveHour}, {"7 days", "", week, data.SevenDay},
-		{"7 days · Opus", "opus", week, data.SevenDayOpus}, {"7 days · Sonnet", "sonnet", week, data.SevenDaySonnet}} {
+		name string
+		w    *quotaWire
+	}{{"5 hours", data.FiveHour}, {"7 days", data.SevenDay}, {"7 days · Opus", data.SevenDayOpus}, {"7 days · Sonnet", data.SevenDaySonnet}} {
 		if x.w != nil {
-			w := x.w.window(x.name)
-			w.Span, w.Model = x.span, x.model
-			out = append(out, w)
+			out = append(out, x.w.window(x.name))
 		}
 	}
 	return out, nil
@@ -330,8 +268,7 @@ func quotaDurationName(seconds int64) string {
 }
 
 func (w codexWindow) window() QuotaWindow {
-	out := QuotaWindow{Name: quotaDurationName(w.LimitWindowSecs), Used: w.UsedPercent, ResetSecs: w.ResetAfterSecs,
-		Span: time.Duration(w.LimitWindowSecs) * time.Second}
+	out := QuotaWindow{Name: quotaDurationName(w.LimitWindowSecs), Used: w.UsedPercent, ResetSecs: w.ResetAfterSecs}
 	if w.ResetAt > 0 {
 		t := time.Unix(w.ResetAt, 0)
 		out.ResetsAt = &t
@@ -344,10 +281,8 @@ func copilotSubscriptionUsage(ctx context.Context, githubToken string) Subscript
 	var data struct {
 		Plan      string                      `json:"copilot_plan"`
 		Snapshots map[string]copilotQuotaWire `json:"quota_snapshots"`
-		Reset     string                      `json:"quota_reset_date_utc"`
-		ResetDay  string                      `json:"quota_reset_date"`
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, CopilotUserURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/copilot_internal/user", nil)
 	if err == nil {
 		req.Header.Set("Authorization", "token "+githubToken)
 		req.Header.Set("Accept", "application/json")
@@ -371,22 +306,14 @@ func copilotSubscriptionUsage(ctx context.Context, githubToken string) Subscript
 		return q
 	}
 	q.Plan = data.Plan
-	// the allowances renew with the month, on the day GitHub says
-	var resets *time.Time
-	if t, err := time.Parse(time.RFC3339, data.Reset); err == nil {
-		resets = &t
-	} else if t, err := time.Parse("2006-01-02", data.ResetDay); err == nil {
-		resets = &t
-	}
 	for _, x := range []struct{ id, name string }{{"chat", "Chat requests"}, {"completions", "Completions"}, {"premium_interactions", "Premium requests"}} {
 		w, ok := data.Snapshots[x.id]
 		if !ok || !w.HasQuota || w.Entitlement <= 0 {
 			continue
 		}
 		used := w.Entitlement - w.Remaining
-		q.Windows = append(q.Windows, QuotaWindow{Name: x.name, Used: 100 * used / w.Entitlement, ResetsAt: resets,
-			Display: fmt.Sprintf("%s / %s", compactNumber(used), compactNumber(w.Entitlement)),
-			Span:    30 * 24 * time.Hour, Aside: x.id == "completions"})
+		q.Windows = append(q.Windows, QuotaWindow{Name: x.name, Used: 100 * used / w.Entitlement,
+			Display: fmt.Sprintf("%s / %s", compactNumber(used), compactNumber(w.Entitlement))})
 	}
 	return q
 }
