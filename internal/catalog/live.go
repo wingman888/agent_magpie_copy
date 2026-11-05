@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -59,25 +60,6 @@ func SaveLive(provider, base string, models []Model) error {
 	return os.WriteFile(p, b, 0o644)
 }
 
-// SetHeaders adds a provider's own headers to a request. Each name goes out
-// exactly as the user typed it (net/http would otherwise capitalise it), and
-// replaces any header of the same name already set, so the user's value wins
-// over magpie's defaults. Host sets the request's Host instead.
-func SetHeaders(req *http.Request, headers map[string]string) {
-	for k, v := range headers {
-		if strings.EqualFold(k, "Host") {
-			req.Host = v
-			continue
-		}
-		for name := range req.Header {
-			if strings.EqualFold(name, k) {
-				delete(req.Header, name)
-			}
-		}
-		req.Header[k] = []string{v}
-	}
-}
-
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
 // around it. The result keeps the server's order. anthropic sends the
@@ -85,12 +67,12 @@ func SetHeaders(req *http.Request, headers map[string]string) {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchHeaders(ctx, base, key, anthropic, nil)
+	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchHeaders is Fetch with extra request headers (a custom provider's own),
-// sent exactly as named and after the key, so they may override the defaults.
-func FetchHeaders(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+// FetchWith is Fetch with extra request headers, sent after the key's own
+// headers under the exact names given (see SetHeaderExact).
+func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -117,7 +99,7 @@ func FetchHeaders(ctx context.Context, base, key string, anthropic bool, headers
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key, anthropic, extra)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -134,7 +116,7 @@ func FetchHeaders(ctx context.Context, base, key string, anthropic bool, headers
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -150,7 +132,14 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	SetHeaders(req, headers)
+	names := make([]string, 0, len(extra))
+	for name := range extra {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		SetHeaderExact(req.Header, name, extra[name])
+	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -189,6 +178,19 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	return out, nil
 }
 
+// SetHeaderExact sets a header under exactly the name given, so the case the
+// user typed is what goes on the wire (http.Header.Set would canonicalize
+// it). An entry that differs only in case is replaced, so the override wins
+// over a default instead of being sent twice.
+func SetHeaderExact(h http.Header, name, value string) {
+	for k := range h {
+		if k != name && strings.EqualFold(k, name) {
+			delete(h, k)
+		}
+	}
+	h[name] = []string{value}
+}
+
 type liveModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -204,12 +206,7 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if !ok {
-			// a gateway's "vendor/model" id names the catalog's "model"
-			k, ok = byID[Tail(m.ID)]
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
