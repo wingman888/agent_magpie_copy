@@ -108,7 +108,7 @@ func isSVG(data []byte) bool {
 	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
 		return false
 	}
-	s := strings.TrimPrefix(string(data), "﻿")
+	s := strings.TrimPrefix(string(data), "\uFEFF")
 	for {
 		s = strings.TrimLeft(s, " \t\r\n")
 		var end string
