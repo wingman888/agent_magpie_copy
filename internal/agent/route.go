@@ -17,18 +17,27 @@ import (
 // magpieID is the provider id agents know the gateway by.
 const magpieID = "magpie"
 
-// viaMagpie lists the catalog for a picker, one group per provider.
+// RoutingGroups is the picker's group of routing groups.
+const RoutingGroups = "Routing groups"
+
+// viaMagpie lists the catalog for a picker: the routing groups first, in
+// one group of their own, then one group per provider.
 func viaMagpie(prefix string) []Option {
-	var out []Option
+	var out, groups []Option
 	for _, e := range provider.Catalog() {
+		if e.Group != "" {
+			groups = append(groups, Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
+				Icon: e.Provider.Icon, Icons: e.Icons, Group: RoutingGroups, Ref: e.ID})
+			continue
+		}
 		note := e.Provider.Name + " · via magpie"
 		if a := e.Provider.Account; a != nil {
 			note = a.User + " · via magpie"
 		}
 		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
-			Icon: e.Provider.Icon, Group: e.Provider.Name})
+			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
 	}
-	return out
+	return append(groups, out...)
 }
 
 // viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going
@@ -49,12 +58,23 @@ func isMagpie(v string) bool {
 	return ok && strings.Contains(v, "/")
 }
 
+func firstOf(xs []string) string {
+	if len(xs) > 0 {
+		return xs[0]
+	}
+	return ""
+}
+
 // magpieModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
+		by := e.Provider.Name
+		if e.Group != "" {
+			by = "routing group"
+		}
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + by, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
 	}
 	return out
 }
