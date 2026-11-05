@@ -29,7 +29,7 @@ func keysOf(cs []candidate) string {
 func TestKeyTiersMainPoolThenAside(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	p := provider.Provider{ID: "tiers-main", Name: "Tiers", Chat: "http://127.0.0.1:1/v1", Key: "k1",
+	p := provider.Provider{ID: "tiers-main", Name: "Tiers", Chat: "http://127.0.0.1:1/v1", Anthropic: "http://127.0.0.1:1", Key: "k1",
 		Keys: []provider.KeyAccount{
 			{Key: "k2", Protocol: provider.Chat},
 			{Key: "k3", Protocol: provider.Chat},

@@ -35,6 +35,22 @@ type Route struct {
 	Error    string    `json:"error,omitempty"`
 	Millis   int64     `json:"ms,omitempty"`
 	Tokens   int       `json:"tokens,omitempty"`
+	// Group is set when the agent asked for a routing group (group/<id>).
+	Group *GroupRoute `json:"group,omitempty"`
+	// Affinity is how the conversation stuck to its last answerer, when it had
+	// more than one candidate to choose from.
+	Affinity *AffinityRoute `json:"affinity,omitempty"`
+}
+
+// GroupRoute is the routing group a request asked for, and the members that
+// were ready to take it, in the group's order.
+type GroupRoute struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Routing  string   `json:"routing"`
+	Affinity string   `json:"affinity"`
+	Auto     bool     `json:"auto"`
+	Members  []string `json:"members"` // "provider/model"
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -78,6 +94,7 @@ type Try struct {
 
 type planned struct {
 	order, left []Weighed
+	affinity    *AffinityRoute
 }
 
 func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
@@ -95,7 +112,7 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	default:
 		w.Kind = "provider"
 	}
-	if l, ok := wg.lefts[c.rest]; ok {
+	if l, ok := wg.lefts[candKey(c)]; ok {
 		w.Known, w.Used, w.Renews = true, l.used, l.renews
 	}
 	if wg.tokens != nil {

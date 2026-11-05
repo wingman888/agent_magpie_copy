@@ -183,6 +183,12 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 // plan is candidates, and for the routing trace what each stood where it
 // did by, and those left out.
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
+	return s.planConv(p, model, from, convo{})
+}
+
+// planConv is plan for a request's conversation, which keeps it on the
+// candidate that answered it last and moves a rotation on per user turn.
+func (s *Server) planConv(p provider.Provider, model string, from provider.Protocol, cv convo) ([]candidate, planned) {
 	var pl planned
 	add := func(q provider.Provider, m string, fallback bool) []candidate {
 		cs, left := perKeyOf(q, m, from)
@@ -194,7 +200,7 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 				break
 			}
 		}
-		cs, wg := weigh(q, cs, m, from)
+		cs, wg := weighConv(q, cs, m, from, cv)
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
 			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
@@ -220,11 +226,27 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 		seen[fp.ID+"/"+fm] = true
 		out = append(out, add(fp, fm, true)...)
 	}
+	return settle(out, pl, p.Affinity, cv)
+}
+
+// settle puts candidates in the order a request tries them: the conversation's
+// last answerer first when its affinity keeps it there, then those ready,
+// those resting after a failure last. pl.order is kept in step with out.
+func settle(out []candidate, pl planned, mode string, cv convo) ([]candidate, planned) {
 	if len(out) == 1 {
 		if r, ok := restOf(out[0].rest); ok {
 			pl.order[0].Rest = &r // tried all the same: there is no other
 		}
 		return out, pl
+	}
+	// affinity is for a conversation with more than one candidate to choose from
+	if cv.id != "" {
+		k, aff := keepLast(mode, cv, out)
+		if k > 0 {
+			out = moveFirst(out, k)
+			pl.order = moveFirst(pl.order, k)
+		}
+		pl.affinity = &aff
 	}
 	var ready, resting []candidate
 	var wReady, wResting []Weighed
@@ -238,6 +260,14 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 	}
 	pl.order = append(wReady, wResting...)
 	return append(ready, resting...), pl
+}
+
+// moveFirst is xs with its k-th element put first, the rest in their order.
+func moveFirst[T any](xs []T, k int) []T {
+	out := make([]T, 0, len(xs))
+	out = append(out, xs[k])
+	out = append(out, xs[:k]...)
+	return append(out, xs[k+1:]...)
 }
 
 var restingUntil = struct {

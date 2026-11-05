@@ -237,12 +237,16 @@ type Entry struct {
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`
+	// Group is the id of the routing group this entry is, "" for a model.
+	Group string `json:"group,omitempty"`
 }
 
-// Catalog lists every exposed model of every ready provider.
+// Catalog lists every exposed model of every ready provider, then the
+// routing groups that have a ready member.
 func Catalog() []Entry {
 	var out []Entry
-	for _, p := range All() {
+	ps := All()
+	for _, p := range ps {
 		if !p.Ready() {
 			continue
 		}
@@ -250,7 +254,7 @@ func Catalog() []Entry {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
 		}
 	}
-	return out
+	return append(out, groupEntries(ps)...)
 }
 
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
@@ -258,6 +262,15 @@ func Catalog() []Entry {
 // and the bare model id when exactly one provider serves it.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
+	if strings.HasPrefix(id, groupPrefix+"/") {
+		// a group answers as its first ready member; the gateway sends
+		// the request on from there
+		_, ms, ok := FindGroup(id)
+		if !ok {
+			return Provider{}, "", false
+		}
+		return ms[0].Provider, ms[0].Model, true
+	}
 	entries := Catalog()
 	for _, e := range entries {
 		if e.ID == id {

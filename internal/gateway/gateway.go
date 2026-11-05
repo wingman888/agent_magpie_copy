@@ -349,6 +349,24 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
+	var group *GroupRoute
+	var grp provider.Group
+	var members []provider.Member
+	if strings.HasPrefix(call.Model, "group/") {
+		g, ms, ok := provider.FindGroup(call.Model)
+		if !ok {
+			call.Status, call.Error = 404, "routing group has no model ready"
+			writeError(w, from, 404, fmt.Sprintf("routing group %q has no model ready", strings.TrimPrefix(call.Model, "group/")))
+			finishCapture()
+			s.record(call)
+			return
+		}
+		group = &GroupRoute{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto}
+		for _, m := range ms {
+			group.Members = append(group.Members, m.Ref)
+		}
+		grp, members = g, ms
+	}
 	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
@@ -365,8 +383,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands, pl := s.plan(p, model, from)
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left})
+	cv := conversationOf(r.Header, body, call.Model)
+	var cands []candidate
+	var pl planned
+	if group != nil {
+		cands, pl = s.planGroup(grp, members, from, cv)
+	} else {
+		cands, pl = s.planConv(p, model, from, cv)
+	}
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left, Group: group, Affinity: pl.affinity})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
@@ -387,6 +412,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+			remember(cv, c.rest, call.Usage.CacheRead)
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}

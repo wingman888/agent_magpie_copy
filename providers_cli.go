@@ -144,10 +144,22 @@ func presets() error {
 
 // models: `magpie models` — the catalog every agent sees
 func models() error {
-	entries := provider.Catalog()
-	if len(entries) == 0 {
+	catalog := provider.Catalog()
+	if len(catalog) == 0 {
 		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
+	}
+	// routing groups first, in a section of their own
+	var entries []provider.Entry
+	for _, e := range catalog {
+		if e.Group != "" {
+			entries = append(entries, e)
+		}
+	}
+	for _, e := range catalog {
+		if e.Group == "" {
+			entries = append(entries, e)
+		}
 	}
 	w := 0
 	for _, e := range entries {
