@@ -274,6 +274,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 				in.Keys = old.Keys
 				if in.Key == old.Key {
 					in.KeyName = old.KeyName
+					in.KeyProtocol = old.KeyProtocol
 				}
 			}
 			if in.Icon == "" && old != nil && in.Preset == "" {
