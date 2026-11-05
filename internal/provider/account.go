@@ -26,7 +26,7 @@ const (
 var accountIDs = []string{CodexID, CopilotID}
 
 // claudeNote is shown instead of a provider for a signed-in Claude Code.
-const claudeNote = "Claude Code 已登录但不提供：它的订阅令牌只供 Claude Code 自己使用，" +
+const claudeNote = "Claude Code 已登录但不提供（不作为 provider 提供）：它的订阅令牌只供 Claude Code 自己使用，" +
 	"不能转交给其他 Agent 经由 dial 使用。"
 
 var errNotSignedIn = errors.New("not signed in")
