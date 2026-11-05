@@ -101,7 +101,7 @@ func parseGemini(body []byte) (*Request, error) {
 		return nil, err
 	}
 
-	r := &Request{}
+	r := &Request{KeepThinking: true}
 	if g.SystemInstruction != nil {
 		var sys []string
 		for _, p := range g.SystemInstruction.Parts {

@@ -201,7 +201,7 @@ func buildChat(r *Request, model, host string) []byte {
 			if len(calls) > 0 {
 				am["tool_calls"] = calls
 			}
-			if deepseek && think != "" {
+			if (deepseek || r.KeepThinking) && think != "" {
 				am["reasoning_content"] = think
 			}
 			msgs = append(msgs, am)
