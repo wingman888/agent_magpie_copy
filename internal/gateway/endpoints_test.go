@@ -4,325 +4,341 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// endpointFake answers each upstream path with its scripted status and body,
-// and counts the requests each path gets. A path without a reply is a 404.
-type endpointFake struct {
-	status map[string]int
-	reply  map[string]string
-	calls  map[string]int
+type apiReply struct {
+	code  int
+	ctype string
+	body  string
 }
 
-func (f *endpointFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	io.ReadAll(r.Body)
-	f.calls[r.URL.Path]++
-	reply, ok := f.reply[r.URL.Path]
+// apiFake answers each upstream API path with its reply, and counts the calls
+// each path gets.
+type apiFake struct {
+	mu      sync.Mutex
+	replies map[string]apiReply
+	hits    map[string]int
+}
+
+func newAPIFake(replies map[string]apiReply) *apiFake {
+	return &apiFake{replies: replies, hits: map[string]int{}}
+}
+
+func (f *apiFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	io.Copy(io.Discard, r.Body)
+	f.mu.Lock()
+	f.hits[r.URL.Path]++
+	rp, ok := f.replies[r.URL.Path]
+	f.mu.Unlock()
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	code := f.status[r.URL.Path]
-	if code == 0 {
-		code = 200
-	}
-	if code >= 400 {
-		w.Header().Set("Content-Type", "application/json")
-	} else {
-		w.Header().Set("Content-Type", "text/event-stream")
-	}
-	w.WriteHeader(code)
-	io.WriteString(w, reply)
+	w.Header().Set("Content-Type", rp.ctype)
+	w.WriteHeader(rp.code)
+	io.WriteString(w, rp.body)
 }
 
-const endpointChatReply = `data: {"id":"c1","model":"m1","choices":[{"index":0,"delta":{"role":"assistant","content":"chat ok"}}]}
+func (f *apiFake) count(path string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hits[path]
+}
 
-data: {"id":"c1","model":"m1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}
+var (
+	respOKBody = sse(
+		`event: response.created`+"\n"+`data: {"type":"response.created","response":{"id":"r1","model":"m1","usage":{"input_tokens":0,"output_tokens":0}}}`,
+		`event: response.output_text.delta`+"\n"+`data: {"type":"response.output_text.delta","delta":"fallback ok"}`,
+		`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"id":"r1","model":"m1","status":"completed","usage":{"input_tokens":4,"output_tokens":2}}}`,
+	)
+	chatOKBody = sse(
+		`data: {"id":"c1","model":"m1","choices":[{"delta":{"role":"assistant","content":"chat ok"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}`,
+		`data: [DONE]`,
+	)
+	respOK = apiReply{200, "text/event-stream", respOKBody}
+	chatOK = apiReply{200, "text/event-stream", chatOKBody}
+)
 
-data: [DONE]
+const (
+	pathChat      = "/v1/chat/completions"
+	pathResp      = "/v1/responses"
+	pathAnthropic = "/v1/messages"
+	pathCount     = "/v1/messages/count_tokens"
 
-`
+	chatRefusal = `{"error":{"message":"model m1 is not accessible via the /chat/completions endpoint"}}`
+	respRefusal = `{"error":{"code":"unsupported_api_for_model","message":"model m1 does not support this API"}}`
+)
 
-const endpointResponsesReply = "event: response.created\n" +
-	`data: {"type":"response.created","response":{"id":"r1","model":"m1","usage":{"input_tokens":0,"output_tokens":0}}}` + "\n\n" +
-	"event: response.output_text.delta\n" +
-	`data: {"type":"response.output_text.delta","delta":"fallback ok"}` + "\n\n" +
-	"event: response.completed\n" +
-	`data: {"type":"response.completed","response":{"id":"r1","model":"m1","status":"completed","usage":{"input_tokens":4,"output_tokens":2}}}` + "\n\n"
-
-// endpointUpstream starts the fake and points magpie's config at a temp dir.
-func endpointUpstream(t *testing.T, f *endpointFake) *httptest.Server {
+// apiSetup saves a provider whose bases are set to the fake (a non-empty field
+// of p marks the API as offered) and, when declare is set, its live model list
+// with the APIs each model declares.
+func apiSetup(t *testing.T, f *apiFake, p provider.Provider, declare []catalog.Model) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	up := httptest.NewServer(f)
 	t.Cleanup(up.Close)
-	return up
+	p.Key = "k"
+	if p.Chat != "" {
+		p.Chat = up.URL + "/v1"
+	}
+	if p.Responses != "" {
+		p.Responses = up.URL + "/v1"
+	}
+	if p.Anthropic != "" {
+		p.Anthropic = up.URL
+	}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if declare != nil {
+		if err := catalog.SaveLive(p.ID, up.URL, declare); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
-func serveAt(h http.Handler, path, body string) (int, string) {
+func postTo(h http.Handler, path, body string) (int, string) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
 	return rec.Code, rec.Body.String()
 }
 
-func TestChatClientMovesToResponsesAndRemembers(t *testing.T) {
-	f := &endpointFake{
-		status: map[string]int{"/v1/chat/completions": 400},
-		reply: map[string]string{
-			"/v1/chat/completions": `{"error":{"message":"model m1 is not accessible via the /chat/completions endpoint"}}`,
-			"/v1/responses":        endpointResponsesReply,
-		},
-		calls: map[string]int{},
-	}
-	up := endpointUpstream(t, f)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"},
-		Chat: up.URL + "/v1", Responses: up.URL + "/v1"}); err != nil {
-		t.Fatal(err)
-	}
+const (
+	chatReqBody = `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`
+	respReqBody = `{"model":"m1","input":"hi"}`
+	anthReqBody = `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+)
+
+// Acceptance 1: Chat is refused, Responses answers, and the next request goes
+// straight to Responses.
+func TestChatRefusalMovesToResponsesAndIsRemembered(t *testing.T) {
+	f := newAPIFake(map[string]apiReply{
+		pathChat: {400, "application/json", chatRefusal},
+		pathResp: respOK,
+	})
+	apiSetup(t, f, provider.Provider{ID: "fake", Name: "Fake", Models: []string{"m1"}, Chat: "x", Responses: "x"}, nil)
 	h := New().Handler()
-	body := `{"model":"m1","messages":[{"role":"user","content":"hello"}]}`
-
-	code, out := serveAt(h, "/v1/chat/completions", body)
-	if code != 200 || !strings.Contains(out, "fallback ok") {
-		t.Fatalf("first: %d %s", code, out)
+	code, body := postTo(h, "/v1/chat/completions", chatReqBody)
+	if code != 200 || !strings.Contains(body, "fallback ok") {
+		t.Fatalf("first: %d %s", code, body)
 	}
-	if strings.Contains(out, "not accessible") {
-		t.Errorf("the refusal reached the agent: %s", out)
+	if f.count(pathChat) != 1 || f.count(pathResp) != 1 {
+		t.Fatalf("first calls: chat=%d responses=%d", f.count(pathChat), f.count(pathResp))
 	}
-	if f.calls["/v1/chat/completions"] != 1 || f.calls["/v1/responses"] != 1 {
-		t.Fatalf("first calls: %v", f.calls)
+	code, body = postTo(h, "/v1/chat/completions", chatReqBody)
+	if code != 200 || !strings.Contains(body, "fallback ok") {
+		t.Fatalf("second: %d %s", code, body)
 	}
-
-	code, out = serveAt(h, "/v1/chat/completions", body)
-	if code != 200 || !strings.Contains(out, "fallback ok") {
-		t.Fatalf("second: %d %s", code, out)
-	}
-	if f.calls["/v1/chat/completions"] != 1 || f.calls["/v1/responses"] != 2 {
-		t.Fatalf("second calls, chat must not be asked again: %v", f.calls)
+	if f.count(pathChat) != 1 || f.count(pathResp) != 2 {
+		t.Fatalf("second calls: chat=%d responses=%d", f.count(pathChat), f.count(pathResp))
 	}
 }
 
-func TestResponsesClientMovesToChatAndRemembers(t *testing.T) {
-	f := &endpointFake{
-		status: map[string]int{"/v1/responses": 400},
-		reply: map[string]string{
-			"/v1/responses":        `{"error":{"code":"unsupported_api_for_model","message":"model m1 is not supported"}}`,
-			"/v1/chat/completions": endpointChatReply,
-		},
-		calls: map[string]int{},
-	}
-	up := endpointUpstream(t, f)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"},
-		Chat: up.URL + "/v1", Responses: up.URL + "/v1"}); err != nil {
-		t.Fatal(err)
-	}
+// Acceptance 2: the reverse. Responses is refused, Chat answers, and the next
+// request goes straight to Chat.
+func TestResponsesRefusalMovesToChatAndIsRemembered(t *testing.T) {
+	f := newAPIFake(map[string]apiReply{
+		pathResp: {400, "application/json", respRefusal},
+		pathChat: chatOK,
+	})
+	apiSetup(t, f, provider.Provider{ID: "fake", Name: "Fake", Models: []string{"m1"}, Chat: "x", Responses: "x"}, nil)
 	h := New().Handler()
-	body := `{"model":"m1","input":"hello"}`
-
-	code, out := serveAt(h, "/v1/responses", body)
-	if code != 200 || !strings.Contains(out, "chat ok") {
-		t.Fatalf("first: %d %s", code, out)
+	code, body := postTo(h, "/v1/responses", respReqBody)
+	if code != 200 || !strings.Contains(body, "chat ok") {
+		t.Fatalf("first: %d %s", code, body)
 	}
-	if f.calls["/v1/responses"] != 1 || f.calls["/v1/chat/completions"] != 1 {
-		t.Fatalf("first calls: %v", f.calls)
+	if f.count(pathResp) != 1 || f.count(pathChat) != 1 {
+		t.Fatalf("first calls: responses=%d chat=%d", f.count(pathResp), f.count(pathChat))
 	}
-
-	code, out = serveAt(h, "/v1/responses", body)
-	if code != 200 || !strings.Contains(out, "chat ok") {
-		t.Fatalf("second: %d %s", code, out)
+	code, body = postTo(h, "/v1/responses", respReqBody)
+	if code != 200 || !strings.Contains(body, "chat ok") {
+		t.Fatalf("second: %d %s", code, body)
 	}
-	if f.calls["/v1/responses"] != 1 || f.calls["/v1/chat/completions"] != 2 {
-		t.Fatalf("second calls, responses must not be asked again: %v", f.calls)
+	if f.count(pathResp) != 1 || f.count(pathChat) != 2 {
+		t.Fatalf("second calls: responses=%d chat=%d", f.count(pathResp), f.count(pathChat))
 	}
 }
 
-func TestDeclaredAPIsDecideEndpoints(t *testing.T) {
-	f := &endpointFake{
-		reply: map[string]string{
-			"/v1/chat/completions": endpointChatReply,
-			"/v1/responses":        endpointResponsesReply,
-		},
-		calls: map[string]int{},
-	}
-	up := endpointUpstream(t, f)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"gpt-x", "claude-x"},
-		Chat: up.URL + "/v1", Responses: up.URL + "/v1", Anthropic: up.URL}); err != nil {
-		t.Fatal(err)
-	}
-	if err := catalog.SaveLive("fake", up.URL, []catalog.Model{
+// Acceptance 3: a declared API list decides where a model goes, with no probe
+// of the APIs it does not list, on every client protocol.
+func TestDeclaredAPIsAreTheOnlyOnesAsked(t *testing.T) {
+	f := newAPIFake(map[string]apiReply{
+		pathChat:      chatOK,
+		pathResp:      respOK,
+		pathAnthropic: {200, "application/json", `{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"m1"}`},
+	})
+	declare := []catalog.Model{
 		{ID: "gpt-x", APIs: []string{"responses"}},
 		{ID: "claude-x", APIs: []string{"chat"}},
-	}); err != nil {
-		t.Fatal(err)
 	}
+	apiSetup(t, f, provider.Provider{ID: "fake", Name: "Fake", Models: []string{"gpt-x", "claude-x"},
+		Chat: "x", Responses: "x", Anthropic: "x"}, declare)
 	h := New().Handler()
-	chatBody := `{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`
-	claudeOpenAI := `{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}`
-	claudeAnthropic := `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
-	gptAnthropic := `{"model":"gpt-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
-
-	steps := []struct {
-		name, path, body, want string
-	}{
-		{"chat client, responses-only model", "/v1/chat/completions", chatBody, "/v1/responses"},
-		{"responses client, chat-only model", "/v1/responses", `{"model":"claude-x","input":"hi"}`, "/v1/chat/completions"},
-		{"anthropic client, chat-only model", "/v1/messages", claudeAnthropic, "/v1/chat/completions"},
-		{"anthropic client, responses-only model", "/v1/messages", gptAnthropic, "/v1/responses"},
-		{"chat client, chat-only model", "/v1/chat/completions", claudeOpenAI, "/v1/chat/completions"},
+	reset := func() {
+		f.mu.Lock()
+		f.hits = map[string]int{}
+		f.mu.Unlock()
 	}
-	for _, st := range steps {
-		f.calls = map[string]int{}
-		code, out := serveAt(h, st.path, st.body)
+	check := func(name, path, body string, wantPath string) {
+		t.Helper()
+		reset()
+		code, out := postTo(h, path, body)
 		if code != 200 {
-			t.Fatalf("%s: %d %s", st.name, code, out)
+			t.Fatalf("%s: %d %s", name, code, out)
 		}
-		if len(f.calls) != 1 || f.calls[st.want] != 1 {
-			t.Fatalf("%s: upstream calls %v, want one to %s", st.name, f.calls, st.want)
+		for _, p := range []string{pathChat, pathResp, pathAnthropic} {
+			want := 0
+			if p == wantPath {
+				want = 1
+			}
+			if got := f.count(p); got != want {
+				t.Errorf("%s: upstream %s got %d calls, want %d", name, p, got, want)
+			}
 		}
 	}
+	check("chat client gpt-x", "/v1/chat/completions", `{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`, pathResp)
+	check("anthropic client gpt-x", "/v1/messages", `{"model":"gpt-x","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, pathResp)
+	check("responses client claude-x", "/v1/responses", `{"model":"claude-x","input":"hi"}`, pathChat)
+	check("anthropic client claude-x", "/v1/messages", `{"model":"claude-x","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, pathChat)
+}
 
-	// count_tokens is not probed at Anthropic for a model that is not
-	// declared for it
-	f.calls = map[string]int{}
-	code, out := serveAt(h, "/v1/messages/count_tokens", claudeAnthropic)
-	if code != 200 || !strings.Contains(out, "input_tokens") {
-		t.Fatalf("count_tokens: %d %s", code, out)
+// A 5xx that names another API is an outage, not a refusal: no other API is
+// asked, and the error goes to the client.
+func TestServerErrorNamingAnotherAPIDoesNotMove(t *testing.T) {
+	f := newAPIFake(map[string]apiReply{
+		pathChat: {500, "application/json", `{"error":{"message":"internal; use v1/responses"}}`},
+		pathResp: respOK,
+	})
+	apiSetup(t, f, provider.Provider{ID: "fake", Name: "Fake", Models: []string{"m1"}, Chat: "x", Responses: "x"}, nil)
+	code, body := postTo(New().Handler(), "/v1/chat/completions", chatReqBody)
+	if code != 500 {
+		t.Fatalf("status %d: %s", code, body)
 	}
-	if f.calls["/v1/messages/count_tokens"] != 0 {
-		t.Fatalf("count_tokens probed the provider: %v", f.calls)
+	// the lone candidate's 500 is tried again twice (retryDelays), still on Chat only
+	if f.count(pathChat) != 3 || f.count(pathResp) != 0 {
+		t.Fatalf("calls: chat=%d responses=%d", f.count(pathChat), f.count(pathResp))
 	}
 }
 
-func TestServerErrorsDoNotMoveEndpoint(t *testing.T) {
-	f := &endpointFake{
-		status: map[string]int{"/v1/chat/completions": 500},
-		reply: map[string]string{
-			"/v1/chat/completions": `{"error":{"message":"internal: use v1/responses"}}`,
-			"/v1/responses":        endpointResponsesReply,
-		},
-		calls: map[string]int{},
+// An Anthropic request that the Anthropic API refuses is translated to Chat
+// Completions, and the client gets Chat's answer.
+func TestAnthropicClientMovesOffRefusingAnthropicAPI(t *testing.T) {
+	f := newAPIFake(map[string]apiReply{
+		pathAnthropic: {400, "application/json", `{"error":{"message":"model m1 is not accessible via the /v1/messages endpoint"}}`},
+		pathChat:      chatOK,
+	})
+	apiSetup(t, f, provider.Provider{ID: "fake", Name: "Fake", Models: []string{"m1"}, Chat: "x", Anthropic: "x"}, nil)
+	code, body := postTo(New().Handler(), "/v1/messages", anthReqBody)
+	if code != 200 || !strings.Contains(body, "chat ok") {
+		t.Fatalf("status %d: %s", code, body)
 	}
-	up := endpointUpstream(t, f)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"},
-		Chat: up.URL + "/v1", Responses: up.URL + "/v1"}); err != nil {
-		t.Fatal(err)
+	if f.count(pathAnthropic) != 1 || f.count(pathChat) != 1 {
+		t.Fatalf("calls: anthropic=%d chat=%d", f.count(pathAnthropic), f.count(pathChat))
 	}
-	quickRetries(t)
+}
+
+// count_tokens reaches the upstream only for a model that is served on the
+// Anthropic API; otherwise it is estimated locally.
+func TestCountTokensOnlyForAnthropicModels(t *testing.T) {
+	f := newAPIFake(map[string]apiReply{
+		pathCount: {200, "application/json", `{"input_tokens":7}`},
+	})
+	declare := []catalog.Model{
+		{ID: "gpt-x", APIs: []string{"responses"}},
+		{ID: "claude-x", APIs: []string{"chat", "anthropic"}},
+	}
+	apiSetup(t, f, provider.Provider{ID: "fake", Name: "Fake", Models: []string{"gpt-x", "claude-x"},
+		Responses: "x", Anthropic: "x"}, declare)
 	h := New().Handler()
-	body := `{"model":"m1","messages":[{"role":"user","content":"hello"}]}`
-	for i := 1; i <= 2; i++ {
-		code, out := serveAt(h, "/v1/chat/completions", body)
-		if code != 500 {
-			t.Fatalf("request %d: status %d, want the 500 passed on: %s", i, code, out)
-		}
+	code, _ := postTo(h, "/v1/messages/count_tokens", `{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`)
+	if code != 200 || f.count(pathCount) != 0 {
+		t.Fatalf("gpt-x: status %d, upstream count calls %d", code, f.count(pathCount))
 	}
-	// the only candidate is tried again twice on a 500 before it is passed on
-	if f.calls["/v1/chat/completions"] != 6 || f.calls["/v1/responses"] != 0 {
-		t.Fatalf("calls: %v", f.calls)
+	code, _ = postTo(h, "/v1/messages/count_tokens", `{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}`)
+	if code != 200 || f.count(pathCount) != 1 {
+		t.Fatalf("claude-x: status %d, upstream count calls %d", code, f.count(pathCount))
 	}
 }
 
-func TestRoutesOrderByVendor(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	s := New()
-	openai := provider.Provider{ID: "oa", Name: "OpenAI", Key: "k",
-		Chat: "https://api.openai.com/v1", Responses: "https://api.openai.com/v1"}
-	other := provider.Provider{ID: "other", Name: "Other", Key: "k",
-		Chat: "https://relay.example/v1", Responses: "https://relay.example/v1"}
-	copilot := provider.Provider{ID: "copilot", Name: "Copilot",
-		Chat: "https://api.githubcopilot.com", Responses: "https://api.githubcopilot.com",
-		Anthropic: "https://api.githubcopilot.com", Account: &provider.Account{Agent: "copilot"}}
-	// Gemini is an API no provider speaks, so every route is a translation
-	cases := []struct {
+// Acceptance 9: which API a translated request tries first.
+func TestTranslationOrderPrefersByVendorAndModel(t *testing.T) {
+	openai := provider.Provider{ID: "openai", Chat: "https://api.openai.com/v1", Responses: "https://api.openai.com/v1"}
+	copilot := provider.Provider{ID: "copilot", Account: &provider.Account{Agent: "copilot"},
+		Chat: "https://api.githubcopilot.com", Responses: "https://api.githubcopilot.com", Anthropic: "https://api.githubcopilot.com"}
+	other := provider.Provider{ID: "other", Chat: "https://openrouter.example/api/v1", Responses: "https://openrouter.example/api/v1"}
+	chatFirst := []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}
+	responsesFirst := []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
+	for _, tc := range []struct {
 		name  string
 		p     provider.Provider
 		model string
 		want  []provider.Protocol
 	}{
-		{"openai gpt", openai, "gpt-6-sol", []provider.Protocol{provider.Responses, provider.Chat}},
-		{"openai o-series", openai, "o4-mini", []provider.Protocol{provider.Responses, provider.Chat}},
-		{"openai with vendor prefix", openai, "openai/gpt-6-sol", []provider.Protocol{provider.Responses, provider.Chat}},
-		{"other vendor's claude", other, "claude-x", []provider.Protocol{provider.Chat, provider.Responses}},
-		{"other vendor's gpt-oss", other, "openai/gpt-oss-120b", []provider.Protocol{provider.Chat, provider.Responses}},
-		{"copilot gpt", copilot, "gpt-5.5", []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}},
-		{"copilot claude", copilot, "claude-opus-5.5", []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}},
-		{"copilot gpt-oss is another vendor's", copilot, "openai/gpt-oss-120b", []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}},
-	}
-	for _, tc := range cases {
-		var got []provider.Protocol
-		for _, rt := range s.routes(tc.p, tc.model, provider.Gemini, []byte(`{}`)) {
-			got = append(got, rt.to)
-		}
-		if strings.Join(protoNames(got), ",") != strings.Join(protoNames(tc.want), ",") {
-			t.Errorf("%s: routes %v, want %v", tc.name, got, tc.want)
-		}
-	}
-
-	// a refusal leaves only the other endpoint, for that model alone
-	s.markRefused("oa", "gpt-6-sol", provider.Responses)
-	if got := s.routes(openai, "gpt-6-sol", provider.Gemini, []byte(`{}`)); len(got) != 1 || got[0].to != provider.Chat {
-		t.Errorf("after refusal: %v", got)
-	}
-	if got := s.routes(openai, "o4-mini", provider.Gemini, []byte(`{}`)); len(got) != 2 || got[0].to != provider.Responses {
-		t.Errorf("refusal leaked to another model: %v", got)
-	}
-
-	// when every endpoint is remembered as refusing, the memory is set aside
-	// rather than leaving the model with no route at all
-	s.markRefused("oa", "gpt-6-sol", provider.Chat)
-	if got := s.routes(openai, "gpt-6-sol", provider.Gemini, []byte(`{}`)); len(got) != 2 {
-		t.Errorf("all refused: routes %v, want every endpoint tried again", got)
-	}
-}
-
-// count_tokens goes to the provider only when its list says the model is
-// served at Anthropic's API; an unknown list is not probed.
-func TestCountTokensNeedsDeclaredAnthropic(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		apis  []string // nil: the list says nothing about the model
-		calls int
-	}{
-		{"list says nothing", nil, 0},
-		{"declared for anthropic", []string{"anthropic"}, 1},
-		{"declared for chat only", []string{"chat"}, 0},
+		{"openai gpt", openai, "gpt-6-sol", responsesFirst},
+		{"openai o-series", openai, "o4-mini", responsesFirst},
+		{"openai codex", openai, "codex-mini", responsesFirst},
+		{"openai vendor prefix", openai, "vendor/gpt-6-sol", responsesFirst},
+		{"copilot gpt", copilot, "gpt-6-sol", responsesFirst},
+		{"copilot o-series", copilot, "o4-mini", responsesFirst},
+		{"copilot claude", copilot, "claude-x", chatFirst},
+		{"other vendor gpt-oss", other, "openai/gpt-oss-120b", chatFirst},
+		{"other vendor gpt", other, "gpt-6-sol", chatFirst},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := &endpointFake{
-				reply: map[string]string{"/v1/messages/count_tokens": `{"input_tokens":7}`},
-				calls: map[string]int{},
-			}
-			up := endpointUpstream(t, f)
-			if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"claude-x"},
-				Chat: up.URL + "/v1", Anthropic: up.URL}); err != nil {
-				t.Fatal(err)
-			}
-			if err := catalog.SaveLive("fake", up.URL, []catalog.Model{{ID: "claude-x", APIs: tc.apis}}); err != nil {
-				t.Fatal(err)
-			}
-			body := `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
-			code, out := serveAt(New().Handler(), "/v1/messages/count_tokens", body)
-			if code != 200 || !strings.Contains(out, "input_tokens") {
-				t.Fatalf("%d %s", code, out)
-			}
-			if f.calls["/v1/messages/count_tokens"] != tc.calls {
-				t.Fatalf("count_tokens calls %v, want %d", f.calls, tc.calls)
-			}
-		})
+		if got := translationOrder(tc.p, tc.model); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
-func protoNames(ps []provider.Protocol) []string {
-	out := make([]string, 0, len(ps))
-	for _, p := range ps {
-		out = append(out, string(p))
+// Refusals are per provider, model and API: refusing m1 on Chat leaves m2 and
+// the other APIs alone, and when every API has refused a model they are all
+// tried again.
+func TestRefusalsAreScopedToModelAndAPI(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	s := New()
+	p := provider.Provider{ID: "fake", Chat: "http://x/v1", Responses: "http://x/v1", Models: []string{"m1", "m2"}}
+	s.refuse("fake", "m1", provider.Chat)
+	if got := s.endpoints(p, "m1", provider.Chat, false); !slices.Equal(got, []provider.Protocol{provider.Responses}) {
+		t.Errorf("m1 after refusal: %v", got)
 	}
-	return out
+	if got := s.endpoints(p, "m2", provider.Chat, false); !slices.Equal(got, []provider.Protocol{provider.Chat, provider.Responses}) {
+		t.Errorf("m2: %v", got)
+	}
+	s.refuse("fake", "m1", provider.Responses)
+	if got := s.endpoints(p, "m1", provider.Chat, false); !slices.Equal(got, []provider.Protocol{provider.Chat, provider.Responses}) {
+		t.Errorf("m1 with every API refused: %v", got)
+	}
+}
+
+func TestRejectsEndpointOnlyFor4xx(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{400, `model m1 is not accessible via the /chat/completions endpoint`, true},
+		{400, `{"code":"unsupported_api_for_model"}`, true},
+		{400, `此模型不存在 use /v1/chat/completions`, true},
+		{422, `not supported in the v1/responses API`, true},
+		{404, `not a chat model`, true},
+		{400, `messages: field required`, false},
+		{400, `context length exceeded`, false},
+		{500, `use v1/responses`, false},
+		{503, `not accessible via the /chat/completions endpoint`, false},
+		{200, `use v1/responses`, false},
+	} {
+		if got := rejectsEndpoint(tc.status, []byte(tc.body)); got != tc.want {
+			t.Errorf("rejectsEndpoint(%d, %q) = %v, want %v", tc.status, tc.body, got, tc.want)
+		}
+	}
 }
