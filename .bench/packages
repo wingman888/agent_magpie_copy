@@ -1,1 +1,1 @@
-./build/icon ./internal/backup ./internal/catalog ./internal/claudebridge ./internal/codexcat ./internal/edit ./internal/netproxy ./internal/profile ./internal/settings ./internal/tui ./internal/update ./internal/usage ./internal/store
+./internal/backup ./internal/catalog ./internal/claudebridge ./internal/codexcat ./internal/edit ./internal/netproxy ./internal/profile ./internal/settings ./internal/tui ./internal/update ./internal/usage ./internal/gui
