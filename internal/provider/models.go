@@ -63,6 +63,49 @@ func (p Provider) Fetched() (time.Time, bool) {
 	return t, ok
 }
 
+// APIs are the endpoints the vendor's last model list declares for model,
+// in the order listed; nil when the list does not say (or has no such model),
+// which means every protocol the vendor speaks may be tried.
+func (p Provider) APIs(model string) []Protocol {
+	live, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return nil
+	}
+	var apis []string
+	found := false
+	for _, m := range live {
+		if m.ID == model {
+			apis, found = m.APIs, true
+			break
+		}
+	}
+	if !found {
+		// a gateway's "vendor/model" is listed as "model", and the reverse
+		for _, m := range live {
+			if bare(m.ID) == bare(model) {
+				apis = m.APIs
+				break
+			}
+		}
+	}
+	var out []Protocol
+	for _, a := range apis {
+		switch Protocol(a) {
+		case Chat, Responses, Anthropic:
+			out = append(out, Protocol(a))
+		}
+	}
+	return out
+}
+
+// bare is a model id without its "vendor/" prefix.
+func bare(id string) string {
+	if i := strings.LastIndexByte(id, '/'); i >= 0 {
+		return id[i+1:]
+	}
+	return id
+}
+
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	if p.Account != nil && p.Account.fetch != nil {
@@ -212,29 +255,6 @@ func (p Provider) RejectsTemperature(model string) bool {
 		}
 	}
 	return false
-}
-
-// APIs lists the wire APIs the vendor's last model list declares for model,
-// in Protocols order. Nil means unknown: no list, the model is not in it,
-// or it declares none that magpie speaks.
-func (p Provider) APIs(model string) []Protocol {
-	live, _, ok := catalog.Live(p.ID)
-	if !ok {
-		return nil
-	}
-	for _, m := range live {
-		if m.ID != model {
-			continue
-		}
-		var out []Protocol
-		for _, pr := range Protocols {
-			if slices.Contains(m.APIs, string(pr)) {
-				out = append(out, pr)
-			}
-		}
-		return out
-	}
-	return nil
 }
 
 // Chosen reports whether a model is exposed.
