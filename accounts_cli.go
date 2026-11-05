@@ -1,156 +1,142 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
 const accountsUsage = `usage:
-  magpie accounts [claude|codex]                  list the remembered accounts (claude also as cc)
-  magpie accounts switch <claude|codex> <email>   sign the agent in to a remembered account
-  magpie accounts forget <claude|codex> <email>   forget a remembered account
-  magpie accounts add <claude|codex>              sign in to another account and remember it
-  magpie accounts on|off <claude|codex> <email>   serve requests alongside the current account`
+  magpie accounts [claude|codex]           list the subscription accounts magpie remembers
+  magpie accounts switch <agent> <email>   sign the agent in to a remembered account
+  magpie accounts forget <agent> <email>   forget a remembered account
+  magpie accounts add <agent>              sign in to another account and remember it
+agents: claude (cc), codex`
 
-// loginAgent names the agent an accounts command is about, or false when it
-// is not one that keeps accounts.
-func loginAgent(name string) (string, bool) {
+// accountAgent maps the agent names accepted on the command line.
+func accountAgent(name string) (string, error) {
 	switch strings.ToLower(name) {
 	case "claude", "cc":
-		return "claude", true
+		return "claude", nil
 	case "codex":
-		return "codex", true
+		return "codex", nil
 	}
-	return "", false
+	return "", fmt.Errorf("unknown agent %q\n%s", name, accountsUsage)
 }
 
-func agentTitle(agent string) string {
+func accountTitle(agent string) string {
 	if agent == "claude" {
 		return "Claude Code"
 	}
 	return "Codex"
 }
 
-// accountsCmd handles `magpie accounts …`.
+// accountsCmd handles `magpie accounts ...`; args[0] is "accounts".
 func accountsCmd(args []string) error {
 	rest := args[1:]
-	usageErr := func(msg string) error { return fmt.Errorf("%s\n%s", msg, accountsUsage) }
 	if len(rest) == 0 {
-		return showLogins([]string{"claude", "codex"})
+		return listAccounts("claude", "codex")
 	}
-	verb := rest[0]
-	switch verb {
-	case "add":
-		if len(rest) != 2 {
-			return usageErr("magpie accounts add <claude|codex>")
-		}
-		agent, ok := loginAgent(rest[1])
-		if !ok {
-			return usageErr(fmt.Sprintf("unknown agent %q", rest[1]))
-		}
-		return addLogin(agent)
-	case "switch", "forget", "on", "off":
-		if len(rest) != 3 {
-			return usageErr(fmt.Sprintf("magpie accounts %s <claude|codex> <email>", verb))
-		}
-		agent, ok := loginAgent(rest[1])
-		if !ok {
-			return usageErr(fmt.Sprintf("unknown agent %q", rest[1]))
-		}
-		return changeLogin(verb, agent, rest[2])
-	}
-	if len(rest) != 1 {
-		return usageErr("magpie accounts [claude|codex]")
-	}
-	agent, ok := loginAgent(verb)
-	if !ok {
-		return usageErr(fmt.Sprintf("unknown agent %q", verb))
-	}
-	return showLogins([]string{agent})
-}
-
-// changeLogin runs switch, forget, on or off for one remembered account.
-func changeLogin(verb, agent, email string) error {
-	switch verb {
+	switch rest[0] {
 	case "switch":
-		if err := provider.SwitchLogin(agent, email); err != nil {
-			return err
+		if len(rest) != 3 {
+			return fmt.Errorf("%s", accountsUsage)
 		}
-		fmt.Println(green.Render("✓"), "signed "+agentTitle(agent)+" in to", email)
-		fmt.Println(muted.Render("sessions already running keep the previous account until they restart"))
-	case "forget":
-		if err := provider.ForgetLogin(agent, email); err != nil {
-			return err
-		}
-		fmt.Println(green.Render("✓"), "forgot", email, muted.Render("("+agentTitle(agent)+")"))
-	case "on", "off":
-		if err := provider.SetLoginOn(agent, email, verb == "on"); err != nil {
-			return err
-		}
-		state := "serves requests alongside the current account"
-		if verb == "off" {
-			state = "no longer serves requests"
-		}
-		fmt.Println(green.Render("✓"), email, muted.Render(state))
-	}
-	return nil
-}
-
-// addLogin opens the agent's own sign-in, then remembers the account it leaves signed in.
-func addLogin(agent string) error {
-	argv, err := provider.LoginCommand(agent)
-	if err != nil {
-		return err
-	}
-	fmt.Println(muted.Render("signing in to " + agentTitle(agent) + "; finish the login in your browser"))
-	login, err := provider.AddLogin(agent, func() error {
-		cmd := exec.Command(argv[0], argv[1:]...)
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		return cmd.Run()
-	})
-	if err != nil {
-		return err
-	}
-	fmt.Println(green.Render("✓"), "remembered", login.User, muted.Render("("+agentTitle(agent)+")"))
-	return showLogins([]string{agent})
-}
-
-// showLogins lists the remembered accounts of each agent, the current one marked.
-func showLogins(agents []string) error {
-	for _, agent := range agents {
-		logins, err := provider.Logins(agent)
+		agent, err := accountAgent(rest[1])
 		if err != nil {
 			return err
 		}
-		fmt.Println(bold.Render(agentTitle(agent)))
-		if len(logins) == 0 {
-			fmt.Println("  " + muted.Render("no remembered accounts; sign in with magpie accounts add "+agent))
+		if err := provider.SwitchAccount(agent, rest[2]); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), accountTitle(agent), "is now signed in to", rest[2])
+		fmt.Println(muted.Render("  sessions already running keep the old account until they restart"))
+		return nil
+	case "forget":
+		if len(rest) != 3 {
+			return fmt.Errorf("%s", accountsUsage)
+		}
+		agent, err := accountAgent(rest[1])
+		if err != nil {
+			return err
+		}
+		if err := provider.ForgetAccount(agent, rest[2]); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), "forgot", rest[2], muted.Render("("+accountTitle(agent)+")"))
+		return nil
+	case "add":
+		if len(rest) != 2 {
+			return fmt.Errorf("%s", accountsUsage)
+		}
+		agent, err := accountAgent(rest[1])
+		if err != nil {
+			return err
+		}
+		if err := provider.Login(agent); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), "signed in and remembered an account for", accountTitle(agent))
+		return listAccounts(agent)
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("%s", accountsUsage)
+	}
+	agent, err := accountAgent(rest[0])
+	if err != nil {
+		return err
+	}
+	return listAccounts(agent)
+}
+
+// listAccounts prints the remembered accounts of each agent, the one in use
+// first, with its plan and the usage the vendor reports.
+func listAccounts(agents ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for _, agent := range agents {
+		fmt.Println(bold.Render(accountTitle(agent)))
+		list := provider.Remembered(agent)
+		if len(list) == 0 {
+			fmt.Println(muted.Render("  no remembered accounts; sign in with the agent, or magpie accounts add " + agent))
 			continue
 		}
-		for _, l := range logins {
-			mark := "  "
-			if l.Current {
-				mark = green.Render("●") + " "
-			}
-			plan := l.Plan
-			if plan == "" {
-				plan = "-"
-			}
-			status := "off"
+		usage := provider.LoginUsage(ctx, agent)
+		for _, a := range list {
+			mark, state := "○", "remembered"
 			switch {
-			case l.Current:
-				status = "signed in"
-			case !l.Held:
-				status = "signed out; sign in with magpie accounts add " + agent
-			case l.On:
-				status = "on"
+			case a.Live:
+				mark, state = "●", "signed in"
+			case a.On:
+				state = "on alongside"
 			}
-			fmt.Printf("  %s%-32s %-12s %s\n", mark, l.User, muted.Render(plan), muted.Render(status))
+			plan := ""
+			if a.Plan != "" {
+				plan = " " + a.Plan
+			}
+			fmt.Printf("  %s %s%s  %s\n", mark, a.User, muted.Render(plan), muted.Render(state))
+			if q, ok := usage[a.User]; ok {
+				fmt.Println("     ", usageLine(q))
+			}
 		}
 	}
 	return nil
+}
+
+// usageLine summarizes an account's windows, or why they are not known.
+func usageLine(q provider.SubscriptionQuota) string {
+	if q.Error != "" {
+		return muted.Render("usage unknown: " + q.Error)
+	}
+	var parts []string
+	for _, w := range q.Windows {
+		parts = append(parts, fmt.Sprintf("%s %.0f%%", w.Name, w.Used))
+	}
+	if len(parts) == 0 {
+		return muted.Render("no usage reported")
+	}
+	return strings.Join(parts, " · ")
 }

@@ -31,11 +31,6 @@ type SubscriptionQuota struct {
 	Plan     string        `json:"plan,omitempty"`
 	Windows  []QuotaWindow `json:"windows"`
 	Error    string        `json:"error,omitempty"`
-
-	// FiveHourUsed and WeeklyUsed are the used share of the 5-hour and the
-	// weekly window, in percent; filled for each remembered login.
-	FiveHourUsed float64 `json:"fiveHourUsed"`
-	WeeklyUsed   float64 `json:"weeklyUsed"`
 }
 
 var subscriptionUsageCache struct {
@@ -159,29 +154,30 @@ type accountStatusError struct{ status int }
 
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
-// claudeUsageURL is where Claude's rolling usage is read; a var so tests can
-// point it elsewhere.
-var claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
-
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
-	token, err := claudeToken(ctx)
-	if err != nil {
-		return SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}, Error: err.Error()}
-	}
-	_, plan, _ := claudeIdentity()
-	return claudeQuotaWith(ctx, token, plan)
+	return claudeUsage(ctx, claudeToken, func() string {
+		_, plan, _ := claudeIdentity()
+		return plan
+	})
 }
 
-// claudeQuotaWith reads the rolling usage of the Claude login a token belongs to.
-func claudeQuotaWith(ctx context.Context, token, plan string) SubscriptionQuota {
-	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}, Plan: plan}
+// claudeUsage reads one Claude Code account's windows, with the token from
+// token and its plan from plan (asked only once a token is in hand).
+func claudeUsage(ctx context.Context, token func(context.Context) (string, error), plan func() string) SubscriptionQuota {
+	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
+	tok, err := token(ctx)
+	if err != nil {
+		q.Error = err.Error()
+		return q
+	}
+	q.Plan = plan()
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err := accountJSON(ctx, claudeUsageURL, token, map[string]string{
+	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", tok, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
@@ -213,16 +209,19 @@ func (w quotaWire) window(name string) QuotaWindow {
 }
 
 func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota {
-	token, accountID, err := codexToken(ctx, path)
-	if err != nil {
-		return SubscriptionQuota{Provider: "codex", Name: "Codex", Icon: "codex-color", Windows: []QuotaWindow{}, Error: err.Error()}
-	}
-	return codexQuotaWith(ctx, token, accountID)
+	return codexUsage(ctx, func(ctx context.Context) (string, string, error) {
+		return codexToken(ctx, path)
+	})
 }
 
-// codexQuotaWith reads the rolling usage of the ChatGPT login a token belongs to.
-func codexQuotaWith(ctx context.Context, token, accountID string) SubscriptionQuota {
+// codexUsage reads one ChatGPT account's windows, with the token from token.
+func codexUsage(ctx context.Context, token func(context.Context) (string, string, error)) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "codex", Name: "Codex", Icon: "codex-color", Windows: []QuotaWindow{}}
+	tok, accountID, err := token(ctx)
+	if err != nil {
+		q.Error = err.Error()
+		return q
+	}
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -231,7 +230,7 @@ func codexQuotaWith(ctx context.Context, token, accountID string) SubscriptionQu
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err := accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	err = accountJSON(ctx, base+"/wham/usage", tok, map[string]string{"chatgpt-account-id": accountID}, &data)
 	if err != nil {
 		q.Error = err.Error()
 		return q
