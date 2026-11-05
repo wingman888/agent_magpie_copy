@@ -120,7 +120,7 @@ func TestParseImportRejects(t *testing.T) {
 		"key too long":                 "magpie://import?name=X&chat=https://a.example/v1&key=" + strings.Repeat("k", 4097),
 		"unknown preset":               "magpie://import?preset=nosuch&key=k",
 		"duplicate parameter":          "magpie://import?name=X&name=Y&chat=https://a.example/v1",
-		"too many models":              "magpie://import?name=X&chat=https://a.example/v1&models=" + manyModels(201),
+		"too many models":              "magpie://import?name=X&chat=https://a.example/v1&models=" + modelList(201),
 		"id not a slug":                "magpie://import?name=X&id=Acme&chat=https://a.example/v1",
 		"anthropic public http":        "magpie://import?name=X&anthropic=http://a.example",
 		"region without preset":        "magpie://import?name=X&region=cn&chat=https://a.example/v1",
@@ -168,7 +168,7 @@ func TestParseImportModelsAndName(t *testing.T) {
 	if strings.Join(p.Models, "|") != "a-1|b-2" {
 		t.Fatalf("models: %q", p.Models)
 	}
-	if _, err := ParseImport("magpie://import?name=X&chat=https://a.example/v1&models=" + manyModels(200)); err != nil {
+	if _, err := ParseImport("magpie://import?name=X&chat=https://a.example/v1&models=" + modelList(200)); err != nil {
 		t.Fatalf("200 models rejected: %v", err)
 	}
 
@@ -201,7 +201,7 @@ func url_(s string) string {
 	return r.Replace(s)
 }
 
-func manyModels(n int) string {
+func modelList(n int) string {
 	var xs []string
 	for i := 0; i < n; i++ {
 		xs = append(xs, "m"+strings.Repeat("x", i%3)+string(rune('a'+i%26))+strconv.Itoa(i))
