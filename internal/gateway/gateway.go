@@ -353,6 +353,21 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
+	// A provider with fallback models tries its keys or accounts, then each
+	// fallback in turn, until one answers (see fallback.go). Without any, the
+	// request takes the single-provider path below, as before.
+	if fb := fallbackTargets(p, model); len(fb) > 0 {
+		final, to, status, msg, failed := s.serveChain(w, r, from, body, append([]target{{p: p, model: model}}, fb...), &call.Usage)
+		call.To, call.Status, call.Error, call.Fallback = to, status, msg, failed
+		call.Provider = final.p.ID
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: final.p.ID, Model: final.model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
+	}
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
@@ -443,6 +458,15 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
 	rd, sse := eventStream(res)
+	// a reply still held back may yet be retried: an error raised before the
+	// first event is answered by the next try, not relayed (see fallback.go)
+	if hw, ok := w.(*holdWriter); ok && hw.hold && sse {
+		var status int
+		var emsg string
+		if rd, status, emsg = openingError(rd); status != 0 {
+			return writeError(w, proto, status, p.Name+": "+emsg), emsg
+		}
+	}
 	h := w.Header()
 	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
 		if v := res.Header.Get(k); v != "" {
@@ -592,6 +616,16 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg
+	}
+	// a reply still held back may yet be retried: an error raised before the
+	// first event is answered by the next try, not relayed (see fallback.go)
+	if hw, ok := w.(*holdWriter); ok && hw.hold {
+		var status int
+		var emsg string
+		if rd, status, emsg = openingError(rd); status != 0 {
+			msg := p.Name + ": " + emsg
+			return writeError(w, from, status, msg), msg
+		}
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), request.Model)
