@@ -227,6 +227,8 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
+			// extra keys, key name and protocol, headers and fallback stay as stored unless this save sets them
+			in = provider.FillUnset(in)
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
 				return
