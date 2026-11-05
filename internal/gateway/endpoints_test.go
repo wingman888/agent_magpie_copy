@@ -224,7 +224,8 @@ func TestServerErrorNamingAnotherAPIDoesNotMove(t *testing.T) {
 	if code != 500 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	if f.count(pathChat) != 1 || f.count(pathResp) != 0 {
+	// the lone candidate's 500 is tried again twice (retryDelays), still on Chat only
+	if f.count(pathChat) != 3 || f.count(pathResp) != 0 {
 		t.Fatalf("calls: chat=%d responses=%d", f.count(pathChat), f.count(pathResp))
 	}
 }
