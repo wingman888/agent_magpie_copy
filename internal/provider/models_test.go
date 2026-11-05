@@ -26,3 +26,16 @@ func TestRejectsTemperatureFromFetchedList(t *testing.T) {
 		}
 	}
 }
+
+func TestIsOpenCode(t *testing.T) {
+	for base, want := range map[string]bool{
+		"https://opencode.ai/zen/go/v1": true,
+		"https://api.opencode.ai/v1":    true,
+		"https://notopencode.ai/v1":     false,
+		"https://api.deepseek.com/v1":   false,
+	} {
+		if got := (Provider{Chat: base}).IsOpenCode(); got != want {
+			t.Errorf("%s: %v", base, got)
+		}
+	}
+}
