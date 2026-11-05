@@ -111,11 +111,21 @@ func Apply(p Profile) (int, error) {
 	for k := range p {
 		keys = append(keys, k)
 	}
-	// providers first: switching one re-settles the model behind it
+	// providers first, then models, then everything else: switching a provider
+	// re-settles the model behind it, and per-tier choices build on the model
+	rank := func(k string) int {
+		switch {
+		case strings.HasSuffix(k, ".provider"):
+			return 0
+		case strings.HasSuffix(k, ".model"):
+			return 1
+		}
+		return 2
+	}
 	sort.Slice(keys, func(i, j int) bool {
-		pi, pj := strings.HasSuffix(keys[i], ".provider"), strings.HasSuffix(keys[j], ".provider")
-		if pi != pj {
-			return pi
+		ri, rj := rank(keys[i]), rank(keys[j])
+		if ri != rj {
+			return ri < rj
 		}
 		return keys[i] < keys[j]
 	})

@@ -29,6 +29,8 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
+	// Optional fields are left out of listings while empty.
+	Optional bool
 }
 
 // Agent is one supported coding agent.

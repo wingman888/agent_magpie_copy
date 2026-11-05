@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -160,17 +161,34 @@ func magpieProviderJSON(shape string) any {
 		}
 		return map[string]any{"type": "openai", "name": "magpie", "base_url": gatewayV1(), "api_key": gateway.Token, "models": ms}
 	case "pi":
-		var ms []map[string]any
-		for _, m := range models {
-			// reasoning lets Pi offer its thinking levels for the model
-			ms = append(ms, map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0})
-		}
-		if ms == nil {
-			ms = []map[string]any{}
-		}
+		ms := piModels(models)
 		return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
 	}
 	return nil
+}
+
+// piModels lists models in Pi's models.json shape. reasoning lets Pi offer
+// its thinking levels; xhigh and max are declared only where the model has
+// them, under their own names, so Pi offers them and sends them unchanged.
+func piModels(models []catalog.Model) []map[string]any {
+	var ms []map[string]any
+	for _, m := range models {
+		e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
+		tl := map[string]string{}
+		for _, lv := range []string{"xhigh", "max"} {
+			if slices.Contains(m.Efforts, lv) {
+				tl[lv] = lv
+			}
+		}
+		if len(tl) > 0 {
+			e["thinkingLevelMap"] = tl
+		}
+		ms = append(ms, e)
+	}
+	if ms == nil {
+		ms = []map[string]any{}
+	}
+	return ms
 }
 
 func opencode(home, cfg string) *Agent {
