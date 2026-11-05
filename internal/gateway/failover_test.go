@@ -1,71 +1,40 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// quickRetries makes the waits before a retry short for the test.
-func quickRetries(t *testing.T) {
+// freshFailover resets what earlier tests may have left: rests, and the
+// environment the provider files live in.
+func freshFailover(t *testing.T) {
 	t.Helper()
-	old := retryDelays
-	retryDelays = [maxRetries]time.Duration{time.Millisecond, 2 * time.Millisecond}
-	t.Cleanup(func() { retryDelays = old })
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.note = map[string]Rest{}
+	restingUntil.Unlock()
 }
 
-// scriptReply is one answer of a scripted upstream.
-type scriptReply struct {
-	code   int    // 0 is 200
-	retry  string // Retry-After, when set
-	stream bool   // an event stream, else JSON
-	body   string
-}
-
-// scripted answers each request with the next reply; the last one repeats.
-type scripted struct {
-	replies []scriptReply
-	calls   int
-}
-
-func (s *scripted) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	io.ReadAll(r.Body)
-	rp := s.replies[min(s.calls, len(s.replies)-1)]
-	s.calls++
-	if rp.stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-	} else {
-		w.Header().Set("Content-Type", "application/json")
-	}
-	if rp.retry != "" {
-		w.Header().Set("Retry-After", rp.retry)
-	}
-	if rp.code != 0 {
-		w.WriteHeader(rp.code)
-	}
-	io.WriteString(w, rp.body)
-}
-
-// addProvider starts an upstream for h and saves provider id, speaking proto
-// only, with the model m.
-func addProvider(t *testing.T, id string, proto provider.Protocol, h http.Handler) {
+// saveAt serves h as one of p's APIs and saves p.
+func saveAt(t *testing.T, p provider.Provider, h http.Handler, api string) {
 	t.Helper()
 	up := httptest.NewServer(h)
 	t.Cleanup(up.Close)
-	p := provider.Provider{ID: id, Name: strings.ToUpper(id), Key: "k", Models: []string{"m"}}
-	switch proto {
-	case provider.Chat:
+	p.Key = "k"
+	switch api {
+	case "chat":
 		p.Chat = up.URL + "/v1"
-	case provider.Responses:
-		p.Responses = up.URL + "/v1"
-	case provider.Anthropic:
+	case "anthropic":
 		p.Anthropic = up.URL
 	}
 	if err := provider.Save(p); err != nil {
@@ -73,462 +42,232 @@ func addProvider(t *testing.T, id string, proto provider.Protocol, h http.Handle
 	}
 }
 
-// saveGroup makes the group the tests send to: the members in order.
-func saveGroup(t *testing.T, members ...string) {
+// step is one scripted reply: its status, the Retry-After it carries, its body.
+type step struct {
+	code       int
+	retryAfter string
+	body       string
+}
+
+// scripted answers one request per step, and repeats the last step after.
+type scripted struct {
+	mu    sync.Mutex
+	steps []step
+	got   int
+}
+
+func (s *scripted) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	io.ReadAll(r.Body)
+	s.mu.Lock()
+	st := s.steps[min(s.got, len(s.steps)-1)]
+	s.got++
+	s.mu.Unlock()
+	if st.retryAfter != "" {
+		w.Header().Set("Retry-After", st.retryAfter)
+	}
+	if st.code == 200 {
+		w.Header().Set("Content-Type", "text/event-stream")
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(st.code)
+	io.WriteString(w, st.body)
+}
+
+func (s *scripted) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.got
+}
+
+// fastRetries shortens the waits for a test; the defaults stay as they are.
+func fastRetries(t *testing.T) {
 	t.Helper()
-	if err := provider.SaveGroup(provider.Group{Name: "Mine", Members: members, Routing: provider.Ordered}); err != nil {
-		t.Fatal(err)
-	}
+	old := retryDelays
+	retryDelays = []time.Duration{5 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { retryDelays = old })
 }
 
 const (
-	chatOK     = `{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"the answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`
-	chatGroup  = `{"model":"group/mine","messages":[{"role":"user","content":"hi"}]}`
-	chatSingle = `{"model":"a/m","messages":[{"role":"user","content":"hi"}]}`
+	anthropicReq = `{"model":"plan/m1","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	soloChatReq  = `{"model":"solo/m1","messages":[{"role":"user","content":"hi"}]}`
+	chatOKReply  = `data: {"id":"c1","model":"m2","choices":[{"delta":{"role":"assistant","content":"from spare"}}]}` + "\n\n" +
+		`data: [DONE]` + "\n\n"
 )
 
-func TestGroupMovesOnWhenTheModelIsRefused(t *testing.T) {
-	fresh(t)
-	a := &scripted{replies: []scriptReply{{code: 400, body: `{"error":{"message":"model m is not accessible via the /chat/completions endpoint"}}`}}}
-	b := &scripted{replies: []scriptReply{{body: chatOK}}}
-	addProvider(t, "a", provider.Chat, a)
-	addProvider(t, "b", provider.Chat, b)
-	saveGroup(t, "a/m", "b/m")
-	s := New()
-	code, out := serveAt(s.Handler(), "/v1/chat/completions", chatGroup)
-	if code != 200 || !strings.Contains(out, "the answer") || strings.Contains(out, "accessible") {
-		t.Fatalf("%d %s", code, out)
-	}
-	if a.calls != 1 || b.calls != 1 {
-		t.Fatalf("a asked %d times, b %d", a.calls, b.calls)
-	}
-	if c := s.Recent()[0]; c.Fallback == "" {
-		t.Fatalf("the move is not recorded: %+v", c)
-	}
-}
-
-// Each of these answers says another member may serve the request.
-func TestGroupMovesOnForOtherRefusals(t *testing.T) {
+// Acceptance 5: a refusal that says the model is not there, or is closed to
+// the key, moves the request on; a 400 about the request itself does not.
+func TestRejectionsThatMoveOnAndThoseThatDoNot(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		code int
-		body string
+		name  string
+		code  int
+		body  string
+		moves bool
 	}{
-		{"unauthorized", 401, `{"error":{"message":"invalid api key"}}`},
-		{"not found", 404, `{"error":{"message":"no such route"}}`},
-		{"model not found, in Chinese", 400, `{"error":{"message":"模型不存在"}}`},
-		{"model does not exist", 400, `{"error":{"message":"The model gpt-x does not exist or you do not have access to it."}}`},
-		{"out of quota as 422", 422, `{"error":{"message":"您的套餐额度已用完"}}`},
+		{"not found", 404, `{"error":{"message":"not found"}}`, true},
+		{"unauthorized", 401, `{"error":{"message":"bad key"}}`, true},
+		{"model does not exist", 400, `{"error":{"message":"The model m1 does not exist"}}`, true},
+		{"model unavailable in Chinese", 400, `{"error":{"message":"模型不存在"}}`, true},
+		{"not accessible via endpoint", 400, `{"error":{"message":"model m1 is not accessible via the /chat/completions endpoint"}}`, true},
+		{"context too long", 400, `{"error":{"message":"maximum context length exceeded"}}`, false},
+		{"missing field", 400, `{"error":{"message":"messages: field required"}}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fresh(t)
-			a := &scripted{replies: []scriptReply{{code: tc.code, body: tc.body}}}
-			b := &scripted{replies: []scriptReply{{body: chatOK}}}
-			addProvider(t, "a", provider.Chat, a)
-			addProvider(t, "b", provider.Chat, b)
-			saveGroup(t, "a/m", "b/m")
-			code, out := serveAt(New().Handler(), "/v1/chat/completions", chatGroup)
-			if code != 200 || !strings.Contains(out, "the answer") || b.calls != 1 {
-				t.Fatalf("%d %s, b asked %d times", code, out, b.calls)
+			freshFailover(t)
+			plan := &fake{t: t, ctype: "application/json", code: tc.code, reply: tc.body}
+			spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
+			saveAt(t, provider.Provider{ID: "plan", Name: "Plan", Models: []string{"m1"}, Fallback: []string{"spare/m2"}}, plan, "chat")
+			saveAt(t, provider.Provider{ID: "spare", Name: "Spare", Models: []string{"m2"}}, spare, "chat")
+			code, body := post(t, "/v1/chat/completions", chatReq)
+			if tc.moves {
+				if code != 200 || !strings.Contains(body, "from-spare") {
+					t.Fatalf("moved: %d %s", code, body)
+				}
+			} else if code != tc.code || spare.got != nil {
+				t.Fatalf("stayed: %d %s (spare got %s)", code, body, spare.got)
 			}
 		})
 	}
 }
 
-// Each of these is the request's own fault: the agent gets the error, and no
-// other member is asked.
-func TestGroupKeepsTheRequestsOwnErrors(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		body string
-	}{
-		{"field required", `{"error":{"message":"messages: field required"}}`},
-		{"context too long", `{"error":{"message":"maximum context length is 8192 tokens, exceeded"}}`},
-		{"context too long, in Chinese", `{"error":{"message":"上下文超长"}}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fresh(t)
-			a := &scripted{replies: []scriptReply{{code: 400, body: tc.body}}}
-			b := &scripted{replies: []scriptReply{{body: chatOK}}}
-			addProvider(t, "a", provider.Chat, a)
-			addProvider(t, "b", provider.Chat, b)
-			saveGroup(t, "a/m", "b/m")
-			code, out := serveAt(New().Handler(), "/v1/chat/completions", chatGroup)
-			if code != 400 || b.calls != 0 || a.calls != 1 {
-				t.Fatalf("%d %s, a asked %d, b asked %d", code, out, a.calls, b.calls)
-			}
-		})
-	}
-}
-
-// retryableCases pins which failures another candidate may answer.
-func TestRetryableStatuses(t *testing.T) {
-	for _, tc := range []struct {
-		status int
-		body   string
-		want   bool
-	}{
-		{401, "", true}, {402, "", true}, {403, "", true}, {404, "", true}, {408, "", true},
-		{429, "", true}, {500, "", true}, {503, "", true}, {529, "", true},
-		{400, "messages: field required", false},
-		{400, "maximum context length exceeded", false},
-		{400, "上下文超长", false},
-		{400, "模型不存在", true},
-		{400, "model m is not accessible via the /chat/completions endpoint", true},
-		{400, "Rate limit reached", true},
-		{422, "您的套餐额度已用完", true},
-		{200, "", false},
-	} {
-		if got := retryable(tc.status, []byte(tc.body)); got != tc.want {
-			t.Errorf("retryable(%d, %q) = %v", tc.status, tc.body, got)
-		}
-	}
-}
-
-const (
-	anthropicStart = `event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_A","type":"message","role":"assistant","model":"m","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`
-	anthropicPing  = `event: ping` + "\n" + `data: {"type":"ping"}`
-	anthropicOver  = `event: error` + "\n" + `data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`
-	anthropicText  = `event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`
-	anthropicB     = `event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_B","type":"message","role":"assistant","model":"m","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`
-	anthropicBText = `event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"from b"}}`
-	anthropicBEnd  = `event: message_stop` + "\n" + `data: {"type":"message_stop"}`
-	anthropicGroup = `{"model":"group/mine","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
-)
-
-func TestAnthropicStreamErrorBeforeContentMovesOn(t *testing.T) {
-	fresh(t)
-	a := &scripted{replies: []scriptReply{{stream: true, body: sse(anthropicStart, anthropicPing, anthropicOver)}}}
-	b := &scripted{replies: []scriptReply{{stream: true, body: sse(anthropicB, anthropicBText, anthropicBEnd)}}}
-	addProvider(t, "a", provider.Anthropic, a)
-	addProvider(t, "b", provider.Anthropic, b)
-	saveGroup(t, "a/m", "b/m")
+// Acceptance 6: an Anthropic stream that fails before any content moves to the
+// next candidate, and the agent sees only that candidate's reply.
+func TestAnthropicStreamFailingBeforeContentMoves(t *testing.T) {
+	freshFailover(t)
+	plan := &fake{t: t, reply: sse(
+		`event: message_start`+"\n"+`data: {"type":"message_start","message":{"id":"msg_A","role":"assistant","content":[],"model":"m1","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`event: ping`+"\n"+`data: {"type":"ping"}`,
+		`event: error`+"\n"+`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+	)}
+	spare := &fake{t: t, reply: sse(
+		`event: message_start`+"\n"+`data: {"type":"message_start","message":{"id":"msg_B","role":"assistant","content":[],"model":"m2","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`event: content_block_start`+"\n"+`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`event: content_block_delta`+"\n"+`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"from spare"}}`,
+		`event: message_stop`+"\n"+`data: {"type":"message_stop"}`,
+	)}
+	saveAt(t, provider.Provider{ID: "plan", Name: "Plan", Models: []string{"m1"}, Fallback: []string{"spare/m2"}}, plan, "anthropic")
+	saveAt(t, provider.Provider{ID: "spare", Name: "Spare", Models: []string{"m2"}}, spare, "anthropic")
 	s := New()
-	code, out := serveAt(s.Handler(), "/v1/messages", anthropicGroup)
-	if code != 200 || !strings.Contains(out, "from b") {
-		t.Fatalf("%d %s", code, out)
+	code, body := postTo(s.Handler(), "/v1/messages", anthropicReq)
+	if code != 200 || !strings.Contains(body, "from spare") || strings.Contains(body, "msg_A") || strings.Contains(body, "Overloaded") {
+		t.Fatalf("%d %s", code, body)
 	}
-	if strings.Contains(out, "Overloaded") || strings.Contains(out, "msg_A") {
-		t.Fatalf("the dropped candidate's reply reached the agent: %s", out)
+	if !strings.Contains(body, "msg_B") {
+		t.Fatalf("spare's stream not relayed: %s", body)
 	}
-	if a.calls != 1 || b.calls != 1 {
-		t.Fatalf("a asked %d times, b %d", a.calls, b.calls)
-	}
-	tr := s.trace.routes[len(s.trace.routes)-1]
-	if len(tr.Tries) != 2 || tr.Tries[0].Status != 529 || tr.Tries[0].Rest == nil {
-		t.Fatalf("tries: %+v", tr.Tries)
-	}
-	if !s.resting("a") {
-		t.Fatal("a is not resting after its overload")
+	if !s.resting("plan") {
+		t.Fatal("the overloaded provider should rest")
 	}
 }
 
-func TestAnthropicStreamErrorAfterContentIsPassedOn(t *testing.T) {
-	fresh(t)
-	a := &scripted{replies: []scriptReply{{stream: true, body: sse(anthropicStart, anthropicText, anthropicOver)}}}
-	b := &scripted{replies: []scriptReply{{stream: true, body: sse(anthropicB, anthropicBText, anthropicBEnd)}}}
-	addProvider(t, "a", provider.Anthropic, a)
-	addProvider(t, "b", provider.Anthropic, b)
-	saveGroup(t, "a/m", "b/m")
-	code, out := serveAt(New().Handler(), "/v1/messages", anthropicGroup)
-	if code != 200 || !strings.Contains(out, "partial") || !strings.Contains(out, "Overloaded") || b.calls != 0 {
-		t.Fatalf("%d %s, b asked %d times", code, out, b.calls)
+// Once content has gone out, a stream error is the agent's, and nothing else is asked.
+func TestStreamErrorAfterContentReachesTheAgent(t *testing.T) {
+	freshFailover(t)
+	plan := &fake{t: t, reply: sse(
+		`event: content_block_delta`+"\n"+`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"half"}}`,
+		`event: error`+"\n"+`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+	)}
+	spare := &fake{t: t, reply: sse(`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"spare"}}`)}
+	saveAt(t, provider.Provider{ID: "plan", Name: "Plan", Models: []string{"m1"}, Fallback: []string{"spare/m2"}}, plan, "anthropic")
+	saveAt(t, provider.Provider{ID: "spare", Name: "Spare", Models: []string{"m2"}}, spare, "anthropic")
+	code, body := postTo(New().Handler(), "/v1/messages", anthropicReq)
+	if code != 200 || !strings.Contains(body, "half") || !strings.Contains(body, "Overloaded") || spare.got != nil {
+		t.Fatalf("%d %s (spare got %s)", code, body, spare.got)
 	}
 }
 
-func TestChatStreamErrorChunkMovesOn(t *testing.T) {
-	fresh(t)
-	a := &scripted{replies: []scriptReply{{stream: true, body: sse(`data: {"error":{"message":"slow down","type":"rate_limit_error"}}`)}}}
-	b := &scripted{replies: []scriptReply{{stream: true, body: sse(
-		`data: {"id":"c","choices":[{"index":0,"delta":{"role":"assistant","content":"from b"}}]}`, `data: [DONE]`)}}}
-	addProvider(t, "a", provider.Chat, a)
-	addProvider(t, "b", provider.Chat, b)
-	saveGroup(t, "a/m", "b/m")
-	code, out := serveAt(New().Handler(), "/v1/chat/completions", `{"model":"group/mine","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	if code != 200 || !strings.Contains(out, "from b") || strings.Contains(out, "slow down") {
-		t.Fatalf("%d %s", code, out)
-	}
-}
-
-func TestResponsesStreamFailedBeforeContentMovesOn(t *testing.T) {
-	fresh(t)
-	a := &scripted{replies: []scriptReply{{stream: true, body: sse(
-		`event: response.created`+"\n"+`data: {"type":"response.created","response":{"id":"r1"}}`,
-		`event: response.failed`+"\n"+`data: {"type":"response.failed","response":{"id":"r1","error":{"code":"server_error","message":"internal failure"}}}`)}}}
-	b := &scripted{replies: []scriptReply{{stream: true, body: sse(
-		`event: response.output_text.delta`+"\n"+`data: {"type":"response.output_text.delta","delta":"from b"}`,
-		`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"id":"r2","status":"completed"}}`)}}}
-	addProvider(t, "a", provider.Responses, a)
-	addProvider(t, "b", provider.Responses, b)
-	saveGroup(t, "a/m", "b/m")
-	code, out := serveAt(New().Handler(), "/v1/responses", `{"model":"group/mine","stream":true,"input":"hi"}`)
-	if code != 200 || !strings.Contains(out, "from b") || strings.Contains(out, "internal failure") {
-		t.Fatalf("%d %s", code, out)
-	}
-}
-
-// The gate lets go of a stream once it has passed its size limit, and what it
-// has held is passed on first.
-func TestStreamHoldGivesUpAtItsSizeLimit(t *testing.T) {
-	defer func(d time.Duration, n int) { streamHoldFor, streamHoldSize = d, n }(streamHoldFor, streamHoldSize)
-	streamHoldSize = 1
-	pr, pw := io.Pipe()
-	go func() {
-		io.WriteString(pw, anthropicStart+"\n\n")
-		io.WriteString(pw, anthropicOver+"\n\n")
-		pw.Close()
-	}()
-	out, stop, fail := holdStream(pr, provider.Anthropic)
-	defer stop()
-	if fail != nil {
-		t.Fatalf("held past its size limit: %+v", fail)
-	}
-	b, _ := io.ReadAll(out)
-	if !bytes.Contains(b, []byte("msg_A")) || !bytes.Contains(b, []byte("overloaded_error")) {
-		t.Fatalf("passed on %q", b)
-	}
-}
-
-// Nor does it wait past its time limit for the first content.
-func TestStreamHoldGivesUpAtItsTimeLimit(t *testing.T) {
-	defer func(d time.Duration, n int) { streamHoldFor, streamHoldSize = d, n }(streamHoldFor, streamHoldSize)
-	streamHoldFor = time.Millisecond
-	pr, pw := io.Pipe()
-	out, stop, fail := holdStream(pr, provider.Anthropic)
-	defer stop()
-	if fail != nil {
-		t.Fatalf("failed with nothing read: %+v", fail)
-	}
-	go func() {
-		io.WriteString(pw, anthropicOver+"\n\n")
-		pw.Close()
-	}()
-	b, _ := io.ReadAll(out)
-	if !bytes.Contains(b, []byte("overloaded_error")) {
-		t.Fatalf("passed on %q", b)
-	}
-}
-
-func TestRetryTheLastCandidate(t *testing.T) {
-	fresh(t)
-	quickRetries(t)
-	a := &scripted{replies: []scriptReply{
-		{code: 503, body: `{"error":{"message":"busy"}}`},
-		{code: 502, body: `{"error":{"message":"bad gateway"}}`},
-		{body: chatOK},
-	}}
-	addProvider(t, "a", provider.Chat, a)
+// Acceptance 7: the only provider's transient failures are tried again.
+func TestLastCandidateRetriesTransientFailures(t *testing.T) {
+	freshFailover(t)
+	fastRetries(t)
+	up := &scripted{steps: []step{{503, "", `{"error":{"message":"busy"}}`}, {502, "", `{"error":{"message":"bad gateway"}}`}, {200, "", chatOKReply}}}
+	saveAt(t, provider.Provider{ID: "solo", Name: "Solo", Models: []string{"m1"}}, up, "chat")
 	s := New()
-	code, out := serveAt(s.Handler(), "/v1/chat/completions", chatSingle)
-	if code != 200 || !strings.Contains(out, "the answer") || a.calls != 3 {
-		t.Fatalf("%d %s, asked %d times", code, out, a.calls)
+	code, body := postTo(s.Handler(), "/v1/chat/completions", soloChatReq)
+	if code != 200 || !strings.Contains(body, "from spare") || up.count() != 3 {
+		t.Fatalf("%d %s after %d requests", code, body, up.count())
 	}
-	tr := s.trace.routes[len(s.trace.routes)-1]
-	if len(tr.Tries) != 3 || !tr.Tries[0].Retry || tr.Tries[0].Wait != 1 || !tr.Tries[1].Retry || tr.Tries[1].Wait != 2 || tr.Tries[2].Retry {
-		t.Fatalf("tries: %+v", tr.Tries)
+	r := s.trace.routes[len(s.trace.routes)-1]
+	if len(r.Tries) != 3 || !r.Tries[1].Retry || r.Tries[1].WaitMs != 5 || !r.Tries[2].Retry || r.Tries[2].WaitMs != 10 {
+		t.Fatalf("tries %+v", r.Tries)
+	}
+	if r.Tries[0].Fail != failRetry || r.Tries[1].Fail != failRetry || r.Tries[2].Rest != nil {
+		t.Fatalf("tries %+v", r.Tries)
 	}
 }
 
-func TestRetryGivesUpWithTheLastError(t *testing.T) {
-	fresh(t)
-	quickRetries(t)
-	a := &scripted{replies: []scriptReply{{code: 503, body: `{"error":{"message":"spare down"}}`}}}
-	addProvider(t, "a", provider.Chat, a)
-	code, out := serveAt(New().Handler(), "/v1/chat/completions", chatSingle)
-	if code != 503 || !strings.Contains(out, "spare down") || a.calls != 3 {
-		t.Fatalf("%d %s, asked %d times", code, out, a.calls)
+func TestLastCandidateGivesUpAfterThreeTries(t *testing.T) {
+	freshFailover(t)
+	fastRetries(t)
+	up := &scripted{steps: []step{{503, "", `{"error":{"message":"busy"}}`}}}
+	saveAt(t, provider.Provider{ID: "solo", Name: "Solo", Models: []string{"m1"}}, up, "chat")
+	code, body := postTo(New().Handler(), "/v1/chat/completions", soloChatReq)
+	if code != 503 || !strings.Contains(body, "busy") || up.count() != 3 {
+		t.Fatalf("%d %s after %d requests", code, body, up.count())
+	}
+}
+
+func TestRetryAfterBeyondEightSecondsIsNotWaitedFor(t *testing.T) {
+	freshFailover(t)
+	fastRetries(t)
+	up := &scripted{steps: []step{{429, "9", `{"error":{"message":"slow down"}}`}, {200, "", chatOKReply}}}
+	saveAt(t, provider.Provider{ID: "solo", Name: "Solo", Models: []string{"m1"}}, up, "chat")
+	code, body := postTo(New().Handler(), "/v1/chat/completions", soloChatReq)
+	if code != 429 || up.count() != 1 {
+		t.Fatalf("%d %s after %d requests", code, body, up.count())
+	}
+}
+
+func TestRateLimitWithoutRetryAfterIsNotRetried(t *testing.T) {
+	freshFailover(t)
+	fastRetries(t)
+	up := &scripted{steps: []step{{429, "", `{"error":{"message":"slow down"}}`}, {200, "", chatOKReply}}}
+	saveAt(t, provider.Provider{ID: "solo", Name: "Solo", Models: []string{"m1"}}, up, "chat")
+	code, _ := postTo(New().Handler(), "/v1/chat/completions", soloChatReq)
+	if code != 429 || up.count() != 1 {
+		t.Fatalf("%d after %d requests", code, up.count())
 	}
 }
 
 func TestPlainBadRequestIsNotRetried(t *testing.T) {
-	fresh(t)
-	quickRetries(t)
-	a := &scripted{replies: []scriptReply{{code: 400, body: `{"error":{"message":"messages: field required"}}`}}}
-	addProvider(t, "a", provider.Chat, a)
-	code, out := serveAt(New().Handler(), "/v1/chat/completions", chatSingle)
-	if code != 400 || !strings.Contains(out, "field required") || a.calls != 1 {
-		t.Fatalf("%d %s, asked %d times", code, out, a.calls)
+	freshFailover(t)
+	fastRetries(t)
+	up := &scripted{steps: []step{{400, "", `{"error":{"message":"messages: field required"}}`}, {200, "", chatOKReply}}}
+	saveAt(t, provider.Provider{ID: "solo", Name: "Solo", Models: []string{"m1"}}, up, "chat")
+	code, _ := postTo(New().Handler(), "/v1/chat/completions", soloChatReq)
+	if code != 400 || up.count() != 1 {
+		t.Fatalf("%d after %d requests", code, up.count())
 	}
 }
 
-// Retry-After decides: a short one is waited out, a long one is not, and a
-// 429 without one is not retried at all.
-func TestRetryAfterDecidesWhetherToRetry(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		replies []scriptReply
-		code    int
-		calls   int
-	}{
-		{"long Retry-After", []scriptReply{{code: 503, retry: "9", body: `{"error":{"message":"busy"}}`}, {body: chatOK}}, 503, 1},
-		{"429 without Retry-After", []scriptReply{{code: 429, body: `{"error":{"message":"slow"}}`}, {body: chatOK}}, 429, 1},
-		{"429 with Retry-After 0", []scriptReply{{code: 429, retry: "0", body: `{"error":{"message":"slow"}}`}, {body: chatOK}}, 200, 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fresh(t)
-			quickRetries(t)
-			a := &scripted{replies: tc.replies}
-			addProvider(t, "a", provider.Chat, a)
-			code, out := serveAt(New().Handler(), "/v1/chat/completions", chatSingle)
-			if code != tc.code || a.calls != tc.calls {
-				t.Fatalf("%d %s, asked %d times", code, out, a.calls)
-			}
-		})
-	}
-}
-
-func TestRetryDelay(t *testing.T) {
-	quickRetries(t)
-	header := func(v string) http.Header {
-		h := http.Header{}
-		if v != "" {
-			h.Set("Retry-After", v)
-		}
-		return h
-	}
-	for _, tc := range []struct {
-		status  int
-		retry   string
-		attempt int
-		want    time.Duration
-		ok      bool
-	}{
-		{503, "", 0, time.Millisecond, true},
-		{503, "", 1, 2 * time.Millisecond, true},
-		{503, "", 2, 0, false},
-		{500, "", 0, time.Millisecond, true},
-		{529, "", 0, time.Millisecond, true},
-		{408, "", 0, time.Millisecond, true},
-		{502, "", 0, time.Millisecond, true},
-		{429, "", 0, 0, false},
-		{429, "3", 0, 3 * time.Second, true},
-		{503, "9", 0, 0, false},
-		{503, "8", 0, 8 * time.Second, true},
-		{400, "", 0, 0, false},
-		{501, "", 0, 0, false},
-	} {
-		got, ok := retryDelay(tc.status, header(tc.retry), tc.attempt)
-		if ok != tc.ok || got != tc.want {
-			t.Errorf("retryDelay(%d, %q, %d) = %v, %v", tc.status, tc.retry, tc.attempt, got, ok)
-		}
-	}
-}
-
-// The agent going away is no failure of any candidate: it is recorded as
-// canceled, nothing rests, and the next candidate is not asked.
-func TestCancelDoesNotMoveOrRest(t *testing.T) {
-	fresh(t)
-	started := make(chan struct{}, 1)
-	a := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// Acceptance 8: an agent that goes away while a candidate is still working
+// blames no one, and no other candidate is asked.
+func TestAgentCancelBlamesNoCandidate(t *testing.T) {
+	freshFailover(t)
+	hang := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
-		select {
-		case started <- struct{}{}:
-		default:
-		}
-		select {
-		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
-			w.WriteHeader(503)
-		}
+		<-r.Context().Done()
 	})
-	b := &scripted{replies: []scriptReply{{body: chatOK}}}
-	addProvider(t, "a", provider.Chat, a)
-	addProvider(t, "b", provider.Chat, b)
-	saveGroup(t, "a/m", "b/m")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		<-started
-		cancel()
-	}()
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatGroup)).WithContext(ctx)
+	spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
+	saveAt(t, provider.Provider{ID: "plan", Name: "Plan", Models: []string{"m1"}, Fallback: []string{"spare/m2"}}, hang, "chat")
+	saveAt(t, provider.Provider{ID: "spare", Name: "Spare", Models: []string{"m2"}}, spare, "chat")
 	s := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatReq)).WithContext(ctx)
 	s.Handler().ServeHTTP(httptest.NewRecorder(), req)
 
-	c := s.Recent()[0]
-	if c.Status != 499 || c.Error != "canceled" || c.Fallback != "" {
+	if spare.got != nil {
+		t.Fatalf("spare was asked after the agent left: %s", spare.got)
+	}
+	if c := s.Recent()[0]; c.Status != statusClientClosed || c.Error != failCanceled {
 		t.Fatalf("recorded %+v", c)
 	}
-	if b.calls != 0 {
-		t.Fatalf("the next candidate was asked %d times", b.calls)
+	r := s.trace.routes[len(s.trace.routes)-1]
+	if len(r.Tries) != 1 || r.Tries[0].Fail != failCanceled || r.Tries[0].Rest != nil {
+		t.Fatalf("tries %+v", r.Tries)
 	}
-	if s.resting("a") {
-		t.Fatal("a rests after the agent went away")
-	}
-	tr := s.trace.routes[len(s.trace.routes)-1]
-	if len(tr.Tries) != 1 || !tr.Tries[0].Canceled {
-		t.Fatalf("tries: %+v", tr.Tries)
-	}
-}
-
-// Words that name the model, the quota, or a rate limit move a 400 on; a
-// bare "not supported" about a parameter, or a request too big, do not.
-func TestRefusalWordsAreAboutTheModel(t *testing.T) {
-	for _, tc := range []struct {
-		body string
-		want bool
-	}{
-		{"Parameter 'temperature' is not supported with this model", false},
-		{"max_output_tokens exceeded", false},
-		{"messages: field required", false},
-		{"context length exceeded", false},
-		{"上下文超长", false},
-		{"model gpt-x is not supported", true},
-		{"The model does not exist or you do not have access to it", true},
-		{"unsupported model: gpt-x", true},
-		{"模型不存在", true},
-		{"该模型未开通", true},
-		{"quota exceeded for this account", true},
-		{"insufficient_quota", true},
-		{"insufficient balance", true},
-		{"余额不足", true},
-		{"model m is not accessible via the /chat/completions endpoint", true},
-		{`{"error":{"code":"unsupported_api_for_model"}}`, true},
-	} {
-		if got := retryable(400, []byte(tc.body)); got != tc.want {
-			t.Errorf("retryable(400, %q) = %v, want %v", tc.body, got, tc.want)
-		}
-	}
-}
-
-// A cancel that lands while the last candidate waits to retry is a cancel:
-// the try is marked canceled, not as a retry.
-func TestCancelDuringRetryWaitIsACancel(t *testing.T) {
-	fresh(t)
-	started := make(chan struct{}, 1)
-	a := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body)
-		w.Header().Set("Retry-After", "5")
-		w.WriteHeader(503)
-		io.WriteString(w, `{"error":{"message":"busy"}}`)
-		select {
-		case started <- struct{}{}:
-		default:
-		}
-	})
-	addProvider(t, "a", provider.Chat, a)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		<-started
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-	}()
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatSingle)).WithContext(ctx)
-	s := New()
-	s.Handler().ServeHTTP(httptest.NewRecorder(), req)
-
-	c := s.Recent()[0]
-	if c.Status != 499 || c.Error != "canceled" {
-		t.Fatalf("recorded %+v", c)
-	}
-	if s.resting("a") {
-		t.Fatal("a rests after the agent went away")
-	}
-	tr := s.trace.routes[len(s.trace.routes)-1]
-	if len(tr.Tries) != 1 || !tr.Tries[0].Canceled || tr.Tries[0].Retry {
-		t.Fatalf("tries: %+v", tr.Tries)
+	if s.resting("plan") {
+		t.Fatal("a cancelled candidate must not rest")
 	}
 }

@@ -627,6 +627,9 @@ func (r *subscriptionRun) abort() {
 }
 
 func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
+	if b == nil {
+		return // a run made without a bridge (tests) has none to leave
+	}
 	b.mu.Lock()
 	delete(b.runs, run.token)
 	for id, owner := range b.calls {

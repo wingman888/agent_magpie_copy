@@ -1,122 +1,127 @@
 package gateway
 
+// Endpoints: a model is served on some of a provider's wire APIs and turned
+// away by the others. The provider's model list says which, when it does.
+// When it does not, a request goes to one API, and if that API refuses the
+// model, to the provider's next API. Each refusal is remembered per provider,
+// model and API, so the next request goes straight to an API that serves it.
+
 import (
-	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// endpointRoute is one endpoint a request may be sent to: the agent's own API as it
-// is (relay), or a translation of the request into another API.
-type endpointRoute struct {
-	to    provider.Protocol
-	relay bool
-}
+// endpointRefusal matches the messages upstreams use when a model is not
+// served on the API asked. See rejectsEndpoint.
+var endpointRefusal = regexp.MustCompile(`(?i)not accessible via the .{1,80}endpoint|unsupported_api_for_model|use v1/responses|use /v1/chat/completions|not supported in the v1/responses|not a chat model`)
 
-// refusal is an upstream reply saying the model is not served at the endpoint
-// asked. Nothing has been written to the agent when one is returned.
-type refusal struct {
-	status int
-	msg    string
-	header http.Header
-}
-
-// answerRefusal writes the last refusal as the answer, the way an ordinary
-// upstream error is written.
-func answerRefusal(w http.ResponseWriter, from provider.Protocol, ref *refusal) (int, string) {
-	keepRetry(w.Header(), ref.header)
-	return writeError(w, from, ref.status, ref.msg), ref.msg
-}
-
-// routes lists the endpoints a request for model may go to, first choice
-// first: the agent's own API when the provider serves the model there, then
-// translations to the other APIs the provider serves the model at. Endpoints
-// remembered as refusing the model are left out, unless that leaves nothing
-// to try: a memory must not make the model unreachable for good.
-func (s *Server) routes(p provider.Provider, model string, from provider.Protocol, body []byte) []endpointRoute {
-	if out := s.routesWith(p, model, from, body, true); len(out) > 0 {
-		return out
+// rejectsEndpoint says whether a reply means the model is not served on the
+// API it was sent to, so another API of the provider may serve it. Only 4xx
+// replies qualify; a 5xx that happens to name an API is an outage, not a
+// refusal.
+func rejectsEndpoint(status int, body []byte) bool {
+	if status < 400 || status >= 500 {
+		return false
 	}
-	return s.routesWith(p, model, from, body, false)
+	return notChatModel(status, body) || endpointRefusal.Match(body)
 }
 
-// routesWith is routes, with or without the endpoints remembered as refusing.
-func (s *Server) routesWith(p provider.Provider, model string, from provider.Protocol, body []byte, remembered bool) []endpointRoute {
+// isOpenAIModel says whether a model is OpenAI's by its name: gpt-*, codex*,
+// or o followed by a digit (o3, o4-mini). A vendor/ prefix is ignored. The
+// open-weight gpt-oss models are not OpenAI's API models, whatever their name.
+func isOpenAIModel(model string) bool {
+	m := strings.ToLower(model)
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	if strings.HasPrefix(m, "gpt-oss") {
+		return false
+	}
+	return strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "codex") ||
+		(len(m) > 1 && m[0] == 'o' && m[1] >= '0' && m[1] <= '9')
+}
+
+// streamRefused says whether an error event that came before any content
+// means the model is not served on the API it was sent to: the same test as
+// rejectsEndpoint, which has no status to go by on a stream.
+func streamRefused(f *streamFault) bool {
+	return f != nil && (endpointRefusal.MatchString(f.msg) || notChatModel(400, []byte(f.msg)))
+}
+
+// isCopilot says whether a provider is GitHub Copilot, signed in or keyed.
+func isCopilot(p provider.Provider) bool {
+	return p.Account != nil && p.Account.Agent == "copilot" || strings.HasSuffix(p.Host(), "githubcopilot.com")
+}
+
+// translationOrder is the order a request is translated to the provider's
+// APIs in. OpenAI's own models, on api.openai.com or Copilot, prefer
+// Responses; everything else prefers Chat Completions. Anthropic comes last.
+func translationOrder(p provider.Provider, model string) []provider.Protocol {
+	if isOpenAIModel(model) && (p.Host() == "api.openai.com" || isCopilot(p)) {
+		return []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
+	}
+	return []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}
+}
+
+// endpoints is the APIs a request for model goes to on p, in the order to try
+// them. The agent's own API comes first, forwarded as it is, when relay allows
+// it and the provider serves the model on it. The others are translated, in
+// translationOrder. An API the model is known not to be served on, or one that
+// refused it before, is left out. When every API is left out by refusals, the
+// refusals are ignored and all the declared APIs are tried again.
+func (s *Server) endpoints(p provider.Provider, model string, from provider.Protocol, relay bool) []provider.Protocol {
+	if order := s.endpointsWhere(p, model, from, relay, true); len(order) > 0 {
+		return order
+	}
+	return s.endpointsWhere(p, model, from, relay, false)
+}
+
+func (s *Server) endpointsWhere(p provider.Provider, model string, from provider.Protocol, relay, remembered bool) []provider.Protocol {
+	declared := p.APIs(model) // nil: the list says nothing, so all the provider's APIs may be tried
 	usable := func(pr provider.Protocol) bool {
-		return p.Base(pr) != "" && declares(p, model, pr) && !(remembered && s.refusedEndpoint(p.ID, model, pr))
+		if p.Base(pr) == "" {
+			return false
+		}
+		if declared != nil && !slices.Contains(declared, pr) {
+			return false
+		}
+		return !remembered || !s.refused(p.ID, model, pr)
 	}
-	var out []endpointRoute
-	relay := usable(from) && relayable(p, from, body)
-	if relay {
-		out = append(out, endpointRoute{to: from, relay: true})
+	var out []provider.Protocol
+	passthrough := relay && slices.Contains(provider.Protocols, from) && usable(from)
+	if passthrough {
+		out = append(out, from)
 	}
-	prefs := []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}
-	if openAIFirst(p, model) {
-		prefs = []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
-	}
-	for _, pr := range prefs {
-		if relay && pr == from {
+	for _, pr := range translationOrder(p, model) {
+		if (passthrough && pr == from) || !usable(pr) {
 			continue
 		}
-		if usable(pr) {
-			out = append(out, endpointRoute{to: pr})
-		}
+		out = append(out, pr)
 	}
 	return out
 }
 
-// relayable is whether the provider takes the agent's own API as it is: it
-// has that endpoint, and a backend that only streams gets streamed requests.
-func relayable(p provider.Provider, from provider.Protocol, body []byte) bool {
-	return p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-}
-
-// declares is whether the provider may be asked for model at proto: its model
-// list names the APIs of that model and proto is one of them. A list that says
-// nothing about the model allows every API the provider has.
-func declares(p provider.Provider, model string, proto provider.Protocol) bool {
-	apis := p.APIs(model)
-	return apis == nil || slices.Contains(apis, proto)
-}
-
-// openAIFirst is whether a translated request for model tries Responses before
-// Chat: OpenAI's own models on api.openai.com or on Copilot. The vendor prefix
-// of "vendor/model" does not count.
-func openAIFirst(p provider.Provider, model string) bool {
-	if p.Host() != "api.openai.com" && (p.Account == nil || p.Account.Agent != "copilot") {
-		return false
-	}
-	id := strings.ToLower(model)
-	if i := strings.LastIndexByte(id, '/'); i >= 0 {
-		id = id[i+1:]
-	}
-	// gpt-oss is an open-weight model of another vendor, served as such
-	if strings.HasPrefix(id, "gpt-oss") {
-		return false
-	}
-	if strings.HasPrefix(id, "gpt-") || strings.HasPrefix(id, "codex") {
-		return true
-	}
-	return len(id) > 1 && id[0] == 'o' && id[1] >= '0' && id[1] <= '9'
-}
-
-func refusedKey(providerID, model string, proto provider.Protocol) string {
+// refusalKey names one provider's model on one API.
+func refusalKey(providerID, model string, proto provider.Protocol) string {
 	return providerID + "\x00" + model + "\x00" + string(proto)
 }
 
-// refusedEndpoint is whether the endpoint was found to refuse the model.
-func (s *Server) refusedEndpoint(providerID, model string, proto provider.Protocol) bool {
+// refused says whether an API has turned a provider's model away before.
+func (s *Server) refused(providerID, model string, proto provider.Protocol) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.refused[refusedKey(providerID, model, proto)]
+	return s.refusals[refusalKey(providerID, model, proto)]
 }
 
-// markRefused remembers that the endpoint refuses the model. Only that
-// provider, model and endpoint are affected.
-func (s *Server) markRefused(providerID, model string, proto provider.Protocol) {
+// refuse remembers that an API turned a provider's model away.
+func (s *Server) refuse(providerID, model string, proto provider.Protocol) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.refused[refusedKey(providerID, model, proto)] = true
+	if s.refusals == nil {
+		s.refusals = make(map[string]bool)
+	}
+	s.refusals[refusalKey(providerID, model, proto)] = true
 }

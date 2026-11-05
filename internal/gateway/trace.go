@@ -85,15 +85,12 @@ type Try struct {
 	Done   bool      `json:"done"`
 	Status int       `json:"status,omitempty"`
 	Millis int64     `json:"ms,omitempty"`
-	Fail   string    `json:"fail,omitempty"` // why it failed, as rest tells it
+	Fail   string    `json:"fail,omitempty"` // why it failed, as rest tells it; "retry" when it was tried again, "canceled" when the agent went away
 	Error  string    `json:"error,omitempty"`
 	Rest   *Rest     `json:"rest,omitempty"` // how long it now sits out; none when it was the last to try
-	// Retry: it failed in a way that may heal, and the last candidate tries
-	// again after Wait milliseconds
-	Retry bool  `json:"retry,omitempty"`
-	Wait  int64 `json:"wait,omitempty"`
-	// Canceled: the agent went away while it was tried; nothing rests for it
-	Canceled bool `json:"canceled,omitempty"`
+	// Retry: this try repeats the last candidate's failed one, after WaitMs
+	Retry  bool  `json:"retry,omitempty"`
+	WaitMs int64 `json:"waitMs,omitempty"`
 }
 
 type planned struct {

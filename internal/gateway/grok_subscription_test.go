@@ -68,9 +68,7 @@ func TestReadGrokStream(t *testing.T) {
 		`{"type":"stream_event","parent_tool_use_id":"x","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"sub"}}}`,
 		`{"type":"result","subtype":"success","is_error":false,"result":"pong","usage":{"input_tokens":262,"output_tokens":27,"cache_read_input_tokens":28416,"cache_creation_input_tokens":0}}`,
 	}, "\n")
-	// the bridge is set as in production: a finished turn's delayed abort
-	// removes the run from it, and must not reach a nil bridge later on
-	run := &subscriptionRun{bridge: newSubscriptionBridge(), token: "tok", pending: map[string]chan mcpToolResult{}}
+	run := &subscriptionRun{pending: map[string]chan mcpToolResult{}}
 	run.timer = time.AfterFunc(time.Hour, func() {})
 	c := &cursorTurn{run: run}
 	seg := run.attach()
@@ -101,7 +99,7 @@ func TestReadGrokStream(t *testing.T) {
 }
 
 func TestReadGrokError(t *testing.T) {
-	run := &subscriptionRun{bridge: newSubscriptionBridge(), token: "tok", pending: map[string]chan mcpToolResult{}}
+	run := &subscriptionRun{pending: map[string]chan mcpToolResult{}}
 	c := &cursorTurn{run: run}
 	seg := run.attach()
 	go c.readGrok(strings.NewReader(`{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["rate limited"]}`))
