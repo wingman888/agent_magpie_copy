@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yetone/dial/internal/catalog"
+	"github.com/yetone/magpie/internal/catalog"
 )
 
 func errorf(format string, a ...any) error { return fmt.Errorf(format, a...) }
@@ -15,23 +15,44 @@ func errorf(format string, a ...any) error { return fmt.Errorf(format, a...) }
 // manyModels is where "expose everything" stops being helpful.
 const manyModels = 24
 
-// Available lists every model the vendor is known to serve: its own list
-// when fetched (see Fetch), else the models.dev catalog for the vendor.
+// Available lists every model the vendor is known to serve: the list fetched
+// from the vendor itself when there is one, over the models.dev catalog (or,
+// for an account, whatever the agent's own sign-in can see).
 func (p Provider) Available() []catalog.Model {
-	if p.IsAccount() {
-		if live, _, ok := catalog.Live(p.ID); ok {
-			return live
-		}
-		return accountBuiltin(p.ID)
+	signedIn := p.Account != nil && p.Account.models != nil
+	var known []catalog.Model
+	if signedIn {
+		known = p.Account.models()
+	} else {
+		known = p.catalogModels()
 	}
-	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
+	}
+	if signedIn {
+		return known
 	}
 	var out []catalog.Model
 	for _, m := range known {
 		if !strings.Contains(m.ID, "-exp") && !strings.Contains(m.ID, "preview") {
 			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// catalogModels lists the models of every catalog the provider reads, in
+// the order the catalogs were given. A model listed by an earlier catalog
+// wins over the same id in a later one.
+func (p Provider) catalogModels() []catalog.Model {
+	var out []catalog.Model
+	seen := map[string]bool{}
+	for _, c := range p.CatalogIDs() {
+		for _, m := range catalog.Provider(c) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out = append(out, m)
+			}
 		}
 	}
 	return out
@@ -45,12 +66,12 @@ func (p Provider) Fetched() (time.Time, bool) {
 
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
-	if p.IsAccount() {
-		return p.fetchAccount(ctx)
+	if p.Account != nil && p.Account.fetch != nil {
+		return p.Account.fetch(ctx)
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key)
+		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.CustomHeaders())
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -62,18 +83,15 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	return nil, lastErr
 }
 
-// Exposed lists the models dial offers to agents for this provider: the
+// Exposed lists the models magpie offers to agents for this provider: the
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
-	byID := make(map[string]catalog.Model, len(avail))
-	for _, m := range avail {
-		byID[m.ID] = m
-	}
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
-			if m, ok := byID[id]; ok {
+			if m, ok := catalog.Match(avail, id); ok {
+				m.ID = id // keep the id the user wrote; the vendor is asked for that one
 				out = append(out, m)
 			} else {
 				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
@@ -84,26 +102,26 @@ func (p Provider) Exposed() []catalog.Model {
 	if len(p.Models) > 0 {
 		return pick(p.Models)
 	}
-	if pr := Preset(p.Preset); pr != nil && len(pr.Defaults) > 0 {
-		if _, fetched := p.Fetched(); !fetched {
-			return pick(pr.Defaults)
-		}
-		var have []string
-		for _, id := range pr.Defaults {
-			if _, ok := byID[id]; ok {
-				have = append(have, id)
-			}
-		}
-		if len(have) > 0 {
-			return pick(have)
-		}
-	}
-	// an agent's own login has a short, fixed list; the manyModels cap is for
-	// vendors whose catalogs are large
-	if len(avail) <= manyModels || p.IsAccount() {
+	if len(avail) <= manyModels {
 		return avail
 	}
-	return nil
+	// More than an agent's picker wants. Show the first slice of the
+	// vendor's own list — theirs run newest first — and let the user pick
+	// from the rest; nothing here is compiled in.
+	return avail[:manyModels]
+}
+
+// RejectsTemperature reports whether the model is known to refuse
+// temperature and top_p. The answer comes from the catalog — models.dev
+// plus the vendor's own list — so a model released after this binary was
+// built is handled without a code change.
+func (p Provider) RejectsTemperature(model string) bool {
+	for _, m := range p.Available() {
+		if m.ID == model && m.Temperature != nil {
+			return !*m.Temperature
+		}
+	}
+	return false
 }
 
 // Chosen reports whether a model is exposed.
@@ -116,7 +134,7 @@ func (p Provider) Chosen(id string) bool {
 	return false
 }
 
-// ---- the dial catalog ------------------------------------------------------
+// ---- the magpie catalog ------------------------------------------------------
 //
 // Agents see one flat list of models across every provider, each spelled
 // "provider/model" so nothing ever clashes. The bare model id works too
@@ -124,8 +142,8 @@ func (p Provider) Chosen(id string) bool {
 
 // Entry is one model as the agents see it.
 type Entry struct {
-	ID       string   `json:"id"`    // what the agent sends dial
-	Model    string   `json:"model"` // what dial sends the vendor
+	ID       string   `json:"id"`    // what the agent sends magpie
+	Model    string   `json:"model"` // what magpie sends the vendor
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`
