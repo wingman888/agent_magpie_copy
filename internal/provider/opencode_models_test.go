@@ -4,9 +4,12 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/catalog"
 )
 
 // recordTransport answers every request with a model list and remembers the
@@ -63,5 +66,46 @@ func TestFetchSendsOpenCodeSessionOnlyToOpenCode(t *testing.T) {
 	}
 	if v := rt.headers["api.example.com"].Get("x-opencode-session"); v != "" {
 		t.Errorf("non-OpenCode provider received x-opencode-session %q", v)
+	}
+}
+
+// The hook passed to catalog.FetchWith must reach every list request, and
+// Fetch without a hook must send nothing extra.
+func TestCatalogFetchWithHookSeesEveryRequest(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("x-test-hook"))
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+	}))
+	defer srv.Close()
+
+	ms, err := catalog.FetchWith(context.Background(), srv.URL, "k", false, func(req *http.Request) {
+		req.Header.Set("x-test-hook", "yes")
+	})
+	if err != nil || len(ms) != 1 || ms[0].ID != "m1" {
+		t.Fatalf("FetchWith: %v %+v", err, ms)
+	}
+	if len(seen) == 0 {
+		t.Fatal("no request reached the server")
+	}
+	for i, v := range seen {
+		if v != "yes" {
+			t.Errorf("request %d lacked the hook header: %q", i, v)
+		}
+	}
+
+	seen = nil
+	if _, err := catalog.Fetch(context.Background(), srv.URL, "k", false); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	for i, v := range seen {
+		if v != "" {
+			t.Errorf("Fetch request %d sent unexpected header %q", i, v)
+		}
 	}
 }
