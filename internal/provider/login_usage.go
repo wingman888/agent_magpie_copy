@@ -1,5 +1,9 @@
 package provider
 
+// How much of its allowance each of an agent's accounts has used, the one
+// the agent is signed in to and every saved one, so picking which to use
+// next is a look at the list, not a guess.
+
 import (
 	"context"
 	"strings"
@@ -7,124 +11,106 @@ import (
 	"time"
 )
 
-// loginUsageTTL is how long LoginUsage reuses its last answer for an agent.
-const loginUsageTTL = time.Minute
-
-var loginUsageCache = struct {
+var loginUsageCache struct {
 	sync.Mutex
-	at   map[string]time.Time
-	data map[string]map[string]SubscriptionQuota // agent -> account email -> quota
-}{at: map[string]time.Time{}, data: map[string]map[string]SubscriptionQuota{}}
-
-// usageAccount is one remembered account and how to ask for its usage.
-type usageAccount struct {
-	user  string
-	quota func(ctx context.Context) SubscriptionQuota
+	m map[string]loginUsageEntry // agent/user
 }
 
-// LoginUsage returns the rolling-window usage of every remembered account of
-// an agent, keyed by account email. Answers are reused for a minute. When an
-// account's query fails, its last good answer is kept. Agents without
-// accounts magpie can remember give an empty map.
+type loginUsageEntry struct {
+	at time.Time
+	q  SubscriptionQuota
+}
+
+// LoginUsage is the allowance used by each of an agent's accounts, by
+// user. What was fetched less than a minute ago comes from the cache; the
+// rest is asked for at once, as long as ctx allows.
 func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota {
+	if agent == "grok" {
+		return grokLoginUsage(ctx)
+	}
 	out := map[string]SubscriptionQuota{}
-	if checkAgent(agent) != nil {
-		return out
-	}
-	loginUsageCache.Lock()
-	if at, ok := loginUsageCache.at[agent]; ok && time.Since(at) < loginUsageTTL {
-		for k, v := range loginUsageCache.data[agent] {
-			out[k] = v
+	var logins []Login
+	switch agent {
+	case "claude", "codex":
+		logins = Logins(agent)
+	case "copilot":
+		logins = copilotLoginList()
+	case "cursor": // one account, the one cursor-agent is signed in to
+		if user, plan, ok := cursorIdentity(); ok {
+			logins = []Login{{Agent: agent, User: user, Plan: plan, Active: true, On: true}}
 		}
-		loginUsageCache.Unlock()
+	default:
 		return out
 	}
-	loginUsageCache.Unlock()
-
-	Accounts() // remembers the sign-in in use, so it is listed
-	accts := rememberedUsage(agent)
-	results := make([]SubscriptionQuota, len(accts))
+	c := &loginUsageCache
+	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for i, a := range accts {
-		wg.Add(1)
-		go func(i int, a usageAccount) {
-			defer wg.Done()
-			results[i] = a.quota(ctx)
-		}(i, a)
-	}
-	wg.Wait()
-
-	loginUsageCache.Lock()
-	defer loginUsageCache.Unlock()
-	prev := loginUsageCache.data[agent]
-	next := map[string]SubscriptionQuota{}
-	for i, a := range accts {
-		q := results[i]
-		if old, ok := prev[a.user]; ok && q.Error != "" && old.Error == "" {
-			q = old // a failed query keeps the last known answer
-		}
-		next[a.user] = q
-	}
-	loginUsageCache.data[agent] = next
-	loginUsageCache.at[agent] = time.Now()
-	for k, v := range next {
-		out[k] = v
-	}
-	return out
-}
-
-// rememberedUsage lists the usage sources for an agent: the account signed in
-// to, and every other remembered account.
-func rememberedUsage(agent string) []usageAccount {
-	cur, has := agentLogin(agent)
-	accountsMu.Lock()
-	ix := loadIndex()
-	accountsMu.Unlock()
-	var out []usageAccount
-	if has {
-		out = append(out, liveUsage(agent, cur))
-	}
-	for _, a := range ix.Accounts {
-		if a.Agent != agent || (has && strings.EqualFold(a.User, cur.user)) {
+	for _, l := range logins {
+		key := agent + "/" + strings.ToLower(l.User)
+		c.Lock()
+		e, ok := c.m[key]
+		c.Unlock()
+		if ok && time.Since(e.at) < time.Minute {
+			out[l.User] = e.q
 			continue
 		}
-		out = append(out, storedUsage(a))
+		wg.Add(1)
+		go func(l Login) {
+			defer wg.Done()
+			q := loginQuota(ctx, l)
+			if q.Error != "" && ok {
+				q = e.q // a hiccup keeps what was known
+			}
+			c.Lock()
+			if c.m == nil {
+				c.m = map[string]loginUsageEntry{}
+			}
+			c.m[key] = loginUsageEntry{time.Now(), q}
+			c.Unlock()
+			mu.Lock()
+			out[l.User] = q
+			mu.Unlock()
+		}(l)
 	}
+	wg.Wait()
 	return out
 }
 
-func liveUsage(agent string, cur login) usageAccount {
-	u := usageAccount{user: cur.user}
-	if agent == "claude" {
-		u.quota = func(ctx context.Context) SubscriptionQuota {
-			return claudeUsage(ctx, claudeToken, func() string { return cur.plan })
+func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
+	if l.Agent == "cursor" {
+		return cursorSubscriptionUsage(ctx, l.Plan)
+	}
+	if l.Agent == "copilot" {
+		for _, c := range copilotLogins(copilotConfigDir()) {
+			if strings.EqualFold(c.User, l.User) {
+				return copilotSubscriptionUsage(ctx, c.app.Token)
+			}
 		}
-		return u
+		return SubscriptionQuota{Provider: l.Agent, Plan: l.Plan, Windows: []QuotaWindow{}, Error: "not signed in"}
 	}
-	path := codexAuthPath()
-	u.quota = func(ctx context.Context) SubscriptionQuota {
-		return codexUsage(ctx, func(ctx context.Context) (string, string, error) {
-			return codexToken(ctx, path)
-		})
+	q := SubscriptionQuota{Provider: l.Agent, Plan: l.Plan, Windows: []QuotaWindow{}}
+	var tok, accountID string
+	var err error
+	switch {
+	case l.Active && l.Agent == "claude":
+		tok, err = claudeToken(ctx)
+	case l.Active:
+		tok, accountID, err = codexToken(ctx, codexAuthPath())
+	default:
+		tok, accountID, err = savedLoginToken(ctx, l.Agent, l.User)
 	}
-	return u
-}
-
-func storedUsage(a rememberedAccount) usageAccount {
-	u := usageAccount{user: a.User}
-	path := a.path()
-	if a.Agent == "claude" {
-		u.quota = func(ctx context.Context) SubscriptionQuota {
-			return claudeUsage(ctx, func(ctx context.Context) (string, error) {
-				return claudeTokenFile(ctx, path)
-			}, func() string { return a.Plan })
+	if err == nil {
+		if l.Agent == "claude" {
+			q.Windows, err = claudeWindows(ctx, tok)
+		} else {
+			var plan string
+			if plan, q.Windows, err = codexWindows(ctx, tok, accountID); plan != "" {
+				q.Plan = plan
+			}
 		}
-		return u
 	}
-	u.quota = func(ctx context.Context) SubscriptionQuota {
-		return codexUsage(ctx, func(ctx context.Context) (string, string, error) {
-			return codexToken(ctx, path)
-		})
+	if err != nil {
+		q.Error = err.Error()
 	}
-	return u
+	return q
 }

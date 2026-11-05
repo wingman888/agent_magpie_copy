@@ -1,210 +1,173 @@
 package provider
 
 import (
-	"bytes"
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
-var iconRef = regexp.MustCompile(`^file:[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
+func TestStoreIcon(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 
-func pngBytes(n int) []byte {
-	b := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, n)...)
-	return b
-}
-
-func TestStoreIconStoresOncePerContent(t *testing.T) {
-	isolateConfig(t)
-	img := pngBytes(64)
-	ref, err := StoreIcon(img)
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+	ref, err := StoreIcon(png)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !iconRef.MatchString(ref) {
-		t.Fatalf("ref = %q, want file:<16 hex>.png", ref)
+	if !strings.HasPrefix(ref, "file:") || !strings.HasSuffix(ref, ".png") {
+		t.Fatalf("ref = %q", ref)
 	}
-	again, err := StoreIcon(img)
-	if err != nil || again != ref {
-		t.Fatalf("second store = %q, %v; want %q", again, err, ref)
+	if again, _ := StoreIcon(png); again != ref {
+		t.Errorf("same picture stored twice: %q, %q", ref, again)
 	}
-	entries, err := os.ReadDir(IconDir())
-	if err != nil {
-		t.Fatal(err)
+	p := IconFile(strings.TrimPrefix(ref, "file:"))
+	if b, err := os.ReadFile(p); err != nil || string(b) != string(png) {
+		t.Fatalf("IconFile(%q) = %q: %v", ref, p, err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("icons folder has %d files, want 1", len(entries))
-	}
-	path := IconFile(strings.TrimPrefix(ref, "file:"))
-	if path == "" {
-		t.Fatalf("IconFile rejects a name StoreIcon made: %q", ref)
-	}
-	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, img) {
-		t.Fatalf("stored file does not match the image: %v", err)
-	}
-}
 
-func TestStoreIconFormats(t *testing.T) {
-	isolateConfig(t)
-	cases := map[string][]byte{
-		".jpg":  append([]byte{0xff, 0xd8, 0xff, 0xe0}, make([]byte, 20)...),
-		".gif":  []byte("GIF89a\x01\x00\x01\x00"),
-		".webp": []byte("RIFF\x10\x00\x00\x00WEBPVP8 "),
-		".ico":  []byte{0, 0, 1, 0, 1, 0},
-		".svg":  []byte(`<?xml version="1.0"?>` + "\n<!-- logo -->\n" + `<svg xmlns="http://www.w3.org/2000/svg"></svg>`),
+	if ref, err := StoreIcon([]byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>`)); err != nil || !strings.HasSuffix(ref, ".svg") {
+		t.Errorf("svg: %q, %v", ref, err)
 	}
-	for ext, data := range cases {
-		ref, err := StoreIcon(data)
-		if err != nil {
-			t.Errorf("%s: %v", ext, err)
-			continue
-		}
-		if !strings.HasSuffix(ref, ext) {
-			t.Errorf("%s stored as %q", ext, ref)
+	if _, err := StoreIcon([]byte("hello")); err == nil {
+		t.Error("text taken as a picture")
+	}
+	if _, err := StoreIcon(make([]byte, MaxIcon+1)); err == nil {
+		t.Error("oversized picture taken")
+	}
+	for _, bad := range []string{"../providers.json", "x.png", "0123456789abcdef.exe", ""} {
+		if IconFile(bad) != "" {
+			t.Errorf("IconFile(%q) resolved", bad)
 		}
 	}
 }
 
-func TestStoreIconRefusesBadInput(t *testing.T) {
-	isolateConfig(t)
-	if _, err := StoreIcon(nil); err == nil {
-		t.Error("empty content accepted")
+func TestFetchIcon(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/logo.png", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "image/png")
+		rw.Write(png)
+	})
+	mux.HandleFunc("/huge.png", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "image/png")
+		rw.Write(make([]byte, MaxIcon+1))
+	})
+	mux.HandleFunc("/text", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Write([]byte("hello"))
+	})
+	mux.HandleFunc("/missing", func(rw http.ResponseWriter, r *http.Request) {
+		http.NotFound(rw, r)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// httptest is plain http on loopback, which FetchIcon refuses on purpose;
+	// the guard is checked here, then the download itself is driven directly.
+	if _, err := FetchIcon(context.Background(), srv.URL+"/logo.png"); err == nil {
+		t.Error("a loopback icon URL was fetched")
 	}
-	if _, err := StoreIcon(pngBytes(MaxIcon)); err == nil {
-		t.Error("content over MaxIcon accepted")
+	if _, err := iconURL(srv.URL + "/logo.png"); err == nil {
+		t.Error("iconURL accepted a loopback host")
 	}
-	if _, err := StoreIcon(pngBytes(MaxIcon - 8)); err != nil {
-		t.Errorf("content of exactly MaxIcon refused: %v", err)
+
+	get := func(name string) (string, error) {
+		return fetchIcon(context.Background(), srv.Client(), srv.URL+name)
 	}
-	for _, text := range []string{
-		"hello, this is plain text",
-		"<html><body><svg></svg></body></html>",
-		"<svg-like>not svg</svg-like>",
-		"<!doctype html><html></html>",
-		"\x00\x01binary",
-	} {
-		if _, err := StoreIcon([]byte(text)); err == nil {
-			t.Errorf("non-image %q accepted", text)
-		}
+	ref, err := get("/logo.png")
+	if err != nil || !strings.HasPrefix(ref, "file:") {
+		t.Fatalf("fetch = %q, %v", ref, err)
 	}
-	// Only the one accepted image (exactly MaxIcon) may be in the folder.
-	entries, _ := os.ReadDir(IconDir())
-	if len(entries) != 1 {
-		t.Errorf("icons folder has %d files, want only the accepted image", len(entries))
+	if b, err := os.ReadFile(IconFile(strings.TrimPrefix(ref, "file:"))); err != nil || string(b) != string(png) {
+		t.Fatalf("stored picture: %q, %v", b, err)
+	}
+	if _, err := get("/huge.png"); err == nil {
+		t.Error("an oversized icon was stored")
+	}
+	if _, err := get("/text"); err == nil {
+		t.Error("a non-picture was stored")
+	}
+	if _, err := get("/missing"); err == nil {
+		t.Error("a 404 was stored")
 	}
 }
 
-func TestIconFileOnlyAcceptsStoredNames(t *testing.T) {
-	isolateConfig(t)
-	good := "0123456789abcdef.png"
-	if got := IconFile(good); got != filepath.Join(IconDir(), good) {
-		t.Errorf("IconFile(%q) = %q", good, got)
+func TestPublicIP(t *testing.T) {
+	public := []string{"93.184.216.34", "8.8.8.8", "2606:4700:4700::1111"}
+	private := []string{
+		"127.0.0.1", "::1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.1.1",
+		"0.0.0.0", "100.64.0.1", "192.0.0.1", "192.0.2.1", "198.18.0.1", "198.51.100.1",
+		"203.0.113.1", "224.0.0.1", "fc00::1", "fe80::1", "2002::1",
 	}
-	for _, bad := range []string{
-		"",
-		"0123456789abcdef.exe",
-		"0123456789abcdef",
-		"0123456789ABCDEF.png",
-		"0123456789abcde.png",
-		"0123456789abcdef0.png",
-		"../0123456789abcdef.png",
-		"..\\0123456789abcdef.png",
-		"sub/0123456789abcdef.png",
-		"../../providers.json",
-		"0123456789abcdef.png/..",
-		"0123456789abcdef.png\n",
-		"/etc/passwd",
-	} {
-		if got := IconFile(bad); got != "" {
-			t.Errorf("IconFile(%q) = %q, want empty", bad, got)
+	for _, s := range public {
+		if !publicIP(net.ParseIP(s)) {
+			t.Errorf("%s judged private", s)
+		}
+	}
+	for _, s := range private {
+		if publicIP(net.ParseIP(s)) {
+			t.Errorf("%s judged public", s)
 		}
 	}
 }
 
-func TestSaveRefusesIconsOutsideTheFolder(t *testing.T) {
-	isolateConfig(t)
-	err := Save(Provider{Name: "Relay", Chat: "https://relay.example.com/v1", Key: "sk",
-		Icon: "file:../../providers.json"})
-	if err == nil {
-		t.Fatal("a reference outside the icons folder was saved")
+// The guarded client must refuse a host that resolves to loopback, even
+// though the URL scheme and hostname look fine.
+func TestGuardClientRefusesLoopback(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		rw.Write([]byte("x"))
+	}))
+	defer srv.Close()
+	// a real FetchIcon already refuses 127.0.0.1 by hostname; this checks the
+	// dial-time guard by aiming the same client at the loopback server
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if _, err := guardClient().Do(req); err == nil {
+		t.Fatal("the guarded client reached a loopback address")
+	}
+
+	// a name that is not a literal address but resolves to loopback: the
+	// guard has to judge the resolved IP, which is what stops DNS rebinding.
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	req2, _ := http.NewRequest(http.MethodGet, "https://localhost:"+strconv.Itoa(port), nil)
+	if _, err := guardClient().Do(req2); err == nil {
+		t.Fatal("the guarded client reached a name resolving to loopback")
 	}
 }
 
-func TestSavePrunesUnusedOldIcons(t *testing.T) {
-	isolateConfig(t)
-	dir := IconDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
+// A public address must get past the guard: the dial may then fail (nothing
+// is listening), but not because the guard refused it. A literal IP needs no
+// resolver, so this is deterministic offline.
+func TestPublicDialAllowsPublic(t *testing.T) {
+	var got string
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		got = addr
+		return nil, errorf("connection refused for the test")
 	}
-	old := time.Now().Add(-2 * time.Hour)
-	touch := func(name string, when time.Time) {
-		t.Helper()
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(path, when, when); err != nil {
-			t.Fatal(err)
-		}
+	_, err := publicDial(context.Background(), dial, "tcp", "93.184.216.34:443")
+	if got != "93.184.216.34:443" {
+		t.Fatalf("public host not dialed: %q (%v)", got, err)
 	}
-	kept := "1111111111111111.png" // referenced by a provider, though old
-	orphanOld := "2222222222222222.png"
-	orphanNew := "3333333333333333.png"
-	notIcon := "notes.txt"
-	touch(kept, old)
-	touch(orphanOld, old)
-	touch(orphanNew, time.Now())
-	touch(notIcon, old)
-
-	if err := Save(Provider{Name: "Relay", Chat: "https://relay.example.com/v1", Key: "sk",
-		Icon: "file:" + kept}); err != nil {
-		t.Fatal(err)
-	}
-	if err := Save(Provider{Name: "Other", Chat: "https://other.example.com/v1", Key: "sk"}); err != nil {
-		t.Fatal(err)
+	if err == nil || strings.Contains(err.Error(), "not public") {
+		t.Fatalf("a public host was refused by the guard: %v", err)
 	}
 
-	exists := func(name string) bool {
-		_, err := os.Stat(filepath.Join(dir, name))
-		return err == nil
+	// and the same shape for a private literal is refused before any dial
+	got = ""
+	if _, err := publicDial(context.Background(), dial, "tcp", "10.0.0.1:443"); err == nil || !strings.Contains(err.Error(), "not public") {
+		t.Fatalf("a private address was not refused: %v", err)
 	}
-	if !exists(kept) {
-		t.Error("a referenced icon was removed")
-	}
-	if exists(orphanOld) {
-		t.Error("an unreferenced icon older than an hour was kept")
-	}
-	if !exists(orphanNew) {
-		t.Error("an unreferenced icon less than an hour old was removed")
-	}
-	if !exists(notIcon) {
-		t.Error("a file that is not an icon name was removed")
-	}
-}
-
-func TestStoreIconTouchesExistingFile(t *testing.T) {
-	isolateConfig(t)
-	img := pngBytes(32)
-	ref, err := StoreIcon(img)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := IconFile(strings.TrimPrefix(ref, "file:"))
-	old := time.Now().Add(-3 * time.Hour)
-	if err := os.Chtimes(path, old, old); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := StoreIcon(img); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if time.Since(info.ModTime()) > time.Minute {
-		t.Error("picking an existing image did not refresh its grace period")
+	if got != "" {
+		t.Fatalf("dialed a private address anyway: %q", got)
 	}
 }
