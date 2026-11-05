@@ -9,10 +9,12 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -21,10 +23,60 @@ type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
 	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
-	// Proxy for magpie's own requests to vendors: "" follows the
-	// environment and then the system, "direct" uses none, anything else
-	// is the proxy (http://, https:// or socks5://; host:port means http).
+	// Proxy is the network proxy for requests to model vendors: "" follows
+	// the environment and then the system, "direct" turns proxies off, and
+	// anything else is a proxy URL (see ValidateProxy).
 	Proxy string `json:"proxy,omitempty"`
+}
+
+// ProxyExample is the form shown when a proxy value is refused.
+const ProxyExample = "http://127.0.0.1:7890"
+
+// ValidateProxy checks a proxy value as the user typed it. It returns the
+// trimmed value to store: "" (follow the environment and system), "direct",
+// or a proxy address. A proxy address is either a URL with scheme http://,
+// https://, socks5:// or socks5h:// and a non-empty host, or a bare host:port,
+// which means an HTTP proxy.
+func ValidateProxy(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "direct" {
+		return s, nil
+	}
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return "", proxyError(s, "it cannot be parsed")
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return "", proxyError(s, "the scheme must be http, https, socks5 or socks5h")
+		}
+		if u.Hostname() == "" {
+			return "", proxyError(s, "the host is missing")
+		}
+		if p := u.Port(); p != "" && !validPort(p) {
+			return "", proxyError(s, "the port is not a number from 1 to 65535")
+		}
+		return s, nil
+	}
+	host, port, err := net.SplitHostPort(s)
+	if err != nil || host == "" {
+		return "", proxyError(s, "write it as host:port or as a URL")
+	}
+	if !validPort(port) {
+		return "", proxyError(s, "the port is not a number from 1 to 65535")
+	}
+	return s, nil
+}
+
+func validPort(p string) bool {
+	n, err := strconv.Atoi(p)
+	return err == nil && n >= 1 && n <= 65535
+}
+
+func proxyError(s, why string) error {
+	return fmt.Errorf("proxy %q is not valid: %s; use a form such as %s, https://host:port, socks5://127.0.0.1:1080, or direct to turn proxies off", s, why, ProxyExample)
 }
 
 // Themes and Langs are the accepted values, in the order the UI offers them.
@@ -67,17 +119,11 @@ func Save(s Settings) error {
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
 	}
-	s.Proxy = strings.TrimSpace(s.Proxy)
-	if s.Proxy != "" && s.Proxy != "direct" {
-		raw := s.Proxy
-		if !strings.Contains(raw, "://") {
-			raw = "http://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
-			return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", s.Proxy)
-		}
+	proxy, err := ValidateProxy(s.Proxy)
+	if err != nil {
+		return err
 	}
+	s.Proxy = proxy
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
 	}
