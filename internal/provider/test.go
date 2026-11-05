@@ -33,10 +33,6 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
-		// a key limited to another protocol is never sent to this endpoint
-		if !p.keyReaches(proto) {
-			continue
-		}
 		var url, body string
 		switch proto {
 		case Chat:

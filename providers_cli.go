@@ -188,10 +188,6 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if rest[1] != p.Key {
-			// a new key does not inherit the old key's protocol limit
-			p.KeyProtocol = ""
-		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
 			return err

@@ -69,10 +69,6 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		// a key limited to another protocol is never sent to this endpoint
-		if !p.keyReaches(proto) {
-			continue
-		}
 		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic, p.Headers)
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)

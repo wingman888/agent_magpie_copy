@@ -6,6 +6,9 @@ package provider
 // is out of quota or rate limited the gateway moves on to the next one
 // that's on (see gateway/fallback.go). Key stays the first, so everything
 // else that talks to the vendor reads it as before.
+//
+// A key can be limited to one protocol (Protocol, KeyProtocol for the first):
+// the relay's Anthropic key is no use on its OpenAI endpoint. Empty means any.
 
 import (
 	"crypto/sha256"
@@ -16,8 +19,7 @@ import (
 )
 
 // KeyAccount is a saved key after the first. Off keeps it without using it.
-// Protocol, when set, limits the key to that one protocol's endpoint; empty
-// means the key is good for every endpoint the provider has.
+// Protocol, when set, limits the key to that protocol's endpoint.
 type KeyAccount struct {
 	Name     string   `json:"name,omitempty"`
 	Key      string   `json:"key"`
@@ -35,58 +37,6 @@ type KeyInfo struct {
 	Protocol Protocol `json:"protocol,omitempty"`
 }
 
-// knownKeyProtocol is true for the protocols a key can be limited to.
-func knownKeyProtocol(proto Protocol) bool {
-	switch proto {
-	case Chat, Responses, Anthropic:
-		return true
-	}
-	return false
-}
-
-// setBase sets the base URL for one protocol.
-func (p *Provider) setBase(proto Protocol, u string) {
-	switch proto {
-	case Chat:
-		p.Chat = u
-	case Responses:
-		p.Responses = u
-	case Anthropic:
-		p.Anthropic = u
-	}
-}
-
-// WithKey returns a copy of p that uses k as its key. A key limited to a
-// protocol keeps only that protocol's endpoint; an unlimited one keeps all.
-// p itself is not changed.
-func (p Provider) WithKey(k KeyAccount) Provider {
-	q := p
-	q.Key, q.KeyName, q.KeyProtocol = k.Key, k.Name, k.Protocol
-	q.Keys = append([]KeyAccount(nil), p.Keys...)
-	q.Models = append([]string(nil), p.Models...)
-	q.Fallback = append([]string(nil), p.Fallback...)
-	if p.Headers != nil {
-		q.Headers = make(map[string]string, len(p.Headers))
-		for h, v := range p.Headers {
-			q.Headers[h] = v
-		}
-	}
-	if k.Protocol != "" {
-		for _, pr := range Protocols {
-			if pr != k.Protocol {
-				q.setBase(pr, "")
-			}
-		}
-	}
-	return q
-}
-
-// keyReaches is whether p's first key may be sent to the endpoint for proto:
-// an unlimited key may go anywhere, a limited one only to its own protocol.
-func (p Provider) keyReaches(proto Protocol) bool {
-	return p.KeyProtocol == "" || p.KeyProtocol == proto
-}
-
 func keyID(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:5])
@@ -94,6 +44,16 @@ func keyID(key string) string {
 
 // KeyID is the fingerprint a key is named by, in lists and in the gateway.
 func KeyID(key string) string { return keyID(key) }
+
+// validProtocol is whether proto is one a key can be limited to.
+func validProtocol(proto Protocol) bool {
+	for _, p := range Protocols {
+		if p == proto {
+			return true
+		}
+	}
+	return false
+}
 
 // KeyList is a provider's keys, in the order requests try them.
 func (p Provider) KeyList() []KeyInfo {
@@ -122,16 +82,36 @@ func (p Provider) KeysOn() []KeyAccount {
 	return out
 }
 
+// WithKey is the provider as it talks with key k: k's key and name, and
+// only the endpoint of k's protocol when k is limited to one. The provider
+// passed in is not changed.
+func (p Provider) WithKey(k KeyAccount) Provider {
+	q := p
+	q.Key, q.KeyName, q.KeyProtocol = k.Key, k.Name, k.Protocol
+	if k.Protocol != "" {
+		if k.Protocol != Chat {
+			q.Chat = ""
+		}
+		if k.Protocol != Responses {
+			q.Responses = ""
+		}
+		if k.Protocol != Anthropic {
+			q.Anthropic = ""
+		}
+	}
+	return q
+}
+
 // AddKey saves one more key for a provider, on: it takes requests after
 // the ones before it. It becomes the first when the provider has none.
-// proto limits the key to one protocol; empty means every endpoint.
+// proto limits the key to one protocol; empty means any.
 func AddKey(id, name, key string, proto Protocol) error {
 	name, key = strings.TrimSpace(name), strings.TrimSpace(key)
 	if key == "" {
 		return errors.New("paste the key to add")
 	}
-	if proto != "" && !knownKeyProtocol(proto) {
-		return fmt.Errorf("unknown protocol %q; use chat, responses or anthropic", proto)
+	if proto != "" && !validProtocol(proto) {
+		return fmt.Errorf("unknown protocol %q", proto)
 	}
 	p, err := Find(id)
 	if err != nil {
@@ -154,10 +134,10 @@ func AddKey(id, name, key string, proto Protocol) error {
 }
 
 // SetKeyProtocol limits one of a provider's keys to a protocol; empty lifts
-// the limit. The first key is named like any other.
+// the limit.
 func SetKeyProtocol(id, keyRef string, proto Protocol) error {
-	if proto != "" && !knownKeyProtocol(proto) {
-		return fmt.Errorf("unknown protocol %q; use chat, responses or anthropic", proto)
+	if proto != "" && !validProtocol(proto) {
+		return fmt.Errorf("unknown protocol %q", proto)
 	}
 	p, err := Find(id)
 	if err != nil {

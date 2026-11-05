@@ -39,12 +39,10 @@ type Provider struct {
 
 	// KeyName names the key in use, and Keys are the provider's other
 	// accounts: keys saved to switch to (see keys.go).
-	KeyName string       `json:"keyName,omitempty"`
-	Keys    []KeyAccount `json:"keys,omitempty"`
-
-	// KeyProtocol limits the key in use to one protocol's endpoint; empty
-	// means it is good for all of them.
-	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
+	// KeyProtocol limits the first key to one protocol, when set (see keys.go).
+	KeyName     string       `json:"keyName,omitempty"`
+	KeyProtocol Protocol     `json:"keyProtocol,omitempty"`
+	Keys        []KeyAccount `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),

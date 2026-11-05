@@ -68,38 +68,10 @@ func perKey(p provider.Provider, model string) []candidate {
 	return out
 }
 
-// perKeyFrom is perKey for a request from client protocol from: the keys
-// that may take it, best fit first, each with only the endpoints its
-// protocol limit allows. With no usable key it is perKey.
-func perKeyFrom(p provider.Provider, model string, from provider.Protocol) []candidate {
-	if p.Account != nil {
-		return perKey(p, model)
-	}
-	keys := p.KeysOn()
-	ordered, ok := usableKeys(p, model, from, keys)
-	if !ok {
-		return perKey(p, model)
-	}
-	if len(keys) < 2 {
-		return []candidate{{p.WithKey(ordered[0]), model, p.ID}}
-	}
-	out := make([]candidate, 0, len(ordered))
-	for _, k := range ordered {
-		out = append(out, candidate{p.WithKey(k), model, p.ID + "#" + provider.KeyID(k.Key)})
-	}
-	return out
-}
-
 // candidates is the primary and then its fallbacks, those resting after a
-// recent failure moved behind the rest. Keys are tried in no particular
-// protocol order; serve uses candidatesFrom.
+// recent failure moved behind the rest.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	return s.candidatesFrom(p, model, "")
-}
-
-// candidatesFrom is candidates for a request from client protocol from.
-func (s *Server) candidatesFrom(p provider.Provider, model string, from provider.Protocol) []candidate {
-	out := perKeyFrom(p, model, from)
+	out := perKey(p, model)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -107,7 +79,7 @@ func (s *Server) candidatesFrom(p provider.Provider, model string, from provider
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, perKeyFrom(fp, fm, from)...)
+		out = append(out, perKey(fp, fm)...)
 	}
 	if len(out) == 1 {
 		return out
