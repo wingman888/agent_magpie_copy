@@ -14,7 +14,7 @@ import (
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
-// models.dev lags and keeps legacy names around. dial asks the vendor when
+// models.dev lags and keeps legacy names around. magpie asks the vendor when
 // it has a key, remembers the answer next to the models.dev cache, and lets
 // the catalog fill in display names and reasoning levels.
 
@@ -61,8 +61,17 @@ func SaveLive(provider, base string, models []Model) error {
 
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
-// around it. The result keeps the server's order.
-func Fetch(ctx context.Context, base, key string) ([]Model, error) {
+// around it. The result keeps the server's order. anthropic sends the
+// Anthropic version header, which the official API requires but which a
+// dual-protocol relay like OpenRouter reads as a request for its
+// Anthropic-flavoured catalog — namespaced, differently named ids.
+func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, nil)
+}
+
+// FetchWith is Fetch with extra request headers (a custom provider's own),
+// sent after the key and the version header so they can override them.
+func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -89,7 +98,7 @@ func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key)
+		ms, err := fetchOneWith(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -106,7 +115,11 @@ func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
+	return fetchOneWith(ctx, url, key, anthropic, nil)
+}
+
+func fetchOneWith(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -114,12 +127,15 @@ func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "dial")
+	req.Header.Set("User-Agent", "magpie")
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("x-api-key", key)
+	}
+	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
+	SetHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -164,6 +180,48 @@ type liveModel struct {
 	DisplayName string `json:"display_name"`
 }
 
+// SetHeaders adds extra headers to a request, keeping each name exactly as
+// given (http.Header would otherwise canonicalise it). A name replaces any
+// value already set for it, whatever its case.
+func SetHeaders(h http.Header, extra map[string]string) {
+	for k, v := range extra {
+		delete(h, http.CanonicalHeaderKey(k))
+		delete(h, k)
+		h[k] = []string{v}
+	}
+}
+
+// modelTail is the part of a model id after its last "/", or the id itself
+// when it has none ("deepseek/deepseek-chat" gives "deepseek-chat").
+func modelTail(id string) string {
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		return id[i+1:]
+	}
+	return id
+}
+
+// Match finds the entry a model id names among known models. The id as
+// written is tried first; failing that, a prefixed id is matched by the part
+// after its last "/". As before, the last entry with the id wins.
+func Match(known []Model, id string) (Model, bool) {
+	for _, want := range []string{id, modelTail(id)} {
+		if want == "" {
+			continue
+		}
+		var got Model
+		found := false
+		for _, m := range known {
+			if m.ID == want {
+				got, found = m, true
+			}
+		}
+		if found {
+			return got, true
+		}
+	}
+	return Model{}, false
+}
+
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
@@ -173,11 +231,18 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := byID[m.ID]; ok {
+		k, ok := byID[m.ID]
+		if !ok {
+			k, ok = Match(known, m.ID)
+		}
+		if ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
 			m.Efforts, m.Released, m.Provider = k.Efforts, k.Released, k.Provider
+			if k.Temperature != nil {
+				m.Temperature = k.Temperature
+			}
 		}
 		out = append(out, m)
 	}
