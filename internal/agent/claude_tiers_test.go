@@ -158,11 +158,14 @@ func TestClaudeTierErrors(t *testing.T) {
 	}
 }
 
+// A bare value on the command line goes to the first field that is not Extra
+// (see fieldForValue in main.go), so the main model must come first and every
+// tier must be Extra.
 func TestClaudeBareModelIsMainField(t *testing.T) {
 	claudeHome(t)
 	a := claudeAgent(t)
-	if f := fieldForValue(a, "deepseek/deepseek-flash"); f != nil {
-		t.Fatalf("bare model routed to %q", f.Key)
+	if a.Fields[0].Key != "model" || a.Fields[0].Extra {
+		t.Fatalf("first field %q (extra=%v), want the main model", a.Fields[0].Key, a.Fields[0].Extra)
 	}
 	for _, f := range a.Fields[1:] {
 		if !f.Extra {
