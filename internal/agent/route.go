@@ -17,44 +17,18 @@ import (
 // magpieID is the provider id agents know the gateway by.
 const magpieID = "magpie"
 
-// viaMagpie lists the catalog for a picker, one group per provider. Routing
-// groups come first, in a section of their own.
+// viaMagpie lists the catalog for a picker, one group per provider.
 func viaMagpie(prefix string) []Option {
 	var out []Option
-	cat := provider.Catalog()
-	for _, e := range cat {
-		if e.Group != "" {
-			out = append(out, groupOption(prefix, e))
-		}
-	}
-	for _, e := range cat {
-		if e.Group != "" {
-			continue
-		}
+	for _, e := range provider.Catalog() {
 		note := e.Provider.Name + " · via magpie"
 		if a := e.Provider.Account; a != nil {
 			note = a.User + " · via magpie"
 		}
 		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
-			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
+			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
-}
-
-// groupOption is the picker entry for a routing group. Its icons are the
-// logos of the ready providers behind it, each provider's once.
-func groupOption(prefix string, e provider.Entry) Option {
-	_, ms, _ := provider.FindGroup(e.ID)
-	var icons []string
-	seen := map[string]bool{}
-	for _, m := range ms {
-		if ic := m.Provider.Icon; ic != "" && !seen[ic] {
-			seen[ic] = true
-			icons = append(icons, ic)
-		}
-	}
-	return Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
-		Icons: icons, Group: e.Provider.Name, Ref: e.ID}
 }
 
 // viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going
@@ -75,19 +49,12 @@ func isMagpie(v string) bool {
 	return ok && strings.Contains(v, "/")
 }
 
-func firstOf(xs []string) string {
-	if len(xs) > 0 {
-		return xs[0]
-	}
-	return ""
-}
-
 // magpieModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }
