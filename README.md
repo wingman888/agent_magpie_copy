@@ -3,8 +3,6 @@
 One place to pick every agent's model: Codex on DeepSeek, Claude Code
 on Kimi, Gemini CLI on GLM, from the menu bar. [usemagpie.ai](https://usemagpie.ai)
 
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/vGSnD3ZKQF)
-
 `magpie` is a single screen that lists each AI agent on your machine and
 the model it is set to. Click a value, pick a model. That is the whole app.
 
@@ -64,7 +62,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 
 | Agent        | File                              | Fields          |
 | ------------ | --------------------------------- | --------------- |
-| Claude Code  | `~/.claude/settings.json`         | provider, model, opus/sonnet/haiku/fable (through magpie) |
+| Claude Code  | `~/.claude/settings.json`         | provider, model |
 | Codex        | `~/.codex/config.toml`            | provider, model, effort |
 | Gemini CLI   | `~/.gemini/settings.json`, `~/.gemini/.env` | auth, model |
 | OpenCode     | `~/.config/opencode/opencode.json(c)` | model, small |
@@ -73,11 +71,8 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
-| DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
-| Command Code | `~/.commandcode/settings.json` (+ `providers.json`) | model |
-| omp (oh-my-pi) | `~/.omp/agent/config.yml` (+ `models.yml`) | model |
 
-Provider-scoped agents (OpenCode, Pi, Goose, Crush, omp) take `provider/model`.
+Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
 
 ## Providers and the gateway
@@ -106,6 +101,33 @@ Anthropic-compatible base), or both, plus `responses=` when the vendor has a
 separate Responses endpoint, `catalog=` to borrow a models.dev list, and
 `models=` to name the models to expose. Anything a preset does not know can
 be overridden the same way.
+
+### 导入链接
+
+供应商或中转站可以提供一条 `magpie://import?…` 链接，点击或执行下面的命令后，magpie 先展示将要添加的名称、请求发往的主机和模型，**确认后才保存**：
+
+```sh
+magpie import 'magpie://import?preset=deepseek&key=sk-…'
+magpie import -y 'magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…'
+```
+
+`magpie import [-y] <link>` 中，`-y` 跳过询问；非交互终端且没有 `-y` 时直接报错退出。链接中的 key 不会完整显示。
+
+| 参数 | 含义 |
+| --- | --- |
+| `preset` | 预设 id，使用该预设的端点 |
+| `region` | 预设有多个区域时选择区域 |
+| `name` | 名称；没有 `preset` 时必填，有 `preset` 时覆盖预设名称 |
+| `id` | Provider id；缺省时由名称派生（如 `Acme Relay` → `acme-relay`） |
+| `key` | API key；缺省则之后用 `magpie provider key <id> <key>` 补填 |
+| `chat` / `responses` / `anthropic` | 三种协议的基址（`anthropic` 为不含 `/v1` 的根） |
+| `models` | 逗号分隔的模型 id，最多 200 个 |
+| `catalog` | models.dev 的 provider id，用于模型名与推理档位 |
+| `website` / `keys` | 官网 / 取 key 页面，仅接受 https，其他值忽略 |
+
+基址必须是 https；只有本机、回环地址、私网地址、`localhost` 或 `.local` 域名可以用 http。基址不得含用户名、密码、查询串或片段。链接中有任何非法内容时整条拒绝，不会部分导入。
+
+网页和 GitHub 无法可靠打开自定义 scheme，可改用 `https://usemagpie.ai/import#<同样参数>` 形式分享：参数放在 fragment（`#`）之后，不会发送到服务器。
 
 ### Signed-in agents as providers
 
@@ -182,41 +204,6 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 `auth` to API key with the gateway token, and names the model in
 `settings.json`; a native model puts the previous auth back.
 
-### Import links
-
-A vendor or relay can hand its users a ready-made provider as a link:
-
-```
-magpie://import?preset=deepseek&key=sk-…
-magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&anthropic=https://api.acme.example&key=sk-…&models=gpt-5.5,claude-sonnet-5
-```
-
-Opening one brings up magpie with what the link would add: the name, the
-hosts your prompts and key would go to, the models. Nothing is saved until
-you press *Add*. `magpie import <link>` does the same in a terminal.
-
-| Parameter   | Meaning                                                            |
-| ----------- | ------------------------------------------------------------------ |
-| `preset`    | a preset id (`magpie presets`); its endpoints are used             |
-| `region`    | with a preset that has regions, which one                          |
-| `name`      | the provider's name; required without a preset                     |
-| `id`        | its id; derived from the name when absent                          |
-| `key`       | the API key; the user pastes one when absent                       |
-| `chat`      | OpenAI Chat Completions base URL (`…/v1`)                          |
-| `responses` | OpenAI Responses base URL (`…/v1`)                                 |
-| `anthropic` | Anthropic Messages base URL (the root, without `/v1`)              |
-| `models`    | model ids to expose, comma separated                               |
-| `catalog`   | models.dev provider id, for model names and reasoning levels       |
-| `website`, `keys` | the vendor's site and its API-key page (https)               |
-| `icon`      | an https picture of the vendor's own (PNG, JPEG, GIF, WebP, ICO, SVG, at most 1 MB). magpie downloads it once, after you confirm the import, into its icons folder; without one it falls back to the catalog's logo or a plain mark |
-
-Base URLs must be https (plain http only to this machine or the local
-network). Web pages and GitHub don't link custom schemes reliably, so link
-to `https://usemagpie.ai/import#<same parameters>` instead: it opens
-magpie, and offers the download when it is not installed. The parameters
-stay in the fragment, which browsers never send to a server. The full guide,
-with a link builder: <https://usemagpie.ai/docs/import>.
-
 ## Install
 
 Download the app for macOS, Windows or Linux from
@@ -291,8 +278,6 @@ magpie codex effort high        # other fields
 magpie codex xhigh              # bare effort levels are recognised too
 magpie codex deepseek/deepseek-chat   # any catalog model, through the gateway
 magpie claude moonshot/kimi-k2.5
-magpie claude haiku deepseek/deepseek-v4-flash   # one tier on its own model
-magpie claude haiku ""          # back to the main model
 magpie gemini auth api-key
 magpie opencode anthropic/claude-sonnet-5
 magpie oc small anthropic/claude-haiku-4-5
@@ -329,24 +314,24 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
-### Moving to another machine
+### Claude Code 档位
+
+Claude Code 的 opus、sonnet、haiku、fable 四个档位可以各自指定模型，未指定的档位跟随主模型：
 
 ```sh
-magpie backup                   # writes magpie.magpie-backup, asks for a passphrase twice
-magpie backup --no-keys ~/b.magpie-backup   # the same with no API keys in it
-magpie restore magpie.magpie-backup         # on the other machine
-magpie restore --no-agents b.magpie-backup  # providers, settings, profiles; agents left as they are
+magpie claude deepseek/pro               # 主模型；未单独指定的档位都跟随它
+magpie claude haiku deepseek/flash       # 只把 haiku 档（小快模型）设为 flash
+magpie claude haiku ""                   # 恢复 haiku 跟随主模型
 ```
 
-A backup holds your providers (with their keys, unless `--no-keys`), the
-pictures picked for them, the settings, the profiles and every agent's model.
-It is encrypted on your machine (AES-256-GCM, the key derived from the
-passphrase with PBKDF2-SHA256); nothing in it can be read without the
-passphrase. Restoring replaces providers with the same id and adds the rest;
-one that came without a key keeps the key already there. Agent models are set
-only for agents installed on that machine. Subscriptions are not in it: sign
-in to them on each machine. Piped in, the passphrase is the first line of
-stdin.
+模型必须是 magpie 提供的模型（`provider/model`）。尚未让 Claude Code 经 magpie 时，设置档位会报错，请先选定一个主模型。把主模型设空（恢复 Claude Code 原样）会清除所有相关设置，其他设置（如 theme）保留。
+
+### 代理与托盘
+
+设置文件 `~/.config/magpie/settings.json` 中的两项：
+
+- `proxy`：magpie 访问供应商时使用的代理。留空时依次采用环境变量（`HTTPS_PROXY` 等及 `NO_PROXY`）、系统代理；`direct` 表示不走代理；也可填代理地址，支持 `http://`、`https://`、`socks5://`、`socks5h://`，裸 `host:port` 视为 http 代理。本机回环地址永不走代理。
+- `tray`：点击托盘图标的行为，`panel`（默认，弹出面板）或 `window`（打开主窗口）。修改后需重新启动应用生效。
 
 ## Files
 
@@ -358,12 +343,6 @@ stdin.
 - `~/.cache/magpie/models/<provider>.json` — model lists fetched from vendors
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are respected.
-
-## Community
-
-Questions, setups worth sharing, ideas, bugs: come talk to us and other
-magpie users on [Discord](https://discord.gg/vGSnD3ZKQF). Issues and pull
-requests are welcome here too.
 
 ## License
 
