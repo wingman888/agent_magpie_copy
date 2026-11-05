@@ -32,6 +32,9 @@ func All() []*Agent {
 		cursor(home),
 		copilot(home),
 		crush(home, cfg),
+		dsh(home),
+		commandCode(home),
+		omp(home),
 	}
 }
 
@@ -131,7 +134,17 @@ func ownOptions(authFile string, cur string, extra ...string) []Option {
 	sort.Strings(providers)
 	var out []Option
 	for _, p := range providers {
-		out = append(out, group(p, options(catalog.Provider(p), p+"/"))...)
+		name := catalog.ProviderName(p)
+		if name == "" {
+			name = p
+		}
+		opts := group(name, options(catalog.Provider(p), p+"/"))
+		if ic := providerIcon(p); ic != "" {
+			for i := range opts {
+				opts[i].GroupIcon = ic
+			}
+		}
+		out = append(out, opts...)
 	}
 	return out
 }
@@ -162,7 +175,12 @@ func magpieProviderJSON(shape string) any {
 	case "pi":
 		var ms []map[string]any
 		for _, m := range models {
-			ms = append(ms, piModel(m))
+			// reasoning lets Pi offer its thinking levels for the model
+			e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
+			if levels := piThinkingLevels(m.Efforts); levels != nil {
+				e["thinkingLevelMap"] = levels
+			}
+			ms = append(ms, e)
 		}
 		if ms == nil {
 			ms = []map[string]any{}
@@ -172,21 +190,20 @@ func magpieProviderJSON(shape string) any {
 	return nil
 }
 
-// piModel is one model entry in Pi's models.json. reasoning lets Pi offer its
-// thinking levels for the model; thinkingLevelMap declares the levels Pi does
-// not know by default (xhigh, max) so it offers them too, under their own names.
-func piModel(m catalog.Model) map[string]any {
-	e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-	levels := map[string]string{}
-	for _, l := range m.Efforts {
-		if l == "max" || l == "xhigh" {
-			levels[l] = l
+// piThinkingLevels is the thinkingLevelMap for a model's efforts. Pi offers
+// xhigh and max only for models that map them, so without it a model whose
+// top level is max stopped at high in Pi.
+func piThinkingLevels(efforts []string) map[string]any {
+	var levels map[string]any
+	for _, e := range efforts {
+		if e == "xhigh" || e == "max" {
+			if levels == nil {
+				levels = map[string]any{}
+			}
+			levels[e] = e
 		}
 	}
-	if len(levels) > 0 {
-		e["thinkingLevelMap"] = levels
-	}
-	return e
+	return levels
 }
 
 func opencode(home, cfg string) *Agent {
