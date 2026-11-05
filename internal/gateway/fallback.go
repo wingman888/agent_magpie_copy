@@ -31,7 +31,9 @@ type candidate struct {
 	p     provider.Provider
 	model string
 	rest  string // what rests after a failure: the provider, or one of its keys
-	aside bool   // made for another protocol: tried only after the keys that suit the request
+	// aside is a key made for another protocol than the best-fitting ones
+	// of its provider: it is tried only after those, see perKeyOf.
+	aside bool
 }
 
 // label names a candidate in a call's record: the provider, and the key
@@ -107,31 +109,51 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, l
 		return []candidate{{p, model, p.ID, false}}, nil
 	}
 	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
-	return out, unlisted
+	// the keys that fit best are the main pool, routed among themselves; the
+	// others follow, aside, and are tried only once the main pool has failed
+	best := keyFit(out[0].p, model, from)
+	var main, aside []candidate
+	for _, c := range out {
+		if keyFit(c.p, model, from) == best {
+			main = append(main, c)
+		} else {
+			c.aside = true
+			aside = append(aside, c)
+		}
+	}
+	return append(main, aside...), unlisted
 }
 
-// keyFit ranks how well a key suits a request, best first: 0 fits, 1 needs
-// the request translated, 2 is made for another vendor's models.
+// keyFit ranks how well a key suits a request, best first: 0 is a key made
+// for the protocol the request is at home in, 1 a key that names no protocol,
+// 2 a key made for another protocol. The request's protocol is the model's
+// own when its name says (Anthropic for Claude, OpenAI for GPT and the
+// o-series), else the one the agent spoke.
 func keyFit(q provider.Provider, model string, from provider.Protocol) int {
-	if q.KeyProtocol == "" {
+	switch q.KeyProtocol {
+	case "":
+		return 1
+	case requestProtocol(model, from):
 		return 0
 	}
-	switch modelFamily(model) {
-	case provider.Anthropic:
-		if q.KeyProtocol == provider.Anthropic {
-			return 0
-		}
-		return 2
-	case provider.Chat:
-		if q.KeyProtocol != provider.Anthropic {
-			return 0
-		}
-		return 2
+	if isOpenAI(q.KeyProtocol) && isOpenAI(requestProtocol(model, from)) {
+		return 0 // Chat and Responses are both OpenAI's
 	}
-	if q.Base(from) != "" {
-		return 0
+	return 2
+}
+
+// requestProtocol is the protocol a request for model is at home in: the
+// model's own when its name says, else from, the one the agent spoke.
+func requestProtocol(model string, from provider.Protocol) provider.Protocol {
+	if f := modelFamily(model); f != "" {
+		return f
 	}
-	return 1
+	return from
+}
+
+// isOpenAI is whether a protocol is OpenAI's own wire API.
+func isOpenAI(p provider.Protocol) bool {
+	return p == provider.Chat || p == provider.Responses
 }
 
 // modelFamily is the protocol a model is at home in, when its name says:
@@ -164,18 +186,29 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 	var pl planned
 	add := func(q provider.Provider, m string, fallback bool) []candidate {
 		cs, left := perKeyOf(q, m, from)
+		// the main pool is routed; the keys aside follow it, in their order
+		var asides []candidate
+		for i, c := range cs {
+			if c.aside {
+				cs, asides = cs[:i], cs[i:]
+				break
+			}
+		}
 		cs, wg := weigh(q, cs, m, from)
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
 			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
 			pl.order = append(pl.order, w)
 		}
+		for _, c := range asides {
+			pl.order = append(pl.order, weighed(c, q, weighing{}, fallback, from))
+		}
 		for _, c := range left {
 			w := weighed(c, q, weighing{}, fallback, from)
 			w.Unlisted = true
 			pl.left = append(pl.left, w)
 		}
-		return cs
+		return append(append([]candidate{}, cs...), asides...)
 	}
 	out := add(p, model, false)
 	seen := map[string]bool{p.ID + "/" + model: true}
