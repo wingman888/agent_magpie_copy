@@ -1,60 +1,54 @@
 package agent
 
 import (
-	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// A picker lists the routing groups first, in their own section, noted as
-// routed by magpie, with each member provider's icon once.
-func TestPickerRoutingGroupsFirst(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	for _, p := range []provider.Provider{
-		{ID: "pa", Name: "PA", Chat: "https://a.example.com/v1", Key: "k", Models: []string{"m"}, Icon: "icon-a"},
-		{ID: "pb", Name: "PB", Chat: "https://b.example.com/v1", Key: "k", Models: []string{"m", "n"}, Icon: "icon-b"},
-	} {
-		if err := provider.Save(p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := provider.SaveGroup(provider.Group{ID: "mine", Name: "Mine", Members: []string{"pa/m", "pb/m", "pa/m"}}); err != nil {
+// Two ready providers offering the same model, sharing one logo, plus one
+// provider of its own, so the catalog holds a discovered group.
+func pickerSetup(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := provider.Save(provider.Provider{ID: "a", Name: "Alpha", Chat: "https://a.test/v1", Key: "sk-a-1111", Models: []string{"m"}, Icon: "openai"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := provider.Save(provider.Provider{ID: "b", Name: "Beta", Chat: "https://b.test/v1", Key: "sk-b-2222", Models: []string{"vendor/m"}, Icon: "openai"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Save(provider.Provider{ID: "c", Name: "Gamma", Chat: "https://c.test/v1", Key: "sk-c-3333", Models: []string{"other"}, Icon: "deepseek-color"}); err != nil {
+		t.Fatal(err)
+	}
+}
 
-	opts := viaMagpie("")
+// The picker lists the routing group first, in a section of its own, with
+// the note and one icon per member provider.
+func TestViaMagpieRoutingGroupsFirst(t *testing.T) {
+	pickerSetup(t)
+	opts := viaMagpie("magpie/")
 	if len(opts) == 0 {
 		t.Fatal("no options")
 	}
-	var mine *Option
-	for i := range opts {
-		if opts[i].Value == "group/mine" {
-			mine = &opts[i]
-		}
+	g := opts[0]
+	if g.Value != "magpie/group/auto-m" || g.Group != "Routing groups" || g.Note != "routing group · via magpie" || g.Ref != "group/auto-m" {
+		t.Fatalf("first option %+v", g)
 	}
-	if mine == nil {
-		t.Fatalf("group not listed: %+v", opts)
+	if !slices.Equal(g.Icons, []string{"openai"}) {
+		t.Fatalf("icons %v, want one openai", g.Icons)
 	}
-	if opts[0].Value != "group/mine" {
-		t.Fatalf("group not first: %q", opts[0].Value)
-	}
-	if mine.Group != "Routing groups" {
-		t.Errorf("section %q, want Routing groups", mine.Group)
-	}
-	if mine.Note != "routing group · via magpie" {
-		t.Errorf("note %q", mine.Note)
-	}
-	if want := []string{"icon-a", "icon-b"}; !slices.Equal(mine.Icons, want) {
-		t.Errorf("icons %v, want %v", mine.Icons, want)
+	if g.Icon != "" {
+		t.Fatalf("group Icon %q, want empty", g.Icon)
 	}
 	for _, o := range opts[1:] {
 		if o.Group == "Routing groups" {
-			t.Errorf("a non-group option %q is in the routing groups section", o.Value)
+			t.Fatalf("group section continues after a provider: %+v", o)
 		}
+	}
+	if len(opts) != 4 {
+		t.Fatalf("%d options, want 4 (group + three provider models)", len(opts))
 	}
 }
