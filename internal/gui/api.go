@@ -169,8 +169,10 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		writeJSON(rw, settingsState())
 	})
 	mux.HandleFunc("POST /api/settings", func(rw http.ResponseWriter, r *http.Request) {
-		var in settings.Settings
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		// start from the current settings so fields the request leaves out
+		// (proxy, tray) keep their values
+		in, err := settings.Apply(settings.Load(), r.Body)
+		if err != nil {
 			fail(rw, err)
 			return
 		}

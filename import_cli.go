@@ -47,13 +47,20 @@ func importCmd(args []string) error {
 	if replacing && old.Account != nil {
 		return fmt.Errorf("%s is a signed-in agent, not a provider; choose another id with id=", p.ID)
 	}
-	if replacing && p.Key == "" && old.Key != "" {
-		// the link carries no key: keep the one already saved rather than
-		// dropping it with the rest of the old provider
-		p.Key = old.Key
+	keySource := "none"
+	if p.Key != "" {
+		keySource = "provided by link"
+	}
+	if replacing {
+		// the link carries no key: keep the saved one only when the link
+		// talks to the same hosts; a key is for the vendor it came from
+		if key, kept := provider.KeyOnReplace(old, p); kept {
+			p.Key = key
+			keySource = "kept from existing provider"
+		}
 	}
 
-	printImport(p, replacing)
+	printImport(p, replacing, keySource)
 
 	if !yes {
 		if !stdinIsTerminal() {
@@ -91,13 +98,17 @@ func importCmd(args []string) error {
 
 // printImport shows what the link would add. The key is never printed in
 // full: only its first characters, or that one was provided.
-func printImport(p provider.Provider, replacing bool) {
+func printImport(p provider.Provider, replacing bool, keySource string) {
 	fmt.Println(" ", bold.Render(p.Name)+muted.Render("  "+p.ID))
 	kv := func(k, v string) {
 		fmt.Printf("  %s %s\n", muted.Render(pad(k, 10)), v)
 	}
 	kv("sends to", strings.Join(importHosts(p), ", "))
-	kv("key", importKeyLabel(p.Key))
+	if p.Key == "" {
+		kv("key", "none "+muted.Render("(add one later with magpie provider key)"))
+	} else {
+		kv("key", importKeyLabel(p.Key)+muted.Render(" ("+keySource+")"))
+	}
 	if len(p.Models) > 0 {
 		kv("models", strings.Join(p.Models, ", "))
 	} else {
@@ -128,8 +139,6 @@ func importHosts(p provider.Provider) []string {
 // just "provided" for a short one.
 func importKeyLabel(k string) string {
 	switch {
-	case k == "":
-		return muted.Render("not in the link; add it later with magpie provider key")
 	case utf8.RuneCountInString(k) < 8:
 		return "provided"
 	default:

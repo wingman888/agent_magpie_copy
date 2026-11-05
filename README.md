@@ -345,6 +345,25 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
+## Settings
+
+`~/.config/magpie/settings.json` (or the app's Settings page) holds these
+choices; a missing file means the defaults.
+
+- `tray` — what a click on the menu bar icon does: `panel` (default, the small
+  panel) or `window` (opens the main window). Other values are refused.
+- `proxy` — how magpie reaches providers and the gateway's outgoing requests:
+  - empty (default): follow `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` and
+    `NO_PROXY`, then the system proxy (macOS network settings, Windows Internet
+    options, including their exception lists; on Linux the environment only);
+  - `direct`: never use a proxy;
+  - a proxy address: `http://host:port`, `https://…`, `socks5://127.0.0.1:1080`
+    or `socks5h://…`; a bare `127.0.0.1:7890` means HTTP. Other schemes such as
+    `ftp://` are refused.
+
+  Loopback addresses never go through a proxy. Apps started from the Dock or the
+  Start menu do not inherit shell variables, so set `proxy` here for them.
+
 ## Files
 
 - `~/.config/magpie/profiles.json` — saved profiles

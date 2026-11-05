@@ -9,6 +9,7 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -82,6 +83,17 @@ func Save(s Settings) error {
 		return err
 	}
 	return os.WriteFile(Path(), append(b, '\n'), 0o644)
+}
+
+// Apply decodes a settings document on top of base. Fields the document does
+// not mention keep their value in base, so a save that only carries theme and
+// lang leaves proxy and tray as they were.
+func Apply(base Settings, r io.Reader) (Settings, error) {
+	s := base
+	if err := json.NewDecoder(r).Decode(&s); err != nil {
+		return base, err
+	}
+	return s, nil
 }
 
 // NormalizeProxy checks a proxy setting and returns it in the form to store:

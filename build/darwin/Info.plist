@@ -7,6 +7,16 @@
 	<key>CFBundleIdentifier</key><string>com.yetone.magpie</string>
 	<key>CFBundleExecutable</key><string>magpie</string>
 	<key>CFBundleIconFile</key><string>magpie</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key><string>com.yetone.magpie</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>magpie</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>@VERSION@</string>
 	<key>CFBundleVersion</key><string>@VERSION@</string>

@@ -31,6 +31,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie <agent>                  show one agent
   magpie <agent> <model>          set an agent's model   e.g. magpie claude deepseek/deepseek-chat
   magpie <agent> <field> <value>  set another field   e.g. magpie codex effort high
+  magpie claude <opus|sonnet|haiku|fable> <model>   set one Claude Code tier   e.g. magpie claude haiku deepseek/flash
+  magpie claude <opus|sonnet|haiku|fable> ""    that tier follows the main model again
   magpie <agent> [field] default  back to the agent's own default, magpie's wiring removed
 
   magpie save <name>              snapshot every agent's settings as a profile
