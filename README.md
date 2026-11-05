@@ -325,6 +325,37 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
+## Backup and restore
+
+Move your whole setup to another machine in one file:
+
+```sh
+magpie backup                   # writes magpie.magpie-backup (asks for a passphrase twice)
+magpie backup ~/b.magpie-backup
+magpie backup --no-keys b.magpie-backup   # no API keys, no credential-looking headers: safe to share
+
+magpie restore magpie.magpie-backup       # asks for the passphrase once
+magpie restore --no-agents b.magpie-backup   # providers, settings and profiles only; leave agents alone
+
+echo "pw" | magpie backup       # passphrase from standard input (first line), for scripts
+echo "pw" | magpie restore magpie.magpie-backup
+```
+
+The file holds your providers (keys, extra keys, custom headers), their
+icons, settings, saved profiles and each agent's model choice. It is sealed
+with AES-256-GCM under a key derived from the passphrase (PBKDF2-SHA256), and
+it is written readable only by you. Lose the passphrase and the file cannot
+be opened.
+
+- Subscriptions (Claude Code, Codex and the like) are not in the file: their
+  sign-in stays with each agent, so sign in again on the new machine.
+- Restoring replaces a provider with the same id. A backup without keys keeps
+  the keys this machine already has. Providers left without a key are listed
+  so you can add one with `magpie provider key <id> <key>`.
+- Agent model choices are applied only to agents installed on this machine;
+  the others, and any value that cannot be applied, are listed as skipped.
+- Running agents keep their current model until they are restarted.
+
 ## Files
 
 - `~/.config/magpie/profiles.json` — saved profiles
