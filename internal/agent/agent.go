@@ -1,4 +1,4 @@
-// Package agent describes every coding agent magpie can drive: where its config
+// Package agent describes every coding agent dial can drive: where its config
 // lives, which fields matter (model, effort, …) and which values to offer.
 package agent
 
@@ -21,7 +21,7 @@ type Option struct {
 }
 
 // Field is one tunable setting of an agent. Set with an empty value puts
-// the field back to the agent's own default: anything magpie wired in (the
+// the field back to the agent's own default: anything dial wired in (the
 // gateway as a provider, its model catalog) comes out and the key is removed.
 type Field struct {
 	Key     string
@@ -29,9 +29,6 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
-	// Quiet fields are left out of listings while empty: they follow
-	// another field until set (Claude Code's per-tier models).
-	Quiet bool
 }
 
 // Agent is one supported coding agent.
@@ -42,7 +39,7 @@ type Agent struct {
 	Aliases []string
 	Bin     string // executable name, used for detection
 	Dir     string // config directory, used for detection
-	Path    string // config file magpie edits
+	Path    string // config file dial edits
 	Fields  []Field
 	// Notice, if set, is advice worth showing after a change: agents that
 	// read their config once at start-up need a restart to see it.
@@ -81,7 +78,22 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key.
+// Routing is the field that says which provider an agent is routed to: its
+// "model" field when it has one, else its first field. Nil when it has none.
+func (a *Agent) Routing() *Field {
+	for i := range a.Fields {
+		if a.Fields[i].Key == "model" {
+			return &a.Fields[i]
+		}
+	}
+	if len(a.Fields) > 0 {
+		return &a.Fields[0]
+	}
+	return nil
+}
+
+// Field looks a field up by key. Failing that, the label the picker shows
+// (case-insensitive) will do, so `dial gemini auth` works as well as a key.
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
@@ -89,7 +101,7 @@ func (a *Agent) Field(key string) *Field {
 		}
 	}
 	for i := range a.Fields {
-		if a.Fields[i].Label == key { // `magpie gemini auth …`: the label as shown
+		if strings.EqualFold(a.Fields[i].Key, key) || strings.EqualFold(a.Fields[i].Label, key) {
 			return &a.Fields[i]
 		}
 	}
