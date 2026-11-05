@@ -124,7 +124,10 @@ func providerOf(v string) (string, bool) {
 		return "", false
 	}
 	pid, _, ok := strings.Cut(v, "/")
-	return pid, ok
+	if !ok {
+		return "", false
+	}
+	return pid, true
 }
 
 // presets: `magpie presets`
