@@ -114,7 +114,7 @@ func TestMatchBypass(t *testing.T) {
 		"git.corp":              true,
 		"a.b.corp":              true,
 		"corp":                  true,
-		"notcorp":               false,
+		"x.notcorp":              false,
 		"chatgpt.com":           false,
 		"GIT.CORP":              true,
 		"exact.example.org":     true,
