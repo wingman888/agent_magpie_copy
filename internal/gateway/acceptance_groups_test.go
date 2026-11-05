@@ -118,13 +118,20 @@ func accClearResting() {
 // accRoute runs one request under session (none when empty) and returns the status.
 func accRoute(t *testing.T, s *Server, session, body string) int {
 	t.Helper()
+	code, _ := accRouteBody(t, s, session, body)
+	return code
+}
+
+// accRouteBody is accRoute with the response body too.
+func accRouteBody(t *testing.T, s *Server, session, body string) (int, string) {
+	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	if session != "" {
 		req.Header.Set("x-session-id", session)
 	}
 	s.Handler().ServeHTTP(rec, req)
-	return rec.Code
+	return rec.Code, rec.Body.String()
 }
 
 // accLast is the route the last request traced.
@@ -417,8 +424,9 @@ func TestAccProtocolTiers(t *testing.T) {
 		return 429
 	}
 	u.mu.Unlock()
-	if c := accRoute(t, s, sess, accBody("group/mine", 4)); c != 200 {
-		t.Fatalf("with the main pool failing: %d", c)
+	if c, body := accRouteBody(t, s, sess, accBody("group/mine", 4)); c != 200 {
+		accDump(t, s)
+		t.Fatalf("with the main pool failing: %d body %s", c, body)
 	}
 	r := accLast(t, s)
 	last := r.Order[len(r.Order)-1]
