@@ -63,15 +63,15 @@ type Provider struct {
 	// Routing is how requests spread over the keys or accounts it has on:
 	// "" smart, the first while it has quota to spare, then whichever has
 	// the most; "order" in order, the next one only when the one before
-	// can't take it; "rotate" each in turn; "usage" the least used first.
+	// can't take it; "rotate" each in turn; "least-used" the least used first.
 	// Whichever it is, one out of credit, out of quota, rate limited or
 	// failing is passed over for as long as that lasts.
 	Routing string `json:"routing,omitempty"`
 
-	// Affinity is how long a conversation stays on the key or account that
-	// answered it last, so the vendor's prompt cache can hit: "" automatic
-	// (kept within a turn, and across turns while the cache is warm),
-	// "session" always, "turn" only within a user turn, "off" never.
+	// Affinity is whether a conversation sticks to the key or account that
+	// answered it last, so the vendor's prompt cache can hit: "" automatic,
+	// "session" the whole conversation, "turn" only within one user turn,
+	// "off" never (see group.go).
 	Affinity string `json:"affinity,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
@@ -113,8 +113,7 @@ type Provider struct {
 
 type file struct {
 	Providers []Provider `json:"providers"`
-	// Groups are the routing groups the user made, and the automatic ones
-	// the user hid (see group.go).
+	// Groups are the routing groups the user made or hid (see group.go).
 	Groups []Group `json:"groups,omitempty"`
 }
 
@@ -229,8 +228,8 @@ func Save(p Provider) error {
 	if p.ID == "magpie" {
 		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
-	if p.ID == "group" {
-		return errors.New(`"group" is how routing groups are named (group/<id>); pick another id`)
+	if p.ID == groupPrefix {
+		return errors.New(`"group" is how agents name routing groups (group/<id>); pick another id`)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
@@ -339,10 +338,8 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
-		p.Routing = ""
-	}
-	p.Affinity = cleanAffinity(p.Affinity)
+	p.Routing = normalizeRouting(p.Routing)
+	p.Affinity = normalizeAffinity(p.Affinity)
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {

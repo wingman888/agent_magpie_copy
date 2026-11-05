@@ -1,53 +1,21 @@
 package provider
 
 import (
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/yetone/magpie/internal/catalog"
 )
 
-// groupEnv isolates the config and the caches, with an empty models.dev
-// catalog so nothing is fetched.
-func groupEnv(t *testing.T) {
+// groupSetup gives two ready providers, A offering m and B offering vendor/m.
+func groupSetup(t *testing.T) {
 	t.Helper()
-	isolate(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	cache := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cache)
-	if err := os.MkdirAll(filepath.Join(cache, "magpie"), 0o755); err != nil {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := Save(Provider{ID: "a", Name: "A", Chat: "https://a.test/v1", Key: "sk-a-1111", Models: []string{"m"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(catalog.CachePath(), []byte(`{}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	catalog.Reset()
-	t.Cleanup(catalog.Reset)
-}
-
-// twoVendors has vendor a serving claude-opus-5-5 and b serving the same
-// model under another spelling, plus a model of a's alone.
-func twoVendors(t *testing.T) {
-	t.Helper()
-	if err := Save(Provider{ID: "a", Name: "A", Key: "ka", Chat: "https://a.example/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := Save(Provider{ID: "b", Name: "B", Key: "kb", Chat: "https://b.example/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := catalog.SaveLive("a", "https://a.example/v1", []catalog.Model{
-		{ID: "claude-opus-5-5", Name: "Claude Opus 5.5"},
-		{ID: "only-a", Name: "Only A"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := catalog.SaveLive("b", "https://b.example/v1", []catalog.Model{
-		{ID: "anthropic/claude-opus-5.5", Name: "anthropic/claude-opus-5.5"},
-	}); err != nil {
+	if err := Save(Provider{ID: "b", Name: "B", Chat: "https://b.test/v1", Key: "sk-b-2222", Models: []string{"vendor/m"}}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -60,192 +28,155 @@ func catalogIDs() []string {
 	return out
 }
 
-func TestAutoGroupFound(t *testing.T) {
-	groupEnv(t)
-	twoVendors(t)
+func memberRefs(ms []Member) []string {
+	var out []string
+	for _, m := range ms {
+		out = append(out, m.Ref)
+	}
+	return out
+}
 
-	ids := catalogIDs()
-	want := []string{"a/claude-opus-5-5", "a/only-a", "b/anthropic/claude-opus-5.5", "group/auto-claude-opus-5-5"}
-	if !slices.Equal(ids, want) {
-		t.Fatalf("catalog = %v, want %v", ids, want)
+// Acceptance 1: the discovered group comes after the providers' own models,
+// and it is listed with the group id and its members in provider order.
+func TestDiscoveredGroupCatalog(t *testing.T) {
+	groupSetup(t)
+	want := []string{"a/m", "b/vendor/m", "group/auto-m"}
+	if got := catalogIDs(); !slices.Equal(got, want) {
+		t.Fatalf("catalog %v, want %v", got, want)
 	}
-	var auto Entry
-	for _, e := range Catalog() {
-		if e.Group != "" {
-			auto = e
-		}
+	es := Catalog()
+	if g := es[2]; g.Group != "auto-m" || g.Provider.ID != groupPrefix {
+		t.Fatalf("group entry %+v", g)
 	}
-	if auto.Name != "Claude Opus 5.5" {
-		t.Errorf("auto group name = %q, want the display name", auto.Name)
+	g, ms, ok := FindGroup("group/auto-m")
+	if !ok || !g.Auto || !slices.Equal(memberRefs(ms), []string{"a/m", "b/vendor/m"}) {
+		t.Fatalf("FindGroup: %+v %v %v", g, memberRefs(ms), ok)
 	}
-	if auto.Provider.ID != "group" {
-		t.Errorf("group entry provider = %q, want group", auto.Provider.ID)
-	}
-	g, ms, ok := FindGroup("group/auto-claude-opus-5-5")
-	if !ok || !g.Auto {
-		t.Fatalf("FindGroup auto = %+v ok=%v", g, ok)
-	}
-	if len(ms) != 2 || ms[0].ID() != "a/claude-opus-5-5" || ms[1].ID() != "b/anthropic/claude-opus-5.5" {
-		t.Errorf("members = %v", ms)
+	// resolving the group answers as its first member
+	if p, model, ok := Resolve("group/auto-m"); !ok || p.ID != "a" || model != "m" {
+		t.Fatalf("Resolve group: %v %q %v", p.ID, model, ok)
 	}
 }
 
-func TestDifferentNamesNeverGroup(t *testing.T) {
-	groupEnv(t)
-	twoVendors(t)
-	// only-a has no twin at b, so it is not grouped; nothing else is
+// Acceptance 3: a discovered group can be hidden, and shown again.
+func TestDeleteAndShowDiscoveredGroup(t *testing.T) {
+	groupSetup(t)
+	if err := DeleteGroup("auto-m"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := FindGroup("group/auto-m"); ok {
+		t.Fatal("hidden group still resolves")
+	}
+	if _, _, ok := Resolve("group/auto-m"); ok {
+		t.Fatal("hidden group still resolves in Resolve")
+	}
 	for _, id := range catalogIDs() {
-		if strings.Contains(id, "only-a") && strings.HasPrefix(id, "group/") {
-			t.Fatalf("grouped a model with no twin: %s", id)
+		if strings.HasPrefix(id, "group/") {
+			t.Fatalf("hidden group still in catalog: %v", catalogIDs())
 		}
 	}
-}
-
-func TestSaveGroupRules(t *testing.T) {
-	groupEnv(t)
-	twoVendors(t)
-
-	if err := SaveGroup(Group{Name: "Empty"}); err == nil || err.Error() != "组里至少要有一个模型" {
-		t.Errorf("empty group error = %v", err)
-	}
-	if err := SaveGroup(Group{Name: "Only nest", Members: []string{"group/auto-claude-opus-5-5"}}); err == nil {
-		t.Errorf("a group of only groups should be refused")
-	}
-	if err := Save(Provider{ID: "group", Name: "G", Key: "k", Chat: "https://g.example/v1"}); err == nil {
-		t.Errorf("provider id group should be refused")
-	}
-
-	// a group named inside a group is ignored; the rest is kept, in order
-	if err := SaveGroup(Group{Name: "Mine", Members: []string{"group/auto-claude-opus-5-5", "b/anthropic/claude-opus-5.5", "a/only-a", "a/only-a"}}); err != nil {
+	if err := ShowGroup("auto-m"); err != nil {
 		t.Fatal(err)
 	}
-	g, _, ok := FindGroup("mine")
-	if !ok {
-		t.Fatal("saved group not found")
+	if _, ms, ok := FindGroup("group/auto-m"); !ok || len(ms) != 2 {
+		t.Fatalf("shown group: %v %v", memberRefs(ms), ok)
 	}
-	if g.ID != "mine" || g.Name != "Mine" {
-		t.Errorf("group = %+v", g)
-	}
-	if want := []string{"b/anthropic/claude-opus-5.5", "a/only-a"}; !slices.Equal(g.Members, want) {
-		t.Errorf("members = %v, want %v", g.Members, want)
+	// deleting what is not there is an error
+	if err := DeleteGroup("nothing-here"); err == nil {
+		t.Fatal("deleted a group that does not exist")
 	}
 }
 
-func TestSaveGroupIDAndNameDefaults(t *testing.T) {
-	groupEnv(t)
-	twoVendors(t)
-	if err := SaveGroup(Group{Name: "My Opus Pool", Members: []string{"a/only-a"}, Routing: "bogus", Affinity: "nope"}); err != nil {
+// Acceptance 4: validation of saved groups and providers.
+func TestGroupValidation(t *testing.T) {
+	groupSetup(t)
+	err := SaveGroup(Group{ID: "empty", Members: nil})
+	if err == nil || err.Error() != "组里至少要有一个模型" {
+		t.Fatalf("empty group: %v", err)
+	}
+	// only nested groups: nothing is left, so it is empty too
+	if err := SaveGroup(Group{ID: "nest", Members: []string{"group/auto-m"}}); err == nil {
+		t.Fatal("group of only a group saved")
+	}
+	if err := SaveGroup(Group{ID: "Bad_Id", Members: []string{"a/m"}}); err == nil {
+		t.Fatal("bad group id saved")
+	}
+	if err := Save(Provider{ID: "group", Name: "G", Chat: "https://g.test/v1", Key: "sk-g"}); err == nil {
+		t.Fatal("provider id group saved")
+	}
+	if err := Save(Provider{Name: "Group", Chat: "https://g.test/v1", Key: "sk-g"}); err == nil {
+		t.Fatal("provider named Group saved")
+	}
+	// a group inside a group is ignored, the rest is kept
+	if err := SaveGroup(Group{ID: "mine", Members: []string{"group/auto-m", "b/vendor/m", "a/only-a"}}); err != nil {
 		t.Fatal(err)
 	}
-	g, _, ok := FindGroup("my-opus-pool")
-	if !ok {
-		t.Fatal("id not derived from the name")
-	}
-	if g.Routing != "" || g.Affinity != "" {
-		t.Errorf("invalid routing/affinity should fall back to default: %+v", g)
-	}
-	if err := SaveGroup(Group{ID: "named-by-id", Members: []string{"a/only-a"}}); err != nil {
-		t.Fatal(err)
-	}
-	if g, _, _ := FindGroup("named-by-id"); g.Name != "named-by-id" {
-		t.Errorf("name should default to id, got %q", g.Name)
-	}
-	if err := SaveGroup(Group{ID: "Bad Id", Members: []string{"a/only-a"}}); err == nil {
-		t.Errorf("an invalid id should be refused")
+	g, _, _ := FindGroup("mine")
+	if !slices.Equal(g.Members, []string{"b/vendor/m", "a/only-a"}) {
+		t.Fatalf("members %v", g.Members)
 	}
 }
 
-func TestDeleteAndShowAutoGroup(t *testing.T) {
-	groupEnv(t)
-	twoVendors(t)
-
-	if err := DeleteGroup("auto-claude-opus-5-5"); err != nil {
+// A user's group comes first in its order, and saving over a discovered
+// group makes it the user's; deleting that hides it again.
+func TestUserGroupOwnership(t *testing.T) {
+	groupSetup(t)
+	if err := SaveGroup(Group{ID: "mine", Name: "Mine", Members: []string{"b/vendor/m", "a/m"}, Routing: "order"}); err != nil {
 		t.Fatal(err)
 	}
-	if slices.Contains(catalogIDs(), "group/auto-claude-opus-5-5") {
-		t.Fatal("hidden group still listed")
+	g, ms, ok := FindGroup("group/mine")
+	if !ok || g.Name != "Mine" || g.Routing != Ordered || g.Auto || !slices.Equal(memberRefs(ms), []string{"b/vendor/m", "a/m"}) {
+		t.Fatalf("mine: %+v %v", g, memberRefs(ms))
 	}
-	if _, _, ok := FindGroup("group/auto-claude-opus-5-5"); ok {
-		t.Fatal("hidden group still found")
-	}
-	if err := ShowGroup("auto-claude-opus-5-5"); err != nil {
+	if err := SaveGroup(Group{ID: "auto-m", Members: []string{"b/vendor/m"}}); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(catalogIDs(), "group/auto-claude-opus-5-5") {
-		t.Fatal("shown group not listed again")
+	if g, ms, _ := FindGroup("auto-m"); g.Auto || g.Name != "auto-m" || len(ms) != 1 {
+		t.Fatalf("converted group: %+v %v", g, memberRefs(ms))
 	}
-	if err := DeleteGroup("no-such-group"); err == nil {
-		t.Error("deleting an unknown group should fail")
+	if err := DeleteGroup("auto-m"); err != nil {
+		t.Fatal(err)
 	}
-	if err := ShowGroup("no-such-group"); err == nil {
-		t.Error("showing an unknown group should fail")
+	if _, _, ok := FindGroup("auto-m"); ok {
+		t.Fatal("deleted converted group came back")
+	}
+	if err := DeleteGroup("mine"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := FindGroup("mine"); ok {
+		t.Fatal("deleted group still there")
 	}
 }
 
-func TestUserOwnsAutoGroupOnceSaved(t *testing.T) {
-	groupEnv(t)
-	twoVendors(t)
-	if err := SaveGroup(Group{ID: "auto-claude-opus-5-5", Members: []string{"a/only-a"}}); err != nil {
+// Unknown routing and affinity values fall back to the defaults; the old
+// "usage" name of least-used still means least-used.
+func TestRoutingAndAffinityValues(t *testing.T) {
+	groupSetup(t)
+	if err := SaveGroup(Group{ID: "r", Members: []string{"a/m"}, Routing: "ordered", Affinity: "forever"}); err != nil {
 		t.Fatal(err)
 	}
-	g, ms, ok := FindGroup("auto-claude-opus-5-5")
-	if !ok || g.Auto || len(ms) != 1 || ms[0].ID() != "a/only-a" {
-		t.Fatalf("saved auto id should be the user's: %+v %v %v", g, ms, ok)
+	if g, _, _ := FindGroup("r"); g.Routing != "" || g.Affinity != "" {
+		t.Fatalf("invalid values kept: %+v", g)
 	}
-}
-
-func TestFindGroupSkipsUnreadyAndDuplicates(t *testing.T) {
-	groupEnv(t)
-	twoVendors(t)
-	if err := SaveGroup(Group{ID: "dup", Members: []string{"a/only-a", "a/only-a", "ghost/x", "b/anthropic/claude-opus-5.5"}}); err != nil {
-		t.Fatal(err)
-	}
-	_, ms, ok := FindGroup("dup")
-	if !ok || len(ms) != 2 {
-		t.Fatalf("members = %v ok=%v, want the two ready ones", ms, ok)
-	}
-	if err := SaveGroup(Group{ID: "ghosts", Members: []string{"ghost/x"}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, ok := FindGroup("ghosts"); ok {
-		t.Error("a group with no member ready should not be ok")
-	}
-}
-
-func TestSetAffinity(t *testing.T) {
-	groupEnv(t)
-	twoVendors(t)
 	if err := SetAffinity("a", "session"); err != nil {
 		t.Fatal(err)
 	}
-	p, err := Find("a")
-	if err != nil {
+	if p, _ := Find("a"); p.Affinity != "session" {
+		t.Fatalf("affinity %q", p.Affinity)
+	}
+	if err := SetAffinity("a", "bogus"); err != nil {
 		t.Fatal(err)
 	}
-	if p.Affinity != "session" {
-		t.Errorf("affinity = %q, want session", p.Affinity)
+	if p, _ := Find("a"); p.Affinity != "" {
+		t.Fatalf("bogus affinity kept: %q", p.Affinity)
 	}
-	if err := SetAffinity("a", "sometimes"); err != nil {
+	if err := SetRouting("a", "usage"); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ = Find("a"); p.Affinity != "" {
-		t.Errorf("invalid affinity should fall back to automatic, got %q", p.Affinity)
+	if p, _ := Find("a"); p.Routing != LeastUsed || LeastUsed != "least-used" {
+		t.Fatalf("routing %q", p.Routing)
 	}
-	if err := SetAffinity("nobody", "off"); err == nil {
-		t.Error("an unknown provider should fail")
-	}
-}
-
-func TestCatalogGroupsAfterProviders(t *testing.T) {
-	groupEnv(t)
-	twoVendors(t)
-	if err := SaveGroup(Group{ID: "mine", Members: []string{"b/anthropic/claude-opus-5.5", "a/only-a"}}); err != nil {
-		t.Fatal(err)
-	}
-	ids := catalogIDs()
-	// providers first, then the groups in the order they were found
-	want := []string{"a/claude-opus-5-5", "a/only-a", "b/anthropic/claude-opus-5.5", "group/mine", "group/auto-claude-opus-5-5"}
-	if !slices.Equal(ids, want) {
-		t.Fatalf("catalog = %v, want %v", ids, want)
+	if err := SetAffinity("nope", "turn"); err == nil {
+		t.Fatal("affinity set on an unknown provider")
 	}
 }

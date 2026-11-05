@@ -21,40 +21,36 @@ const traceKeep = 60
 
 // Route is one request's way through routing.
 type Route struct {
-	Seq      int64       `json:"seq"` // the trace's count when it last changed
-	ID       int64       `json:"id"`
-	Time     time.Time   `json:"time"`
-	Agent    string      `json:"agent"`
-	Model    string      `json:"model"`    // as the agent asked
-	Provider string      `json:"provider"` // the provider the model resolved to
-	Order    []Weighed   `json:"order"`    // who was to try it, first first
-	Left     []Weighed   `json:"left,omitempty"`
-	Tries    []Try       `json:"tries"`
-	Done     bool        `json:"done"`
-	Status   int         `json:"status,omitempty"`
-	Error    string      `json:"error,omitempty"`
-	Millis   int64       `json:"ms,omitempty"`
-	Tokens   int         `json:"tokens,omitempty"`
-	Group    *GroupRoute `json:"group,omitempty"` // the routing group the model was, if it was one
+	Seq      int64     `json:"seq"` // the trace's count when it last changed
+	ID       int64     `json:"id"`
+	Time     time.Time `json:"time"`
+	Agent    string    `json:"agent"`
+	Model    string    `json:"model"`    // as the agent asked
+	Provider string    `json:"provider"` // the provider the model resolved to
+	Order    []Weighed `json:"order"`    // who was to try it, first first
+	Left     []Weighed `json:"left,omitempty"`
+	Tries    []Try     `json:"tries"`
+	Done     bool      `json:"done"`
+	Status   int       `json:"status,omitempty"`
+	Error    string    `json:"error,omitempty"`
+	Millis   int64     `json:"ms,omitempty"`
+	Tokens   int       `json:"tokens,omitempty"`
+	// Group is set when the agent asked for a routing group (group/<id>).
+	Group *GroupRoute `json:"group,omitempty"`
+	// Affinity is how the conversation stuck to its last answerer, when it had
+	// more than one candidate to choose from.
+	Affinity *AffinityRoute `json:"affinity,omitempty"`
 }
 
-// GroupRoute is the routing group a request named, and who could take it.
+// GroupRoute is the routing group a request asked for, and the members that
+// were ready to take it, in the group's order.
 type GroupRoute struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
-	Routing  string   `json:"routing"`  // "", order, rotate, least-used
-	Affinity string   `json:"affinity"` // "", session, turn, off
-	Auto     bool     `json:"auto"`     // found by magpie, not the user
-	Members  []string `json:"members"`  // the ready ones, "provider/model", in order
-}
-
-// groupRoute is the trace's view of a routing group and its ready members.
-func groupRoute(g provider.Group, ms []provider.Member) *GroupRoute {
-	out := &GroupRoute{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto, Members: []string{}}
-	for _, m := range ms {
-		out.Members = append(out.Members, m.ID())
-	}
-	return out
+	Routing  string   `json:"routing"`
+	Affinity string   `json:"affinity"`
+	Auto     bool     `json:"auto"`
+	Members  []string `json:"members"` // "provider/model"
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -69,7 +65,7 @@ type Weighed struct {
 	Agent    string            `json:"agent,omitempty"`
 	Plan     string            `json:"plan,omitempty"`
 	Model    string            `json:"model"`
-	Routing  string            `json:"routing"` // its provider's: "", order, rotate, usage
+	Routing  string            `json:"routing"` // its provider's: "", order, rotate, least-used
 	Fallback bool              `json:"fallback,omitempty"`
 	Shared   bool              `json:"shared,omitempty"` // its provider has more than one on
 	Known    bool              `json:"known,omitempty"`  // the vendor said what the account has left
@@ -81,7 +77,7 @@ type Weighed struct {
 	Speaks   provider.Protocol `json:"speaks,omitempty"` // a key made for one protocol only
 	Rest     *Rest             `json:"rest,omitempty"`   // resting after a failure, when the request came
 	Unlisted bool              `json:"unlisted,omitempty"`
-	Aside    bool              `json:"aside,omitempty"` // a key made for another protocol: tried only after the rest
+	Aside    bool              `json:"aside,omitempty"` // a key made for another protocol, tried only after the main pool
 }
 
 // Try is one candidate trying the request.
@@ -98,6 +94,7 @@ type Try struct {
 
 type planned struct {
 	order, left []Weighed
+	affinity    *AffinityRoute
 }
 
 func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
@@ -115,13 +112,13 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	default:
 		w.Kind = "provider"
 	}
-	w.Aside = c.Aside
-	if l, ok := wg.lefts[c.rest]; ok {
+	if l, ok := wg.lefts[candKey(c)]; ok {
 		w.Known, w.Used, w.Renews = true, l.used, l.renews
 	}
 	if wg.tokens != nil {
 		w.Tokens = wg.tokens[c.rest]
 	}
+	w.Aside = c.aside
 	return w
 }
 
