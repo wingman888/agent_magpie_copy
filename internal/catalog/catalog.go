@@ -295,39 +295,11 @@ func Codex() []Model {
 	return out
 }
 
-// Models returns the text models of several models.dev providers, in the
-// order the ids are listed. A model listed by an earlier id is not repeated.
-func Models(ids []string) []Model {
-	var out []Model
-	seen := map[string]bool{}
-	for _, id := range ids {
-		for _, m := range Provider(id) {
-			if !seen[m.ID] {
-				seen[m.ID] = true
-				out = append(out, m)
-			}
-		}
-	}
-	return out
-}
-
-// Tail is the model's own name once any "vendor/" prefix is dropped:
-// "deepseek/deepseek-chat" → "deepseek-chat". Ids without a slash are unchanged.
-func Tail(id string) string {
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		return id[i+1:]
-	}
-	return id
-}
-
-// Efforts returns the reasoning levels a model supports, if known. A prefixed
-// id ("vendor/model") matches the catalog's bare id when no exact one exists.
+// Efforts returns the reasoning levels a model supports, if known.
 func Efforts(models []Model, id string) []string {
-	for _, want := range []string{id, Tail(id)} {
-		for _, m := range models {
-			if m.ID == want && len(m.Efforts) > 0 {
-				return m.Efforts
-			}
+	for _, m := range models {
+		if m.ID == id && len(m.Efforts) > 0 {
+			return m.Efforts
 		}
 	}
 	return nil

@@ -31,11 +31,6 @@ type SubscriptionQuota struct {
 	Plan     string        `json:"plan,omitempty"`
 	Windows  []QuotaWindow `json:"windows"`
 	Error    string        `json:"error,omitempty"`
-
-	// FiveHourUsed and WeeklyUsed are the used share of the 5-hour and the
-	// weekly window, in percent; filled for each remembered login.
-	FiveHourUsed float64 `json:"fiveHourUsed"`
-	WeeklyUsed   float64 `json:"weeklyUsed"`
 }
 
 var subscriptionUsageCache struct {
@@ -159,29 +154,22 @@ type accountStatusError struct{ status int }
 
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
-// claudeUsageURL is where Claude's rolling usage is read; a var so tests can
-// point it elsewhere.
-var claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
-
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
+	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
 	token, err := claudeToken(ctx)
 	if err != nil {
-		return SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}, Error: err.Error()}
+		q.Error = err.Error()
+		return q
 	}
 	_, plan, _ := claudeIdentity()
-	return claudeQuotaWith(ctx, token, plan)
-}
-
-// claudeQuotaWith reads the rolling usage of the Claude login a token belongs to.
-func claudeQuotaWith(ctx context.Context, token, plan string) SubscriptionQuota {
-	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}, Plan: plan}
+	q.Plan = plan
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err := accountJSON(ctx, claudeUsageURL, token, map[string]string{
+	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
@@ -213,16 +201,12 @@ func (w quotaWire) window(name string) QuotaWindow {
 }
 
 func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota {
+	q := SubscriptionQuota{Provider: "codex", Name: "Codex", Icon: "codex-color", Windows: []QuotaWindow{}}
 	token, accountID, err := codexToken(ctx, path)
 	if err != nil {
-		return SubscriptionQuota{Provider: "codex", Name: "Codex", Icon: "codex-color", Windows: []QuotaWindow{}, Error: err.Error()}
+		q.Error = err.Error()
+		return q
 	}
-	return codexQuotaWith(ctx, token, accountID)
-}
-
-// codexQuotaWith reads the rolling usage of the ChatGPT login a token belongs to.
-func codexQuotaWith(ctx context.Context, token, accountID string) SubscriptionQuota {
-	q := SubscriptionQuota{Provider: "codex", Name: "Codex", Icon: "codex-color", Windows: []QuotaWindow{}}
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -231,7 +215,7 @@ func codexQuotaWith(ctx context.Context, token, accountID string) SubscriptionQu
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err := accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
 	if err != nil {
 		q.Error = err.Error()
 		return q

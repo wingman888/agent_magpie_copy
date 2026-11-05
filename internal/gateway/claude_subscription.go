@@ -65,10 +65,6 @@ type bridgeTool struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
-// agentEnvKey carries the environment a Claude Code run needs for the login
-// it serves (see provider.Provider.AgentEnv).
-type agentEnvKey struct{}
-
 func newSubscriptionBridge() *subscriptionBridge {
 	return &subscriptionBridge{runs: map[string]*subscriptionRun{}, calls: map[string]*subscriptionRun{}}
 }
@@ -148,10 +144,6 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model stri
 	cmd := exec.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
 	cmd.Env = cleanClaudeEnv(os.Environ())
-	// a remembered login runs with its own config directory
-	if extra, _ := ctx.Value(agentEnvKey{}).([]string); len(extra) > 0 {
-		cmd.Env = append(cmd.Env, extra...)
-	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cleanup()

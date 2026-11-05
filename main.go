@@ -40,7 +40,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie rm <name>                delete a profile
 
   magpie providers                list your providers: host, key, models, who uses them
-  magpie accounts [claude|codex]  the Claude Code and Codex accounts you signed in to; switch, add, forget
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
@@ -125,8 +124,6 @@ func run(args []string) error {
 		return providers()
 	case "presets":
 		return presets()
-	case "accounts":
-		return accountsCmd(args)
 	case "provider":
 		return providerCmd(args)
 	case "models":

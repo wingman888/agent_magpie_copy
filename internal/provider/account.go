@@ -45,20 +45,6 @@ type Account struct {
 	body   func(body []byte) []byte // request tweaks the backend insists on
 	models func() []catalog.Model
 	fetch  func(ctx context.Context) ([]catalog.Model, error)
-
-	// env, when set, gives the environment an agent needs to run with this
-	// login instead of its own; the func returns a cleanup for it.
-	env func(ctx context.Context) ([]string, func(), error)
-}
-
-// AgentEnv is the environment variables an agent must run with to use this
-// provider's login, plus a cleanup to call when the run is over. A provider
-// whose login is the agent's own needs none.
-func (p Provider) AgentEnv(ctx context.Context) ([]string, func(), error) {
-	if p.Account == nil || p.Account.env == nil {
-		return nil, func() {}, nil
-	}
-	return p.Account.env(ctx)
 }
 
 // Sign authenticates a request to the provider, refreshing what needs it.
@@ -70,7 +56,6 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
-	catalog.SetHeaders(req, p.ExtraHeaders())
 	return nil
 }
 
@@ -361,24 +346,8 @@ func claudeAccount() (Provider, bool) {
 		}
 	}
 	acct := &Account{Agent: "claude", User: user, Plan: plan}
-	acct.sign = claudeSigner(claudeToken)
-	acct.body = claudeBody
-	acct.models = func() []catalog.Model { return catalog.Provider("anthropic") }
-	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := claudeModels(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return ms, catalog.SaveLive("claude", claudeBase, ms)
-	}
-	return Provider{ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Anthropic: claudeBase,
-		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}, true
-}
-
-// claudeSigner authenticates a request with the Claude login token returns.
-func claudeSigner(token func(ctx context.Context) (string, error)) func(ctx context.Context, req *http.Request, body []byte) error {
-	return func(ctx context.Context, req *http.Request, body []byte) error {
-		tok, err := token(ctx)
+	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
+		tok, err := claudeToken(ctx)
 		if err != nil {
 			return err
 		}
@@ -394,6 +363,17 @@ func claudeSigner(token func(ctx context.Context) (string, error)) func(ctx cont
 		}
 		return nil
 	}
+	acct.body = claudeBody
+	acct.models = func() []catalog.Model { return catalog.Provider("anthropic") }
+	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
+		ms, err := claudeModels(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return ms, catalog.SaveLive("claude", claudeBase, ms)
+	}
+	return Provider{ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Anthropic: claudeBase,
+		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}, true
 }
 
 // claudeModels asks Anthropic's Models API, authenticated with the account's
@@ -498,7 +478,7 @@ func claudeToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := tokenClient.Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", errors.New("Claude Code token refresh: " + err.Error())
 	}
@@ -619,17 +599,8 @@ func codexAccount(home string) (Provider, bool) {
 	if acct.User == "" {
 		acct.User = "ChatGPT"
 	}
-	acct.sign = codexSigner(func(ctx context.Context) (string, string, error) { return codexToken(ctx, path) })
-	acct.body = codexBody
-	acct.models = catalog.Codex
-	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
-}
-
-// codexSigner authenticates a request with the ChatGPT login token returns.
-func codexSigner(token func(ctx context.Context) (tok, accountID string, err error)) func(ctx context.Context, req *http.Request, body []byte) error {
-	return func(ctx context.Context, req *http.Request, _ []byte) error {
-		tok, accountID, err := token(ctx)
+	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
+		tok, accountID, err := codexToken(ctx, path)
 		if err != nil {
 			return err
 		}
@@ -641,6 +612,10 @@ func codexSigner(token func(ctx context.Context) (tok, accountID string, err err
 		req.Header.Set("originator", "magpie")
 		return nil
 	}
+	acct.body = codexBody
+	acct.models = catalog.Codex
+	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
+	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI
@@ -667,7 +642,7 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 		return "", "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := tokenClient.Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", "", errors.New("Codex token refresh: " + err.Error())
 	}
