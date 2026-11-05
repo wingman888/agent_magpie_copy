@@ -121,6 +121,19 @@ func accLast(t *testing.T, s *Server) (r Route) {
 	return st.Routes[len(st.Routes)-1]
 }
 
+// accDump logs the last route's candidates and tries, for diagnosis.
+func accDump(t *testing.T, s *Server) {
+	t.Helper()
+	r := accLast(t, s)
+	for _, w := range r.Order {
+		t.Logf("DUMP order id=%s provider=%s model=%s aside=%v fit=%d speaks=%s rest=%v", w.ID, w.Provider, w.Model, w.Aside, w.Fit, w.Speaks, w.Rest != nil)
+	}
+	for _, x := range r.Tries {
+		t.Logf("DUMP try id=%s status=%d fail=%s err=%s", x.ID, x.Status, x.Fail, x.Error)
+	}
+	t.Logf("DUMP left=%d status=%d", len(r.Left), r.Status)
+}
+
 // accBody is a request in group "mine" whose conversation has n user turns.
 func accBody(model string, turns int) string {
 	var msgs []string
@@ -368,9 +381,13 @@ func TestAccProtocolTiers(t *testing.T) {
 		if c := accRoute(t, s, sess, accBody("group/mine", turn)); c != 200 {
 			t.Fatalf("turn %d: %d", turn, c)
 		}
+		if turn == 1 {
+			accDump(t, s)
+		}
 	}
 	keys := u.keys("m1")
 	if fmt.Sprint(keys) != "[k1 k2 k1]" {
+		accDump(t, s)
 		t.Errorf("chat requests went to %v, want k1 k2 k1 only", keys)
 	}
 	// main pool fails: the aside key answers
