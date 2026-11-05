@@ -200,42 +200,46 @@ func modelTail(id string) string {
 	return id
 }
 
-// Match finds the entry a model id names among known models. The id as
-// written is tried first; failing that, a prefixed id is matched by the part
-// after its last "/". As before, the last entry with the id wins.
+// Match finds the entry a model id names among known models: a prefixed id
+// ("deepseek/deepseek-chat") is matched by the part after its last "/" alone.
+// The last entry with that id wins, as the catalog map always did.
 func Match(known []Model, id string) (Model, bool) {
-	for _, want := range []string{id, modelTail(id)} {
-		if want == "" {
-			continue
-		}
-		var got Model
-		found := false
-		for _, m := range known {
-			if m.ID == want {
-				got, found = m, true
-			}
-		}
-		if found {
-			return got, true
+	want := modelTail(id)
+	if want == "" {
+		return Model{}, false
+	}
+	var got Model
+	found := false
+	for _, m := range known {
+		if m.ID == want {
+			got, found = m, true
 		}
 	}
-	return Model{}, false
+	return got, found
+}
+
+// Lookup is Match, except that an id the catalog lists exactly as written
+// wins first, so single-catalog results stay what they were.
+func Lookup(known []Model, id string) (Model, bool) {
+	var got Model
+	found := false
+	for _, m := range known {
+		if m.ID == id {
+			got, found = m, true
+		}
+	}
+	if found {
+		return got, true
+	}
+	return Match(known, id)
 }
 
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
-	byID := make(map[string]Model, len(known))
-	for _, m := range known {
-		byID[m.ID] = m
-	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if !ok {
-			k, ok = Match(known, m.ID)
-		}
-		if ok {
+		if k, ok := Lookup(known, m.ID); ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

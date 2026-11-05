@@ -94,7 +94,7 @@ func (p Provider) Exposed() []catalog.Model {
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
-			if m, ok := catalog.Match(avail, id); ok {
+			if m, ok := catalog.Lookup(avail, id); ok {
 				m.ID = id // keep the id the user wrote; the vendor is asked for that one
 				out = append(out, m)
 			} else {
