@@ -65,13 +65,7 @@ func SaveLive(provider, base string, models []Model) error {
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with extra request headers (a custom provider's own),
-// sent after the key and the version header so they can override them.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -98,7 +92,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOneWith(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,11 +109,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
-	return fetchOneWith(ctx, url, key, anthropic, nil)
-}
-
-func fetchOneWith(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -135,7 +125,11 @@ func fetchOneWith(ctx context.Context, url, key string, anthropic bool, headers 
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	SetHeaders(req.Header, headers)
+	// The user's own headers, after the defaults so a private auth scheme
+	// wins. Written directly so the name keeps the exact case the user typed.
+	for k, v := range headers {
+		req.Header[k] = []string{v}
+	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -180,66 +174,20 @@ type liveModel struct {
 	DisplayName string `json:"display_name"`
 }
 
-// SetHeaders adds extra headers to a request, keeping each name exactly as
-// given (http.Header would otherwise canonicalise it). A name replaces any
-// value already set for it, whatever its case.
-func SetHeaders(h http.Header, extra map[string]string) {
-	for k, v := range extra {
-		delete(h, http.CanonicalHeaderKey(k))
-		delete(h, k)
-		h[k] = []string{v}
-	}
-}
-
-// modelTail is the part of a model id after its last "/", or the id itself
-// when it has none ("deepseek/deepseek-chat" gives "deepseek-chat").
-func modelTail(id string) string {
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		return id[i+1:]
-	}
-	return id
-}
-
-// Match finds the entry a model id names among known models: a prefixed id
-// ("deepseek/deepseek-chat") is matched by the part after its last "/" alone.
-// The last entry with that id wins, as the catalog map always did.
-func Match(known []Model, id string) (Model, bool) {
-	want := modelTail(id)
-	if want == "" {
-		return Model{}, false
-	}
-	var got Model
-	found := false
-	for _, m := range known {
-		if m.ID == want {
-			got, found = m, true
-		}
-	}
-	return got, found
-}
-
-// Lookup is Match, except that an id the catalog lists exactly as written
-// wins first, so single-catalog results stay what they were.
-func Lookup(known []Model, id string) (Model, bool) {
-	var got Model
-	found := false
-	for _, m := range known {
-		if m.ID == id {
-			got, found = m, true
-		}
-	}
-	if found {
-		return got, true
-	}
-	return Match(known, id)
-}
-
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
+	byID := make(map[string]Model, len(known))
+	for _, m := range known {
+		byID[m.ID] = m
+	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := Lookup(known, m.ID); ok {
+		k, ok := byID[m.ID]
+		if i := strings.LastIndexByte(m.ID, '/'); !ok && i >= 0 {
+			k, ok = byID[m.ID[i+1:]] // a gateway's "deepseek/deepseek-chat"
+		}
+		if ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

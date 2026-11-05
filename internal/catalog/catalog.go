@@ -26,6 +26,9 @@ type Model struct {
 	Efforts     []string
 	Temperature *bool  // false when the model refuses temperature/top_p
 	Price       *Price // USD per million tokens, when models.dev lists it
+	// Keys, for a vendor whose keys each see models of their own, are the
+	// keys (by fingerprint) whose list has this one; empty is every key.
+	Keys []string `json:",omitempty"`
 }
 
 // Price is what a model costs, in USD per million tokens.
@@ -301,9 +304,6 @@ func Efforts(models []Model, id string) []string {
 		if m.ID == id && len(m.Efforts) > 0 {
 			return m.Efforts
 		}
-	}
-	if m, ok := Match(models, id); ok && m.ID != id {
-		return m.Efforts
 	}
 	return nil
 }
