@@ -98,3 +98,23 @@ func TestOpenCodeSessionHeaderOnlyForOpenCode(t *testing.T) {
 		t.Errorf("other provider received x-opencode-session = %q", got)
 	}
 }
+
+func TestDeveloperToSystemKeepsOtherBytes(t *testing.T) {
+	in := []byte(`{"model":"m1",  "messages":[{"role":"developer","content":"be <terse> & short"},` +
+		`{"role":"user",   "content":"y  z é"}],"n":12345678901234567890}`)
+	out := developerToSystem(in)
+	want := []byte(`{"model":"m1",  "messages":[{"role":"system","content":"be <terse> & short"},` +
+		`{"role":"user",   "content":"y  z é"}],"n":12345678901234567890}`)
+	if !bytes.Equal(out, want) {
+		t.Errorf("got  %s\nwant %s", out, want)
+	}
+
+	plain := []byte(`{ "messages" : [ { "role" : "user" , "content" : "a & b" } ] }`)
+	if !bytes.Equal(developerToSystem(plain), plain) {
+		t.Errorf("body without developer must be byte-identical")
+	}
+	noMsgs := []byte(`{"input":"hi"}`)
+	if !bytes.Equal(developerToSystem(noMsgs), noMsgs) {
+		t.Errorf("body without messages must be byte-identical")
+	}
+}

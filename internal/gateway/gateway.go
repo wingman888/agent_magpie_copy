@@ -714,34 +714,99 @@ func rewriteModel(body []byte, model string) []byte {
 
 // developerToSystem renames the "developer" role to "system" in a Chat
 // Completions request. Chat backends without a developer role reject the whole
-// request, so Pi's reasoning turns fail without this. A body with no developer
-// message is returned untouched.
+// request, so Pi's reasoning turns fail without this. Only the role values
+// change: every other byte of the body, including the other messages, is kept
+// as sent. A body with no developer message is returned untouched.
 func developerToSystem(body []byte) []byte {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var m map[string]any
-	if err := dec.Decode(&m); err != nil {
-		return body
+	spans := fieldSpans(body)
+	for _, sp := range spans {
+		if sp.key != "messages" {
+			continue
+		}
+		raw := body[sp.start:sp.end]
+		msgs, changed := renameDeveloperRoles(raw)
+		if !changed {
+			return body
+		}
+		out := make([]byte, 0, len(body)+len(msgs))
+		out = append(out, body[:sp.start]...)
+		out = append(out, msgs...)
+		return append(out, body[sp.end:]...)
 	}
-	msgs, ok := m["messages"].([]any)
-	if !ok {
-		return body
+	return body
+}
+
+// renameDeveloperRoles rewrites the developer messages in a messages array.
+// Other elements are copied byte for byte.
+func renameDeveloperRoles(arr []byte) ([]byte, bool) {
+	var items []json.RawMessage
+	if json.Unmarshal(arr, &items) != nil {
+		return nil, false
 	}
 	changed := false
-	for _, v := range msgs {
-		if msg, ok := v.(map[string]any); ok && msg["role"] == "developer" {
-			msg["role"] = "system"
+	var b bytes.Buffer
+	b.WriteByte('[')
+	for i, it := range items {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		var m struct {
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(it, &m) == nil && m.Role == "developer" {
+			it = replaceRole(it)
 			changed = true
 		}
+		b.Write(it)
 	}
-	if !changed {
-		return body
+	b.WriteByte(']')
+	return b.Bytes(), changed
+}
+
+// replaceRole sets every "role" member of a JSON object to "system", leaving
+// the rest of the object's bytes alone.
+func replaceRole(obj []byte) []byte {
+	var out []byte
+	last := 0
+	for _, sp := range fieldSpans(obj) {
+		if sp.key != "role" {
+			continue
+		}
+		out = append(out, obj[last:sp.start]...)
+		out = append(out, `"system"`...)
+		last = sp.end
 	}
-	out, err := json.Marshal(m)
-	if err != nil {
-		return body
+	return append(out, obj[last:]...)
+}
+
+// span is the byte range of one member's value in a JSON object.
+type span struct {
+	key        string
+	start, end int
+}
+
+// fieldSpans returns the byte ranges of the values of a JSON object's members,
+// in document order. It returns nil if obj is not an object.
+func fieldSpans(obj []byte) []span {
+	dec := json.NewDecoder(bytes.NewReader(obj))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil
 	}
-	return out
+	var spans []span
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		key, _ := kt.(string)
+		var raw json.RawMessage
+		if dec.Decode(&raw) != nil {
+			return nil
+		}
+		end := int(dec.InputOffset())
+		spans = append(spans, span{key: key, start: end - len(raw), end: end})
+	}
+	return spans
 }
 
 // withFields sets top-level fields, keeping every other field as it was.

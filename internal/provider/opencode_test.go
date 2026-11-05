@@ -99,3 +99,23 @@ func TestOpenCodeSessionFallbackResponsesAndAnthropic(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenCodeSessionFallbackImageOnlyFirstTurn(t *testing.T) {
+	img := func(data string) []byte {
+		return []byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + data + `"}}]}]}`)
+	}
+	a := OpenCodeSession(nil, img("AAAA"))
+	b := OpenCodeSession(nil, img("BBBB"))
+	if !strings.HasPrefix(a, "magpie-") || !strings.HasPrefix(b, "magpie-") {
+		t.Fatalf("got %q, %q", a, b)
+	}
+	if a == b {
+		t.Errorf("different image-only conversations share %q", a)
+	}
+	if again := OpenCodeSession(nil, img("AAAA")); again != a {
+		t.Errorf("same image-only conversation changed id: %q vs %q", again, a)
+	}
+	if e1, e2 := OpenCodeSession(nil, []byte(`{"input":""}`)), OpenCodeSession(nil, []byte(`{"input":"x"}`)); e1 == e2 {
+		t.Errorf("empty input collides with non-empty input")
+	}
+}

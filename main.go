@@ -178,6 +178,9 @@ func set(a *agent.Agent, key, value string) error {
 func fieldForValue(a *agent.Agent, v string) *agent.Field {
 	vals := a.Values()
 	for i := 1; i < len(a.Fields); i++ {
+		if a.Fields[i].Extra {
+			continue
+		}
 		for _, o := range a.Fields[i].Options(vals) {
 			if o.Value == v {
 				return &a.Fields[i]
@@ -205,6 +208,9 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
+				if f.Extra && v == "" {
+					continue
+				}
 				if v == "" {
 					v = faint.Render("—")
 				}

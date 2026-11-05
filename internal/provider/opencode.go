@@ -60,48 +60,64 @@ func OpenCodeSession(in http.Header, body []byte) string {
 			return v
 		}
 	}
-	sum := sha256.Sum256([]byte(firstUserText(body)))
+	text, raw := firstUser(body)
+	seed := []byte(text)
+	if text == "" {
+		// No text to key on (images, tool results, no user item): hash the raw
+		// JSON so different conversations still get different ids.
+		seed = append([]byte("raw:"), raw...)
+	}
+	sum := sha256.Sum256(seed)
 	return "magpie-" + hex.EncodeToString(sum[:])[:16]
 }
 
-// firstUserText returns the text of the first user turn in a request body.
-func firstUserText(body []byte) string {
+// firstUser returns the text of the first user turn in a request body. When
+// that text is empty it returns the raw JSON of the user turn instead, or of
+// the whole messages/input when there is no user turn.
+func firstUser(body []byte) (string, []byte) {
 	var v struct {
-		Messages []json.RawMessage `json:"messages"`
-		Input    json.RawMessage   `json:"input"`
+		Messages json.RawMessage `json:"messages"`
+		Input    json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &v) != nil {
-		return ""
+		return "", body
 	}
+	list := v.Messages
 	if len(v.Input) > 0 {
 		var s string
 		if json.Unmarshal(v.Input, &s) == nil {
-			return s
+			if s != "" {
+				return s, nil
+			}
+			return "", v.Input
 		}
-		var items []json.RawMessage
-		json.Unmarshal(v.Input, &items)
-		if t, ok := userTurn(items); ok {
-			return t
+		list = v.Input
+	}
+	var items []json.RawMessage
+	json.Unmarshal(list, &items)
+	if t, r, ok := userTurn(items); ok {
+		if t != "" {
+			return t, nil
 		}
-		return ""
+		return "", r
 	}
-	if t, ok := userTurn(v.Messages); ok {
-		return t
+	if len(list) == 0 {
+		return "", body
 	}
-	return ""
+	return "", list
 }
 
-func userTurn(items []json.RawMessage) (string, bool) {
+func userTurn(items []json.RawMessage) (string, json.RawMessage, bool) {
 	for _, raw := range items {
 		var m struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		}
 		if json.Unmarshal(raw, &m) == nil && m.Role == "user" {
-			return contentText(m.Content), true
+			return contentText(m.Content), raw, true
 		}
 	}
-	return "", false
+	return "", nil, false
 }
 
 // contentText flattens message content: a plain string, or the text parts of
