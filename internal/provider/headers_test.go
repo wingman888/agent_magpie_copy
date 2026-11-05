@@ -1,193 +1,84 @@
 package provider
 
 import (
-	"bufio"
 	"context"
-	"fmt"
-	"io"
-	"net"
 	"net/http"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
 	"testing"
-
-	"github.com/yetone/magpie/internal/catalog"
 )
 
-// rawServer answers every request with body and keeps each request's header
-// block as it arrived on the wire. net/http would canonicalize the names, and
-// the point of these tests is the case the user typed.
-type rawServer struct {
-	mu    sync.Mutex
-	heads []string
-}
-
-func newRawServer(t *testing.T, body string) (string, *rawServer) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ln.Close() })
-	rs := &rawServer{}
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go rs.serve(conn, body)
-		}
-	}()
-	return "http://" + ln.Addr().String(), rs
-}
-
-func (rs *rawServer) serve(conn net.Conn, body string) {
-	defer conn.Close()
-	br := bufio.NewReader(conn)
-	var head strings.Builder
-	length := 0
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
-			return
-		}
-		head.WriteString(line)
-		if line == "\r\n" {
-			break
-		}
-		if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(k), "content-length") {
-			length, _ = strconv.Atoi(strings.TrimSpace(v))
-		}
-	}
-	_, _ = io.CopyN(io.Discard, br, int64(length))
-	rs.mu.Lock()
-	rs.heads = append(rs.heads, head.String())
-	rs.mu.Unlock()
-	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
-}
-
-func (rs *rawServer) seen() []string {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	return append([]string(nil), rs.heads...)
-}
-
-// isolateConfig points magpie's config and cache at a temp dir.
-func isolateConfig(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
-}
-
-const modelList = `{"data":[{"id":"demo-chat"}]}`
-
-func TestCustomHeadersReachEveryRequest(t *testing.T) {
-	isolateConfig(t)
-	base, rs := newRawServer(t, modelList)
-	err := Save(Provider{Name: "Team Relay", Chat: base + "/v1", Key: "sk-test",
-		Headers: map[string]string{"  X-Org-Id ": " acme ", "": "dropped"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, err := Find("team-relay")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Headers) != 1 || p.Headers["X-Org-Id"] != "acme" {
-		t.Fatalf("headers after save = %v, want only X-Org-Id=acme", p.Headers)
-	}
-	res := p.Test(context.Background())
-	if len(res) != 1 || !res[0].OK {
-		t.Fatalf("test result = %+v, want one OK probe", res)
-	}
-	heads := rs.seen()
-	if len(heads) < 2 {
-		t.Fatalf("saw %d requests, want the model list and the probe", len(heads))
-	}
-	for _, h := range heads {
-		if !strings.Contains(h, "\r\nX-Org-Id: acme\r\n") {
-			t.Errorf("request without the exact-case header:\n%s", h)
-		}
-	}
-}
-
-func TestPresetIgnoresCustomHeaders(t *testing.T) {
-	isolateConfig(t)
-	base, rs := newRawServer(t, modelList)
-	err := Save(Provider{Preset: "deepseek", Name: "DeepSeek", Chat: base + "/v1", Key: "sk-test",
-		Headers: map[string]string{"X-Org-Id": "acme"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, err := Find("deepseek")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Headers) != 0 || len(p.CustomHeaders()) != 0 {
-		t.Fatalf("preset kept headers %v", p.Headers)
-	}
-	p.Test(context.Background())
-	heads := rs.seen()
-	if len(heads) == 0 {
-		t.Fatal("no request reached the server")
-	}
-	for _, h := range heads {
-		if strings.Contains(h, "X-Org-Id") {
-			t.Errorf("preset sent a custom header:\n%s", h)
-		}
-	}
-}
-
-func TestCleanHeaders(t *testing.T) {
-	got := cleanHeaders(map[string]string{
-		" X-A ":     " 1 ",
-		"":          "empty name",
-		"   ":       "blank name",
-		"Bad Name":  "space in name",
-		"X-B":       "a\r\nInjected: 1",
-		"X-Keep-Eq": "",
-		"X-Other":   "x",
-	})
-	want := map[string]string{"X-A": "1", "X-Keep-Eq": "", "X-Other": "x"}
-	if len(got) != len(want) {
-		t.Fatalf("cleanHeaders = %v, want %v", got, want)
+func TestAccCleanHeadersTrimsAndDropsEmptyNames(t *testing.T) {
+	p := normalize(Provider{ID: "x", Chat: "https://x.example.com/v1", Headers: map[string]string{
+		" X-Org-Id ": " acme ",
+		"":           "dropped",
+		"   ":        "dropped too",
+		"x-Gw":       "v",
+	}})
+	want := map[string]string{"X-Org-Id": "acme", "x-Gw": "v"}
+	if len(p.Headers) != len(want) {
+		t.Fatalf("Headers = %v, want %v", p.Headers, want)
 	}
 	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("cleanHeaders[%q] = %q, want %q", k, got[k], v)
+		if p.Headers[k] != v {
+			t.Errorf("Headers[%q] = %q, want %q", k, p.Headers[k], v)
 		}
 	}
-	if cleanHeaders(map[string]string{" ": "x"}) != nil {
-		t.Error("an empty map should clean to nil so nothing is written")
+
+	empty := normalize(Provider{ID: "y", Chat: "https://y.example.com/v1", Headers: map[string]string{"  ": "x"}})
+	if empty.Headers != nil {
+		t.Errorf("a map with only empty names should normalise to nil, got %v", empty.Headers)
 	}
 }
 
-func TestSetHeaderExactReplacesCaseVariants(t *testing.T) {
-	h := http.Header{}
-	h["User-Agent"] = []string{"magpie"}
-	catalog.SetHeaderExact(h, "user-agent", "custom")
-	if len(h) != 1 || h["user-agent"][0] != "custom" {
-		t.Fatalf("header = %v, want only user-agent: custom", h)
+func TestAccCustomHeadersKeepCaseAndOverrideAuth(t *testing.T) {
+	p := Provider{ID: "x", Key: "sk-test", Chat: "https://api.example.com/v1",
+		Headers: map[string]string{"x-org-id": "acme", "Authorization": "Custom token"}}
+	req, err := http.NewRequest(http.MethodPost, "https://api.example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	catalog.SetHeaderExact(h, "X-Org-Id", "acme")
-	if h["X-Org-Id"][0] != "acme" {
-		t.Fatalf("exact name not kept: %v", h)
+	if err := p.Sign(context.Background(), req, Chat, nil); err != nil {
+		t.Fatal(err)
+	}
+	if v := req.Header["x-org-id"]; len(v) != 1 || v[0] != "acme" {
+		t.Errorf(`req.Header["x-org-id"] = %v, want [acme] sent with its own case`, v)
+	}
+	if _, ok := req.Header["X-Org-Id"]; ok {
+		t.Error("header name should not be canonicalised")
+	}
+	if v := req.Header.Values("Authorization"); len(v) != 1 || v[0] != "Custom token" {
+		t.Errorf("Authorization = %v, want the custom header to override the key", v)
 	}
 }
 
-func TestValidHeader(t *testing.T) {
-	for _, ok := range []string{"X-Org-Id", "x_gateway.token", "A"} {
-		if !ValidHeader(ok) {
-			t.Errorf("ValidHeader(%q) = false", ok)
-		}
+func TestAccPresetsAndAccountsIgnoreHeaders(t *testing.T) {
+	hdrs := map[string]string{"X-Org-Id": "acme"}
+	preset := Provider{ID: "deepseek", Preset: "deepseek", Key: "sk", Chat: "https://api.deepseek.com/v1", Headers: hdrs}
+	if got := preset.ExtraHeaders(); got != nil {
+		t.Errorf("preset ExtraHeaders = %v, want none", got)
 	}
-	for _, bad := range []string{"", "Bad Name", "X:Y", "héllo"} {
-		if ValidHeader(bad) {
-			t.Errorf("ValidHeader(%q) = true", bad)
-		}
+	req, _ := http.NewRequest(http.MethodPost, "https://api.deepseek.com/v1/chat/completions", nil)
+	if err := preset.Sign(context.Background(), req, Chat, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := req.Header["X-Org-Id"]; ok {
+		t.Error("a preset must not send custom headers")
+	}
+	account := Provider{ID: "acct", Headers: hdrs, Account: &Account{}}
+	if got := account.ExtraHeaders(); got != nil {
+		t.Errorf("account ExtraHeaders = %v, want none", got)
+	}
+	custom := Provider{ID: "custom", Headers: hdrs}
+	if got := custom.ExtraHeaders(); got["X-Org-Id"] != "acme" {
+		t.Errorf("custom ExtraHeaders = %v, want X-Org-Id", got)
+	}
+}
+
+func TestAccCatalogIDsSplitsList(t *testing.T) {
+	got := CatalogIDs(" openai, deepseek ,,")
+	if len(got) != 2 || got[0] != "openai" || got[1] != "deepseek" {
+		t.Errorf("CatalogIDs = %v, want [openai deepseek]", got)
+	}
+	if n := normalize(Provider{ID: "c", Chat: "https://c.example.com/v1", Catalog: " openai ,deepseek"}).Catalog; n != "openai,deepseek" {
+		t.Errorf("normalised catalog = %q, want openai,deepseek", n)
 	}
 }
