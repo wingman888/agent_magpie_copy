@@ -3,26 +3,34 @@ package main
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestUntilShort(t *testing.T) {
-	for d, want := range map[time.Duration]string{
-		-time.Minute:                  "now",
-		45 * time.Minute:              "45m",
-		2*time.Hour + 13*time.Minute:  "2h13m",
-		76*time.Hour + 30*time.Minute: "3d4h",
+// An unknown agent, or a bad argument count, is an error that carries the
+// usage text, which names both agents and the cc alias.
+func TestAccountsUnknownAgentShowsUsage(t *testing.T) {
+	for _, args := range [][]string{
+		{"gemini"},
+		{"switch", "gemini", "me@example.com"},
+		{"forget", "gemini", "me@example.com"},
+		{"add", "gemini"},
+		{"switch", "claude"},
+		{"add"},
 	} {
-		if got := untilShort(d); got != want {
-			t.Errorf("%v: %q, want %q", d, got, want)
+		err := accountsCmd(args)
+		if err == nil {
+			t.Fatalf("accountsCmd(%q) succeeded, want an error", args)
+		}
+		msg := err.Error()
+		for _, want := range []string{"claude", "cc", "codex", "usage:"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("accountsCmd(%q) error lacks %q:\n%s", args, want, msg)
+			}
 		}
 	}
 }
 
-func TestQuotaCell(t *testing.T) {
-	at := time.Now().Add(2*time.Hour + 13*time.Minute + 30*time.Second)
-	got := quotaCell(quotaSpan{Name: "5 hours", Used: 42, ResetsAt: &at})
-	if !strings.HasPrefix(got, "5h 42%") || !strings.Contains(got, "↻2h13m") {
-		t.Fatalf("%q", got)
+func TestAgentLabels(t *testing.T) {
+	if agentLabel("claude") != "Claude Code" || agentLabel("codex") != "Codex" {
+		t.Fatal("unexpected agent labels")
 	}
 }

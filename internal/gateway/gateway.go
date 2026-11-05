@@ -67,12 +67,12 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
-	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	Fallback          string            `json:"fallback,omitempty"` // providers or keys that failed before this one answered
 }
 
 // Server is the gateway.
@@ -85,7 +85,9 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	trace        trace // what routing did with each request, for the Gateway view
+	// keyCool is when a key last failed, by provider and key ref; such a
+	// key is tried after the others for a minute.
+	keyCool map[string]time.Time
 }
 
 // New makes a gateway.
@@ -162,7 +164,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("POST /_magpie/claude-mcp/{token}", s.subscription.mcpCall)
-	mux.HandleFunc(CodexPath+"/", s.codexBackend)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
 	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +216,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	p, model, ok := provider.Resolve(modelOf(body))
 	// Claude Subscription generations run through the Claude Code binary. Its
 	// OAuth token must not take a direct HTTP side path just for token counting.
-	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok") {
+	if ok && p.Account != nil && p.Account.Agent == "claude" {
 		req, err := parseAnthropic(body)
 		if err != nil {
 			writeError(w, provider.Anthropic, 400, err.Error())
@@ -224,20 +225,8 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok {
-		// a relay's OpenAI-only key can't count Anthropic tokens
-		q := p
-		q.Anthropic = ""
-		for _, c := range perKey(p, model, provider.Anthropic) {
-			if c.p.Anthropic != "" {
-				q = c.p
-				break
-			}
-		}
-		p = q
-	}
-	if ok && p.Anthropic != "" {
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+	if view, can := countView(p, ok, model); can {
+		res, err := s.forward(r.Context(), view, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
 			if res.StatusCode < 400 {
@@ -349,28 +338,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	// a routing group is one model to the agent, and routed over its members
-	var grp *provider.Group
-	var members []provider.Member
-	var p provider.Provider
-	var model string
-	var ok bool
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(call.Model)), "group/") {
-		if gg, ms, found := provider.FindGroup(call.Model); found {
-			if len(ms) == 0 {
-				call.Status, call.Error = 404, "no model ready"
-				writeError(w, from, 404, "路由组 "+gg.ID+" 没有模型就绪")
-				finishCapture()
-				s.record(call)
-				return
-			}
-			grp, members, ok = &gg, ms, true
-			p, model = provider.Provider{ID: "group/" + gg.ID, Routing: gg.Routing}, call.Model
-		}
-	}
-	if !ok {
-		p, model, ok = provider.Resolve(call.Model)
-	}
+	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
@@ -384,133 +352,50 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// the primary, then its fallbacks while it can't take the request and
-	// nothing has been sent yet
-	// the conversation's session and route, by which affinity and rotation
-	// go: a provider's model, or a routing group
-	sid := sessionID(r.Header)
-	turns, within := turnsOf(from, body)
-	routeKey := p.ID + "/" + strings.ToLower(model)
-	mode := p.Affinity
-	if grp != nil {
-		routeKey = "group/" + grp.ID
-		mode = grp.Affinity
-		if mode == "" {
-			mode = members[0].Provider.Affinity
-		}
-	}
-	mode = affinityMode(mode)
-	t := &turnScope{key: routeKey, within: within}
-	if conv, have := conversationOf(sid, routeKey, start); have && within {
-		t.start = conv.start
-	}
-	var cands []candidate
-	var pl planned
-	if grp != nil {
-		cands, pl = s.planGroup(*grp, members, from, t)
-	} else {
-		cands, pl = s.planT(p, model, from, t)
-	}
-	if t.picked != "" {
-		touchConversation(sid, routeKey, start, func(c *conversation) { c.start = t.picked })
-	}
-	cands, aff := affine(cands, from, mode, sid, routeKey, turns, within, start)
-	rt := Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left, Affinity: aff}
-	if grp != nil {
-		rt.Group = groupTrace(*grp, members)
-	}
-	tr := s.trace.begin(rt)
-	var skipped []string
-	answered := ""
-	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		began := time.Now()
-		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
-		if !last && hw.failed() {
-			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
-			try.Fail, try.Rest = rest.Why, &rest
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			skipped = append(skipped, c.label()+": "+call.Error)
-			continue
-		}
-		hw.release()
-		model = c.model
-		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			answered = c.rest
-		} else {
-			try.Fail = failure(call.Status, []byte(call.Error))
-		}
-		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-		break
-	}
-	if answered != "" {
-		// what the conversation's next request may find cached here
-		touchConversation(sid, routeKey, time.Now(), func(c *conversation) {
-			c.last, c.at, c.cacheRead = answered, time.Now(), call.Usage.CacheRead
-		})
-	}
-	if len(skipped) > 0 {
-		call.Fallback = strings.Join(skipped, "; ")
-	}
-	call.Millis = time.Since(start).Milliseconds()
-	finishCapture()
-	s.trace.update(tr, func(t *Route) {
-		t.Done, t.Status, t.Error, t.Millis = true, call.Status, call.Error, call.Millis
-		t.Tokens = call.Usage.Input + call.Usage.Output + call.Usage.CacheRead + call.Usage.CacheWrite
-	})
-	s.record(call)
-	if call.To != "" {
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-	}
-}
-
-// attempt sends a request to one provider. call.To stays empty when the
-// provider has no endpoint to send it to.
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
+	call.Provider = p.ID
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
 		call.To = provider.Anthropic
-		return s.serveClaudeSubscription(w, r, from, p, model, body, &call.Usage)
-	}
-	// Cursor's API belongs to its own clients: its CLI does the talking
-	if p.Account != nil && p.Account.Agent == "cursor" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startCursor(ctx, req, model)
-		}
-		return s.serveSubscription(w, r, from, "Cursor", model, body, &call.Usage, start)
-	}
-	// and so does Grok's
-	if p.Account != nil && p.Account.Agent == "grok" {
-		call.To = from
-		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-			return s.subscription.startGrok(ctx, req, model, p.Account.Home)
-		}
-		return s.serveSubscription(w, r, from, "Grok", model, body, &call.Usage, start)
+		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
 	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
+	if p.Account != nil && len(p.Account.Alternates()) > 0 {
+		call.To, call.Status, call.Error, call.Fallback = s.serveAccounts(w, r, p, from, model, body, &call.Usage)
+	} else if p.Account == nil && p.Routed() {
+		call.To, call.Status, call.Error, call.Fallback = s.serveKeys(w, r, p, from, model, body, &call.Usage)
+	} else if relay {
 		call.To = from
-		return s.passthrough(w, r, p, from, model, body, &call.Usage)
+		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+	} else {
+		to := p.Speaks()
+		if len(to) == 0 {
+			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
+			writeError(w, from, call.Status, call.Error)
+			call.Millis = time.Since(start).Milliseconds()
+			finishCapture()
+			s.record(call)
+			return
+		}
+		call.To = to[0]
+		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 	}
-	to := p.Speaks()
-	if len(to) == 0 {
-		msg := p.Name + " has no endpoint configured"
-		return writeError(w, from, 502, msg), msg
-	}
-	call.To = to[0]
-	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+	call.Millis = time.Since(start).Milliseconds()
+	finishCapture()
+	s.record(call)
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
 // forward sends a request to the provider.
@@ -555,7 +440,6 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
 	rd, sse := eventStream(res)
@@ -698,7 +582,6 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(actual)
