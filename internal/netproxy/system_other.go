@@ -2,5 +2,6 @@
 
 package netproxy
 
-// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
-func system() Proxy { return Proxy{} }
+// systemConfig has no system proxy source off macOS and Windows: Linux
+// relies on the environment alone.
+var systemConfig = func() (*sysConfig, error) { return nil, nil }
