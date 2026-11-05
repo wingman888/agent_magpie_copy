@@ -314,18 +314,43 @@ func restOf(id string) (Rest, bool) {
 
 // quotaWords are how vendors say "out of quota" or "slow down" when their
 // status code doesn't: some answer 400 or 403 with it.
-var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
+var quotaWords = regexp.MustCompile(`(?i)quota|insufficient.{0,12}(balance|quota|credit)|billing|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
 
 // retryable says whether another provider may do better with a request
-// that failed this way.
+// that failed this way. A 400 or 422 counts only when its words say the
+// account is out of quota or the model is not there for it; other 400s
+// (bad parameters, a context too long) are the request's own fault.
 func retryable(status int, body []byte) bool {
 	switch {
-	case status == 402, status == 408, status == 429, status >= 500:
+	case status == 401, status == 402, status == 403, status == 404, status == 408, status == 429, status >= 500:
 		return true
-	case status == 400, status == 401, status == 403:
-		return quotaWords.Match(body)
+	case status == 400, status == 422:
+		return refusedModel(body)
 	}
 	return false
+}
+
+// contextWords say the request itself is too big; that is no reason to try
+// another provider, whatever else the words hold.
+var contextWords = regexp.MustCompile(`(?i)context.{0,3}(length|window)|too long|maximum.{0,30}(token|length|context)|token limit|too many tokens|上下文|超长|超出.{0,8}(长度|限制)`)
+
+// modelGoneWords say the model is not there for the account or the key:
+// unknown, unsupported, not enabled, or no permission to use it.
+// The phrases about the model must name it: a bare "not supported" is how
+// vendors refuse a parameter ("temperature is not supported with this model").
+// The endpoint phrases ("use v1/responses") are notChatModel's.
+var modelGoneWords = regexp.MustCompile(`(?i)model.{0,60}(not[ _](found|exist|exists|supported|available|accessible|allowed|enabled|activated|authorized)|does not exist|doesn't exist|unsupported|unavailable|no access|not have access|permission|不存在|不支持|不可用|无权限|无权访问|未开通|没有权限|不可访问)|unsupported[ _]model|unsupported_api_for_model|模型.{0,15}(不存在|不支持|不可用|无权限|无权访问|未开通|没有权限|不可访问)|未开通|无权限`)
+
+// refusedModel is whether a 400 or 422 reply says another provider may
+// serve the request: the model is not there, or the account is out of quota.
+func refusedModel(body []byte) bool {
+	if notChatModel(400, body) || modelGoneWords.Match(body) {
+		return true
+	}
+	if contextWords.Match(body) {
+		return false
+	}
+	return quotaWords.Match(body)
 }
 
 // holdWriter keeps an error reply back while another provider may still

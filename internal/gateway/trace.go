@@ -88,6 +88,12 @@ type Try struct {
 	Fail   string    `json:"fail,omitempty"` // why it failed, as rest tells it
 	Error  string    `json:"error,omitempty"`
 	Rest   *Rest     `json:"rest,omitempty"` // how long it now sits out; none when it was the last to try
+	// Retry: it failed in a way that may heal, and the last candidate tries
+	// again after Wait milliseconds
+	Retry bool  `json:"retry,omitempty"`
+	Wait  int64 `json:"wait,omitempty"`
+	// Canceled: the agent went away while it was tried; nothing rests for it
+	Canceled bool `json:"canceled,omitempty"`
 }
 
 type planned struct {

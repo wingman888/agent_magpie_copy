@@ -32,7 +32,7 @@ type Model struct {
 	// APIs, for a vendor whose own list says which endpoints serve the
 	// model, are those endpoints: "chat", "responses", "anthropic". Empty
 	// is unknown. Kept with the fetched list (see live.go).
-	APIs []string `json:"apis,omitempty"`
+	APIs []string `json:",omitempty"`
 }
 
 // Price is what a model costs, in USD per million tokens.

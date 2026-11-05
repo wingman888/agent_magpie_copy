@@ -213,6 +213,7 @@ func TestServerErrorsDoNotMoveEndpoint(t *testing.T) {
 		Chat: up.URL + "/v1", Responses: up.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}
+	quickRetries(t)
 	h := New().Handler()
 	body := `{"model":"m1","messages":[{"role":"user","content":"hello"}]}`
 	for i := 1; i <= 2; i++ {
@@ -221,7 +222,8 @@ func TestServerErrorsDoNotMoveEndpoint(t *testing.T) {
 			t.Fatalf("request %d: status %d, want the 500 passed on: %s", i, code, out)
 		}
 	}
-	if f.calls["/v1/chat/completions"] != 2 || f.calls["/v1/responses"] != 0 {
+	// the only candidate is tried again twice on a 500 before it is passed on
+	if f.calls["/v1/chat/completions"] != 6 || f.calls["/v1/responses"] != 0 {
 		t.Fatalf("calls: %v", f.calls)
 	}
 }
@@ -251,6 +253,7 @@ func TestRoutesOrderByVendor(t *testing.T) {
 		{"other vendor's gpt-oss", other, "openai/gpt-oss-120b", []provider.Protocol{provider.Chat, provider.Responses}},
 		{"copilot gpt", copilot, "gpt-5.5", []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}},
 		{"copilot claude", copilot, "claude-opus-5.5", []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}},
+		{"copilot gpt-oss is another vendor's", copilot, "openai/gpt-oss-120b", []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}},
 	}
 	for _, tc := range cases {
 		var got []provider.Protocol
@@ -269,6 +272,50 @@ func TestRoutesOrderByVendor(t *testing.T) {
 	}
 	if got := s.routes(openai, "o4-mini", provider.Gemini, []byte(`{}`)); len(got) != 2 || got[0].to != provider.Responses {
 		t.Errorf("refusal leaked to another model: %v", got)
+	}
+
+	// when every endpoint is remembered as refusing, the memory is set aside
+	// rather than leaving the model with no route at all
+	s.markRefused("oa", "gpt-6-sol", provider.Chat)
+	if got := s.routes(openai, "gpt-6-sol", provider.Gemini, []byte(`{}`)); len(got) != 2 {
+		t.Errorf("all refused: routes %v, want every endpoint tried again", got)
+	}
+}
+
+// count_tokens goes to the provider only when its list says the model is
+// served at Anthropic's API; an unknown list is not probed.
+func TestCountTokensNeedsDeclaredAnthropic(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apis  []string // nil: the list says nothing about the model
+		calls int
+	}{
+		{"list says nothing", nil, 0},
+		{"declared for anthropic", []string{"anthropic"}, 1},
+		{"declared for chat only", []string{"chat"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &endpointFake{
+				reply: map[string]string{"/v1/messages/count_tokens": `{"input_tokens":7}`},
+				calls: map[string]int{},
+			}
+			up := endpointUpstream(t, f)
+			if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"claude-x"},
+				Chat: up.URL + "/v1", Anthropic: up.URL}); err != nil {
+				t.Fatal(err)
+			}
+			if err := catalog.SaveLive("fake", up.URL, []catalog.Model{{ID: "claude-x", APIs: tc.apis}}); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
+			code, out := serveAt(New().Handler(), "/v1/messages/count_tokens", body)
+			if code != 200 || !strings.Contains(out, "input_tokens") {
+				t.Fatalf("%d %s", code, out)
+			}
+			if f.calls["/v1/messages/count_tokens"] != tc.calls {
+				t.Fatalf("count_tokens calls %v, want %d", f.calls, tc.calls)
+			}
+		})
 	}
 }
 

@@ -904,7 +904,9 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		if copilotUserTurn(body) {
 			req.Header.Set("X-Initiator", "user")
 		}
-		if copilotHasImage(body) {
+		// the Chat test is the one it always was; the structural one adds the
+		// Responses and Anthropic image parts
+		if bytes.Contains(body, []byte(`"image_url"`)) || copilotHasImage(body) {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil

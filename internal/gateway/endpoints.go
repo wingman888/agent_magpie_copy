@@ -33,10 +33,19 @@ func answerRefusal(w http.ResponseWriter, from provider.Protocol, ref *refusal) 
 // routes lists the endpoints a request for model may go to, first choice
 // first: the agent's own API when the provider serves the model there, then
 // translations to the other APIs the provider serves the model at. Endpoints
-// remembered as refusing the model are left out.
+// remembered as refusing the model are left out, unless that leaves nothing
+// to try: a memory must not make the model unreachable for good.
 func (s *Server) routes(p provider.Provider, model string, from provider.Protocol, body []byte) []endpointRoute {
+	if out := s.routesWith(p, model, from, body, true); len(out) > 0 {
+		return out
+	}
+	return s.routesWith(p, model, from, body, false)
+}
+
+// routesWith is routes, with or without the endpoints remembered as refusing.
+func (s *Server) routesWith(p provider.Provider, model string, from provider.Protocol, body []byte, remembered bool) []endpointRoute {
 	usable := func(pr provider.Protocol) bool {
-		return p.Base(pr) != "" && declares(p, model, pr) && !s.refusedEndpoint(p.ID, model, pr)
+		return p.Base(pr) != "" && declares(p, model, pr) && !(remembered && s.refusedEndpoint(p.ID, model, pr))
 	}
 	var out []endpointRoute
 	relay := usable(from) && relayable(p, from, body)
@@ -82,6 +91,10 @@ func openAIFirst(p provider.Provider, model string) bool {
 	id := strings.ToLower(model)
 	if i := strings.LastIndexByte(id, '/'); i >= 0 {
 		id = id[i+1:]
+	}
+	// gpt-oss is an open-weight model of another vendor, served as such
+	if strings.HasPrefix(id, "gpt-oss") {
+		return false
 	}
 	if strings.HasPrefix(id, "gpt-") || strings.HasPrefix(id, "codex") {
 		return true

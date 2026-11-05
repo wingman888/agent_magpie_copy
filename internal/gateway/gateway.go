@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -237,9 +238,10 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		p = q
 	}
-	// the provider is asked only when the model is known to serve Anthropic's
-	// API here; a model its list gives other APIs only is not probed
-	if ok && p.Anthropic != "" && declares(p, model, provider.Anthropic) && !s.refusedEndpoint(p.ID, model, provider.Anthropic) {
+	// the provider is asked only when its list says the model is served at
+	// Anthropic's API here; a model whose APIs are unknown, or given other
+	// APIs only, is not probed
+	if ok && p.Anthropic != "" && slices.Contains(p.APIs(model), provider.Anthropic) && !s.refusedEndpoint(p.ID, model, provider.Anthropic) {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
@@ -402,33 +404,66 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Affinity: aff, Order: pl.order, Left: pl.left})
 	var skipped []string
+candidates:
 	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		began := time.Now()
-		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
-		if !last && hw.failed() {
-			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
-			try.Fail, try.Rest = rest.Why, &rest
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			skipped = append(skipped, c.label()+": "+call.Error)
-			continue
-		}
-		hw.release()
-		model = c.model
-		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			if aff != nil {
-				answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
+		last := i == len(cands)-1
+		// the last candidate is tried again while its failure may heal
+		for retries := 0; ; retries++ {
+			// a failed reply is held back until it is known whether another
+			// try answers the request, or it is handed on
+			hw := newHoldWriter(w, true)
+			call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+			began := time.Now()
+			s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
+			call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+			try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
+			if call.Status >= 400 && r.Context().Err() != nil {
+				// the agent went away while the try failed: no candidate is
+				// blamed, and none is asked again. A reply already complete
+				// is not a cancel, whenever the agent left.
+				call.Status, call.Error = 499, "canceled"
+				try.Status, try.Error, try.Canceled = call.Status, call.Error, true
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+				break candidates
 			}
-		} else {
-			try.Fail = failure(call.Status, []byte(call.Error))
+			if hw.failed() {
+				if !last {
+					rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
+					try.Fail, try.Rest = rest.Why, &rest
+					s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+					skipped = append(skipped, c.label()+": "+call.Error)
+					break
+				}
+				if wait, ok := retryDelay(hw.status, hw.header, retries); ok {
+					try.Retry, try.Wait = true, wait.Milliseconds()
+					s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+					skipped = append(skipped, fmt.Sprintf("%s: %s (retried after %dms)", c.label(), call.Error, try.Wait))
+					if !sleepCtx(r.Context(), wait) {
+						// the agent went away while the retry waited: this is a
+						// cancel, not a retry, and nothing rests for it
+						call.Status, call.Error = 499, "canceled"
+						try.Retry, try.Wait = false, 0
+						try.Status, try.Error, try.Canceled = call.Status, call.Error, true
+						s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+						break candidates
+					}
+					continue
+				}
+			}
+			hw.release()
+			model = c.model
+			if call.Status < 400 {
+				served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+				clearRest(c.rest)
+				if aff != nil {
+					answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
+				}
+			} else {
+				try.Fail = failure(call.Status, []byte(call.Error))
+			}
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			break candidates
 		}
-		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-		break
 	}
 	if len(skipped) > 0 {
 		call.Fallback = strings.Join(skipped, "; ")
@@ -484,7 +519,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		return writeError(w, from, 502, msg), msg
 	}
 	var last *refusal
-	for i, rt := range routes {
+	for _, rt := range routes {
 		call.To = rt.to
 		var ref *refusal
 		var status int
@@ -500,9 +535,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		// refused before anything reached the agent: the next endpoint is
 		// tried, and this one is remembered as not serving the model
 		last = ref
-		if i < len(routes)-1 {
-			s.markRefused(p.ID, model, rt.to)
-		}
+		s.markRefused(p.ID, model, rt.to)
 	}
 	return answerRefusal(w, from, last)
 }
@@ -567,6 +600,16 @@ func (s *Server) relayOnce(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return nil, writeError(w, proto, res.StatusCode, msg), msg
 	}
 	rd, sse := eventStream(res)
+	if sse {
+		// nothing is written until the stream has content: an error before
+		// it is the candidate's failure, and another may answer instead
+		held, stop, fail := holdStream(rd, proto)
+		defer stop()
+		if fail != nil {
+			return nil, writeError(w, proto, fail.status, p.Name+": "+fail.msg), fail.msg
+		}
+		rd = held
+	}
 	h := w.Header()
 	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
 		if v := res.Header.Get(k); v != "" {
@@ -707,6 +750,14 @@ func (s *Server) translateOnce(w http.ResponseWriter, r *http.Request, p provide
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return nil, writeError(w, from, 502, msg), msg
 	}
+	// nothing is written until the stream has content: an error before it is
+	// the candidate's failure, and another may answer instead
+	held, stop, fail := holdStream(rd, actual)
+	defer stop()
+	if fail != nil {
+		return nil, writeError(w, from, fail.status, p.Name+": "+fail.msg), fail.msg
+	}
+	rd = held
 	if stream {
 		enc := encoder(from, newSSEWriter(w), request.Model)
 		var failed string
