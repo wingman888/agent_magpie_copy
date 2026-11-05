@@ -3,8 +3,6 @@ package netproxy
 import (
 	"net/url"
 	"testing"
-
-	"github.com/yetone/magpie/internal/settings"
 )
 
 // clearEnv blanks the proxy variables for the test and restores them after.
