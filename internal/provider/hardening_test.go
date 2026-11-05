@@ -12,8 +12,10 @@ import (
 func TestAccUseKeyWithoutCurrentKeyLeavesNoEmptyEntry(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
-	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.example/v1",
-		Keys: []KeyEntry{{Name: "a", Key: "sk-a"}, {Name: "b", Key: "sk-b", Protocol: Chat}}}); err != nil {
+	// Save insists on a current key, so write the odd state (extra keys, no
+	// current key) straight to the store.
+	if err := store(file{Providers: []Provider{{ID: "relay", Name: "Relay", Chat: "https://relay.example/v1",
+		Keys: []KeyEntry{{Name: "a", Key: "sk-a"}, {Name: "b", Key: "sk-b", Protocol: Chat}}}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := UseKey("relay", KeyRef("sk-b")); err != nil {
