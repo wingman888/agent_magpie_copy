@@ -38,6 +38,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
+  magpie import [-y] <link>       add a provider from a magpie:// link, after showing it
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
@@ -79,7 +80,12 @@ func run(args []string) error {
 		}
 		return tui.Run()
 	}
+	if isImportLink(args[0]) { // the OS handed us a magpie:// link
+		return importCmd(args[:1])
+	}
 	switch args[0] {
+	case "import":
+		return importCmd(args[1:])
 	case "tui":
 		return tui.Run()
 	case "app", "gui":

@@ -277,15 +277,22 @@ func addProvider(rest []string) error {
 	if err := applyPairs(&p, rest); err != nil {
 		return err
 	}
-	if err := provider.Save(p); err != nil {
-		return err
+	_, err := saveAndReport(p, provider.Save)
+	return err
+}
+
+// saveAndReport saves a provider with save, fetches its model list and prints
+// what happened. `magpie provider add` and `magpie import` both use it.
+func saveAndReport(p provider.Provider, save func(provider.Provider) error) (*provider.Provider, error) {
+	if err := save(p); err != nil {
+		return nil, err
 	}
 	saved, err := provider.Find(p.ID)
 	if err != nil {
 		saved, err = provider.Find(p.Name)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Println(green.Render("✓"), "added", saved.Name, muted.Render("("+saved.ID+")"))
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -299,7 +306,7 @@ func addProvider(rest []string) error {
 	} else {
 		fmt.Printf("  %d models in the catalog · %s\n", n, muted.Render("magpie models"))
 	}
-	return nil
+	return saved, nil
 }
 
 func showProvider(p provider.Provider) error {
