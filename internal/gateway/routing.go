@@ -237,54 +237,28 @@ type left struct {
 // weigh orders one provider's candidates as its routing says, and tells
 // what it went by.
 func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
-	return weighConv(p, cs, model, from, convo{})
-}
-
-// weighConv is weigh for a request's conversation: a rotation moves on per
-// user turn of that conversation (see rotationStart).
-func weighConv(p provider.Provider, cs []candidate, model string, from provider.Protocol, cv convo) ([]candidate, weighing) {
-	if len(cs) > 1 {
-		// the model asked for is the candidates' own, unless they name none
-		filled := make([]candidate, len(cs))
-		copy(filled, cs)
-		for i := range filled {
-			if filled[i].model == "" {
-				filled[i].model = model
-			}
-		}
-		cs = filled
-	}
-	return weighBy(p.Routing, p.ID, cs, from, cv)
-}
-
-// weighBy orders candidates as routing says: the routing itself, and key the
-// rotation is kept under. Each candidate is weighed for the model it names.
-func weighBy(routing, key string, cs []candidate, from provider.Protocol, cv convo) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
 	}
+	var known map[string]provider.Allowance
+	if p.Account != nil {
+		known = allowances(p.Account.Agent)
+	}
 	now := time.Now()
 	wg.lefts = map[string]left{}
-	known := map[string]map[string]provider.Allowance{}
 	for _, c := range cs {
 		if c.p.Account == nil {
 			continue
 		}
-		agent := c.p.Account.Agent
-		k, ok := known[agent]
-		if !ok {
-			k = allowances(agent)
-			known[agent] = k
-		}
-		if a, ok := k[c.p.Account.User]; ok {
+		if a, ok := known[c.p.Account.User]; ok {
 			u, r := a.For(c.model, now)
-			wg.lefts[candKey(c)] = left{u, r} // one not known counts as unused
+			wg.lefts[c.rest] = left{u, r} // one not known counts as unused
 		}
 	}
 	lefts := wg.lefts
-	shareOf := func(c candidate) float64 { return lefts[candKey(c)].used }
-	switch routing {
+	shareOf := func(c candidate) float64 { return lefts[c.rest].used }
+	switch p.Routing {
 	case "":
 		// of those with quota to spare, the one whose allowance renews
 		// soonest, since what it has left is lost then, while one renewing
@@ -307,7 +281,7 @@ func weighBy(routing, key string, cs []candidate, from provider.Protocol, cv con
 			}
 		}
 		sort.SliceStable(fine, func(i, j int) bool {
-			ri, rj := lefts[candKey(fine[i])].renews, lefts[candKey(fine[j])].renews
+			ri, rj := lefts[fine[i].rest].renews, lefts[fine[j].rest].renews
 			for k := 0; k < len(ri) || k < len(rj); k++ {
 				var a, b time.Time // to the hour, so a few minutes don't reorder
 				if k < len(ri) {
@@ -335,7 +309,10 @@ func weighBy(routing, key string, cs []candidate, from provider.Protocol, cv con
 	case provider.Ordered:
 		return cs, wg
 	case provider.Rotate:
-		n := rotationStart(key, len(cs), cv)
+		routed.Lock()
+		n := routed.turn[p.ID] % len(cs)
+		routed.turn[p.ID]++
+		routed.Unlock()
 		cs = append(append([]candidate{}, cs[n:]...), cs[:n]...)
 	case provider.LeastUsed:
 		// a subscription by the share of its allowance used, as the vendor
@@ -367,13 +344,8 @@ func weighBy(routing, key string, cs []candidate, from provider.Protocol, cv con
 	default:
 		return cs, wg
 	}
-	// keys are ordered by how well they fit the request; accounts are not
-	allKeys := true
-	for _, c := range cs {
-		allKeys = allKeys && c.p.Account == nil
-	}
-	if allKeys {
-		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, cs[i].model, from) < keyFit(cs[j].p, cs[j].model, from) })
+	if p.Account == nil {
+		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, model, from) < keyFit(cs[j].p, model, from) })
 	}
 	return cs, wg
 }

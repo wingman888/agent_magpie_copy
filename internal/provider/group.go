@@ -1,129 +1,71 @@
 package provider
 
 // Routing groups: several models, from one vendor or several, that an agent
-// picks as one model ("group/<id>"). The gateway sends a request for a group
-// to whichever of its members is ready.
-//
-// A group the user made or hid is kept in providers.json. A group magpie
-// discovers — the same model offered by two or more ready providers — is not
-// kept: it is worked out from the ready providers each time. Only a change
-// the user makes to it (saving or hiding it) is written down.
+// picks as one. A group is named group/<id> and the gateway spreads its
+// requests over the members' keys and accounts. Groups the user made are
+// kept in providers.json; the ones magpie finds itself — a model more than
+// one ready vendor serves under the same name — are worked out every time
+// and written only when the user hides one.
 
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
-
-	"github.com/yetone/magpie/internal/catalog"
 )
 
-// groupPrefix is the provider-id-like prefix a routing group's model id
-// carries: "group/<id>".
-const groupPrefix = "group"
+// GroupPrefix starts the id of a routing group as agents send it.
+const GroupPrefix = "group/"
 
-// groupProvider stands in for a provider on the catalog entries of groups,
-// so code that reads an entry's provider (its owner, its name) still works.
-var groupProvider = Provider{ID: groupPrefix, Name: "Routing groups"}
+// Routing values a group takes; "" is smart. Ordered and Rotate are the
+// providers' own; a group spells least-used out (a provider keeps LeastUsed).
+const GroupLeastUsed = "least-used"
 
-// Group is a routing group.
+// Affinity values: how long a conversation stays on the key or account that
+// answered it last. "" is automatic.
+const (
+	AffinitySession = "session"
+	AffinityTurn    = "turn"
+	AffinityOff     = "off"
+)
+
+// autoPrefix starts the id of a group magpie discovers.
+const autoPrefix = "auto-"
+
+// groupProvider is the provider a group's catalog entry belongs to: a name
+// of its own, so the lists show the groups under their heading. No vendor
+// has the id "group" (Save refuses it).
+var groupProvider = Provider{ID: "group", Name: "Routing groups"}
+
+// Group is a routing group as the user keeps it, or as magpie finds it.
 type Group struct {
-	ID   string `json:"id"`
-	Name string `json:"name,omitempty"`
-	// Members are "provider/model" references, in the order they are tried.
-	Members []string `json:"members,omitempty"`
-	// Routing is how requests spread over the members: "" smart, "order",
-	// "rotate" or "least-used" (see Provider.Routing).
-	Routing string `json:"routing,omitempty"`
-	// Affinity is as on Provider.Affinity.
-	Affinity string `json:"affinity,omitempty"`
-
-	// Auto marks a group magpie discovered. It is never written down.
-	Auto bool `json:"-"`
-	// Hidden is set on a record that hides a group (usually a discovered
-	// one) from the catalog; such a record has no other fields.
+	ID       string   `json:"id"`
+	Name     string   `json:"name,omitempty"`
+	Members  []string `json:"members,omitempty"` // "provider/model", in order
+	Routing  string   `json:"routing,omitempty"`
+	Affinity string   `json:"affinity,omitempty"`
+	// Hidden marks an automatic group the user removed. It holds nothing else.
 	Hidden bool `json:"hidden,omitempty"`
+	// Auto is set on a group magpie found; it is derived, never stored.
+	Auto bool `json:"-"`
 }
 
-// Member is one ready candidate of a group: a member reference resolved to
-// the provider it names, with the model it names there.
+// Member is one model of a group, on the provider it is reached through.
 type Member struct {
-	Ref      string   // "provider/model", as the group lists it
-	Provider Provider // the ready provider
-	Model    string   // the model id the vendor knows it by
+	Provider Provider
+	Model    string
 }
 
-// normalizeRouting keeps a known routing and turns anything else into smart.
-// "usage" is what least-used was called before; it still means least-used.
-func normalizeRouting(s string) string {
-	switch s {
-	case Ordered, Rotate, LeastUsed:
-		return s
-	case "usage":
-		return LeastUsed
-	}
-	return ""
-}
+// ID is the member as the config spells it: "provider/model".
+func (m Member) ID() string { return m.Provider.ID + "/" + m.Model }
 
-// normalizeAffinity keeps a known affinity and turns anything else into the
-// automatic one.
-func normalizeAffinity(s string) string {
-	switch s {
-	case "session", "turn", "off":
-		return s
-	}
-	return ""
-}
-
-// SetAffinity sets how a provider's conversations stick to the key or
-// account that answered them last; "" is automatic.
-func SetAffinity(providerID, affinity string) error {
-	p, err := Find(providerID)
+// SaveGroup adds or replaces a routing group. Saving an automatic group's
+// id takes that group over: it is the user's from then on.
+func SaveGroup(g Group) error {
+	g, err := g.clean()
 	if err != nil {
 		return err
 	}
-	p.Affinity = normalizeAffinity(affinity)
-	return Save(*p)
-}
-
-// SaveGroup adds a group, or replaces the user's group with its id. Saving a
-// group magpie discovered makes it the user's.
-func SaveGroup(g Group) error {
-	g.ID = strings.ToLower(strings.TrimSpace(g.ID))
-	g.Name = strings.TrimSpace(g.Name)
-	if g.ID == "" {
-		g.ID = Slug(g.Name)
-	}
-	if g.Name == "" {
-		g.Name = g.ID
-	}
-	if g.ID == "" || g.ID != Slug(g.ID) {
-		return fmt.Errorf("group id must be lowercase letters, digits and dashes, not %q", g.ID)
-	}
-	var members []string
-	for _, ref := range g.Members {
-		ref = strings.TrimSpace(ref)
-		if ref == "" {
-			continue
-		}
-		pid, model, ok := strings.Cut(ref, "/")
-		if pid == groupPrefix {
-			// a group is not a member of a group: such a member is ignored
-			continue
-		}
-		if !ok || strings.TrimSpace(model) == "" {
-			return fmt.Errorf("group member %q is not provider/model", ref)
-		}
-		members = append(members, ref)
-	}
-	members = cleanList(members)
-	if len(members) == 0 {
-		return errors.New("组里至少要有一个模型")
-	}
-	g.Members = members
-	g.Routing = normalizeRouting(g.Routing)
-	g.Affinity = normalizeAffinity(g.Affinity)
-	g.Auto, g.Hidden = false, false
-
 	f := load()
 	for i := range f.Groups {
 		if f.Groups[i].ID == g.ID {
@@ -135,149 +77,237 @@ func SaveGroup(g Group) error {
 	return store(f)
 }
 
-// DeleteGroup removes a group the user made. A group magpie discovered is
-// hidden instead, and comes back with ShowGroup.
+// DeleteGroup removes a group the user made. An automatic one is hidden
+// instead, so it does not come back on its own; ShowGroup brings it back.
+// Deleting a group the user made under an automatic group's id hides that
+// id too, so the discovered group does not reappear either.
 func DeleteGroup(id string) error {
 	id = groupID(id)
-	discovered := false
-	for _, g := range autoGroups(All()) {
-		if g.ID == id {
-			discovered = true
-			break
-		}
-	}
 	f := load()
-	if discovered {
-		for i := range f.Groups {
-			if f.Groups[i].ID == id {
-				f.Groups[i] = Group{ID: id, Hidden: true}
-				return store(f)
-			}
+	auto := discovered(id)
+	i := slices.IndexFunc(f.Groups, func(g Group) bool { return g.ID == id && !g.Hidden })
+	switch {
+	case i >= 0:
+		f.Groups = slices.Delete(f.Groups, i, i+1)
+		if auto {
+			hide(&f, id)
 		}
-		f.Groups = append(f.Groups, Group{ID: id, Hidden: true})
-		return store(f)
+	case auto:
+		hide(&f, id)
+	default:
+		return fmt.Errorf("no group %q", id)
 	}
-	for i := range f.Groups {
-		if f.Groups[i].ID == id && !f.Groups[i].Hidden {
-			f.Groups = append(f.Groups[:i], f.Groups[i+1:]...)
+	return store(f)
+}
+
+// ShowGroup brings back an automatic group the user hid.
+func ShowGroup(id string) error {
+	id = groupID(id)
+	f := load()
+	for i, g := range f.Groups {
+		if g.ID == id && g.Hidden {
+			f.Groups = slices.Delete(f.Groups, i, i+1)
 			return store(f)
 		}
+	}
+	if slices.ContainsFunc(f.Groups, func(g Group) bool { return g.ID == id && !g.Hidden }) || discovered(id) {
+		return nil
 	}
 	return fmt.Errorf("no group %q", id)
 }
 
-// ShowGroup brings back a group DeleteGroup hid.
-func ShowGroup(id string) error {
-	id = groupID(id)
-	f := load()
-	for i := range f.Groups {
-		if f.Groups[i].ID == id && f.Groups[i].Hidden {
-			f.Groups = append(f.Groups[:i], f.Groups[i+1:]...)
-			return store(f)
-		}
-	}
-	return nil
-}
-
-// groupID is a group's id, from its id or its "group/<id>" model id.
-func groupID(id string) string {
-	id = strings.ToLower(strings.TrimSpace(id))
-	return strings.TrimPrefix(id, groupPrefix+"/")
-}
-
-// FindGroup looks a group up by its id or its "group/<id>" model id. It
-// returns the group and its members that are ready now, in the group's
-// order; ok is false when the group is unknown or none of its members is
-// ready.
+// FindGroup looks a group up by id, with or without the "group/" prefix,
+// and resolves its members to the ones ready now. ok is false when the
+// group is unknown, hidden, or has no member ready.
 func FindGroup(id string) (Group, []Member, bool) {
 	id = groupID(id)
-	ps := All()
-	for _, g := range groupDefs(ps) {
+	for _, g := range listGroups() {
 		if g.ID == id {
-			ms := expand(g, ps)
+			ms := resolveMembers(g.Members)
 			return g, ms, len(ms) > 0
 		}
 	}
 	return Group{}, nil, false
 }
 
-// expand resolves a group's member references to the ready providers they
-// name. A reference repeated, or naming a group, counts once or not at all.
-func expand(g Group, ps []Provider) []Member {
+// SetAffinity sets how a provider's conversations keep to the key or
+// account that answered them: "" automatic, session, turn or off.
+func SetAffinity(providerID, affinity string) error {
+	p, err := Find(providerID)
+	if err != nil {
+		return err
+	}
+	p.Affinity = cleanAffinity(affinity)
+	return Save(*p)
+}
+
+// groupID is the bare id of a group, from "group/x" or "x".
+func groupID(id string) string {
+	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(id), GroupPrefix)))
+}
+
+// clean checks a group as the user gave it and returns it as it is stored.
+func (g Group) clean() (Group, error) {
+	g.ID = groupID(g.ID)
+	g.Name = strings.TrimSpace(g.Name)
+	if g.ID == "" {
+		g.ID = Slug(g.Name)
+	}
+	if g.ID == "" {
+		return g, errors.New("a group needs a name or an id")
+	}
+	if g.ID != Slug(g.ID) {
+		return g, fmt.Errorf("group id must be lowercase letters, digits and dashes, not %q", g.ID)
+	}
+	if g.Name == "" {
+		g.Name = g.ID
+	}
+	g.Routing = cleanRouting(g.Routing)
+	g.Affinity = cleanAffinity(g.Affinity)
+	members, err := cleanMembers(g.Members)
+	if err != nil {
+		return g, err
+	}
+	if len(members) == 0 {
+		return g, errors.New("组里至少要有一个模型")
+	}
+	g.Members = members
+	return g, nil
+}
+
+// cleanMembers trims the members, drops a group named among them (groups do
+// not nest), and drops repeats. A member is "provider/model".
+func cleanMembers(ms []string) ([]string, error) {
+	var out []string
+	for _, m := range ms {
+		m = strings.TrimSpace(m)
+		if m == "" || strings.HasPrefix(m, GroupPrefix) {
+			continue
+		}
+		pid, model, ok := strings.Cut(m, "/")
+		pid, model = strings.ToLower(strings.TrimSpace(pid)), strings.TrimSpace(model)
+		if !ok || pid == "" || model == "" {
+			return nil, fmt.Errorf("member %q must be written provider/model", m)
+		}
+		if pid == "group" {
+			continue
+		}
+		if id := pid + "/" + model; !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+func cleanRouting(s string) string {
+	switch s {
+	case Ordered, Rotate, GroupLeastUsed:
+		return s
+	}
+	return ""
+}
+
+func cleanAffinity(s string) string {
+	switch s {
+	case AffinitySession, AffinityTurn, AffinityOff:
+		return s
+	}
+	return ""
+}
+
+// hide records an automatic group as hidden, unless it already is.
+func hide(f *file, id string) {
+	if !slices.ContainsFunc(f.Groups, func(g Group) bool { return g.ID == id && g.Hidden }) {
+		f.Groups = append(f.Groups, Group{ID: id, Hidden: true})
+	}
+}
+
+// discovered reports whether magpie finds a group of this id right now,
+// hidden or not.
+func discovered(id string) bool {
+	for _, g := range autoGroups() {
+		if g.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// listGroups is every group the catalog offers: the user's, then the
+// automatic ones the user has not hidden or replaced.
+func listGroups() []Group {
+	f := load()
+	var out []Group
+	taken := map[string]bool{}
+	for _, g := range f.Groups {
+		taken[g.ID] = true
+		if !g.Hidden {
+			out = append(out, g)
+		}
+	}
+	for _, g := range autoGroups() {
+		if !taken[g.ID] {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// resolveMembers turns member ids into the ones whose provider is ready. A
+// member listed twice, or a provider's model listed twice, counts once.
+func resolveMembers(ids []string) []Member {
+	all := All()
 	var out []Member
 	seen := map[string]bool{}
-	for _, ref := range g.Members {
-		pid, model, ok := strings.Cut(ref, "/")
-		if !ok || model == "" || pid == groupPrefix || seen[ref] {
+	for _, s := range ids {
+		pid, model, ok := strings.Cut(s, "/")
+		pid, model = strings.ToLower(strings.TrimSpace(pid)), strings.TrimSpace(model)
+		if !ok || pid == "" || model == "" || pid == "group" || seen[pid+"/"+model] {
 			continue
 		}
-		seen[ref] = true
-		for _, p := range ps {
-			if p.ID == pid && p.Ready() {
-				out = append(out, Member{Ref: ref, Provider: p, Model: model})
-				break
-			}
+		seen[pid+"/"+model] = true
+		p, ok := find(all, pid)
+		if !ok || !p.Ready() {
+			continue
 		}
+		out = append(out, Member{Provider: p, Model: model})
 	}
 	return out
 }
 
-// groupDefs is every group that applies now: the user's, then the ones
-// discovered that the user has neither replaced nor hidden.
-func groupDefs(ps []Provider) []Group {
-	f := load()
-	hidden := map[string]bool{}
-	taken := map[string]bool{}
-	var out []Group
-	for _, g := range f.Groups {
-		if g.Hidden {
-			hidden[g.ID] = true
-			continue
-		}
-		taken[g.ID] = true
-		out = append(out, g)
-	}
-	for _, g := range autoGroups(ps) {
-		if hidden[g.ID] || taken[g.ID] {
-			continue
-		}
-		out = append(out, g)
-	}
-	return out
-}
-
-// autoGroups makes a group for every model that two or more ready providers
-// offer under the same canonical name (see CanonicalModel). Members follow
-// the providers' order; the name is the first display name a member has.
-func autoGroups(ps []Provider) []Group {
+// autoGroups finds the models more than one ready provider serves under the
+// same name (NormalizeModelKey). Each becomes a group "auto-<name>" holding
+// every provider's copy, in the order the providers were added, and named
+// after the first copy that has a proper display name.
+func autoGroups() []Group {
 	type bucket struct {
-		g    Group
-		seen map[string]bool
+		members []Member
+		name    string
+		vendors map[string]bool
 	}
 	var order []string
 	byKey := map[string]*bucket{}
-	for _, p := range ps {
+	for _, p := range All() {
 		if !p.Ready() {
 			continue
 		}
-		for _, m := range p.Exposed() {
-			key := CanonicalModel(m.ID)
+		for _, m := range p.Available() {
+			key := NormalizeModelKey(m.ID)
 			if key == "" {
 				continue
 			}
 			b := byKey[key]
 			if b == nil {
-				b = &bucket{seen: map[string]bool{}}
+				b = &bucket{vendors: map[string]bool{}}
 				byKey[key] = b
 				order = append(order, key)
 			}
-			if b.seen[p.ID] {
-				continue
+			if !slices.ContainsFunc(b.members, func(x Member) bool { return x.Provider.ID == p.ID && x.Model == m.ID }) {
+				b.members = append(b.members, Member{Provider: p, Model: m.ID})
 			}
-			b.seen[p.ID] = true
-			b.g.Members = append(b.g.Members, p.ID+"/"+m.ID)
-			if b.g.Name == "" && displayName(m) {
-				b.g.Name = m.Name
+			b.vendors[p.ID] = true
+			if b.name == "" && m.Name != "" && m.Name != m.ID {
+				b.name = m.Name
 			}
 		}
 	}
@@ -285,74 +315,58 @@ func autoGroups(ps []Provider) []Group {
 	ids := map[string]bool{}
 	for _, key := range order {
 		b := byKey[key]
-		if len(b.seen) < 2 {
+		id := autoPrefix + Slug(key)
+		if len(b.vendors) < 2 || Slug(key) == "" || ids[id] {
 			continue
 		}
-		g := b.g
-		g.ID = autoID(key)
-		if ids[g.ID] {
-			continue // two names that rewrite alike share an id: the first keeps it
+		ids[id] = true
+		name := b.name
+		if name == "" {
+			name = b.members[0].Model
 		}
-		ids[g.ID] = true
-		if g.Name == "" {
-			g.Name = key
+		g := Group{ID: id, Name: name, Auto: true}
+		for _, m := range b.members {
+			g.Members = append(g.Members, m.ID())
 		}
-		g.Auto = true
 		out = append(out, g)
 	}
 	return out
 }
 
-// displayName is whether a model's name is more than its id.
-func displayName(m catalog.Model) bool {
-	return strings.TrimSpace(m.Name) != "" && m.Name != m.ID
-}
-
-// autoID is the id of the group discovered for a canonical model name:
-// "auto-" and the name, its dots already dashes (see CanonicalModel), with any
-// other symbol an id may not hold made a dash too.
-func autoID(key string) string {
-	return "auto-" + Slug(key)
-}
-
-// commonEfforts are the reasoning levels every member supports, in the
-// first member's order.
-func commonEfforts(ms []Member) []string {
-	var out []string
-	for i, m := range ms {
-		var es []string
-		for _, x := range m.Provider.Available() {
-			if x.ID == m.Model {
-				es = x.Efforts
-				break
-			}
-		}
-		if i == 0 {
-			out = append(out, es...)
-			continue
-		}
-		var keep []string
-		for _, e := range out {
-			if contains(es, e) {
-				keep = append(keep, e)
-			}
-		}
-		out = keep
-	}
-	return out
-}
-
-// groupEntries are the catalog entries of the groups that have a ready
-// member, after the providers' own.
-func groupEntries(ps []Provider) []Entry {
+// groupEntries is the catalog's view of the groups: the ones with a member
+// ready, each offering only the reasoning levels every member supports.
+func groupEntries() []Entry {
 	var out []Entry
-	for _, g := range groupDefs(ps) {
-		ms := expand(g, ps)
+	for _, g := range listGroups() {
+		ms := resolveMembers(g.Members)
 		if len(ms) == 0 {
 			continue
 		}
-		out = append(out, Entry{ID: groupPrefix + "/" + g.ID, Model: groupPrefix + "/" + g.ID, Name: g.Name,
+		out = append(out, Entry{ID: GroupPrefix + g.ID, Model: GroupPrefix + g.ID, Name: g.Name,
 			Efforts: commonEfforts(ms), Provider: groupProvider, Group: g.ID})
 	}
 	return out
+}
+
+// commonEfforts is the reasoning levels every member supports, in the first
+// member's order.
+func commonEfforts(ms []Member) []string {
+	if len(ms) == 0 {
+		return nil
+	}
+	out := slices.Clone(memberEfforts(ms[0]))
+	for _, m := range ms[1:] {
+		have := memberEfforts(m)
+		out = slices.DeleteFunc(out, func(x string) bool { return !slices.Contains(have, x) })
+	}
+	return out
+}
+
+func memberEfforts(m Member) []string {
+	for _, cm := range m.Provider.Available() {
+		if cm.ID == m.Model {
+			return cm.Efforts
+		}
+	}
+	return nil
 }

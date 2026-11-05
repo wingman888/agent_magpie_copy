@@ -18,7 +18,7 @@ import (
 const (
 	Ordered   = "order"
 	Rotate    = "rotate"
-	LeastUsed = "least-used"
+	LeastUsed = "usage"
 )
 
 // SetRouting changes how a provider's requests spread over its keys or
