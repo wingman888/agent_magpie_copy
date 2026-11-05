@@ -15,8 +15,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // Model is one entry the picker can offer.
@@ -28,6 +26,13 @@ type Model struct {
 	Efforts     []string
 	Temperature *bool  // false when the model refuses temperature/top_p
 	Price       *Price // USD per million tokens, when models.dev lists it
+	// Keys, for a vendor whose keys each see models of their own, are the
+	// keys (by fingerprint) whose list has this one; empty is every key.
+	Keys []string `json:",omitempty"`
+	// APIs are the wire APIs the vendor says serve this model: "chat",
+	// "responses", "anthropic". Empty means unknown. Only a vendor's own
+	// list fills it in; models.dev does not say.
+	APIs []string `json:",omitempty"`
 }
 
 // Price is what a model costs, in USD per million tokens.
@@ -133,7 +138,7 @@ func Sync(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("User-Agent", "magpie")
-	resp, err := netproxy.Client().Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -227,6 +232,12 @@ func Provider(id string) []Model {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+// ProviderName is a models.dev provider's display name ("GitHub Copilot"
+// for "github-copilot"), or "" when the catalog doesn't know it.
+func ProviderName(id string) string {
+	return load()[id].Name
 }
 
 func textModel(m mdModel) bool {

@@ -6,4 +6,4 @@ import "github.com/yetone/magpie/internal/gui"
 
 const hasGUI = true
 
-func runGUI(showMain bool) error { return gui.Run(version, showMain) }
+func runGUI(showMain bool, link string) error { return gui.Run(version, showMain, link) }

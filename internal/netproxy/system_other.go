@@ -2,5 +2,5 @@
 
 package netproxy
 
-// readPlatform: on Linux only the environment counts, so there is no system proxy.
-func readPlatform() system { return system{} }
+// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
+func system() Proxy { return Proxy{} }

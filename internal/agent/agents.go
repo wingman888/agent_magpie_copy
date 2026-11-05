@@ -32,6 +32,9 @@ func All() []*Agent {
 		cursor(home),
 		copilot(home),
 		crush(home, cfg),
+		dsh(home),
+		commandCode(home),
+		omp(home),
 	}
 }
 
@@ -131,7 +134,17 @@ func ownOptions(authFile string, cur string, extra ...string) []Option {
 	sort.Strings(providers)
 	var out []Option
 	for _, p := range providers {
-		out = append(out, group(p, options(catalog.Provider(p), p+"/"))...)
+		name := catalog.ProviderName(p)
+		if name == "" {
+			name = p
+		}
+		opts := group(name, options(catalog.Provider(p), p+"/"))
+		if ic := providerIcon(p); ic != "" {
+			for i := range opts {
+				opts[i].GroupIcon = ic
+			}
+		}
+		out = append(out, opts...)
 	}
 	return out
 }
@@ -164,9 +177,8 @@ func magpieProviderJSON(shape string) any {
 		for _, m := range models {
 			// reasoning lets Pi offer its thinking levels for the model
 			e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-			// Pi offers xhigh and max only when the model declares them
-			if tl := piThinkingLevels(m.Efforts); tl != nil {
-				e["thinkingLevelMap"] = tl
+			if levels := piThinkingLevels(m.Efforts); levels != nil {
+				e["thinkingLevelMap"] = levels
 			}
 			ms = append(ms, e)
 		}
@@ -178,19 +190,20 @@ func magpieProviderJSON(shape string) any {
 	return nil
 }
 
-// piThinkingLevels maps the levels Pi must learn about (xhigh and max, which
-// it does not offer by default) to themselves; nil when the model has neither.
-func piThinkingLevels(efforts []string) map[string]string {
-	var out map[string]string
+// piThinkingLevels is the thinkingLevelMap for a model's efforts. Pi offers
+// xhigh and max only for models that map them, so without it a model whose
+// top level is max stopped at high in Pi.
+func piThinkingLevels(efforts []string) map[string]any {
+	var levels map[string]any
 	for _, e := range efforts {
 		if e == "xhigh" || e == "max" {
-			if out == nil {
-				out = map[string]string{}
+			if levels == nil {
+				levels = map[string]any{}
 			}
-			out[e] = e
+			levels[e] = e
 		}
 	}
-	return out
+	return levels
 }
 
 func opencode(home, cfg string) *Agent {
