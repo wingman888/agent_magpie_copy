@@ -407,9 +407,6 @@ func TestAccProtocolTiers(t *testing.T) {
 		if c := accRoute(t, s, sess, accBody("group/mine", turn)); c != 200 {
 			t.Fatalf("turn %d: %d", turn, c)
 		}
-		if turn == 1 {
-			accDump(t, s)
-		}
 	}
 	keys := u.keys("m1")
 	if fmt.Sprint(keys) != "[k1 k2 k1]" {
@@ -425,16 +422,14 @@ func TestAccProtocolTiers(t *testing.T) {
 		return 429
 	}
 	u.mu.Unlock()
-	if g, ms, ok := provider.FindGroup("group/mine"); ok {
-		cs, _ := s.planGroup(g, ms, provider.Chat, convo{id: sess, model: "group/mine", turns: 4})
-		t.Logf("PLAN count=%d", len(cs))
-		for i, c := range cs {
-			t.Logf("PLAN idx=%d rest=%s aside=%v key=%s", i, c.rest, c.aside, c.p.KeyProtocol)
-		}
+	c, body := accRouteBody(t, s, sess, accBody("group/mine", 4))
+	fr := accLast(t, s)
+	t.Logf("FINAL code=%d tries=%d orders=%d body=%s", c, len(fr.Tries), len(fr.Order), strings.ReplaceAll(body, `"`, "'"))
+	for i, x := range fr.Tries {
+		t.Logf("FTRY idx=%d id=%s status=%d fail=%s", i, x.ID, x.Status, x.Fail)
 	}
-	if c, body := accRouteBody(t, s, sess, accBody("group/mine", 4)); c != 200 {
-		accDump(t, s)
-		t.Fatalf("with the main pool failing: %d body %s", c, body)
+	if c != 200 {
+		t.Fatalf("with the main pool failing: %d", c)
 	}
 	r := accLast(t, s)
 	last := r.Order[len(r.Order)-1]
