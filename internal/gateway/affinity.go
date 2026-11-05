@@ -3,9 +3,9 @@ package gateway
 // Session affinity and turn-based rotation: a conversation's requests stay
 // on the key or account that answered its last one, so the vendor's prompt
 // cache can hit, and a "rotate" routing moves on once per user turn rather
-// than per request. Both are remembered per conversation (the agent's
-// session id, or one derived from the first user message) and per model
-// asked for, for a day.
+// than per request. Both are remembered per session the agent names (see
+// sessionOf) and per model asked for, for a day. A request without a session
+// id has neither.
 
 import (
 	"encoding/json"
@@ -34,10 +34,12 @@ type convo struct {
 	within bool   // the request carries tool results of the turn in progress
 }
 
-// conversationOf is the request's conversation.
+// conversationOf is the request's conversation. Its id is the session the
+// agent named, never one derived from the messages: affinity and rotation
+// follow only a session the agent sends.
 func conversationOf(h http.Header, body []byte, model string) convo {
 	turns, within := turnsOf(body)
-	return convo{id: conversationID(h, body), model: model, turns: turns, within: within}
+	return convo{id: sessionOf(h), model: model, turns: turns, within: within}
 }
 
 // turnsOf counts the user turns in a request's messages, and tells whether
@@ -125,7 +127,8 @@ type rotation struct {
 }
 
 type answered struct {
-	rest      string // the candidate that answered
+	rest      string // the candidate that answered, as the trace names it
+	key       string // its candKey: the same key or account, for that model
 	cacheRead int    // prompt tokens it read from the vendor's cache
 	at        time.Time
 }
@@ -151,7 +154,8 @@ func sweep(now time.Time) {
 // rotationStart is where a "rotate" routing starts its turn over n candidates
 // of key. Without a conversation it is the old count of requests; with one,
 // the position moves on once per user turn, stays put within a turn, and is
-// not moved by requests of other conversations or other routing keys.
+// not moved by requests of other conversations, other routing keys, or other
+// models asked for in the same conversation.
 func rotationStart(key string, n int, cv convo) int {
 	if cv.id == "" {
 		routed.Lock()
@@ -163,7 +167,7 @@ func rotationStart(key string, n int, cv convo) int {
 	now := time.Now()
 	convMem.Lock()
 	defer convMem.Unlock()
-	k := cv.id + "\x00" + key
+	k := cv.id + "\x00" + cv.model + "\x00" + key
 	st, ok := convMem.rot[k]
 	pos := 0
 	switch {
@@ -178,15 +182,15 @@ func rotationStart(key string, n int, cv convo) int {
 	return pos % n
 }
 
-// remember notes that the candidate rest answered the conversation's model.
-func remember(cv convo, rest string, cacheRead int) {
+// remember notes that candidate c answered the conversation's model.
+func remember(cv convo, c candidate, cacheRead int) {
 	if cv.id == "" {
 		return
 	}
 	now := time.Now()
 	convMem.Lock()
 	defer convMem.Unlock()
-	convMem.last[cv.id+"\x00"+cv.model] = answered{rest: rest, cacheRead: cacheRead, at: now}
+	convMem.last[cv.id+"\x00"+cv.model] = answered{rest: c.rest, key: candKey(c), cacheRead: cacheRead, at: now}
 	sweep(now)
 }
 
@@ -225,7 +229,7 @@ func keepLast(mode string, cv convo, cs []candidate) (int, AffinityRoute) {
 	aff.Last, aff.CacheRead = last.rest, last.cacheRead
 	k := -1
 	for i, c := range cs {
-		if c.rest == last.rest && !c.aside {
+		if candKey(c) == last.key && !c.aside {
 			k = i
 			break
 		}

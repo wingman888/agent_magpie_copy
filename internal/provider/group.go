@@ -282,6 +282,7 @@ func autoGroups(ps []Provider) []Group {
 		}
 	}
 	var out []Group
+	ids := map[string]bool{}
 	for _, key := range order {
 		b := byKey[key]
 		if len(b.seen) < 2 {
@@ -289,6 +290,10 @@ func autoGroups(ps []Provider) []Group {
 		}
 		g := b.g
 		g.ID = autoID(key)
+		if ids[g.ID] {
+			continue // two names that rewrite alike share an id: the first keeps it
+		}
+		ids[g.ID] = true
 		if g.Name == "" {
 			g.Name = key
 		}
@@ -304,15 +309,10 @@ func displayName(m catalog.Model) bool {
 }
 
 // autoID is the id of the group discovered for a canonical model name:
-// "auto-" and the name with its dots and other symbols made dashes. A name
-// that needs that rewriting gets a fingerprint too, so two names that come
-// out alike stay two groups.
+// "auto-" and the name, its dots already dashes (see CanonicalModel), with any
+// other symbol an id may not hold made a dash too.
 func autoID(key string) string {
-	slug := Slug(key)
-	if slug == key {
-		return "auto-" + key
-	}
-	return "auto-" + slug + "-" + keyID(key)
+	return "auto-" + Slug(key)
 }
 
 // commonEfforts are the reasoning levels every member supports, in the

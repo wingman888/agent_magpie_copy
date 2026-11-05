@@ -248,18 +248,35 @@ func settle(out []candidate, pl planned, mode string, cv convo) ([]candidate, pl
 		}
 		pl.affinity = &aff
 	}
-	var ready, resting []candidate
-	var wReady, wResting []Weighed
+	// the main pool comes first, its ready keys before its resting ones;
+	// the keys aside come after all of it, in the same two steps
+	var main, aside pool
 	for i, c := range out {
+		p := &main
+		if c.aside {
+			p = &aside
+		}
 		if r, ok := restOf(c.rest); ok {
 			pl.order[i].Rest = &r
-			resting, wResting = append(resting, c), append(wResting, pl.order[i])
+			p.resting, p.wResting = append(p.resting, c), append(p.wResting, pl.order[i])
 		} else {
-			ready, wReady = append(ready, c), append(wReady, pl.order[i])
+			p.ready, p.wReady = append(p.ready, c), append(p.wReady, pl.order[i])
 		}
 	}
-	pl.order = append(wReady, wResting...)
-	return append(ready, resting...), pl
+	var cs []candidate
+	var ws []Weighed
+	for _, p := range []pool{main, aside} {
+		cs = append(append(cs, p.ready...), p.resting...)
+		ws = append(append(ws, p.wReady...), p.wResting...)
+	}
+	pl.order = ws
+	return cs, pl
+}
+
+// pool is the candidates of one side of settle, ready and resting apart.
+type pool struct {
+	ready, resting   []candidate
+	wReady, wResting []Weighed
 }
 
 // moveFirst is xs with its k-th element put first, the rest in their order.

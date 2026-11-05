@@ -412,7 +412,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			remember(cv, c.rest, call.Usage.CacheRead)
+			remember(cv, c, call.Usage.CacheRead)
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}
@@ -845,14 +845,23 @@ var sessionHeaders = []string{
 	"session_id", "session-id", "x-claude-code-session-id",
 }
 
-// conversationID is a stable id for the conversation a request belongs to.
-// It is the agent's own session id when it sends one; otherwise it is derived
-// from the conversation's first user message, which every later turn repeats.
-func conversationID(in http.Header, body []byte) string {
+// sessionOf is the session id the agent sent with the request: the first of
+// sessionHeaders that is set, or "" when it sends none.
+func sessionOf(in http.Header) string {
 	for _, h := range sessionHeaders {
 		if v := strings.TrimSpace(in.Get(h)); v != "" {
 			return v
 		}
+	}
+	return ""
+}
+
+// conversationID is a stable id for the conversation a request belongs to.
+// It is the agent's own session id when it sends one; otherwise it is derived
+// from the conversation's first user message, which every later turn repeats.
+func conversationID(in http.Header, body []byte) string {
+	if id := sessionOf(in); id != "" {
+		return id
 	}
 	var m struct {
 		Messages []json.RawMessage `json:"messages"`
