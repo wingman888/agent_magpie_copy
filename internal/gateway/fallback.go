@@ -1,281 +1,381 @@
 package gateway
 
+// Fallback: a provider can name models to use when it can't take a request
+// — a coding plan out of quota, a rate limit, an overloaded or failing
+// vendor. The request goes to the next one only while none of the reply has
+// been sent, so an agent sees one clean answer from whoever gave it, never a
+// half from each. A provider that just failed that way waits at the back of
+// the line for a minute, rather than costing every request a doomed try.
+//
+// A provider with several keys on is several candidates, one per key, in
+// order, and so is a subscription with several accounts on: when one
+// account runs out, the next account of the same provider takes the
+// request before any fallback model does. A key can be made for one
+// protocol only, as some relays hand them out; see perKey.
+
 import (
-	"bufio"
 	"bytes"
-	"encoding/json"
-	"io"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// target is a provider and the model it is asked for: the one the client
-// named, or one of its fallbacks.
-type target struct {
+const fallbackCooldown = time.Minute
+
+type candidate struct {
 	p     provider.Provider
 	model string
+	rest  string // what rests after a failure: the provider, or one of its keys
 }
 
-// hop is one try in a fallback chain: one key or account of a target, or the
-// target's provider itself.
-type hop struct {
-	tgt    int               // index of the target in the chain
-	model  string            // the model this try asks for
-	view   provider.Provider // the provider as seen through this key or account
-	to     provider.Protocol // endpoint the reply comes from; from when relayed, "" when none
-	relay  bool              // the client's own endpoint is used, so the reply is relayed as is
-	claude bool              // a Claude Code subscription, run through the agent binary
-	msg    string            // set when the try cannot be made at all
-	ref    string            // cooldown ref within the target; "" for the target itself
-	key    string            // label of the key used, for the call record; "" when none
-	desc   string            // how the try is named in the call record when it fails
-	last   bool              // the last try of its target
-}
-
-// fallbackTargets resolves the fallback list of a provider into targets, in
-// order. Entries that do not resolve are skipped silently, as are repeats of
-// the primary or of an earlier entry.
-func fallbackTargets(p provider.Provider, model string) []target {
-	seen := map[string]bool{p.ID + "\x00" + model: true}
-	var out []target
-	for _, id := range p.Fallback {
-		fp, fm, ok := provider.Resolve(id)
-		if !ok {
-			continue
-		}
-		key := fp.ID + "\x00" + fm
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, target{p: fp, model: fm})
+// label names a candidate in a call's record: the provider, and the key
+// when it has several on.
+func (c candidate) label() string {
+	if c.rest == c.p.ID {
+		return c.p.ID
 	}
+	if c.p.Account != nil {
+		return c.p.ID + " (" + c.p.Account.User + ")"
+	}
+	if c.p.KeyName != "" {
+		return c.p.ID + " (" + c.p.KeyName + ")"
+	}
+	return c.p.ID + " (" + provider.Mask(c.p.Key) + ")"
+}
+
+// perKey is a provider once per key it has on, in order — or, for a
+// signed-in agent, once per account it has on, its own first. A key made
+// for one protocol only serves on that one's endpoint, and the keys that
+// suit the request go first: the Anthropic key for a Claude model, the
+// OpenAI one for a GPT model, else the key that speaks what the agent
+// spoke, so nothing is translated that needn't be.
+func perKey(p provider.Provider, model string, from provider.Protocol) []candidate {
+	out, _ := perKeyOf(p, model, from)
 	return out
 }
 
-// serveChain sends a request through the targets in turn. Each target tries
-// its keys (or its signed-in accounts) first. A try that fails for a reason
-// worth retrying (see keyRetryable) hands the request to the next try, as long
-// as no reply has started; the last try's error goes back to the client as it
-// is. A target whose every try failed is tried last for keyCooldown. It
-// returns the target and endpoint of the last try, its status and message, and
-// a description of the tries that failed on the way ("" when none did).
-// It also returns the key label of the try that answered ("" when it failed,
-// or when the try used no named or routed key).
-func (s *Server) serveChain(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte, ts []target, u *Usage) (target, provider.Protocol, int, string, string, string) {
-	var hops []hop
-	for _, i := range s.targetOrder(ts) {
-		hops = append(hops, s.hopsOf(i, ts[i], from, body)...)
+// perKeyOf is perKey, and the accounts or keys it left out as not listing
+// the model.
+func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, left []candidate) {
+	if p.Account != nil {
+		all := []candidate{{p, model, p.ID}}
+		for _, q := range p.AlsoOn() {
+			all = append(all, candidate{q, model, p.ID + "@" + q.Account.User})
+		}
+		// an account whose plan lacks the model (a Free one behind a Plus)
+		// would only answer 400; it is tried only when none lists it
+		for _, c := range all {
+			if c.p.Account.Lists(model) {
+				out = append(out, c)
+			} else {
+				left = append(left, c)
+			}
+		}
+		if len(out) == 0 {
+			return all, nil
+		}
+		return out, left
 	}
-	var failed []string
-	var final hop
-	var status int
-	var msg string
-	for n, h := range hops {
-		final = h
-		hw := newHoldWriter(w, n < len(hops)-1)
-		status, msg = s.runHop(hw, r, h, from, body, u)
-		if hw.isHeld() && keyRetryable(status, hw.body()) {
-			if h.ref != "" {
-				s.cool(ts[h.tgt].p.ID, h.ref)
-			}
-			if h.last {
-				s.cool(ts[h.tgt].p.ID, "")
-			}
-			failed = append(failed, h.desc)
+	keys := p.KeysOn()
+	var unlisted []candidate
+	for _, k := range keys {
+		q := p.WithKey(k)
+		if len(q.Speaks()) == 0 {
+			continue // made for a protocol this provider has no endpoint for
+		}
+		rest := p.ID
+		if len(keys) > 1 {
+			rest += "#" + provider.KeyID(k.Key)
+		}
+		if !p.Serves(k, model) {
+			// the vendor lists the model to another key only
+			unlisted = append(unlisted, candidate{q, model, rest})
 			continue
 		}
-		hw.release()
-		if status >= 400 && keyRetryable(status, "") {
-			// the last try failed too; its body was not kept, so its status decides
-			if h.ref != "" {
-				s.cool(ts[h.tgt].p.ID, h.ref)
-			}
-			if h.last {
-				s.cool(ts[h.tgt].p.ID, "")
-			}
+		out = append(out, candidate{q, model, rest})
+	}
+	if len(out) == 0 {
+		out, unlisted = unlisted, nil // no key lists it: try them all the same
+	}
+	if len(out) == 0 {
+		return []candidate{{p, model, p.ID}}, nil
+	}
+	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
+	return out, unlisted
+}
+
+// keyFit ranks how well a key suits a request, best first: 0 fits, 1 needs
+// the request translated, 2 is made for another vendor's models.
+func keyFit(q provider.Provider, model string, from provider.Protocol) int {
+	if q.KeyProtocol == "" {
+		return 0
+	}
+	switch modelFamily(model) {
+	case provider.Anthropic:
+		if q.KeyProtocol == provider.Anthropic {
+			return 0
 		}
-		break
-	}
-	key := ""
-	if status < 400 {
-		key = final.key
-	}
-	return ts[final.tgt], final.to, status, msg, strings.Join(failed, "; "), key
-}
-
-// targetOrder lists the targets in the order to try them. Those that failed
-// within keyCooldown are left out while others are ready; when all are cooling,
-// all are listed in their order.
-func (s *Server) targetOrder(ts []target) []int {
-	var ready, cooled []int
-	for i, t := range ts {
-		if s.cooling(t.p.ID, "") {
-			cooled = append(cooled, i)
-		} else {
-			ready = append(ready, i)
+		return 2
+	case provider.Chat:
+		if q.KeyProtocol != provider.Anthropic {
+			return 0
 		}
+		return 2
 	}
-	if len(ready) > 0 {
-		return ready
+	if q.Base(from) != "" {
+		return 0
 	}
-	return cooled
+	return 1
 }
 
-// cooling reports whether a key, account or provider (ref "") failed within
-// keyCooldown.
-func (s *Server) cooling(providerID, ref string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	t, ok := s.keyCool[providerID+"\x00"+ref]
-	return ok && time.Since(t) < keyCooldown
-}
-
-// hopsOf lists the tries of one target, in order. It always returns at least
-// one try, so a target that cannot be reached still explains why.
-func (s *Server) hopsOf(i int, t target, from provider.Protocol, body []byte) []hop {
-	p := t.p
-	var hs []hop
+// modelFamily is the protocol a model is at home in, when its name says:
+// Anthropic for Claude, Chat (standing for OpenAI's) for GPT and the o-series.
+func modelFamily(model string) provider.Protocol {
+	m := strings.ToLower(model)
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
 	switch {
-	case p.Account != nil && p.Account.Agent == "claude":
-		hs = []hop{{view: p, to: provider.Anthropic, claude: true, desc: p.ID}}
-	case p.Account != nil && len(p.Account.Alternates()) > 0:
-		cands := append([]provider.Provider{p}, p.Account.Alternates()...)
-		refs := make([]string, len(cands))
-		for k, c := range cands {
-			refs[k] = accountRef(c)
-		}
-		for _, k := range s.coolOrder(p.ID, refs) {
-			c := cands[k]
-			h := hop{view: c, ref: refs[k], desc: accountFailedDesc(p.ID, c)}
-			h.relay = c.Base(from) != "" && (c.Account == nil || !c.Account.Stream || streamOf(body))
-			h.to = endpointOf(c, from, h.relay)
-			hs = append(hs, h)
-		}
-	case p.Account == nil && p.Routed():
-		atts := s.coolLast(p.ID, p.Attempts(from, t.model))
-		for _, a := range atts {
-			hs = append(hs, hop{view: a.View, to: a.To, relay: a.To == from && a.View.Base(from) != "",
-				ref: a.Key.Ref, key: keyLabel(a.Key), desc: failedDesc(p.ID, a.Key.Name)})
-		}
-		if len(atts) == 0 {
-			msg := p.Name + " has no key for this endpoint"
-			if len(p.Speaks()) == 0 {
-				msg = p.Name + " has no endpoint configured"
-			}
-			hs = []hop{{view: p, msg: msg, desc: p.ID}}
-		}
-	default:
-		h := hop{view: p, desc: p.ID}
-		h.relay = p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-		h.to = endpointOf(p, from, h.relay)
-		hs = []hop{h}
-	}
-	for k := range hs {
-		hs[k].tgt, hs[k].model = i, t.model
-		if hs[k].to == "" && hs[k].msg == "" && !hs[k].claude {
-			hs[k].msg = p.Name + " has no endpoint configured"
-		}
-	}
-	hs[len(hs)-1].last = true
-	return hs
-}
-
-// endpointOf is the endpoint a try uses: the client's own when relayed, else
-// the provider's first native one. "" when the provider has none.
-func endpointOf(p provider.Provider, from provider.Protocol, relay bool) provider.Protocol {
-	if relay {
-		return from
-	}
-	if sp := p.Speaks(); len(sp) > 0 {
-		return sp[0]
+	case strings.HasPrefix(m, "claude"):
+		return provider.Anthropic
+	case strings.HasPrefix(m, "gpt-"), strings.Contains(m, "codex"), len(m) > 1 && m[0] == 'o' && m[1] >= '1' && m[1] <= '9':
+		return provider.Chat
 	}
 	return ""
 }
 
-// runHop makes one try and writes its reply to w.
-func (s *Server) runHop(w http.ResponseWriter, r *http.Request, h hop, from provider.Protocol, body []byte, u *Usage) (int, string) {
+// candidates is the primary and then its fallbacks, each provider's keys
+// or accounts as its routing orders them, those resting after a recent
+// failure moved behind the rest.
+func (s *Server) candidates(p provider.Provider, model string, from provider.Protocol) []candidate {
+	out, _ := s.plan(p, model, from)
+	return out
+}
+
+// plan is candidates, and for the routing trace what each stood where it
+// did by, and those left out.
+func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
+	var pl planned
+	add := func(q provider.Provider, m string, fallback bool) []candidate {
+		cs, left := perKeyOf(q, m, from)
+		cs, wg := weigh(q, cs, m, from)
+		for i, c := range cs {
+			w := weighed(c, q, wg, fallback, from)
+			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
+			pl.order = append(pl.order, w)
+		}
+		for _, c := range left {
+			w := weighed(c, q, weighing{}, fallback, from)
+			w.Unlisted = true
+			pl.left = append(pl.left, w)
+		}
+		return cs
+	}
+	out := add(p, model, false)
+	seen := map[string]bool{p.ID + "/" + model: true}
+	for _, id := range p.Fallback {
+		fp, fm, ok := provider.Resolve(id)
+		if !ok || seen[fp.ID+"/"+fm] {
+			continue
+		}
+		seen[fp.ID+"/"+fm] = true
+		out = append(out, add(fp, fm, true)...)
+	}
+	if len(out) == 1 {
+		if r, ok := restOf(out[0].rest); ok {
+			pl.order[0].Rest = &r // tried all the same: there is no other
+		}
+		return out, pl
+	}
+	var ready, resting []candidate
+	var wReady, wResting []Weighed
+	for i, c := range out {
+		if r, ok := restOf(c.rest); ok {
+			pl.order[i].Rest = &r
+			resting, wResting = append(resting, c), append(wResting, pl.order[i])
+		} else {
+			ready, wReady = append(ready, c), append(wReady, pl.order[i])
+		}
+	}
+	pl.order = append(wReady, wResting...)
+	return append(ready, resting...), pl
+}
+
+var restingUntil = struct {
+	sync.Mutex
+	m    map[string]time.Time
+	note map[string]Rest // why each rests
+}{m: map[string]time.Time{}, note: map[string]Rest{}}
+
+func (s *Server) resting(id string) bool {
+	_, ok := restOf(id)
+	return ok
+}
+
+// restOf is why a candidate is resting, while it is.
+func restOf(id string) (Rest, bool) {
+	restingUntil.Lock()
+	defer restingUntil.Unlock()
+	until := restingUntil.m[id]
+	if !time.Now().Before(until) {
+		return Rest{}, false
+	}
+	r := restingUntil.note[id]
+	r.Until = until
+	return r, true
+}
+
+// quotaWords are how vendors say "out of quota" or "slow down" when their
+// status code doesn't: some answer 400 or 403 with it.
+var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
+
+// retryable says whether another provider may do better with a request
+// that failed this way.
+func retryable(status int, body []byte) bool {
 	switch {
-	case h.claude:
-		return s.serveClaudeSubscription(w, r, from, h.model, body, u)
-	case h.msg != "":
-		return writeError(w, from, http.StatusBadGateway, h.msg), h.msg
-	case h.relay:
-		return s.passthrough(w, r, h.view, from, h.model, body, u)
-	}
-	return s.translate(w, r, h.view, from, h.to, h.model, body, u)
-}
-
-// openingError looks at the first event of a stream whose reply is still held
-// back. When that event is an error the provider raised before answering, the
-// HTTP status it stands for and its message are returned; the status is 0 when
-// there is no such error. The reader returned yields the whole stream as it was.
-func openingError(rd io.Reader) (io.Reader, int, string) {
-	br := bufio.NewReaderSize(rd, 16<<10)
-	var head bytes.Buffer
-	for head.Len() < 64<<10 {
-		line, err := br.ReadBytes('\n')
-		head.Write(line)
-		if (len(bytes.TrimSpace(line)) == 0 && head.Len() > len(line)) || err != nil {
-			break
-		}
-	}
-	all := io.MultiReader(bytes.NewReader(head.Bytes()), br)
-	var data []string
-	for _, ln := range strings.Split(head.String(), "\n") {
-		if strings.HasPrefix(ln, "data:") {
-			data = append(data, strings.TrimSpace(ln[len("data:"):]))
-		}
-	}
-	payload := strings.Join(data, "")
-	var v struct {
-		Type  string          `json:"type"`
-		Error json.RawMessage `json:"error"`
-	}
-	if json.Unmarshal([]byte(payload), &v) != nil {
-		return all, 0, ""
-	}
-	if v.Type != "error" && (len(v.Error) == 0 || string(v.Error) == "null") {
-		return all, 0, ""
-	}
-	var e struct {
-		Message string `json:"message"`
-	}
-	json.Unmarshal(v.Error, &e)
-	msg := e.Message
-	if msg == "" {
-		msg = payload
-	}
-	return all, streamErrorStatus(msg), msg
-}
-
-// streamErrorStatus is the status an error event sent inside a 200 stream
-// stands for, when its wording says the provider cannot answer now. It is 0
-// when it does not, and the error then reaches the client as it is.
-func streamErrorStatus(msg string) int {
-	m := strings.ToLower(msg)
-	switch {
-	case strings.Contains(m, "overload"):
-		return 529
-	case containsAny(m, "rate limit", "rate_limit", "too many requests"):
-		return 429
-	case containsAny(m, "quota", "insufficient", "balance", "exhaust", "额度", "余额"):
-		return 429
-	case containsAny(m, "unavailable", "server error", "internal error", "timeout"):
-		return 503
-	}
-	return 0
-}
-
-// containsAny reports whether s holds any of the substrings.
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if strings.Contains(s, sub) {
-			return true
-		}
+	case status == 402, status == 408, status == 429, status >= 500:
+		return true
+	case status == 400, status == 401, status == 403:
+		return quotaWords.Match(body)
 	}
 	return false
+}
+
+// holdWriter keeps an error reply back while another provider may still
+// answer: headers and body wait until release, or are dropped for the next
+// try. Anything else goes straight through.
+type holdWriter struct {
+	w       http.ResponseWriter
+	hold    bool
+	header  http.Header
+	status  int
+	passing bool
+	held    bytes.Buffer
+}
+
+func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
+	return &holdWriter{w: w, hold: hold, header: http.Header{}}
+}
+
+func (h *holdWriter) Header() http.Header { return h.header }
+
+func (h *holdWriter) WriteHeader(code int) {
+	if h.status != 0 {
+		return
+	}
+	h.status = code
+	if h.hold && code >= 400 {
+		return
+	}
+	h.pass()
+}
+
+func (h *holdWriter) pass() {
+	dst := h.w.Header()
+	for k, v := range h.header {
+		dst[k] = v
+	}
+	h.w.WriteHeader(h.status)
+	h.passing = true
+}
+
+func (h *holdWriter) Write(b []byte) (int, error) {
+	if h.status == 0 {
+		h.WriteHeader(http.StatusOK)
+	}
+	if !h.passing {
+		return h.held.Write(b)
+	}
+	return h.w.Write(b)
+}
+
+func (h *holdWriter) Flush() {
+	if f, ok := h.w.(http.Flusher); ok && h.passing {
+		f.Flush()
+	}
+}
+
+// failed reports a held error another provider could answer instead.
+func (h *holdWriter) failed() bool {
+	return !h.passing && h.status >= 400 && retryable(h.status, h.held.Bytes())
+}
+
+// release sends a held reply after all: nobody else is left to try.
+func (h *holdWriter) release() {
+	if h.passing || h.status == 0 {
+		return
+	}
+	h.pass()
+	h.w.Write(h.held.Bytes())
+}
+
+// keyTier ranks how well a candidate's key suits the request's protocol,
+// best first: 0 a key made for that same protocol, 1 a key that names no
+// protocol, 2 a key made for another. A key's protocol is its own Protocol
+// (the provider's KeyProtocol for its first key). An account ranks 0.
+// Only routing groups order their keys by it; the rest keep keyFit.
+func keyTier(c candidate, from provider.Protocol) int {
+	if c.p.Account != nil {
+		return 0
+	}
+	if c.p.KeyProtocol == "" {
+		return 1
+	}
+	if c.p.KeyProtocol == from {
+		return 0
+	}
+	return 2
+}
+
+// bestTier is the best keyTier among the candidates; 3 when there are none.
+func bestTier(cs []candidate, from provider.Protocol) int {
+	best := 3
+	for _, c := range cs {
+		best = min(best, keyTier(c, from))
+	}
+	return best
+}
+
+// partitionTier splits candidates into those at the best tier and the rest,
+// each in the order given.
+func partitionTier(cs []candidate, from provider.Protocol, best int) (mains, asides []candidate) {
+	for _, c := range cs {
+		if keyTier(c, from) <= best {
+			mains = append(mains, c)
+		} else {
+			asides = append(asides, c)
+		}
+	}
+	return mains, asides
+}
+
+// planItem is one candidate of a group's plan, with what it is weighed as.
+type planItem struct {
+	c candidate
+	w Weighed
+}
+
+// orderItems puts the candidates that are not resting first, and those
+// resting after a recent failure behind them, each in its order.
+func orderItems(ps []planItem, pl planned) ([]candidate, planned) {
+	var ready, resting []planItem
+	for _, it := range ps {
+		if r, ok := restOf(it.c.rest); ok {
+			it.w.Rest = &r // tried all the same when there is no other
+			resting = append(resting, it)
+		} else {
+			ready = append(ready, it)
+		}
+	}
+	var out []candidate
+	for _, it := range append(ready, resting...) {
+		out = append(out, it.c)
+		pl.order = append(pl.order, it.w)
+	}
+	return out, pl
 }
