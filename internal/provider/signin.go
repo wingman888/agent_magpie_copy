@@ -48,7 +48,6 @@ type SignInState struct {
 	ID    string `json:"id"`
 	Agent string `json:"agent"`
 	URL   string `json:"url"`             // the vendor's page, to open or copy
-	Code  string `json:"code,omitempty"`  // what to type there, for a device code
 	State string `json:"state"`           // waiting, done, failed or canceled
 	User  string `json:"user,omitempty"`  // the account, once done
 	Plan  string `json:"plan,omitempty"`  //
@@ -63,7 +62,6 @@ type signInFlow struct {
 	state    string
 	redirect string
 	srv      *http.Server
-	stop     func() // ends an agent's own login command, when that is the sign-in
 	done     chan struct{}
 }
 
@@ -121,31 +119,14 @@ func StartSignIn(agent string) (SignInState, error) {
 		q.Set("state", s.state)
 		q.Set("originator", "codex_cli_rs")
 		s.st.URL = codexAuthorizeURL + "?" + q.Encode()
-	case "cursor":
-		// Cursor has no sign-in of its own to borrow: its CLI signs in
-		if err := startCursorSignIn(s); err != nil {
-			return SignInState{}, err
-		}
-	case "grok":
-		// so is Grok: its CLI signs in with a device code
-		if err := startGrokSignIn(s); err != nil {
-			return SignInState{}, err
-		}
-	case "copilot":
-		// GitHub's device code, as Copilot's editors sign in
-		if err := startCopilotSignIn(s); err != nil {
-			return SignInState{}, err
-		}
 	default:
 		return SignInState{}, fmt.Errorf("magpie can't sign in to %s accounts", agent)
 	}
 
-	if ln != nil {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/", s.callback)
-		s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-		go func() { _ = s.srv.Serve(ln) }()
-	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.callback)
+	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = s.srv.Serve(ln) }()
 	go func() {
 		select {
 		case <-s.done:
@@ -237,20 +218,10 @@ func (s *signInFlow) finish(out SignInState) bool {
 		s.mu.Unlock()
 		return false
 	}
-	out.ID, out.Agent, out.URL, out.Code = s.st.ID, s.st.Agent, s.st.URL, s.st.Code
+	out.ID, out.Agent, out.URL = s.st.ID, s.st.Agent, s.st.URL
 	s.st = out
 	s.mu.Unlock()
-	if out.State == "done" {
-		// signing in again brings back an account removed from magpie
-		_ = ShowAccount(out.Agent)
-	}
 	close(s.done)
-	if s.stop != nil {
-		s.stop()
-	}
-	if s.srv == nil {
-		return true
-	}
 	go func() {
 		// after the browser has had its page
 		time.Sleep(time.Second)
@@ -406,7 +377,7 @@ func claudeExchange(ctx context.Context, code, verifier, redirect, state string)
 		return savedLogin{}, err
 	}
 	profile, _ := json.Marshal(acct)
-	return savedLogin{Agent: "claude", User: claudeUser(email, c.OAuth.SubscriptionType, acct), Plan: c.OAuth.SubscriptionType, Auth: auth, Profile: profile}, nil
+	return savedLogin{Agent: "claude", User: email, Plan: c.OAuth.SubscriptionType, Auth: auth, Profile: profile}, nil
 }
 
 // claudePlans names Claude's organization types the way Claude Code does.
@@ -485,7 +456,7 @@ func addLogin(l savedLogin) (using bool, err error) {
 	defer loginsMu.Unlock()
 	l.Seen = time.Now().UTC().Truncate(time.Second)
 	live, signedIn := liveLogin(l.Agent)
-	using = !signedIn || sameLogin(live, l)
+	using = !signedIn || strings.EqualFold(live.User, l.User)
 	ls := readLogins()
 	if signedIn && !using {
 		// the current account, as fresh as the agent has it
