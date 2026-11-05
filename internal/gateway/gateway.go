@@ -222,8 +222,8 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok && p.Anthropic != "" {
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+	if q, can := countProvider(p); ok && can {
+		res, err := s.forward(r.Context(), q, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
 			if res.StatusCode < 400 {
@@ -351,7 +351,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands := s.candidates(p, model)
+	cands := s.candidatesFor(p, model, from)
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
