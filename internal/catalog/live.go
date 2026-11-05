@@ -66,6 +66,13 @@ func SaveLive(provider, base string, models []Model) error {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, nil)
+}
+
+// FetchWith is Fetch with a hook: decorate, when non-nil, is called on each
+// outgoing list request after its own headers are set, so a caller can add
+// headers that depend on the destination URL. Fetch passes nil.
+func FetchWith(ctx context.Context, base, key string, anthropic bool, decorate func(*http.Request)) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -92,7 +99,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic)
+		ms, err := fetchOne(ctx, u, key, anthropic, decorate)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -109,7 +116,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, decorate func(*http.Request)) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -124,6 +131,9 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, er
 	}
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
+	}
+	if decorate != nil {
+		decorate(req)
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
