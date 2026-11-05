@@ -102,33 +102,6 @@ separate Responses endpoint, `catalog=` to borrow a models.dev list, and
 `models=` to name the models to expose. Anything a preset does not know can
 be overridden the same way.
 
-### 导入链接
-
-供应商或中转站可以提供一条 `magpie://import?…` 链接，点击或执行下面的命令后，magpie 先展示将要添加的名称、请求发往的主机和模型，**确认后才保存**：
-
-```sh
-magpie import 'magpie://import?preset=deepseek&key=sk-…'
-magpie import -y 'magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…'
-```
-
-`magpie import [-y] <link>` 中，`-y` 跳过询问；非交互终端且没有 `-y` 时直接报错退出。链接中的 key 不会完整显示。
-
-| 参数 | 含义 |
-| --- | --- |
-| `preset` | 预设 id，使用该预设的端点 |
-| `region` | 预设有多个区域时选择区域 |
-| `name` | 名称；没有 `preset` 时必填，有 `preset` 时覆盖预设名称 |
-| `id` | Provider id；缺省时由名称派生（如 `Acme Relay` → `acme-relay`） |
-| `key` | API key；缺省则之后用 `magpie provider key <id> <key>` 补填 |
-| `chat` / `responses` / `anthropic` | 三种协议的基址（`anthropic` 为不含 `/v1` 的根） |
-| `models` | 逗号分隔的模型 id，最多 200 个 |
-| `catalog` | models.dev 的 provider id，用于模型名与推理档位 |
-| `website` / `keys` | 官网 / 取 key 页面，仅接受 https，其他值忽略 |
-
-基址必须是 https；只有本机、回环地址、私网地址、`localhost` 或 `.local` 域名可以用 http。基址不得含用户名、密码、查询串或片段。链接中有任何非法内容时整条拒绝，不会部分导入。
-
-网页和 GitHub 无法可靠打开自定义 scheme，可改用 `https://usemagpie.ai/import#<同样参数>` 形式分享：参数放在 fragment（`#`）之后，不会发送到服务器。
-
 ### Signed-in agents as providers
 
 An agent you have signed in to is a subscription with models behind it, so
@@ -313,25 +286,6 @@ Keys in the terminal version:
 
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
-
-### Claude Code 档位
-
-Claude Code 的 opus、sonnet、haiku、fable 四个档位可以各自指定模型，未指定的档位跟随主模型：
-
-```sh
-magpie claude deepseek/pro               # 主模型；未单独指定的档位都跟随它
-magpie claude haiku deepseek/flash       # 只把 haiku 档（小快模型）设为 flash
-magpie claude haiku ""                   # 恢复 haiku 跟随主模型
-```
-
-模型必须是 magpie 提供的模型（`provider/model`）。尚未让 Claude Code 经 magpie 时，设置档位会报错，请先选定一个主模型。把主模型设空（恢复 Claude Code 原样）会清除所有相关设置，其他设置（如 theme）保留。
-
-### 代理与托盘
-
-设置文件 `~/.config/magpie/settings.json` 中的两项：
-
-- `proxy`：magpie 访问供应商时使用的代理。留空时依次采用环境变量（`HTTPS_PROXY` 等及 `NO_PROXY`）、系统代理；`direct` 表示不走代理；也可填代理地址，支持 `http://`、`https://`、`socks5://`、`socks5h://`，裸 `host:port` 视为 http 代理。本机回环地址永不走代理。
-- `tray`：点击托盘图标的行为，`panel`（默认，弹出面板）或 `window`（打开主窗口）。修改后需重新启动应用生效。
 
 ## Files
 

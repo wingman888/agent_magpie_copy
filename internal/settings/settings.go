@@ -8,31 +8,22 @@ package settings
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 )
 
 // Settings is what the user chose. "" and "system" both mean "follow the OS".
 type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
-	Tray  string `json:"tray,omitempty"`  // panel | window: what a click on the tray icon does
-	// Proxy is how magpie reaches providers: "" follows the environment and
-	// the system proxy, "direct" never uses a proxy, anything else is the
-	// proxy address (see ProxyURL).
-	Proxy string `json:"proxy,omitempty"`
 }
 
-// Themes, Langs and Trays are the accepted values, in the order the UI offers them.
+// Themes and Langs are the accepted values, in the order the UI offers them.
 var (
 	Themes = []string{"system", "light", "dark"}
 	Langs  = []string{"system", "en", "zh"}
-	Trays  = []string{"panel", "window"}
 )
 
 // Path is the settings file.
@@ -65,14 +56,6 @@ func Save(s Settings) error {
 	if !slices.Contains(Langs, s.Lang) {
 		return fmt.Errorf("language must be one of %v, not %q", Langs, s.Lang)
 	}
-	if !slices.Contains(Trays, s.Tray) {
-		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
-	}
-	if s.Proxy != "" && s.Proxy != "direct" {
-		if _, err := ProxyURL(s.Proxy); err != nil {
-			return err
-		}
-	}
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
 	}
@@ -90,38 +73,5 @@ func (s Settings) normal() Settings {
 	if s.Lang == "" {
 		s.Lang = "system"
 	}
-	if s.Tray == "" {
-		s.Tray = "panel"
-	}
-	s.Proxy = strings.TrimSpace(s.Proxy)
-	if strings.EqualFold(s.Proxy, "direct") {
-		s.Proxy = "direct"
-	}
 	return s
-}
-
-// ProxyURL parses a proxy address as the settings accept it: http://,
-// https://, socks5:// or socks5h:// URLs, or a bare host:port taken as an
-// HTTP proxy. Anything else is an error.
-func ProxyURL(raw string) (*url.URL, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return nil, errors.New("proxy address is empty")
-	}
-	if !strings.Contains(s, "://") {
-		s = "http://" + s
-	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return nil, fmt.Errorf("proxy %q: %v", raw, err)
-	}
-	switch u.Scheme {
-	case "http", "https", "socks5", "socks5h":
-	default:
-		return nil, fmt.Errorf("proxy %q: use http://, https://, socks5:// or socks5h:// (or a bare host:port), not %q", raw, u.Scheme+"://")
-	}
-	if u.Hostname() == "" {
-		return nil, fmt.Errorf("proxy %q: no host", raw)
-	}
-	return u, nil
 }

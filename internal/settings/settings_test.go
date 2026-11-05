@@ -65,34 +65,3 @@ func TestMigrate(t *testing.T) {
 		t.Fatal("existing folder overwritten")
 	}
 }
-
-func TestTrayAndProxyValidation(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if s := Load(); s.Tray != "panel" || s.Proxy != "" {
-		t.Fatalf("defaults: %+v", s)
-	}
-	for _, good := range []string{"", "panel", "window"} {
-		if err := Save(Settings{Tray: good}); err != nil {
-			t.Errorf("tray %q: %v", good, err)
-		}
-	}
-	if err := Save(Settings{Tray: "menu"}); err == nil {
-		t.Error("bad tray accepted")
-	}
-	for _, good := range []string{"", "direct", "DIRECT", "socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080", "127.0.0.1:7890", "http://10.0.0.1:3128", "https://proxy.example:443"} {
-		if err := Save(Settings{Proxy: good}); err != nil {
-			t.Errorf("proxy %q: %v", good, err)
-		}
-	}
-	if s := Load(); s.Proxy != "https://proxy.example:443" {
-		t.Errorf("last saved proxy: %q", s.Proxy)
-	}
-	for _, bad := range []string{"ftp://x", "x:y:z", "socks4://127.0.0.1:1080", "://nohost"} {
-		if err := Save(Settings{Proxy: bad}); err == nil {
-			t.Errorf("proxy %q accepted", bad)
-		}
-	}
-	if err := Save(Settings{Proxy: "direct"}); err != nil || Load().Proxy != "direct" {
-		t.Fatal("direct not kept")
-	}
-}

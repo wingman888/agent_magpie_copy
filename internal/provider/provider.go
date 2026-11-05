@@ -59,10 +59,6 @@ type Provider struct {
 
 type file struct {
 	Providers []Provider `json:"providers"`
-	// Removed lists the signed-in accounts the user took off the list with
-	// `magpie provider rm`. They keep their model picks; the agent's own
-	// sign-in is never touched, and `magpie provider add <id>` brings them back.
-	Removed []string `json:"removed,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -101,10 +97,10 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
-	f := load()
+	stored := load().Providers
 	picks := map[string][]string{}
 	var out []Provider
-	for _, p := range f.Providers {
+	for _, p := range stored {
 		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			picks[p.ID] = p.Models
@@ -113,7 +109,7 @@ func All() []Provider {
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken || contains(f.Removed, a.ID) {
+		if _, taken := find(out, a.ID); taken {
 			continue
 		}
 		a.Models = picks[a.ID]
@@ -142,18 +138,6 @@ func Find(id string) (*Provider, error) {
 	return nil, fmt.Errorf("no provider %q — magpie providers lists them", id)
 }
 
-// Exact looks a provider up by id only; a display name never matches. Use it
-// wherever the result will be written to, so a name cannot pick the target.
-func Exact(id string) (*Provider, error) {
-	q := strings.ToLower(strings.TrimSpace(id))
-	for _, p := range All() {
-		if p.ID == q {
-			return &p, nil
-		}
-	}
-	return nil, fmt.Errorf("no provider %q — magpie providers lists them", id)
-}
-
 var idRe = regexp.MustCompile(`[^a-z0-9]+`)
 
 // Slug derives an id from a name: "My Relay" → "my-relay".
@@ -161,14 +145,8 @@ func Slug(name string) string {
 	return strings.Trim(idRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-// Save adds or replaces a provider. A provider needs its key (or needs none).
-func Save(p Provider) error { return save(p, true) }
-
-// SaveImported adds or replaces a provider from an import link. A link may
-// leave the key out; the user adds it later with `magpie provider key`.
-func SaveImported(p Provider) error { return save(p, false) }
-
-func save(p Provider, needKey bool) error {
+// Save adds or replaces a provider.
+func Save(p Provider) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -190,7 +168,7 @@ func save(p Provider, needKey bool) error {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
-		if needKey && p.Key == "" && !keyOptional(p) {
+		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
@@ -234,41 +212,6 @@ func Delete(id string) error {
 	}
 	f.Providers = keep
 	return store(f)
-}
-
-// Remove takes a provider off the list. A signed-in account is only hidden:
-// its model picks stay, nothing of the agent's sign-in is touched, and
-// Restore brings it back. Anything else is deleted outright.
-func Remove(id string) error {
-	if _, ok := find(Accounts(), id); !ok {
-		return Delete(id)
-	}
-	f := load()
-	if !contains(f.Removed, id) {
-		f.Removed = append(f.Removed, id)
-	}
-	return store(f)
-}
-
-// Restore undoes Remove for an account; the model picks come back as they were.
-func Restore(id string) error {
-	f := load()
-	keep := f.Removed[:0]
-	for _, r := range f.Removed {
-		if r != id {
-			keep = append(keep, r)
-		}
-	}
-	if len(keep) == len(f.Removed) {
-		return nil
-	}
-	f.Removed = keep
-	return store(f)
-}
-
-// Removed reports whether the user took this account off the list.
-func Removed(id string) bool {
-	return contains(load().Removed, strings.ToLower(strings.TrimSpace(id)))
 }
 
 // keyOptional is true for local servers, which usually have no key.

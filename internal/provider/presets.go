@@ -90,14 +90,6 @@ var presets = []PresetDef{
 		Chat: "https://api.groq.com/openai/v1", Responses: "https://api.groq.com/openai/v1",
 		Website: "https://console.groq.com", KeysURL: "https://console.groq.com/keys"},
 
-	{ID: "opencode-go", Name: "OpenCode Go", Icon: "opencode", Kind: KindVendor,
-		Chat: "https://opencode.ai/zen/go/v1", Responses: "https://opencode.ai/zen/go/v1", Anthropic: "https://opencode.ai/zen/go",
-		Note:    "monthly subscription · open coding models",
-		Website: "https://opencode.ai/docs/go", KeysURL: "https://opencode.ai/auth"},
-	{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindVendor,
-		Chat: "https://opencode.ai/zen/v1", Responses: "https://opencode.ai/zen/v1", Anthropic: "https://opencode.ai/zen",
-		Website: "https://opencode.ai/docs/zen", KeysURL: "https://opencode.ai/auth"},
-
 	{ID: "openrouter", Name: "OpenRouter", Icon: "openrouter", Kind: KindRelay, Catalog: "openrouter",
 		Chat: "https://openrouter.ai/api/v1", Anthropic: "https://openrouter.ai/api",
 		Website: "https://openrouter.ai", KeysURL: "https://openrouter.ai/keys"},
@@ -124,6 +116,14 @@ var presets = []PresetDef{
 			{ID: "global", Name: "Global", Chat: "https://global.yylx.io/v1", Anthropic: "https://global.yylx.io"},
 			{ID: "cn", Name: "China Mainland", Chat: "https://cn.yylx.io/v1", Anthropic: "https://cn.yylx.io"},
 		}},
+
+	{ID: "opencode-go", Name: "OpenCode Go", Icon: "opencode", Kind: KindRelay,
+		Chat: "https://opencode.ai/zen/go/v1", Responses: "https://opencode.ai/zen/go/v1", Anthropic: "https://opencode.ai/zen/go",
+		Note:    "monthly subscription · open coding models",
+		Website: "https://opencode.ai/docs/go", KeysURL: "https://opencode.ai/auth"},
+	{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindRelay,
+		Chat: "https://opencode.ai/zen/v1", Responses: "https://opencode.ai/zen/v1", Anthropic: "https://opencode.ai/zen",
+		Website: "https://opencode.ai/docs/zen", KeysURL: "https://opencode.ai/auth"},
 
 	{ID: "ollama", Name: "Ollama", Icon: "ollama", Kind: KindLocal, NoKey: true,
 		Chat: "http://localhost:11434/v1", Anthropic: "http://localhost:11434",

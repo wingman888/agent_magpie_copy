@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -57,6 +58,43 @@ func magpieModels() []catalog.Model {
 		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
+}
+
+// FieldForValue returns the non-model field a bare value belongs to, or nil
+// when the value is a model or belongs to no field. A value the model field
+// already offers is a model, even when another field offers it too (Claude
+// Code's tiers take the same provider/model).
+func FieldForValue(a *Agent, v string) *Field {
+	vals := a.Values()
+	for _, o := range a.Fields[0].Options(vals) {
+		if o.Value == v {
+			return nil
+		}
+	}
+	for i := 1; i < len(a.Fields); i++ {
+		for _, o := range a.Fields[i].Options(vals) {
+			if o.Value == v {
+				return &a.Fields[i]
+			}
+		}
+	}
+	return nil
+}
+
+// BareTarget decides which field `magpie <agent> <value>` sets: the field the
+// value belongs to (see FieldForValue), else the main model. A lone tier name
+// such as `magpie claude opus` names a tier with no model after it; it is
+// refused rather than taken as the main model's literal value.
+func BareTarget(a *Agent, v string) (string, error) {
+	if f := FieldForValue(a, v); f != nil {
+		return f.Key, nil
+	}
+	for i := 1; i < len(a.Fields); i++ {
+		if f := &a.Fields[i]; f.Optional && f.Key == v {
+			return "", fmt.Errorf("usage: magpie %s %s <provider/model>  (or magpie %s %s \"\" to follow the main model)", a.ID, v, a.ID, v)
+		}
+	}
+	return a.Fields[0].Key, nil
 }
 
 // group tags every option with a group name.

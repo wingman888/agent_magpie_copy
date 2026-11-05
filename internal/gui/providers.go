@@ -248,15 +248,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			writeJSON(rw, map[string]string{"key": p.Key})
 			return
 		case "delete":
-			// a signed-in account is hidden, not deleted, so it can come
-			// back with its model picks; anything else is deleted outright
-			var err error
-			if p, ferr := provider.Exact(in.ID); ferr == nil && p.Account != nil {
-				err = provider.Remove(in.ID)
-			} else {
-				err = provider.Delete(in.ID)
-			}
-			if err != nil {
+			if err := provider.Delete(in.ID); err != nil {
 				fail(rw, err)
 				return
 			}

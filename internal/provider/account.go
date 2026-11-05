@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // Account is the signed-in agent behind a provider.
@@ -68,26 +67,16 @@ func (p Provider) Prepare(body []byte) []byte {
 	return body
 }
 
-// Exclusion is a signed-in account the user took off the provider list.
+// Exclusion is a sign-in magpie found but will not offer as a provider.
 type Exclusion struct {
-	Agent    string `json:"agent"`    // the agent's id: codex, copilot, claude
-	Provider string `json:"provider"` // the provider id it is listed under
-	Why      string `json:"why"`
+	Agent string `json:"agent"`
+	Why   string `json:"why"`
 }
 
-// Excluded lists the signed-in accounts the user removed with
-// `magpie provider rm`; `magpie provider add <id>` brings them back.
-func Excluded() []Exclusion {
-	removed := load().Removed
-	var out []Exclusion
-	for _, a := range Accounts() {
-		if contains(removed, a.ID) {
-			out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID,
-				Why: "removed from magpie · magpie provider add " + a.ID + " brings it back"})
-		}
-	}
-	return out
-}
+// Excluded lists sign-ins magpie detects but cannot expose. It is currently
+// empty, but remains part of the API so the CLI and GUI can explain future
+// account types that are detectable but not usable.
+func Excluded() []Exclusion { return nil }
 
 const (
 	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -122,7 +111,6 @@ var (
 	claudeStatusAt   time.Time
 	claudeStatusUser string
 	claudeStatusPlan string
-	claudeStatusOut  bool // Claude Code said it is signed out
 
 	claudeCacheMu  sync.Mutex
 	claudeCacheAt  time.Time
@@ -252,9 +240,6 @@ func forgetClaudeCredential() {
 	claudeCacheMu.Lock()
 	claudeCacheAt = time.Time{}
 	claudeCacheMu.Unlock()
-	claudeStatusMu.Lock()
-	claudeStatusAt, claudeStatusOut = time.Time{}, false
-	claudeStatusMu.Unlock()
 }
 
 func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) error {
@@ -297,48 +282,33 @@ func claudeExecutable() string {
 // blob intentionally contains tokens and plan metadata but no display identity;
 // `claude auth status --json` is the authoritative, non-secret view shown by the
 // CLI. Cache it briefly because the providers screen refreshes often.
-//
-// loggedOut is true only when Claude Code answered that nobody is signed in,
-// even if its exit code is non-zero. A missing command or an answer magpie
-// cannot parse leaves the previous judgement (the credentials) in place.
-func claudeIdentity() (user, plan string, loggedOut bool) {
+func claudeIdentity() (string, string) {
 	claudeStatusMu.Lock()
 	defer claudeStatusMu.Unlock()
 	if time.Since(claudeStatusAt) < 30*time.Second {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return claudeStatusUser, claudeStatusPlan
 	}
 	claudeStatusAt = time.Now()
-	// unknown: keep the credential-based judgement, so an old "signed out"
-	// answer must not stick once the command stops giving one
-	unknown := func() (string, string, bool) {
-		claudeStatusOut = false
-		return claudeStatusUser, claudeStatusPlan, false
-	}
 	path := claudeExecutable()
 	if path == "" {
-		return unknown()
+		return claudeStatusUser, claudeStatusPlan
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// Output keeps stdout even when the command exits non-zero, which is how
-	// a signed-out Claude Code reports itself.
-	out, _ := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
+	out, err := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
+	if err != nil {
+		return claudeStatusUser, claudeStatusPlan
+	}
 	var status struct {
-		LoggedIn         *bool  `json:"loggedIn"`
+		LoggedIn         bool   `json:"loggedIn"`
 		Email            string `json:"email"`
 		SubscriptionType string `json:"subscriptionType"`
 	}
-	if json.Unmarshal(out, &status) != nil || status.LoggedIn == nil {
-		return unknown()
+	if json.Unmarshal(out, &status) == nil && status.LoggedIn {
+		claudeStatusUser = strings.TrimSpace(status.Email)
+		claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
 	}
-	if !*status.LoggedIn {
-		claudeStatusUser, claudeStatusPlan, claudeStatusOut = "", "", true
-		return "", "", true
-	}
-	claudeStatusUser = strings.TrimSpace(status.Email)
-	claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
-	claudeStatusOut = false
-	return claudeStatusUser, claudeStatusPlan, false
+	return claudeStatusUser, claudeStatusPlan
 }
 
 func claudeAccount() (Provider, bool) {
@@ -346,11 +316,7 @@ func claudeAccount() (Provider, bool) {
 	if !ok {
 		return Provider{}, false
 	}
-	user, statusPlan, loggedOut := claudeIdentity()
-	if loggedOut {
-		// the credentials may linger after `claude auth logout`; the agent wins
-		return Provider{}, false
-	}
+	user, statusPlan := claudeIdentity()
 	plan := c.OAuth.SubscriptionType
 	if statusPlan != "" {
 		plan = statusPlan
@@ -417,7 +383,7 @@ func claudeModels(ctx context.Context) ([]catalog.Model, error) {
 		req.Header.Set("anthropic-beta", claudeBetaHeader(""))
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", claudeUserAgent())
-		res, err := netproxy.Client().Do(req)
+		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return nil, errors.New("Claude model list: " + err.Error())
 		}
@@ -494,7 +460,7 @@ func claudeToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := netproxy.Client().Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", errors.New("Claude Code token refresh: " + err.Error())
 	}
@@ -658,7 +624,7 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 		return "", "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := netproxy.Client().Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", "", errors.New("Codex token refresh: " + err.Error())
 	}
@@ -847,7 +813,7 @@ func copilotToken(ctx context.Context, github string) (copilotSession, error) {
 	for k, v := range copilotHeaders {
 		req.Header.Set(k, v)
 	}
-	res, err := netproxy.Client().Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return copilotSession{}, errors.New("Copilot sign-in: " + err.Error())
 	}
@@ -882,7 +848,7 @@ func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) 
 	for k, v := range copilotHeaders {
 		req.Header.Set(k, v)
 	}
-	res, err := netproxy.Client().Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

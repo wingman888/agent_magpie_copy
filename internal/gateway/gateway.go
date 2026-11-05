@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -88,7 +87,7 @@ type Server struct {
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 netproxy.Proxy,
+			Proxy:                 http.ProxyFromEnvironment,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,
@@ -390,6 +389,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
+	body = developerToSystem(to, body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -405,11 +405,9 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
+	provider.ApplyOpenCodeSession(req, in, body)
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
-	}
-	if provider.IsOpenCodeHost(req.URL.Hostname()) {
-		req.Header.Set(provider.OpenCodeSessionHeader, provider.OpenCodeSession(in, body))
 	}
 	return s.client.Do(req)
 }
@@ -418,9 +416,6 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
-	if proto == provider.Chat {
-		body = developerToSystem(body)
-	}
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(rewriteModel(body, model)), r.Header)
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
@@ -711,103 +706,6 @@ func modelOf(body []byte) string {
 // rewriteModel swaps the model field, keeping every other field as it was.
 func rewriteModel(body []byte, model string) []byte {
 	return withFields(body, map[string]any{"model": model})
-}
-
-// developerToSystem renames the "developer" role to "system" in a Chat
-// Completions request. Chat backends without a developer role reject the whole
-// request, so Pi's reasoning turns fail without this. Only the role values
-// change: every other byte of the body, including the other messages, is kept
-// as sent. A body with no developer message is returned untouched.
-func developerToSystem(body []byte) []byte {
-	spans := fieldSpans(body)
-	for _, sp := range spans {
-		if sp.key != "messages" {
-			continue
-		}
-		raw := body[sp.start:sp.end]
-		msgs, changed := renameDeveloperRoles(raw)
-		if !changed {
-			return body
-		}
-		out := make([]byte, 0, len(body)+len(msgs))
-		out = append(out, body[:sp.start]...)
-		out = append(out, msgs...)
-		return append(out, body[sp.end:]...)
-	}
-	return body
-}
-
-// renameDeveloperRoles rewrites the developer messages in a messages array.
-// Other elements are copied byte for byte.
-func renameDeveloperRoles(arr []byte) ([]byte, bool) {
-	var items []json.RawMessage
-	if json.Unmarshal(arr, &items) != nil {
-		return nil, false
-	}
-	changed := false
-	var b bytes.Buffer
-	b.WriteByte('[')
-	for i, it := range items {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		var m struct {
-			Role string `json:"role"`
-		}
-		if json.Unmarshal(it, &m) == nil && m.Role == "developer" {
-			it = replaceRole(it)
-			changed = true
-		}
-		b.Write(it)
-	}
-	b.WriteByte(']')
-	return b.Bytes(), changed
-}
-
-// replaceRole sets every "role" member of a JSON object to "system", leaving
-// the rest of the object's bytes alone.
-func replaceRole(obj []byte) []byte {
-	var out []byte
-	last := 0
-	for _, sp := range fieldSpans(obj) {
-		if sp.key != "role" {
-			continue
-		}
-		out = append(out, obj[last:sp.start]...)
-		out = append(out, `"system"`...)
-		last = sp.end
-	}
-	return append(out, obj[last:]...)
-}
-
-// span is the byte range of one member's value in a JSON object.
-type span struct {
-	key        string
-	start, end int
-}
-
-// fieldSpans returns the byte ranges of the values of a JSON object's members,
-// in document order. It returns nil if obj is not an object.
-func fieldSpans(obj []byte) []span {
-	dec := json.NewDecoder(bytes.NewReader(obj))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return nil
-	}
-	var spans []span
-	for dec.More() {
-		kt, err := dec.Token()
-		if err != nil {
-			return nil
-		}
-		key, _ := kt.(string)
-		var raw json.RawMessage
-		if dec.Decode(&raw) != nil {
-			return nil
-		}
-		end := int(dec.InputOffset())
-		spans = append(spans, span{key: key, start: end - len(raw), end: end})
-	}
-	return spans
 }
 
 // withFields sets top-level fields, keeping every other field as it was.

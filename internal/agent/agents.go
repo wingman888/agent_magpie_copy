@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -160,37 +161,34 @@ func magpieProviderJSON(shape string) any {
 		}
 		return map[string]any{"type": "openai", "name": "magpie", "base_url": gatewayV1(), "api_key": gateway.Token, "models": ms}
 	case "pi":
-		var ms []map[string]any
-		for _, m := range models {
-			// reasoning lets Pi offer its thinking levels for the model
-			e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-			// Pi offers xhigh and max only when the model declares them
-			if tl := piThinkingLevels(m.Efforts); tl != nil {
-				e["thinkingLevelMap"] = tl
-			}
-			ms = append(ms, e)
-		}
-		if ms == nil {
-			ms = []map[string]any{}
-		}
+		ms := piModels(models)
 		return map[string]any{"name": "magpie", "baseUrl": gatewayV1(), "api": "openai-completions", "apiKey": gateway.Token, "models": ms}
 	}
 	return nil
 }
 
-// piThinkingLevels maps the levels Pi must learn about (xhigh and max, which
-// it does not offer by default) to themselves; nil when the model has neither.
-func piThinkingLevels(efforts []string) map[string]string {
-	var out map[string]string
-	for _, e := range efforts {
-		if e == "xhigh" || e == "max" {
-			if out == nil {
-				out = map[string]string{}
+// piModels lists models in Pi's models.json shape. reasoning lets Pi offer
+// its thinking levels; xhigh and max are declared only where the model has
+// them, under their own names, so Pi offers them and sends them unchanged.
+func piModels(models []catalog.Model) []map[string]any {
+	var ms []map[string]any
+	for _, m := range models {
+		e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
+		tl := map[string]string{}
+		for _, lv := range []string{"xhigh", "max"} {
+			if slices.Contains(m.Efforts, lv) {
+				tl[lv] = lv
 			}
-			out[e] = e
 		}
+		if len(tl) > 0 {
+			e["thinkingLevelMap"] = tl
+		}
+		ms = append(ms, e)
 	}
-	return out
+	if ms == nil {
+		ms = []map[string]any{}
+	}
+	return ms
 }
 
 func opencode(home, cfg string) *Agent {

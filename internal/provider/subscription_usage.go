@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // QuotaWindow is one rolling allowance reported by a subscription provider.
@@ -51,21 +49,18 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		return append([]SubscriptionQuota(nil), subscriptionUsageCache.data...)
 	}
 	var out []SubscriptionQuota
-	// accounts the user removed from magpie are not counted either
-	if _, _, ok := claudeCredential(); ok && !Removed("claude") {
-		if _, _, loggedOut := claudeIdentity(); !loggedOut {
-			out = append(out, claudeSubscriptionUsage(ctx))
-		}
+	if _, _, ok := claudeCredential(); ok {
+		out = append(out, claudeSubscriptionUsage(ctx))
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if _, ok := codexAccount(home); ok && !Removed("codex") {
+		if _, ok := codexAccount(home); ok {
 			out = append(out, codexSubscriptionUsage(ctx, filepath.Join(home, ".codex", "auth.json")))
 		}
 		cfg := os.Getenv("XDG_CONFIG_HOME")
 		if cfg == "" {
 			cfg = filepath.Join(home, ".config")
 		}
-		if app, ok := copilotLogin(cfg); ok && !Removed("copilot") {
+		if app, ok := copilotLogin(cfg); ok {
 			out = append(out, copilotSubscriptionUsage(ctx, app.Token))
 		}
 	}
@@ -83,7 +78,7 @@ func accountJSON(ctx context.Context, url, token string, headers map[string]stri
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	res, err := netproxy.Client().Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -106,7 +101,7 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 		q.Error = err.Error()
 		return q
 	}
-	_, plan, _ := claudeIdentity()
+	_, plan := claudeIdentity()
 	q.Plan = plan
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
@@ -215,7 +210,7 @@ func copilotSubscriptionUsage(ctx context.Context, githubToken string) Subscript
 			req.Header.Set(k, v)
 		}
 		var res *http.Response
-		res, err = netproxy.Client().Do(req)
+		res, err = http.DefaultClient.Do(req)
 		if err == nil {
 			defer res.Body.Close()
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))

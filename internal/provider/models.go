@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -54,7 +55,13 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic)
+		// The model list of an OpenCode gateway is refused without a
+		// session too; the hook touches only opencode.ai hosts. The list
+		// request has no conversation, so the body is empty and the id
+		// is the stable magpie- value for it.
+		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, func(req *http.Request) {
+			ApplyOpenCodeSession(req, nil, nil)
+		})
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}

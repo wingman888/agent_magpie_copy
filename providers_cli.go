@@ -35,7 +35,7 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
-		// no early return: a removed account still gets its note below
+		return nil
 	}
 	uses := usesByProvider()
 	type row struct{ name, id, host, key, models, uses string }
@@ -79,7 +79,7 @@ func providers() error {
 			name = a.Name
 		}
 		fmt.Println()
-		fmt.Println(" ", muted.Render(name+" is signed in but "+x.Why))
+		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why))
 	}
 	return nil
 }
@@ -189,13 +189,10 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := provider.Remove(p.ID); err != nil {
+		if err := provider.Delete(p.ID); err != nil {
 			return err
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
-		if p.Account != nil {
-			fmt.Println(muted.Render("  your " + p.Account.Agent + " sign-in is untouched · magpie provider add " + p.ID + " brings it back"))
-		}
 		return nil
 	case "test":
 		if len(rest) != 1 {
@@ -264,9 +261,6 @@ func addProvider(rest []string) error {
 	if len(rest) == 0 {
 		return fmt.Errorf("magpie provider add <preset> <key>   or   magpie provider add <name> k=v…\n\n%s", providerUsage)
 	}
-	if id := strings.ToLower(strings.TrimSpace(rest[0])); provider.Removed(id) {
-		return restoreAccount(id)
-	}
 	var p provider.Provider
 	if pr, err := provider.FromPreset(strings.ToLower(rest[0])); err == nil {
 		p = pr
@@ -301,32 +295,6 @@ func addProvider(rest []string) error {
 	}
 	n := len(saved.Exposed())
 	if n == 0 {
-		fmt.Println(amber.Render("!"), "no models exposed yet ·", "magpie provider models", saved.ID, "<ids…>")
-	} else {
-		fmt.Printf("  %d models in the catalog · %s\n", n, muted.Render("magpie models"))
-	}
-	return nil
-}
-
-// restoreAccount brings back a signed-in account the user removed; its model
-// picks come back with it.
-func restoreAccount(id string) error {
-	signedIn := false
-	for _, a := range provider.Accounts() {
-		signedIn = signedIn || a.ID == id
-	}
-	if !signedIn {
-		return fmt.Errorf("%s is not signed in; sign in to it first, then magpie provider add %s", id, id)
-	}
-	if err := provider.Restore(id); err != nil {
-		return err
-	}
-	saved, err := provider.Find(id)
-	if err != nil {
-		return err
-	}
-	fmt.Println(green.Render("✓"), "added", saved.Name, muted.Render("("+saved.ID+")"))
-	if n := len(saved.Exposed()); n == 0 {
 		fmt.Println(amber.Render("!"), "no models exposed yet ·", "magpie provider models", saved.ID, "<ids…>")
 	} else {
 		fmt.Printf("  %d models in the catalog · %s\n", n, muted.Render("magpie models"))

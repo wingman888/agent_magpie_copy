@@ -15,8 +15,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // Model is one entry the picker can offer.
@@ -133,7 +131,7 @@ func Sync(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("User-Agent", "magpie")
-	resp, err := netproxy.Client().Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}

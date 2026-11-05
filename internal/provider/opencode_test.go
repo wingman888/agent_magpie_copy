@@ -7,115 +7,128 @@ import (
 )
 
 func TestOpenCodePresets(t *testing.T) {
-	cases := map[string]PresetDef{
-		"opencode-go": {Chat: "https://opencode.ai/zen/go/v1", Responses: "https://opencode.ai/zen/go/v1",
-			Anthropic: "https://opencode.ai/zen/go", Website: "https://opencode.ai/docs/go", KeysURL: "https://opencode.ai/auth"},
-		"opencode-zen": {Chat: "https://opencode.ai/zen/v1", Responses: "https://opencode.ai/zen/v1",
-			Anthropic: "https://opencode.ai/zen", Website: "https://opencode.ai/docs/zen", KeysURL: "https://opencode.ai/auth"},
+	cases := map[string]struct{ chat, responses, anthropic, website string }{
+		"opencode-go":  {"https://opencode.ai/zen/go/v1", "https://opencode.ai/zen/go/v1", "https://opencode.ai/zen/go", "https://opencode.ai/docs/go"},
+		"opencode-zen": {"https://opencode.ai/zen/v1", "https://opencode.ai/zen/v1", "https://opencode.ai/zen", "https://opencode.ai/docs/zen"},
 	}
 	for id, want := range cases {
 		pr := Preset(id)
 		if pr == nil {
 			t.Fatalf("preset %s missing", id)
 		}
-		if pr.Chat != want.Chat || pr.Responses != want.Responses || pr.Anthropic != want.Anthropic ||
-			pr.Website != want.Website || pr.KeysURL != want.KeysURL {
-			t.Errorf("%s: got %+v", id, *pr)
+		if pr.Chat != want.chat || pr.Responses != want.responses || pr.Anthropic != want.anthropic {
+			t.Errorf("%s endpoints: %q %q %q", id, pr.Chat, pr.Responses, pr.Anthropic)
+		}
+		if pr.Website != want.website || pr.KeysURL != "https://opencode.ai/auth" {
+			t.Errorf("%s website/keys: %q %q", id, pr.Website, pr.KeysURL)
 		}
 		p, err := FromPreset(id)
-		if err != nil || !p.IsOpenCode() {
-			t.Errorf("%s: FromPreset %v, IsOpenCode %v", id, err, p.IsOpenCode())
+		if err != nil {
+			t.Fatal(err)
 		}
+		if !p.IsOpenCode() {
+			t.Errorf("%s should be an OpenCode provider", id)
+		}
+	}
+	if Preset("opencode-go").Name != "OpenCode Go" {
+		t.Errorf("name %q", Preset("opencode-go").Name)
 	}
 }
 
 func TestIsOpenCode(t *testing.T) {
-	for host, want := range map[string]bool{
-		"opencode.ai":          true,
-		"api.opencode.ai":      true,
-		"zen.opencode.ai:443":  true,
-		"notopencode.ai":       false,
-		"opencode.ai.evil.com": false,
-		"example.com":          false,
+	for _, tc := range []struct {
+		base string
+		want bool
+	}{
+		{"https://opencode.ai/zen/v1", true},
+		{"https://api.opencode.ai/v1", true},
+		{"https://OPENCODE.AI:443/v1", true},
+		{"https://notopencode.ai/v1", false},
+		{"https://opencode.ai.evil.example/v1", false},
+		{"https://api.deepseek.com/v1", false},
 	} {
-		p := Provider{Chat: "https://" + host + "/v1"}
-		if got := p.IsOpenCode(); got != want {
-			t.Errorf("%s: IsOpenCode = %v, want %v", host, got, want)
-		}
-		if got := IsOpenCodeHost(host); got != want {
-			t.Errorf("IsOpenCodeHost(%s) = %v, want %v", host, got, want)
+		p := Provider{ID: "x", Chat: tc.base}
+		if got := p.IsOpenCode(); got != tc.want {
+			t.Errorf("IsOpenCode(%s) = %v, want %v", tc.base, got, tc.want)
 		}
 	}
 }
 
-func TestOpenCodeSessionHeaderPriority(t *testing.T) {
+func openCodeReq(t *testing.T, url string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func TestOpenCodeSessionAgentHeaderWins(t *testing.T) {
+	in := http.Header{}
+	in.Set("x-session-id", "second")
+	in.Set("X-Opencode-Session", "first")
+	req := openCodeReq(t, "https://opencode.ai/zen/go/v1/chat/completions")
+	ApplyOpenCodeSession(req, in, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	if got := req.Header.Get("x-opencode-session"); got != "first" {
+		t.Errorf("session = %q, want first", got)
+	}
+}
+
+func TestOpenCodeSessionSkipsEmptyAgentHeader(t *testing.T) {
+	in := http.Header{}
+	in.Set("x-opencode-session", "   ")
+	in.Set("session_id", "abc")
+	if got := OpenCodeSession(in, nil); got != "abc" {
+		t.Errorf("session = %q, want abc", got)
+	}
+}
+
+func TestOpenCodeSessionStableFallback(t *testing.T) {
+	chatTurn1 := `{"model":"m","messages":[{"role":"system","content":"sys"},{"role":"user","content":"write a parser"}]}`
+	chatTurn2 := `{"model":"m","messages":[{"role":"system","content":"sys"},{"role":"user","content":"write a parser"},{"role":"assistant","content":"ok"},{"role":"user","content":"now tests"}]}`
+	other := `{"model":"m","messages":[{"role":"user","content":"something else"}]}`
+	respTurn1 := `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"write a parser"}]}]}`
+	respTurn2 := `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"write a parser"}]},{"type":"function_call_output","call_id":"c","output":"x"}]}`
+	respString := `{"model":"m","input":"write a parser"}`
+	anthropicTurn := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"write a parser"}]}]}`
+
+	id := func(body string) string { return OpenCodeSession(nil, []byte(body)) }
+	first := id(chatTurn1)
+	if !strings.HasPrefix(first, "magpie-") || len(first) <= len("magpie-") {
+		t.Fatalf("fallback id %q", first)
+	}
+	if id(chatTurn2) != first {
+		t.Errorf("later Chat turn changed the session id")
+	}
+	if id(other) == first {
+		t.Errorf("different conversation shares the session id")
+	}
+	if id(respTurn1) != first || id(respTurn2) != first {
+		t.Errorf("Responses input does not match the Chat id: %q %q vs %q", id(respTurn1), id(respTurn2), first)
+	}
+	if id(respString) != first {
+		t.Errorf("string input does not match the Chat id")
+	}
+	if id(anthropicTurn) != first {
+		t.Errorf("text-part content does not match the Chat id")
+	}
+}
+
+func TestApplyOpenCodeSessionOnlyOpenCodeHosts(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
-	h := http.Header{}
-	h.Set("session-id", "from-session-id")
-	h.Set("x-claude-code-session-id", "from-claude")
-	if got := OpenCodeSession(h, body); got != "from-session-id" {
-		t.Errorf("got %q", got)
+	req := openCodeReq(t, "https://api.deepseek.com/v1/chat/completions")
+	ApplyOpenCodeSession(req, http.Header{"X-Session-Id": {"s"}}, body)
+	if _, ok := req.Header["X-Opencode-Session"]; ok || req.Header.Get("x-opencode-session") != "" {
+		t.Errorf("non-OpenCode host received the session header")
 	}
-	h.Set("x-opencode-session", "oc-1")
-	if got := OpenCodeSession(h, body); got != "oc-1" {
-		t.Errorf("got %q", got)
+	req = openCodeReq(t, "https://notopencode.ai/v1/chat/completions")
+	ApplyOpenCodeSession(req, nil, body)
+	if req.Header.Get("x-opencode-session") != "" {
+		t.Errorf("notopencode.ai received the session header")
 	}
-	h = http.Header{}
-	h.Set("x-session-affinity", "  ")
-	h.Set("session_id", "sid")
-	if got := OpenCodeSession(h, body); got != "sid" {
-		t.Errorf("blank values must be skipped: got %q", got)
-	}
-}
-
-func TestOpenCodeSessionFallbackIsStablePerConversation(t *testing.T) {
-	first := `{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"write a parser"}]}`
-	later := `{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"write a parser"},` +
-		`{"role":"assistant","content":"ok"},{"role":"user","content":"more"}]}`
-	other := `{"messages":[{"role":"user","content":"something else"}]}`
-	a := OpenCodeSession(nil, []byte(first))
-	if !strings.HasPrefix(a, "magpie-") {
-		t.Fatalf("got %q", a)
-	}
-	if b := OpenCodeSession(nil, []byte(later)); b != a {
-		t.Errorf("later turn changed id: %q vs %q", b, a)
-	}
-	if c := OpenCodeSession(nil, []byte(other)); c == a {
-		t.Errorf("different conversations share %q", a)
-	}
-}
-
-func TestOpenCodeSessionFallbackResponsesAndAnthropic(t *testing.T) {
-	chat := OpenCodeSession(nil, []byte(`{"messages":[{"role":"user","content":"hello"}]}`))
-	respString := OpenCodeSession(nil, []byte(`{"input":"hello"}`))
-	respArray := OpenCodeSession(nil, []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}`))
-	respLater := OpenCodeSession(nil, []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]},`+
-		`{"type":"function_call_output","call_id":"c1","output":"x"}]}`))
-	anth := OpenCodeSession(nil, []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`))
-	for name, got := range map[string]string{"responses string": respString, "responses array": respArray,
-		"responses later": respLater, "anthropic": anth} {
-		if got != chat {
-			t.Errorf("%s: %q, want %q", name, got, chat)
-		}
-	}
-}
-
-func TestOpenCodeSessionFallbackImageOnlyFirstTurn(t *testing.T) {
-	img := func(data string) []byte {
-		return []byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + data + `"}}]}]}`)
-	}
-	a := OpenCodeSession(nil, img("AAAA"))
-	b := OpenCodeSession(nil, img("BBBB"))
-	if !strings.HasPrefix(a, "magpie-") || !strings.HasPrefix(b, "magpie-") {
-		t.Fatalf("got %q, %q", a, b)
-	}
-	if a == b {
-		t.Errorf("different image-only conversations share %q", a)
-	}
-	if again := OpenCodeSession(nil, img("AAAA")); again != a {
-		t.Errorf("same image-only conversation changed id: %q vs %q", again, a)
-	}
-	if e1, e2 := OpenCodeSession(nil, []byte(`{"input":""}`)), OpenCodeSession(nil, []byte(`{"input":"x"}`)); e1 == e2 {
-		t.Errorf("empty input collides with non-empty input")
+	req = openCodeReq(t, "https://opencode.ai/zen/v1/responses")
+	ApplyOpenCodeSession(req, nil, body)
+	if !strings.HasPrefix(req.Header.Get("x-opencode-session"), "magpie-") {
+		t.Errorf("OpenCode host without header: %q", req.Header.Get("x-opencode-session"))
 	}
 }

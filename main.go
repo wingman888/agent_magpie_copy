@@ -43,7 +43,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
-  magpie import [-y] <link>       add a provider from a magpie://import link, after you confirm
   magpie models                   every model agents can pick, as provider/model
 
   magpie serve                    run the gateway alone (the app runs it too)
@@ -80,9 +79,6 @@ func run(args []string) error {
 		}
 		return tui.Run()
 	}
-	if isMagpieLink(args[0]) {
-		return importCmd(args)
-	}
 	switch args[0] {
 	case "tui":
 		return tui.Run()
@@ -113,8 +109,6 @@ func run(args []string) error {
 		return profiles(args)
 	case "providers":
 		return providers()
-	case "import":
-		return importCmd(args[1:])
 	case "presets":
 		return presets()
 	case "provider":
@@ -144,10 +138,11 @@ func run(args []string) error {
 		}
 		// `magpie codex xhigh`: a bare value that belongs to a non-model field
 		// (effort levels, for instance) is routed there; anything else is a model.
-		if f := fieldForValue(a, args[1]); f != nil {
-			return set(a, f.Key, args[1])
+		key, err := agent.BareTarget(a, args[1])
+		if err != nil {
+			return err
 		}
-		return set(a, a.Fields[0].Key, args[1])
+		return set(a, key, args[1])
 	case 3:
 		if args[2] == "default" {
 			args[2] = ""
@@ -181,21 +176,6 @@ func set(a *agent.Agent, key, value string) error {
 	return nil
 }
 
-func fieldForValue(a *agent.Agent, v string) *agent.Field {
-	vals := a.Values()
-	for i := 1; i < len(a.Fields); i++ {
-		if a.Fields[i].Extra {
-			continue
-		}
-		for _, o := range a.Fields[i].Options(vals) {
-			if o.Value == v {
-				return &a.Fields[i]
-			}
-		}
-	}
-	return nil
-}
-
 func list(agents []*agent.Agent, detectedOnly bool) error {
 	if len(agents) == 0 {
 		return fmt.Errorf("no supported agents found on this machine")
@@ -214,7 +194,7 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
-				if f.Extra && v == "" {
+				if f.Optional && v == "" {
 					continue
 				}
 				if v == "" {

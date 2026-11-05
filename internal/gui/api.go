@@ -169,9 +169,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		writeJSON(rw, settingsState())
 	})
 	mux.HandleFunc("POST /api/settings", func(rw http.ResponseWriter, r *http.Request) {
-		// start from the saved settings: decoding only overwrites the fields
-		// the page sent, so tray and proxy survive a theme or language change
-		in := settings.Load()
+		var in settings.Settings
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return

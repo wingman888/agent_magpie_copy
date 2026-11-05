@@ -111,20 +111,20 @@ func Apply(p Profile) (int, error) {
 	for k := range p {
 		keys = append(keys, k)
 	}
-	// providers first: switching one re-settles the model behind it; then the
-	// main model, which the other fields (Claude Code's tiers) build on
+	// providers first, then models, then everything else: switching a provider
+	// re-settles the model behind it, and per-tier choices build on the model
 	rank := func(k string) int {
-		_, field, _ := strings.Cut(k, ".")
 		switch {
 		case strings.HasSuffix(k, ".provider"):
 			return 0
-		case field == "model":
+		case strings.HasSuffix(k, ".model"):
 			return 1
 		}
 		return 2
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		if ri, rj := rank(keys[i]), rank(keys[j]); ri != rj {
+		ri, rj := rank(keys[i]), rank(keys[j])
+		if ri != rj {
 			return ri < rj
 		}
 		return keys[i] < keys[j]
@@ -147,6 +147,20 @@ func Apply(p Profile) (int, error) {
 			return changed, fmt.Errorf("%s: %w", k, err)
 		}
 		changed++
+	}
+	// an optional field the profile does not name (a Claude Code tier, say)
+	// goes back to its default, following the main model; applying this after
+	// the named values keeps every tier set above on the new main model
+	for _, a := range agent.All() {
+		for _, f := range a.Fields {
+			if _, named := p[a.ID+"."+f.Key]; named || !f.Optional || f.Get() == "" {
+				continue
+			}
+			if err := f.Set(""); err != nil {
+				return changed, fmt.Errorf("%s.%s: %w", a.ID, f.Key, err)
+			}
+			changed++
+		}
 	}
 	return changed, nil
 }
