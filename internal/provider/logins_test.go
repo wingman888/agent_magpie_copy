@@ -197,7 +197,7 @@ func TestHeldLoginSignsWithItsOwnTokens(t *testing.T) {
 	if got := req.Header.Get("Authorization"); got != "Bearer "+heldAccess {
 		t.Fatalf("held login signed with %q, want its own token", got)
 	}
-	if got := req.Header.Get("chatgpt-account-id"); got != "acct-me@example.com" {
+	if got := req.Header.Get("chatgpt-account-id"); got != "acct-1" { // signIn's account for me@example.com
 		t.Fatalf("account id = %q", got)
 	}
 }
