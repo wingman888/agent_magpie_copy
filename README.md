@@ -102,6 +102,77 @@ separate Responses endpoint, `catalog=` to borrow a models.dev list, and
 `models=` to name the models to expose. Anything a preset does not know can
 be overridden the same way.
 
+### Import links
+
+A provider can be shared as one link. Opening it, or running
+`magpie import '<link>'`, shows what would be added and waits for your
+confirmation; nothing is saved until you say yes.
+
+```sh
+magpie import 'magpie://import?preset=deepseek&key=sk-…&models=deepseek-chat'
+magpie import -y 'magpie://import?preset=deepseek&key=sk-…'     # no question asked
+```
+
+The link has the form `magpie://import?<parameters>`, and every value must be
+URL-encoded (`name=My%20Relay`). These are equivalent spellings and are all
+accepted: `magpie:import?…`, `magpie:///import?…` and `MAGPIE://import/?…`.
+The scheme name is case-insensitive, and `import` may have a trailing slash.
+
+| Parameter | Meaning |
+| --- | --- |
+| `preset` | a preset id (see `magpie presets`); its endpoints are used |
+| `region` | which region of a preset with several; an unknown region is an error |
+| `name` | the provider's name; required without `preset`, overrides the preset's name with it |
+| `id` | the provider id; when missing it comes from the name (a preset link uses the preset's id) |
+| `key` | the API key; without it you add the key later |
+| `chat` | OpenAI Chat Completions base URL, ending in `/v1` |
+| `responses` | OpenAI Responses base URL, ending in `/v1` |
+| `anthropic` | Anthropic Messages base URL, the root without `/v1` |
+| `models` | model ids to expose, comma-separated; empty items and surrounding spaces are ignored |
+| `catalog` | a models.dev provider id, for model names and reasoning levels; an invalid value is ignored |
+| `website`, `keys` | the vendor's website and its key page; https only, anything else is ignored |
+
+With `preset`, the endpoints come from the preset (and the chosen region), so
+`chat`, `responses`, `anthropic`, `catalog`, `website` and `keys` have no
+effect. Without `preset`, give at least one of `chat`, `responses` or
+`anthropic`.
+
+Links are checked strictly and a bad one is refused, not repaired. It is
+refused when it is not a `magpie://` link or its action is not `import`; when it
+has neither `preset` nor `name`, names an unknown preset or region, or gives
+no base URL; when a base URL is not https (the exception is a local or LAN
+address: `localhost`, a loopback IP, a private-range IP or a `.local` name,
+which may use http), carries a username or password, a query or a fragment,
+or uses another scheme such as `file:`; when the id is empty after
+normalising or is the reserved `magpie`; or when the key holds a control
+character such as a newline or is longer than 4096 characters. A name longer than
+80 characters is cut to 80, and at most 200 models are taken. A trailing `/`
+on a base URL is removed.
+
+Before anything is saved, the summary shows the provider's name and id, the
+host that will receive your prompts and key at each endpoint, and the models.
+If the id matches a provider you already have, the summary warns that the
+import will replace it. Then it asks `Add it? [y/N]`; only `y` or `yes`
+saves. When standard input is not a terminal (a script, a pipe), `magpie
+import` refuses unless you pass `-y`. A link without a key is saved and
+magpie tells you to run `magpie provider key <id> <key>` to add one.
+
+On a machine with a desktop app, the operating system hands a `magpie://` link
+to magpie as its first command-line argument. Registering the scheme is part
+of packaging:
+
+- **macOS**: `build/darwin/Info.plist` declares `CFBundleURLTypes` for `magpie`.
+- **Linux**: the desktop entry written by the installer sets
+  `MimeType=x-scheme-handler/magpie;` and `Exec=<magpie> %u`.
+- **Windows**: a per-user registration under
+  `HKCU\Software\Classes\magpie`, with `URL Protocol` set to an empty string
+  and `shell\open\command` set to `"<path to magpie.exe>" "%1"`. The repo has no
+  Windows installer, so this is for whoever packages the build.
+
+For a web page that offers an import, use the fragment form
+`https://usemagpie.ai/import#<the same parameters>`. Browsers do not send the
+part after `#` to the server, so the key stays out of server logs.
+
 ### Signed-in agents as providers
 
 An agent you have signed in to is a subscription with models behind it, so
@@ -259,6 +330,8 @@ magpie save work                # snapshot everything as a profile
 magpie use work                 # switch back
 magpie profiles
 magpie rm work
+
+magpie import '<magpie:// link>'   # show a provider a link describes, add it after you confirm
 
 magpie sync                     # refresh the models.dev catalog and every live model list
 ```
