@@ -1,0 +1,17 @@
+// usemagpie.ai: the static site in public/, plus worker.js for the update
+// feed and the download links. Deploy with `npx wrangler deploy` from here.
+{
+  "name": "usemagpie",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/download", "/download/*"]
+  },
+  "routes": [
+    { "pattern": "usemagpie.ai", "custom_domain": true },
+    { "pattern": "www.usemagpie.ai", "custom_domain": true }
+  ],
+  "observability": { "enabled": true }
+}
