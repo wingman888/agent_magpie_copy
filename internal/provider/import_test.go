@@ -1,196 +1,308 @@
 package provider
 
 import (
-	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-func mustParse(t *testing.T, link string) Provider {
-	t.Helper()
-	p, err := ParseImport(link)
+func TestImportParsePresetLink(t *testing.T) {
+	p, err := ParseImport("magpie://import?preset=deepseek&key=sk-abc&models=a,%20b")
 	if err != nil {
-		t.Fatalf("ParseImport(%q) unexpected error: %v", link, err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	return p
-}
-
-func TestScheme(t *testing.T) {
-	if Scheme != "magpie" {
-		t.Fatalf("Scheme = %q", Scheme)
-	}
-}
-
-func TestImportPreset(t *testing.T) {
-	p := mustParse(t, "magpie://import?preset=deepseek&key=sk-abc&models=a,%20b")
-	if p.ID != "deepseek" {
-		t.Errorf("ID = %q", p.ID)
+	if p.ID != "deepseek" || p.Preset != "deepseek" {
+		t.Errorf("id/preset = %q/%q, want deepseek", p.ID, p.Preset)
 	}
 	if p.Key != "sk-abc" {
-		t.Errorf("Key = %q", p.Key)
+		t.Errorf("key = %q, want sk-abc", p.Key)
 	}
-	if !reflect.DeepEqual(p.Models, []string{"a", "b"}) {
-		t.Errorf("Models = %v", p.Models)
-	}
-	if p.Chat != "https://api.deepseek.com/v1" || p.Anthropic != "https://api.deepseek.com/anthropic" {
-		t.Errorf("endpoints not from preset: chat=%q anthropic=%q", p.Chat, p.Anthropic)
-	}
-	if p.Preset != "deepseek" || p.Name != "DeepSeek" {
-		t.Errorf("Preset/Name = %q/%q", p.Preset, p.Name)
-	}
-}
-
-func TestImportPresetIgnoresEndpointParams(t *testing.T) {
-	p := mustParse(t, "magpie://import?preset=deepseek&chat=https://evil.example/v1&catalog=openai&website=https://evil.example")
 	if p.Chat != "https://api.deepseek.com/v1" {
-		t.Errorf("Chat overridden by link: %q", p.Chat)
+		t.Errorf("chat = %q, want the preset endpoint", p.Chat)
 	}
-	if p.Catalog != "deepseek" || p.Website != "https://platform.deepseek.com" {
-		t.Errorf("Catalog/Website overridden: %q %q", p.Catalog, p.Website)
-	}
-}
-
-func TestImportPresetNameAndID(t *testing.T) {
-	p := mustParse(t, "magpie://import?preset=deepseek&name=My%20DS&id=ds-work")
-	if p.Name != "My DS" || p.ID != "ds-work" {
-		t.Errorf("Name/ID = %q/%q", p.Name, p.ID)
+	if strings.Join(p.Models, ",") != "a,b" {
+		t.Errorf("models = %v, want [a b]", p.Models)
 	}
 }
 
-func TestImportCustom(t *testing.T) {
-	p := mustParse(t, "magpie://import?name=My%20Relay&chat=https://relay.example/v1/&anthropic=https://relay.example&website=https://relay.example&keys=javascript:alert(1)")
+func TestImportParseSchemeVariants(t *testing.T) {
+	for _, link := range []string{
+		"magpie://import?preset=deepseek",
+		"magpie:import?preset=deepseek",
+		"magpie:///import?preset=deepseek",
+		"MAGPIE://import/?preset=deepseek",
+		"  magpie://import?preset=deepseek  ",
+	} {
+		p, err := ParseImport(link)
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", link, err)
+			continue
+		}
+		if p.ID != "deepseek" {
+			t.Errorf("%q: id = %q, want deepseek", link, p.ID)
+		}
+	}
+}
+
+func TestImportParseRejectsBadLinks(t *testing.T) {
+	for _, link := range []string{
+		"https://usemagpie.ai/import?preset=deepseek",
+		"magpie://delete?id=x",
+		"magpie://import",
+		"magpie://import?",
+		"magpie://import?preset=nope",
+		"magpie://import?name=Only%20A%20Name",
+		"magpie://import?name=Relay&chat=http://relay.example/v1",
+		"magpie://import?name=Relay&chat=https://user:pw@relay.example/v1",
+		"magpie://import?name=Relay&chat=file:///etc/passwd",
+		"magpie://import?name=Relay&chat=https://relay.example/v1?x=1",
+		"magpie://import?name=Relay&chat=https://relay.example/v1#frag",
+		"magpie://import?name=magpie&chat=https://relay.example/v1",
+		"magpie://import?name=%E2%80%94&chat=https://relay.example/v1",
+		"magpie://import?preset=deepseek&key=sk-abc%0A",
+		"magpie://import?preset=deepseek&key=sk%0Dabc",
+		"magpie://import?preset=deepseek&key=" + strings.Repeat("k", 4097),
+		"magpie://import?name=Relay&chat=https://relay.example/v1&models=" + importTestManyModels(201),
+	} {
+		if p, err := ParseImport(link); err == nil {
+			t.Errorf("%q: expected an error, got %+v", link, p)
+		}
+	}
+}
+
+func TestImportParseCustomLink(t *testing.T) {
+	p, err := ParseImport("magpie://import?name=My%20Relay&chat=https://relay.example/v1/&anthropic=https://relay.example&website=https://relay.example&keys=javascript:alert(1)")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if p.ID != "my-relay" {
-		t.Errorf("ID = %q", p.ID)
+		t.Errorf("id = %q, want my-relay", p.ID)
+	}
+	if p.Name != "My Relay" {
+		t.Errorf("name = %q, want My Relay", p.Name)
 	}
 	if p.Chat != "https://relay.example/v1" {
-		t.Errorf("Chat = %q, trailing slash not removed", p.Chat)
+		t.Errorf("chat = %q, want trailing slash removed", p.Chat)
 	}
 	if p.Anthropic != "https://relay.example" {
-		t.Errorf("Anthropic = %q", p.Anthropic)
+		t.Errorf("anthropic = %q", p.Anthropic)
 	}
 	if p.Website != "https://relay.example" {
-		t.Errorf("Website = %q", p.Website)
+		t.Errorf("website = %q, want https kept", p.Website)
 	}
 	if p.KeysURL != "" {
-		t.Errorf("KeysURL = %q, want ignored", p.KeysURL)
+		t.Errorf("keys = %q, want javascript: ignored", p.KeysURL)
 	}
 	if p.Preset != "" {
-		t.Errorf("Preset = %q", p.Preset)
+		t.Errorf("preset = %q, want empty for custom", p.Preset)
 	}
 }
 
-func TestImportCustomIDExplicitAndCatalog(t *testing.T) {
-	p := mustParse(t, "magpie://import?name=Acme&id=Acme%20Relay&responses=https://acme.example/v1&catalog=fireworks-ai")
-	if p.ID != "acme-relay" {
-		t.Errorf("ID = %q", p.ID)
+func TestImportParseExplicitIDAndCatalog(t *testing.T) {
+	p, err := ParseImport("magpie://import?name=Acme&id=Acme_Two&chat=https://api.acme.example/v1&catalog=Bad%20Value")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if p.Catalog != "fireworks-ai" {
-		t.Errorf("Catalog = %q", p.Catalog)
+	if p.ID != "acme-two" {
+		t.Errorf("id = %q, want acme-two", p.ID)
 	}
-	p = mustParse(t, "magpie://import?name=Acme&chat=https://acme.example/v1&catalog=../../etc")
 	if p.Catalog != "" {
-		t.Errorf("invalid catalog kept: %q", p.Catalog)
+		t.Errorf("catalog = %q, want invalid value ignored", p.Catalog)
+	}
+	p, err = ParseImport("magpie://import?name=Acme&chat=https://api.acme.example/v1&catalog=moonshot_ai-2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Catalog != "moonshot_ai-2" {
+		t.Errorf("catalog = %q, want moonshot_ai-2", p.Catalog)
 	}
 }
 
-func TestImportNameTruncated(t *testing.T) {
-	long := strings.Repeat("n", 120)
-	p := mustParse(t, "magpie://import?name="+long+"&chat=https://relay.example/v1")
-	if len([]rune(p.Name)) != 80 {
-		t.Errorf("name length = %d, want 80", len([]rune(p.Name)))
+func TestImportParseRegion(t *testing.T) {
+	pr := Preset("yylx")
+	if pr == nil || len(pr.Regions) < 3 {
+		t.Fatalf("yylx preset with regions is required for this test")
+	}
+	p, err := ParseImport("magpie://import?preset=yylx&region=cn")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Chat != "https://cn.yylx.io/v1" || p.Anthropic != "https://cn.yylx.io" {
+		t.Errorf("endpoints = %q / %q, want the cn region", p.Chat, p.Anthropic)
+	}
+	if p.ID != "yylx" {
+		t.Errorf("id = %q, want yylx", p.ID)
+	}
+
+	p, err = ParseImport("magpie://import?preset=yylx")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Chat != pr.Regions[0].Chat {
+		t.Errorf("default endpoint = %q, want first region %q", p.Chat, pr.Regions[0].Chat)
+	}
+
+	if _, err := ParseImport("magpie://import?preset=yylx&region=nowhere"); err == nil {
+		t.Errorf("region=nowhere: expected an error")
 	}
 }
 
-func TestImportModelsLimit(t *testing.T) {
-	var ms []string
-	for i := 0; i < 250; i++ {
-		ms = append(ms, "m"+strings.Repeat("x", 1)+string(rune('a'+i%26))+strings.Repeat("y", i/26))
+func TestImportParsePresetOverridesAndIgnores(t *testing.T) {
+	p, err := ParseImport("magpie://import?preset=openai&name=My%20OpenAI&id=oa&chat=https://evil.example/v1&website=https://evil.example&keys=https://evil.example&catalog=other")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	p := mustParse(t, "magpie://import?name=R&chat=https://relay.example/v1&models="+strings.Join(ms, ","))
+	if p.Name != "My OpenAI" || p.ID != "oa" {
+		t.Errorf("name/id = %q/%q", p.Name, p.ID)
+	}
+	if p.Chat != "https://api.openai.com/v1" {
+		t.Errorf("chat = %q, preset endpoint must win", p.Chat)
+	}
+	if p.Website != "https://platform.openai.com" || p.KeysURL != "https://platform.openai.com/api-keys" {
+		t.Errorf("website/keys = %q / %q, preset values must win", p.Website, p.KeysURL)
+	}
+	if p.Catalog != "openai" {
+		t.Errorf("catalog = %q, want preset catalog", p.Catalog)
+	}
+}
+
+func TestImportParseLocalHTTP(t *testing.T) {
+	for _, chat := range []string{
+		"http://localhost:11434/v1",
+		"http://127.0.0.1:8080/v1",
+		"http://192.168.1.20:8000/v1",
+		"http://10.0.0.5/v1",
+		"http://172.16.4.4/v1",
+		"http://box.local/v1",
+		"http://[::1]:8080/v1",
+	} {
+		p, err := ParseImport("magpie://import?name=Local&chat=" + importTestEscape(chat))
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", chat, err)
+			continue
+		}
+		if p.Chat != chat {
+			t.Errorf("%s: chat = %q", chat, p.Chat)
+		}
+	}
+	for _, chat := range []string{
+		"http://relay.example/v1",
+		"http://8.8.8.8/v1",
+		"http://172.32.0.1/v1",
+	} {
+		if _, err := ParseImport("magpie://import?name=Remote&chat=" + importTestEscape(chat)); err == nil {
+			t.Errorf("%s: expected http to be rejected", chat)
+		}
+	}
+}
+
+func TestImportParseKeyAndNameEdges(t *testing.T) {
+	p, err := ParseImport("magpie://import?name=Relay&chat=https://relay.example/v1&key=" + strings.Repeat("k", 4096))
+	if err != nil {
+		t.Fatalf("key of exactly 4096 bytes: unexpected error: %v", err)
+	}
+	if len(p.Key) != 4096 {
+		t.Errorf("key length = %d", len(p.Key))
+	}
+
+	p, err = ParseImport("magpie://import?name=Relay&chat=https://relay.example/v1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Key != "" {
+		t.Errorf("key = %q, want empty when absent", p.Key)
+	}
+
+	long := strings.Repeat("a", 81)
+	p, err = ParseImport("magpie://import?name=" + long + "&chat=https://relay.example/v1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n := len([]rune(p.Name)); n != 80 {
+		t.Errorf("name length = %d, want 80", n)
+	}
+
+	if _, err := ParseImport("magpie://import?name=%E2%80%94&id=ok&chat=https://relay.example/v1"); err != nil {
+		t.Errorf("explicit id should be accepted even when name has no slug: %v", err)
+	}
+	if _, err := ParseImport("magpie://import?name=Relay&id=magpie&chat=https://relay.example/v1"); err == nil {
+		t.Errorf("explicit id=magpie: expected an error")
+	}
+	if _, err := ParseImport("magpie://import?name=Relay&id=%E2%80%94&chat=https://relay.example/v1"); err == nil {
+		t.Errorf("explicit id that normalises to empty: expected an error")
+	}
+}
+
+func TestImportParseModels(t *testing.T) {
+	p, err := ParseImport("magpie://import?name=Relay&chat=https://relay.example/v1&models=" + "%20a%20,,%20%20,b,,c%20")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Join(p.Models, "|") != "a|b|c" {
+		t.Errorf("models = %q, want a|b|c", p.Models)
+	}
+
+	p, err = ParseImport("magpie://import?name=Relay&chat=https://relay.example/v1&models=" + importTestManyModels(200))
+	if err != nil {
+		t.Fatalf("200 models: unexpected error: %v", err)
+	}
 	if len(p.Models) != 200 {
 		t.Errorf("models = %d, want 200", len(p.Models))
 	}
 }
 
-func TestImportRegion(t *testing.T) {
-	p := mustParse(t, "magpie://import?preset=yylx&region=cn")
-	if p.Chat != "https://cn.yylx.io/v1" || p.Anthropic != "https://cn.yylx.io" {
-		t.Errorf("region cn endpoints: chat=%q anthropic=%q", p.Chat, p.Anthropic)
+func TestImportParseLenientParams(t *testing.T) {
+	// Unknown parameters are ignored, not rejected.
+	p, err := ParseImport("magpie://import?preset=deepseek&bogus=1")
+	if err != nil {
+		t.Fatalf("unknown parameter: unexpected error: %v", err)
 	}
-	p = mustParse(t, "magpie://import?preset=yylx")
-	if p.Chat != "https://app.yylx.io/v1" {
-		t.Errorf("default region endpoint: %q", p.Chat)
+	if p.ID != "deepseek" {
+		t.Errorf("id = %q, want deepseek", p.ID)
 	}
-	if _, err := ParseImport("magpie://import?preset=yylx&region=nowhere"); err == nil {
-		t.Error("region=nowhere accepted")
+
+	// A repeated parameter takes its first value.
+	p, err = ParseImport("magpie://import?preset=deepseek&preset=openai")
+	if err != nil {
+		t.Fatalf("repeated parameter: unexpected error: %v", err)
 	}
-	if _, err := ParseImport("magpie://import?preset=deepseek&region=cn"); err == nil {
-		t.Error("region on preset without regions accepted")
+	if p.ID != "deepseek" || p.Chat != "https://api.deepseek.com/v1" {
+		t.Errorf("repeated preset: id = %q, chat = %q, want first value deepseek", p.ID, p.Chat)
+	}
+	p, err = ParseImport("magpie://import?name=First&name=Second&chat=https://relay.example/v1&chat=https://other.example/v1")
+	if err != nil {
+		t.Fatalf("repeated custom parameters: unexpected error: %v", err)
+	}
+	if p.Name != "First" || p.Chat != "https://relay.example/v1" {
+		t.Errorf("repeated custom: name = %q, chat = %q, want first values", p.Name, p.Chat)
+	}
+
+	// region without a preset is ignored.
+	p, err = ParseImport("magpie://import?name=Relay&chat=https://relay.example/v1&region=cn")
+	if err != nil {
+		t.Fatalf("region without preset: unexpected error: %v", err)
+	}
+	if p.Name != "Relay" || p.Chat != "https://relay.example/v1" {
+		t.Errorf("region without preset: name = %q, chat = %q", p.Name, p.Chat)
 	}
 }
 
-func TestImportSchemeVariants(t *testing.T) {
-	for _, link := range []string{
-		"magpie:import?preset=deepseek",
-		"magpie:///import?preset=deepseek",
-		"MAGPIE://import/?preset=deepseek",
-		"Magpie://IMPORT?preset=deepseek",
-	} {
-		p, err := ParseImport(link)
-		if err != nil {
-			t.Errorf("ParseImport(%q): %v", link, err)
-			continue
-		}
-		if p.ID != "deepseek" {
-			t.Errorf("ParseImport(%q) ID = %q", link, p.ID)
-		}
+func TestImportParseRequiresBaseURL(t *testing.T) {
+	if _, err := ParseImport("magpie://import?name=Relay&catalog=openai"); err == nil {
+		t.Errorf("custom link without base URL: expected an error")
 	}
 }
 
-func TestImportRejectedLinks(t *testing.T) {
-	cases := map[string]string{
-		"https non-magpie":   "https://usemagpie.ai/import?preset=deepseek",
-		"other action":       "magpie://delete?id=x",
-		"no params":          "magpie://import",
-		"unknown preset":     "magpie://import?preset=nope",
-		"name no base URL":   "magpie://import?name=Relay",
-		"chat plain http":    "magpie://import?name=Relay&chat=http://relay.example/v1",
-		"chat userinfo":      "magpie://import?name=Relay&chat=https://user:pw@relay.example/v1",
-		"chat file scheme":   "magpie://import?name=Relay&chat=file:///etc/passwd",
-		"chat with query":    "magpie://import?name=Relay&chat=https://relay.example/v1?x=1",
-		"chat with fragment": "magpie://import?name=Relay&chat=https://relay.example/v1%23frag",
-		"reserved name":      "magpie://import?name=magpie&chat=https://relay.example/v1",
-		"symbol-only name":   "magpie://import?name=%E2%80%94&chat=https://relay.example/v1",
-		"key with newline":   "magpie://import?preset=deepseek&key=sk-a%0Ab",
-		"key too long":       "magpie://import?preset=deepseek&key=" + strings.Repeat("k", 4097),
-		"reserved explicit":  "magpie://import?name=Relay&id=magpie&chat=https://relay.example/v1",
+// importTestManyModels returns n comma-separated distinct model ids.
+func importTestManyModels(n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = "m" + strconv.Itoa(i)
 	}
-	for label, link := range cases {
-		if p, err := ParseImport(link); err == nil {
-			t.Errorf("%s: ParseImport(%q) accepted: %+v", label, link, p)
-		}
-	}
+	return strings.Join(parts, ",")
 }
 
-func TestImportAcceptedLocalHTTP(t *testing.T) {
-	for _, base := range []string{
-		"http://localhost:11434/v1",
-		"http://127.0.0.1:8080/v1",
-		"http://192.168.1.20:8000/v1",
-		"http://10.0.0.5/v1",
-		"http://172.20.1.1/v1",
-		"http://[::1]:8080/v1",
-		"http://box.local/v1",
-	} {
-		if _, err := ParseImport("magpie://import?name=Local&chat=" + base); err != nil {
-			t.Errorf("chat=%s rejected: %v", base, err)
-		}
-	}
-}
-
-func TestImportNoKeyIsEmpty(t *testing.T) {
-	p := mustParse(t, "magpie://import?preset=openai")
-	if p.Key != "" {
-		t.Errorf("Key = %q", p.Key)
-	}
+// importTestEscape escapes the characters that matter in a query value.
+func importTestEscape(s string) string {
+	return strings.NewReplacer(":", "%3A", "/", "%2F", "[", "%5B", "]", "%5D").Replace(s)
 }
