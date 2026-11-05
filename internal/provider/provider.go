@@ -68,10 +68,10 @@ type Provider struct {
 	// failing is passed over for as long as that lasts.
 	Routing string `json:"routing,omitempty"`
 
-	// Affinity is whether a conversation sticks to the key or account that
-	// answered it last, so the vendor's prompt cache can hit: "" automatic,
-	// "session" the whole conversation, "turn" only within one user turn,
-	// "off" never (see group.go).
+	// Affinity is how long a conversation stays on the key or account that
+	// answered it last, so the vendor's prompt cache can hit: "" automatic
+	// (kept within a turn, and across turns while the cache is warm),
+	// "session" always, "turn" only within a user turn, "off" never.
 	Affinity string `json:"affinity,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
@@ -113,7 +113,8 @@ type Provider struct {
 
 type file struct {
 	Providers []Provider `json:"providers"`
-	// Groups are the routing groups the user made or hid (see group.go).
+	// Groups are the routing groups the user made, and the automatic ones
+	// the user hid (see group.go).
 	Groups []Group `json:"groups,omitempty"`
 }
 
@@ -228,8 +229,8 @@ func Save(p Provider) error {
 	if p.ID == "magpie" {
 		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
-	if p.ID == groupPrefix {
-		return errors.New(`"group" is how agents name routing groups (group/<id>); pick another id`)
+	if p.ID == "group" {
+		return errors.New(`"group" is how routing groups are named (group/<id>); pick another id`)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
@@ -338,8 +339,14 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	p.Routing = normalizeRouting(p.Routing)
-	p.Affinity = normalizeAffinity(p.Affinity)
+	switch p.Routing {
+	case "usage": // the old spelling of least-used
+		p.Routing = LeastUsed
+	case Ordered, Rotate, LeastUsed:
+	default:
+		p.Routing = ""
+	}
+	p.Affinity = cleanAffinity(p.Affinity)
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {

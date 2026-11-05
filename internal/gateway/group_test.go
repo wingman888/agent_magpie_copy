@@ -1,53 +1,58 @@
 package gateway
 
 import (
-	"context"
+	"bytes"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-const groupChatReply = `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+// A routing group sends a request to its members in order; a member that
+// is rate limited hands it to the next one.
+func TestGroupTakesMembersInOrder(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.Unlock()
 
-// A routing group with no ready member answers 404, saying so.
-func TestGroupWithNoModelReady(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t, ctype: "application/json", reply: groupChatReply})
-	if err := provider.SaveGroup(provider.Group{ID: "empty", Members: []string{"ghost/m1"}}); err != nil {
+	b := &fake{t: t, ctype: "application/json", code: 429, reply: `{"error":{"message":"slow down"}}`}
+	a := &fake{t: t, ctype: "application/json", reply: `{"id":"from-a","choices":[]}`}
+	for _, x := range []struct {
+		id string
+		f  *fake
+	}{{"b", b}, {"a", a}} {
+		up := httptest.NewServer(x.f)
+		t.Cleanup(up.Close)
+		if err := provider.Save(provider.Provider{ID: x.id, Name: x.id, Key: "k", Chat: up.URL + "/v1", Models: []string{"m"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := provider.SaveGroup(provider.Group{ID: "mine", Members: []string{"b/m", "a/m"}}); err != nil {
 		t.Fatal(err)
 	}
-	code, body := post(t, "/v1/chat/completions", `{"model":"group/empty","messages":[{"role":"user","content":"hi"}]}`)
-	if code != 404 || !strings.Contains(body, "no model ready") {
-		t.Errorf("%d %s", code, body)
+
+	code, body := post(t, "/v1/chat/completions", `{"model":"group/mine","messages":[{"role":"user","content":"hi"}]}`)
+	if code != 200 || !strings.Contains(body, "from-a") {
+		t.Fatalf("%d %s", code, body)
+	}
+	if !bytes.Contains(b.got, []byte(`"model":"m"`)) {
+		t.Fatalf("b was not tried first: %s", b.got)
 	}
 }
 
-// A routing group with a ready member answers, and the trace says which
-// group it was and who its members were.
-func TestGroupRouteInTrace(t *testing.T) {
-	f := &fake{t: t, ctype: "application/json", reply: groupChatReply}
-	setup(t, provider.Chat, f)
-	if err := provider.SaveGroup(provider.Group{ID: "mine", Name: "Mine", Members: []string{"fake/m1", "ghost/m2"}}); err != nil {
+// A group with no member ready answers 404 and says so.
+func TestGroupWithNoReadyMemberIs404(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := provider.SaveGroup(provider.Group{ID: "empty", Members: []string{"ghost/m"}}); err != nil {
 		t.Fatal(err)
 	}
-	s := New()
-	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
-		strings.NewReader(`{"model":"group/mine","messages":[{"role":"user","content":"hi"}]}`)))
-	if rec.Code != 200 {
-		t.Fatalf("%d %s", rec.Code, rec.Body.String())
-	}
-	st := s.Trace(context.Background(), 0, 0)
-	if len(st.Routes) == 0 {
-		t.Fatal("no route traced")
-	}
-	r := st.Routes[len(st.Routes)-1]
-	if r.Group == nil || r.Group.ID != "mine" || r.Group.Name != "Mine" || r.Group.Auto {
-		t.Fatalf("group %+v", r.Group)
-	}
-	if !slices.Equal(r.Group.Members, []string{"fake/m1"}) {
-		t.Fatalf("members %v", r.Group.Members)
+	code, body := post(t, "/v1/chat/completions", `{"model":"group/empty","messages":[{"role":"user","content":"hi"}]}`)
+	if code != 404 || !strings.Contains(body, "group/empty has no model ready") {
+		t.Fatalf("%d %s", code, body)
 	}
 }

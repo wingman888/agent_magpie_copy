@@ -31,9 +31,9 @@ type candidate struct {
 	p     provider.Provider
 	model string
 	rest  string // what rests after a failure: the provider, or one of its keys
-	// aside is a key made for another protocol than the best-fitting ones
-	// of its provider: it is tried only after those, see perKeyOf.
-	aside bool
+	// Aside marks a key made for another protocol than the request's, which
+	// is tried only after the keys that suit it, and never routed among them.
+	Aside bool
 }
 
 // label names a candidate in a call's record: the provider, and the key
@@ -66,9 +66,9 @@ func perKey(p provider.Provider, model string, from provider.Protocol) []candida
 // the model.
 func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, left []candidate) {
 	if p.Account != nil {
-		all := []candidate{{p, model, p.ID, false}}
+		all := []candidate{{p: p, model: model, rest: p.ID}}
 		for _, q := range p.AlsoOn() {
-			all = append(all, candidate{q, model, p.ID + "@" + q.Account.User, false})
+			all = append(all, candidate{p: q, model: model, rest: p.ID + "@" + q.Account.User})
 		}
 		// an account whose plan lacks the model (a Free one behind a Plus)
 		// would only answer 400; it is tried only when none lists it
@@ -97,63 +97,74 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, l
 		}
 		if !p.Serves(k, model) {
 			// the vendor lists the model to another key only
-			unlisted = append(unlisted, candidate{q, model, rest, false})
+			unlisted = append(unlisted, candidate{p: q, model: model, rest: rest})
 			continue
 		}
-		out = append(out, candidate{q, model, rest, false})
+		out = append(out, candidate{p: q, model: model, rest: rest})
 	}
 	if len(out) == 0 {
 		out, unlisted = unlisted, nil // no key lists it: try them all the same
 	}
 	if len(out) == 0 {
-		return []candidate{{p, model, p.ID, false}}, nil
+		return []candidate{{p: p, model: model, rest: p.ID}}, nil
 	}
-	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
-	// the keys that fit best are the main pool, routed among themselves; the
-	// others follow, aside, and are tried only once the main pool has failed
-	best := keyFit(out[0].p, model, from)
-	var main, aside []candidate
-	for _, c := range out {
-		if keyFit(c.p, model, from) == best {
-			main = append(main, c)
-		} else {
-			c.aside = true
-			aside = append(aside, c)
-		}
-	}
-	return append(main, aside...), unlisted
+	return bySuit(out, model, from), unlisted
 }
 
-// keyFit ranks how well a key suits a request, best first: 0 is a key made
-// for the protocol the request is at home in, 1 a key that names no protocol,
-// 2 a key made for another protocol. The request's protocol is the model's
-// own when its name says (Anthropic for Claude, OpenAI for GPT and the
-// o-series), else the one the agent spoke.
-func keyFit(q provider.Provider, model string, from provider.Protocol) int {
+// bySuit puts the keys that suit the request best first, in their order,
+// and the rest after them, the less suiting first, each marked Aside: the
+// best ones are the pool routing and rotation choose among.
+func bySuit(cs []candidate, model string, from provider.Protocol) []candidate {
+	sort.SliceStable(cs, func(i, j int) bool {
+		return keyTier(cs[i].p, model, from) < keyTier(cs[j].p, model, from)
+	})
+	best := keyTier(cs[0].p, model, from)
+	for i := range cs {
+		cs[i].Aside = keyTier(cs[i].p, model, from) != best
+	}
+	return cs
+}
+
+// keyTier ranks how well a key suits a request, best first: 0 is a key made
+// for the protocol the request is in, 1 one made for none in particular,
+// 2 one made for another. The request is in the model's own protocol when
+// its name says (Claude's Anthropic, GPT's Chat), else in the agent's.
+func keyTier(q provider.Provider, model string, from provider.Protocol) int {
+	want := modelFamily(model)
+	if want == "" {
+		want = from
+	}
 	switch q.KeyProtocol {
+	case want:
+		return 0
 	case "":
 		return 1
-	case requestProtocol(model, from):
-		return 0
-	}
-	if isOpenAI(q.KeyProtocol) && isOpenAI(requestProtocol(model, from)) {
-		return 0 // Chat and Responses are both OpenAI's
 	}
 	return 2
 }
 
-// requestProtocol is the protocol a request for model is at home in: the
-// model's own when its name says, else from, the one the agent spoke.
-func requestProtocol(model string, from provider.Protocol) provider.Protocol {
-	if f := modelFamily(model); f != "" {
-		return f
+// keyFit ranks how well a key suits a request, best first: 0 fits, 1 needs
+// the request translated, 2 is made for another vendor's models.
+func keyFit(q provider.Provider, model string, from provider.Protocol) int {
+	if q.KeyProtocol == "" {
+		return 0
 	}
-	return from
-}
-
-// isOpenAI is whether a protocol is OpenAI's own wire API.
-func isOpenAI(p provider.Protocol) bool {
-	return p == provider.Chat || p == provider.Responses
+	switch modelFamily(model) {
+	case provider.Anthropic:
+		if q.KeyProtocol == provider.Anthropic {
+			return 0
+		}
+		return 2
+	case provider.Chat:
+		if q.KeyProtocol != provider.Anthropic {
+			return 0
+		}
+		return 2
+	}
+	if q.Base(from) != "" {
+		return 0
+	}
+	return 1
 }
 
 // modelFamily is the protocol a model is at home in, when its name says:
@@ -183,108 +194,90 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 // plan is candidates, and for the routing trace what each stood where it
 // did by, and those left out.
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
-	return s.planConv(p, model, from, convo{})
+	return s.planFor(p, model, from, nil)
 }
 
-// planConv is plan for a request's conversation, which keeps it on the
-// candidate that answered it last and moves a rotation on per user turn.
-func (s *Server) planConv(p provider.Provider, model string, from provider.Protocol, cv convo) ([]candidate, planned) {
+// planFor is plan for a request of a conversation, when gc has one.
+func (s *Server) planFor(p provider.Provider, model string, from provider.Protocol, gc *groupCall) ([]candidate, planned) {
+	ts := []target{{p: p, model: model}}
+	for _, id := range p.Fallback {
+		if fp, fm, ok := provider.Resolve(id); ok {
+			ts = append(ts, target{p: fp, model: fm, fallback: true})
+		}
+	}
+	return s.planTargetsFor(ts, from, gc)
+}
+
+// target is one provider and model a request may go to, in order.
+type target struct {
+	p        provider.Provider
+	model    string
+	fallback bool // a fallback model of the primary, not the primary itself
+}
+
+// planTargets is plan over an explicit list: the first target is always
+// tried, the others once each, in order.
+func (s *Server) planTargets(ts []target, from provider.Protocol) ([]candidate, planned) {
+	return s.planTargetsFor(ts, from, nil)
+}
+
+// planTargetsFor is planTargets for a request of a conversation, when gc has one.
+func (s *Server) planTargetsFor(ts []target, from provider.Protocol, gc *groupCall) ([]candidate, planned) {
 	var pl planned
 	add := func(q provider.Provider, m string, fallback bool) []candidate {
 		cs, left := perKeyOf(q, m, from)
-		// the main pool is routed; the keys aside follow it, in their order
-		var asides []candidate
-		for i, c := range cs {
-			if c.aside {
-				cs, asides = cs[:i], cs[i:]
-				break
+		var main, aside []candidate
+		for _, c := range cs {
+			if c.Aside {
+				aside = append(aside, c)
+			} else {
+				main = append(main, c)
 			}
 		}
-		cs, wg := weighConv(q, cs, m, from, cv)
-		for i, c := range cs {
+		main, wg := weighFor(q, main, m, from, gc)
+		for i, c := range main {
 			w := weighed(c, q, wg, fallback, from)
-			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
+			w.Turn = i == 0 && q.Routing == provider.Rotate && len(main) > 1
 			pl.order = append(pl.order, w)
 		}
-		for _, c := range asides {
-			pl.order = append(pl.order, weighed(c, q, weighing{}, fallback, from))
+		for _, c := range aside {
+			pl.order = append(pl.order, weighed(c, q, wg, fallback, from))
 		}
+		cs = append(main, aside...)
 		for _, c := range left {
 			w := weighed(c, q, weighing{}, fallback, from)
 			w.Unlisted = true
 			pl.left = append(pl.left, w)
 		}
-		return append(append([]candidate{}, cs...), asides...)
+		return cs
 	}
-	out := add(p, model, false)
-	seen := map[string]bool{p.ID + "/" + model: true}
-	for _, id := range p.Fallback {
-		fp, fm, ok := provider.Resolve(id)
-		if !ok || seen[fp.ID+"/"+fm] {
+	var out []candidate
+	seen := map[string]bool{}
+	for i, t := range ts {
+		if i > 0 && seen[t.p.ID+"/"+t.model] {
 			continue
 		}
-		seen[fp.ID+"/"+fm] = true
-		out = append(out, add(fp, fm, true)...)
+		seen[t.p.ID+"/"+t.model] = true
+		out = append(out, add(t.p, t.model, t.fallback)...)
 	}
-	return settle(out, pl, p.Affinity, cv)
-}
-
-// settle puts candidates in the order a request tries them: the conversation's
-// last answerer first when its affinity keeps it there, then those ready,
-// those resting after a failure last. pl.order is kept in step with out.
-func settle(out []candidate, pl planned, mode string, cv convo) ([]candidate, planned) {
 	if len(out) == 1 {
 		if r, ok := restOf(out[0].rest); ok {
 			pl.order[0].Rest = &r // tried all the same: there is no other
 		}
 		return out, pl
 	}
-	// affinity is for a conversation with more than one candidate to choose from
-	if cv.id != "" {
-		k, aff := keepLast(mode, cv, out)
-		if k > 0 {
-			out = moveFirst(out, k)
-			pl.order = moveFirst(pl.order, k)
-		}
-		pl.affinity = &aff
-	}
-	// the main pool comes first, its ready keys before its resting ones;
-	// the keys aside come after all of it, in the same two steps
-	var main, aside pool
+	var ready, resting []candidate
+	var wReady, wResting []Weighed
 	for i, c := range out {
-		p := &main
-		if c.aside {
-			p = &aside
-		}
 		if r, ok := restOf(c.rest); ok {
 			pl.order[i].Rest = &r
-			p.resting, p.wResting = append(p.resting, c), append(p.wResting, pl.order[i])
+			resting, wResting = append(resting, c), append(wResting, pl.order[i])
 		} else {
-			p.ready, p.wReady = append(p.ready, c), append(p.wReady, pl.order[i])
+			ready, wReady = append(ready, c), append(wReady, pl.order[i])
 		}
 	}
-	var cs []candidate
-	var ws []Weighed
-	for _, p := range []pool{main, aside} {
-		cs = append(append(cs, p.ready...), p.resting...)
-		ws = append(append(ws, p.wReady...), p.wResting...)
-	}
-	pl.order = ws
-	return cs, pl
-}
-
-// pool is the candidates of one side of settle, ready and resting apart.
-type pool struct {
-	ready, resting   []candidate
-	wReady, wResting []Weighed
-}
-
-// moveFirst is xs with its k-th element put first, the rest in their order.
-func moveFirst[T any](xs []T, k int) []T {
-	out := make([]T, 0, len(xs))
-	out = append(out, xs[k])
-	out = append(out, xs[:k]...)
-	return append(out, xs[k+1:]...)
+	pl.order = append(wReady, wResting...)
+	return append(ready, resting...), pl
 }
 
 var restingUntil = struct {
