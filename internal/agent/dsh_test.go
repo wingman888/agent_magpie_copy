@@ -1,0 +1,168 @@
+package agent
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/yetone/magpie/internal/provider"
+)
+
+func TestDsh(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DSH_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro", "flash"}}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".dsh", "config.yaml")
+	a := dsh(home)
+	f := a.Field("model")
+	read := func() string { b, _ := os.ReadFile(path); return string(b) }
+
+	// nothing there, nothing written
+	if err := f.Set(""); err != nil || f.Get() != "" {
+		t.Fatalf("empty: %v %q", err, f.Get())
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("reset wrote a file")
+	}
+
+	own := "# mine\n- id: tools\n  config:\n    disabled: []\n\n- id: llm-deepseek\n  config:\n    thinking: disabled\n    reasoningEffort: \"off\"\n"
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(own), 0o644)
+
+	if err := f.Set("magpie/deepseek/pro"); err != nil {
+		t.Fatal(err)
+	}
+	s := read()
+	for _, want := range []string{"# mine", "- id: tools", "- id: llm-deepseek # magpie", `baseURL: "http://`, `apiKey: "magpie"`, `- id: "deepseek/flash"`, "- id: agent-loop # magpie", `model: "deepseek/pro"`, "cwd: !!js process.cwd()", "- id: api-gateway # magpie"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "thinking: disabled") || strings.Count(s, "id: llm-deepseek") != 1 {
+		t.Fatalf("the user's entry should be replaced:\n%s", s)
+	}
+	if f.Get() != "magpie/deepseek/pro" {
+		t.Fatalf("get: %q", f.Get())
+	}
+
+	// dsh's own model: the user's endpoint entry comes back
+	if err := f.Set("deepseek-v4-flash"); err != nil {
+		t.Fatal(err)
+	}
+	s = read()
+	if f.Get() != "deepseek-v4-flash" || !strings.Contains(s, "thinking: disabled") || strings.Contains(s, "llm-deepseek # magpie") || strings.Contains(s, "api-gateway") {
+		t.Fatalf("own model: %q\n%s", f.Get(), s)
+	}
+
+	// through magpie again, then back to dsh as it ships
+	if err := f.Set("magpie/deepseek/flash"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Set(""); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got != own {
+		t.Fatalf("reset should leave the user's file as it was:\n%s", got)
+	}
+
+	if err := f.Set("magpie/nope/x"); err == nil {
+		t.Fatal("unknown catalog model accepted")
+	}
+
+	// a file magpie cannot read as a list is left alone
+	os.WriteFile(path, []byte("llm-deepseek:\n  x: 1\n"), 0o644)
+	if err := f.Set("magpie/deepseek/pro"); err == nil {
+		t.Fatal("a mapping was edited as a list")
+	}
+}
+
+// Since 0.1.5 each profile has its own patch list, the key is a credential
+// and new sessions start on agent-default-model.
+func TestDshProfiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DSH_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro", "flash"}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".dsh")
+	template := "# Your patch layer for this dsh profile.\n[]\n"
+	web, desktop := filepath.Join(dir, "profiles", "web", "cordis.patch.yml"), filepath.Join(dir, "profiles", "desktop", "cordis.patch.yml")
+	for _, p := range []string{web, desktop} {
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(template), 0o644)
+	}
+	legacy := filepath.Join(dir, "config.yaml")
+	os.WriteFile(legacy, []byte("- id: agent-loop # magpie\n  config:\n    agents: []\n"), 0o644)
+	settings := filepath.Join(dir, "settings.yaml")
+	os.WriteFile(settings, []byte("ui:\n  theme: dark\nagent-default-model:\n  provider: deepseek-official\n  model: deepseek-flash\n"), 0o644)
+	read := func(p string) string { b, _ := os.ReadFile(p); return string(b) }
+
+	f := dsh(home).Field("model")
+	if f.Get() != "deepseek-flash" {
+		t.Fatalf("the model picked in dsh: %q", f.Get())
+	}
+	if err := f.Set("magpie/deepseek/pro"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{web, desktop} {
+		s := read(p)
+		for _, want := range []string{"# Your patch layer", "- id: llm-deepseek # magpie", "apiKeyEnv: " + dshKeyRef, `baseURL: "http://`, "- id: agent-default-model # magpie", "provider: deepseek-official", `model: "deepseek/pro"`} {
+			if !strings.Contains(s, want) {
+				t.Fatalf("missing %q in %s:\n%s", want, p, s)
+			}
+		}
+		if strings.Contains(s, "[]") || strings.Contains(s, "apiKey:") || strings.Contains(s, "agent-loop") {
+			t.Fatalf("%s:\n%s", p, s)
+		}
+	}
+	if got := read(legacy); got != "[]\n" {
+		t.Fatalf("config.yaml should lose magpie's entries: %q", got)
+	}
+	if !strings.Contains(read(filepath.Join(dir, ".env")), dshKeyRef+"=magpie") {
+		t.Fatal("no key for the gateway")
+	}
+	if s := read(settings); strings.Contains(s, "agent-default-model") || !strings.Contains(s, "theme: dark") {
+		t.Fatalf("settings:\n%s", s)
+	}
+	if f.Get() != "magpie/deepseek/pro" {
+		t.Fatalf("get: %q", f.Get())
+	}
+
+	if err := f.Set("deepseek-v4-pro"); err != nil {
+		t.Fatal(err)
+	}
+	if s := read(web); strings.Contains(s, "llm-deepseek") || !strings.Contains(s, `model: "deepseek-v4-pro"`) || f.Get() != "deepseek-v4-pro" {
+		t.Fatalf("own model: %q\n%s", f.Get(), s)
+	}
+	if strings.Contains(read(filepath.Join(dir, ".env")), dshKeyRef) {
+		t.Fatal("the key outlived the gateway")
+	}
+
+	if err := f.Set(""); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(web); got != template {
+		t.Fatalf("reset should leave the template as it was:\n%q", got)
+	}
+}
+
+func TestDshSettingsEndpoint(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.yaml")
+	os.WriteFile(p, []byte("ui:\n  theme: dark\nllm-deepseek:\n  thinking: enabled\n"), 0o644)
+	if dshSettingsEndpoint(p) {
+		t.Fatal("thinking alone is not an endpoint")
+	}
+	os.WriteFile(p, []byte("llm-deepseek:\n  baseURL: https://x\nui:\n  apiKey: y\n"), 0o644)
+	if !dshSettingsEndpoint(p) {
+		t.Fatal("baseURL missed")
+	}
+}
