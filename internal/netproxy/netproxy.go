@@ -59,7 +59,12 @@ func Describe() (proxy, source string) {
 	set := settings.Load().Proxy
 	p, src, err := decide(probe, set, os.Getenv, systemCached)
 	if err != nil {
-		// The setting cannot be used; For returns this error for every request.
+		// The source of the error tells which setting cannot be used; For
+		// returns this error for every request.
+		var se *sourceError
+		if errors.As(err, &se) && se.source == "environment" {
+			return "", "environment"
+		}
 		return strings.TrimSpace(set), "settings"
 	}
 	if src == "off" {
@@ -87,11 +92,11 @@ func decide(u *url.URL, set string, get func(string) string, sys func() sysConf)
 	if set != "" {
 		v, err := settings.ValidateProxy(set)
 		if err != nil {
-			return nil, "", err
+			return nil, "", &sourceError{source: "settings", err: err}
 		}
 		p, err := toProxyURL(v)
 		if err != nil {
-			return nil, "", err
+			return nil, "", &sourceError{source: "settings", err: err}
 		}
 		return p, "settings", nil
 	}
@@ -103,7 +108,10 @@ func decide(u *url.URL, set string, get func(string) string, sys func() sysConf)
 		}
 		p, err := toProxyURL(raw)
 		if err != nil {
-			return nil, "", fmt.Errorf("netproxy: proxy from environment %q is not usable: %w", raw, err)
+			return nil, "", &sourceError{
+				source: "environment",
+				err:    fmt.Errorf("netproxy: proxy from environment %q is not usable: %w", raw, err),
+			}
 		}
 		return p, "environment", nil
 	}
@@ -114,6 +122,16 @@ func decide(u *url.URL, set string, get func(string) string, sys func() sysConf)
 	}
 	return sc.proxy, "system", nil
 }
+
+// sourceError marks which level of the priority order produced an error, so
+// Describe can report the right source.
+type sourceError struct {
+	source string
+	err    error
+}
+
+func (e *sourceError) Error() string { return e.err.Error() }
+func (e *sourceError) Unwrap() error { return e.err }
 
 // envRaw returns the proxy variable that applies to scheme, or "".
 func envRaw(get func(string) string, scheme string) string {
@@ -143,7 +161,7 @@ func noProxyMatch(host, list string) bool {
 	host = strings.ToLower(host)
 	ip := net.ParseIP(host)
 	for _, entry := range strings.Split(list, ",") {
-		e := strings.ToLower(strings.TrimSpace(entry))
+		e := stripEntryPort(strings.ToLower(strings.TrimSpace(entry)))
 		switch {
 		case e == "":
 		case e == "*":
@@ -163,6 +181,22 @@ func noProxyMatch(host, list string) bool {
 		}
 	}
 	return false
+}
+
+// stripEntryPort removes a port from a NO_PROXY entry such as "example.com:443"
+// or "[::1]:8080", as the standard library does. Entries that are plain IPs,
+// CIDRs, "*" or have no port are returned unchanged.
+func stripEntryPort(e string) string {
+	if e == "*" || strings.Contains(e, "/") || net.ParseIP(e) != nil {
+		return e
+	}
+	if h, _, err := net.SplitHostPort(e); err == nil {
+		return h
+	}
+	if strings.HasPrefix(e, "[") && strings.HasSuffix(e, "]") {
+		return e[1 : len(e)-1]
+	}
+	return e
 }
 
 // isLoopback reports whether host is localhost, a name under .localhost, or a
