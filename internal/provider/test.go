@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -81,8 +82,8 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 	}
 	pools = append(pools, p.Available())
 	for _, want := range []func(string) bool{
-		func(id string) bool { return p.ServesAPI(id, proto) && (proto != Anthropic || isClaude(id)) },
-		func(id string) bool { return p.ServesAPI(id, proto) },
+		func(id string) bool { return (proto != Anthropic || isClaude(id)) && p.declaresAPI(id, proto) },
+		func(id string) bool { return p.declaresAPI(id, proto) },
 	} {
 		for _, pool := range pools {
 			for _, m := range pool {
@@ -93,6 +94,13 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		}
 	}
 	return ""
+}
+
+// declaresAPI is whether model may be asked at proto: its list entry says so,
+// or the list says nothing about it (unknown).
+func (p Provider) declaresAPI(model string, proto Protocol) bool {
+	apis := p.APIs(model)
+	return apis == nil || slices.Contains(apis, proto)
 }
 
 func isClaude(id string) bool {
