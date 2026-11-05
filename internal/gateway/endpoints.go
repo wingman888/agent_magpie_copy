@@ -1,154 +1,99 @@
 package gateway
 
-// Endpoints: which of a provider's API endpoints a model is served on. A
-// provider's model list may say so (provider.APIs); where it doesn't, every
-// protocol the provider has is a candidate, and an endpoint that answers that
-// the model is not served there is remembered for that provider and model
-// alone, so later requests skip it.
+// Endpoints: which upstream API a request goes to. A vendor's model list may
+// say which APIs serve a model (provider.Provider.APIs); a request then goes
+// only to those. Where the list says nothing, every API the vendor has is
+// tried, and one that refuses the model ("not on this endpoint") is
+// remembered for that model, so later requests skip it.
 
 import (
-	"context"
-	"net/http"
-	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// refusal is an upstream's 4xx reply as it came. The agent's copy is worded
-// again on the way (provider.APIError keeps only the message), which can drop
-// the words an endpoint refusal is told by, so the decision reads this.
-type refusal struct {
-	status int
-	body   []byte
-}
-
-type refusalKey struct{}
-
-// recordRefusal keeps an upstream 4xx reply for the endpoint decision, when
-// the request was sent by attempt's loop over endpoints.
-func recordRefusal(ctx context.Context, status int, body []byte) {
-	if rf, ok := ctx.Value(refusalKey{}).(*refusal); ok {
-		rf.status, rf.body = status, body
+// endpoints lists the protocols a request for model goes to upstream, in
+// the order to try them. The agent's own protocol comes first when the
+// model is served on it (the request is relayed as it is); otherwise the
+// translations the vendor prefers. Endpoints remembered as refusing the
+// model are left out, unless that leaves none.
+func (s *Server) endpoints(p provider.Provider, model string, from provider.Protocol) []provider.Protocol {
+	served := servedAPIs(p, model)
+	var ordered []provider.Protocol
+	if slices.Contains(served, from) {
+		ordered = append(ordered, from)
 	}
+	for _, pr := range preferred(p, model) {
+		if pr != from && slices.Contains(served, pr) {
+			ordered = append(ordered, pr)
+		}
+	}
+	var live []provider.Protocol
+	for _, pr := range ordered {
+		if !s.refusedEndpoint(p.ID, model, pr) {
+			live = append(live, pr)
+		}
+	}
+	if len(live) == 0 {
+		return ordered
+	}
+	return live
 }
 
-// endpoints lists the protocols a request for model may be sent over to
-// provider p, in the order to try them. The agent's own protocol comes first
-// when the provider serves the model there (relayOK says it may be relayed
-// as-is); the rest are translations, in the order preferred for the model.
-// An endpoint remembered as not serving the model is left out, unless that
-// leaves none, in which case the list is the same and the upstream decides.
-func (s *Server) endpoints(p provider.Provider, model string, from provider.Protocol, relayOK bool) []provider.Protocol {
+// servedAPIs are the endpoints a model may be sent to: the APIs its list
+// declares that the vendor has a base for, or, when the list declares none,
+// every endpoint the vendor has.
+func servedAPIs(p provider.Provider, model string) []provider.Protocol {
 	declared := p.APIs(model)
-	allowed := func(pr provider.Protocol) bool {
-		if p.Base(pr) == "" {
-			return false
-		}
-		// a model whose list names its APIs is sent to those only, never probed elsewhere
-		return len(declared) == 0 || slices.Contains(declared, pr)
+	if len(declared) == 0 {
+		return p.Speaks()
 	}
 	var out []provider.Protocol
-	add := func(pr provider.Protocol) {
-		if allowed(pr) && !slices.Contains(out, pr) {
+	for _, pr := range declared {
+		if p.Base(pr) != "" && !slices.Contains(out, pr) {
 			out = append(out, pr)
 		}
 	}
-	if relayOK {
-		add(from)
-	}
-	for _, pr := range preferred(p, model) {
-		add(pr)
-	}
-	var fresh []provider.Protocol
-	for _, pr := range out {
-		if !s.unavailableOn(p.ID, model, pr) {
-			fresh = append(fresh, pr)
-		}
-	}
-	if len(fresh) == 0 {
-		return out
-	}
-	return fresh
+	return out
 }
 
-// preferred is the order translations take: OpenAI's own models want the
-// Responses API first where OpenAI serves them (its own API, or Copilot's),
-// other vendors' models Chat Completions first.
+// declaresAPI says a model may be served on proto: its list says so, or its
+// list says nothing and the vendor has the endpoint.
+func declaresAPI(p provider.Provider, model string, proto provider.Protocol) bool {
+	if declared := p.APIs(model); len(declared) > 0 {
+		return slices.Contains(declared, proto)
+	}
+	return p.Base(proto) != ""
+}
+
+// preferred is the order translations are tried in: OpenAI's own models
+// (on api.openai.com, or the OpenAI models on Copilot) go to Responses
+// first, others to Chat Completions first.
 func preferred(p provider.Provider, model string) []provider.Protocol {
-	if openAIFirst(p) && modelFamily(model) == provider.Chat {
+	openAI := p.Host() == "api.openai.com" ||
+		((p.Host() == "api.githubcopilot.com" || p.Account != nil && p.Account.Agent == "copilot") && modelFamily(model) == provider.Chat)
+	if openAI {
 		return []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
 	}
-	return []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}
+	return provider.Protocols
 }
 
-// openAIFirst reports whether the provider is OpenAI's API or Copilot.
-func openAIFirst(p provider.Provider) bool {
-	if p.Account != nil && p.Account.Agent == "copilot" {
-		return true
-	}
-	for _, pr := range provider.Protocols {
-		if provider.HostOf(p.Base(pr)) == "api.openai.com" {
-			return true
-		}
-	}
-	return false
-}
-
-// unavailableKey names one provider's endpoint for one model.
-func unavailableKey(providerID, model string, proto provider.Protocol) string {
+// refusalKey names a (provider, model, endpoint) triple in the refusal memory.
+func refusalKey(providerID, model string, proto provider.Protocol) string {
 	return providerID + "\x00" + model + "\x00" + string(proto)
 }
 
-// unavailableOn reports whether an endpoint has answered that the model is
-// not served there.
-func (s *Server) unavailableOn(providerID, model string, proto provider.Protocol) bool {
+// refusedEndpoint says the upstream refused the model on that endpoint
+// before. It holds for that model on that provider's endpoint only.
+func (s *Server) refusedEndpoint(providerID, model string, proto provider.Protocol) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.unavailable[unavailableKey(providerID, model, proto)]
+	return s.refused[refusalKey(providerID, model, proto)]
 }
 
-// markUnavailable remembers that an endpoint does not serve the model.
-func (s *Server) markUnavailable(providerID, model string, proto provider.Protocol) {
+// markRefused remembers that the model is not served on the endpoint.
+func (s *Server) markRefused(providerID, model string, proto provider.Protocol) {
 	s.mu.Lock()
-	s.unavailable[unavailableKey(providerID, model, proto)] = true
-	s.mu.Unlock()
-}
-
-// unreachableEndpoint matches the wording vendors use when a model exists but
-// not on the endpoint asked, e.g. "not accessible via the /chat/completions endpoint".
-var unreachableEndpoint = regexp.MustCompile(`not accessible via the .{1,40}? endpoint`)
-
-// notChatModel reports whether an upstream error means the model is not
-// served on the endpoint the request went to, so another endpoint may serve
-// it. Only client errors qualify; a 5xx says nothing about the endpoint.
-func notChatModel(status int, body []byte) bool {
-	if status < http.StatusBadRequest || status >= http.StatusInternalServerError {
-		return false
-	}
-	msg := strings.ToLower(string(body))
-	for _, phrase := range endpointPhrases {
-		if strings.Contains(msg, phrase) {
-			return true
-		}
-	}
-	return unreachableEndpoint.MatchString(msg)
-}
-
-// endpointPhrases are how OpenAI-compatible servers say a model is served on
-// the other endpoint (lower case).
-var endpointPhrases = []string{
-	"not a chat model",
-	"not supported in the v1/chat/completions",
-	"not supported in /v1/chat/completions",
-	"not supported in the v1/responses",
-	"not supported in /v1/responses",
-	"unsupported_api_for_model",
-	"use v1/completions",
-	"use /v1/completions",
-	"use v1/responses",
-	"use /v1/responses",
-	"use v1/chat/completions",
-	"use /v1/chat/completions",
+	defer s.mu.Unlock()
+	s.refused[refusalKey(providerID, model, proto)] = true
 }

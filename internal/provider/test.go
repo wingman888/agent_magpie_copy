@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,13 +81,20 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		pools = append(pools, ms)
 	}
 	pools = append(pools, p.Available())
+	// a model the vendor's list says is served on this endpoint first; then
+	// the ones it says nothing of
+	declares := func(id string) bool {
+		return slices.Contains(p.APIs(id), proto)
+	}
 	for _, want := range []func(string) bool{
+		func(id string) bool { return declares(id) && (proto != Anthropic || isClaude(id)) },
+		func(id string) bool { return declares(id) },
 		func(id string) bool { return proto != Anthropic || isClaude(id) },
 		func(string) bool { return true },
 	} {
 		for _, pool := range pools {
 			for _, m := range pool {
-				if want(m.ID) && declaresAPI(m, proto) && (k.Key == "" || p.Serves(k, m.ID)) {
+				if want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
 					return m.ID
 				}
 			}
