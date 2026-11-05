@@ -23,13 +23,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // Account is the signed-in agent behind a provider.
@@ -41,14 +41,6 @@ type Account struct {
 	// Stream is set when the backend only streams; magpie then translates
 	// a non-streaming request instead of relaying it.
 	Stream bool `json:"-"`
-
-	// Home is where a Grok account keeps its sign-in: the CLI's own home,
-	// or one of magpie's for a further account (see grok_accounts.go).
-	Home string `json:"-"`
-
-	// token is set on a saved sign-in in use beside the agent's own (see
-	// logins_on.go): the access token to run the agent's binary with.
-	token func(ctx context.Context) (string, error)
 
 	sign   func(ctx context.Context, req *http.Request, body []byte) error
 	body   func(body []byte) []byte // request tweaks the backend insists on
@@ -65,13 +57,6 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
-	// The user's own headers ride on plain key+URL providers, after auth so
-	// they can override a default when a gateway insists on a private scheme.
-	// Written to the map directly, not via Set, so the name keeps the exact
-	// case the user typed — some gateways match header names case-sensitively.
-	for k, v := range p.Headers {
-		req.Header[k] = []string{v}
-	}
 	return nil
 }
 
@@ -83,19 +68,23 @@ func (p Provider) Prepare(body []byte) []byte {
 	return body
 }
 
-// Exclusion is a sign-in magpie found but will not offer as a provider.
+// Exclusion is a signed-in account the user took off the provider list.
 type Exclusion struct {
-	Agent    string `json:"agent"`
-	Provider string `json:"provider,omitempty"` // set when the user removed it; saving it brings it back
+	Agent    string `json:"agent"`    // the agent's id: codex, copilot, claude
+	Provider string `json:"provider"` // the provider id it is listed under
 	Why      string `json:"why"`
 }
 
-// Excluded lists sign-ins magpie detects but leaves out: the accounts the
-// user removed from magpie.
+// Excluded lists the signed-in accounts the user removed with
+// `magpie provider rm`; `magpie provider add <id>` brings them back.
 func Excluded() []Exclusion {
+	removed := load().Removed
 	var out []Exclusion
-	for _, a := range Hidden() {
-		out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID, Why: "You removed it from magpie."})
+	for _, a := range Accounts() {
+		if contains(removed, a.ID) {
+			out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID,
+				Why: "removed from magpie · magpie provider add " + a.ID + " brings it back"})
+		}
 	}
 	return out
 }
@@ -133,7 +122,7 @@ var (
 	claudeStatusAt   time.Time
 	claudeStatusUser string
 	claudeStatusPlan string
-	claudeStatusOut  bool // Claude Code says nobody is signed in
+	claudeStatusOut  bool // Claude Code said it is signed out
 
 	claudeCacheMu  sync.Mutex
 	claudeCacheAt  time.Time
@@ -263,6 +252,9 @@ func forgetClaudeCredential() {
 	claudeCacheMu.Lock()
 	claudeCacheAt = time.Time{}
 	claudeCacheMu.Unlock()
+	claudeStatusMu.Lock()
+	claudeStatusAt, claudeStatusOut = time.Time{}, false
+	claudeStatusMu.Unlock()
 }
 
 func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) error {
@@ -288,8 +280,7 @@ func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) err
 	return nil
 }
 
-// claudeExecutable finds the claude CLI; a var so tests can fake it.
-var claudeExecutable = func() string {
+func claudeExecutable() string {
 	if p, err := exec.LookPath("claude"); err == nil {
 		return p
 	}
@@ -307,23 +298,30 @@ var claudeExecutable = func() string {
 // `claude auth status --json` is the authoritative, non-secret view shown by the
 // CLI. Cache it briefly because the providers screen refreshes often.
 //
-// It also says when Claude Code is signed out even though credentials are
-// still lying around (a keychain item logout left behind), so a signed-out
-// account stops showing up as a provider.
-func claudeIdentity() (user, plan string, signedOut bool) {
+// loggedOut is true only when Claude Code answered that nobody is signed in,
+// even if its exit code is non-zero. A missing command or an answer magpie
+// cannot parse leaves the previous judgement (the credentials) in place.
+func claudeIdentity() (user, plan string, loggedOut bool) {
 	claudeStatusMu.Lock()
 	defer claudeStatusMu.Unlock()
 	if time.Since(claudeStatusAt) < 30*time.Second {
 		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 	}
 	claudeStatusAt = time.Now()
+	// unknown: keep the credential-based judgement, so an old "signed out"
+	// answer must not stick once the command stops giving one
+	unknown := func() (string, string, bool) {
+		claudeStatusOut = false
+		return claudeStatusUser, claudeStatusPlan, false
+	}
 	path := claudeExecutable()
 	if path == "" {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return unknown()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// signed out, `claude auth status` exits 1 but still prints the JSON
+	// Output keeps stdout even when the command exits non-zero, which is how
+	// a signed-out Claude Code reports itself.
 	out, _ := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
 	var status struct {
 		LoggedIn         *bool  `json:"loggedIn"`
@@ -331,15 +329,16 @@ func claudeIdentity() (user, plan string, signedOut bool) {
 		SubscriptionType string `json:"subscriptionType"`
 	}
 	if json.Unmarshal(out, &status) != nil || status.LoggedIn == nil {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return unknown()
 	}
-	claudeStatusOut = !*status.LoggedIn
-	claudeStatusUser, claudeStatusPlan = "", ""
-	if *status.LoggedIn {
-		claudeStatusUser = strings.TrimSpace(status.Email)
-		claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
+	if !*status.LoggedIn {
+		claudeStatusUser, claudeStatusPlan, claudeStatusOut = "", "", true
+		return "", "", true
 	}
-	return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+	claudeStatusUser = strings.TrimSpace(status.Email)
+	claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
+	claudeStatusOut = false
+	return claudeStatusUser, claudeStatusPlan, false
 }
 
 func claudeAccount() (Provider, bool) {
@@ -347,20 +346,14 @@ func claudeAccount() (Provider, bool) {
 	if !ok {
 		return Provider{}, false
 	}
-	user, statusPlan, signedOut := claudeIdentity()
-	if signedOut {
+	user, statusPlan, loggedOut := claudeIdentity()
+	if loggedOut {
+		// the credentials may linger after `claude auth logout`; the agent wins
 		return Provider{}, false
 	}
 	plan := c.OAuth.SubscriptionType
 	if statusPlan != "" {
 		plan = statusPlan
-	}
-	if m, err := readClaudeProfile(); err == nil && user != "" {
-		if acct, ok := m["oauthAccount"].(map[string]any); ok {
-			if email, _ := acct["emailAddress"].(string); strings.EqualFold(email, user) {
-				user = claudeUser(user, plan, acct)
-			}
-		}
 	}
 	if user == "" {
 		user = "Claude account"
@@ -424,7 +417,7 @@ func claudeModels(ctx context.Context) ([]catalog.Model, error) {
 		req.Header.Set("anthropic-beta", claudeBetaHeader(""))
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", claudeUserAgent())
-		res, err := http.DefaultClient.Do(req)
+		res, err := netproxy.Client().Do(req)
 		if err != nil {
 			return nil, errors.New("Claude model list: " + err.Error())
 		}
@@ -491,30 +484,19 @@ func claudeToken(ctx context.Context) (string, error) {
 	if claudeFresh(c) {
 		return c.OAuth.AccessToken, nil
 	}
-	if err := claudeRefresh(ctx, &c); err != nil {
-		return "", err
-	}
-	if err := saveClaudeCredential(loc, c); err != nil {
-		return "", err
-	}
-	return c.OAuth.AccessToken, nil
-}
-
-// claudeRefresh trades a sign-in's refresh token for a new pair.
-func claudeRefresh(ctx context.Context, c *claudeCredentials) error {
 	if c.OAuth.RefreshToken == "" {
-		return errors.New("Claude Code OAuth token expired; run claude auth login")
+		return "", errors.New("Claude Code OAuth token expired; run claude auth login")
 	}
 	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": c.OAuth.RefreshToken,
 		"client_id": claudeClientID})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeTokenURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := netproxy.Client().Do(req)
 	if err != nil {
-		return errors.New("Claude Code token refresh: " + err.Error())
+		return "", errors.New("Claude Code token refresh: " + err.Error())
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -524,7 +506,7 @@ func claudeRefresh(ctx context.Context, c *claudeCredentials) error {
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if res.StatusCode != http.StatusOK || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
+		return "", errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
 	}
 	c.OAuth.AccessToken = fresh.AccessToken
 	if fresh.RefreshToken != "" {
@@ -533,12 +515,14 @@ func claudeRefresh(ctx context.Context, c *claudeCredentials) error {
 	if fresh.ExpiresIn > 0 {
 		c.OAuth.ExpiresAt = time.Now().Add(time.Duration(fresh.ExpiresIn) * time.Second).UnixMilli()
 	}
-	return nil
+	if err := saveClaudeCredential(loc, c); err != nil {
+		return "", err
+	}
+	return fresh.AccessToken, nil
 }
 
 // Accounts lists the signed-in agents as providers.
 func Accounts() []Provider {
-	rememberLogins(false)
 	home, _ := os.UserHomeDir()
 	cfg := os.Getenv("XDG_CONFIG_HOME")
 	if cfg == "" {
@@ -552,12 +536,6 @@ func Accounts() []Provider {
 		out = append(out, p)
 	}
 	if p, ok := copilotAccount(cfg); ok {
-		out = append(out, p)
-	}
-	if p, ok := cursorAccount(); ok {
-		out = append(out, p)
-	}
-	if p, ok := grokAccount(); ok {
 		out = append(out, p)
 	}
 	return out
@@ -604,11 +582,10 @@ func claimString(m map[string]any, keys ...string) string {
 
 // ---- Codex CLI: a ChatGPT account ----------------------------------------------
 
-const codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
-
-// codexTokenURL is where ChatGPT's tokens are issued and refreshed; a var
-// so tests can point it elsewhere.
-var codexTokenURL = "https://auth.openai.com/oauth/token"
+const (
+	codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann" // Codex CLI's own OAuth client
+	codexTokenURL = "https://auth.openai.com/oauth/token"
+)
 
 // CodexBase is where a ChatGPT account's Codex requests go; a var so tests
 // can point it elsewhere.
@@ -638,26 +615,8 @@ func codexAccount(home string) (Provider, bool) {
 	if acct.User == "" {
 		acct.User = "ChatGPT"
 	}
-	acct.sign = codexSign(func(ctx context.Context) (string, string, error) { return codexToken(ctx, path) })
-	acct.body = codexBody
-	acct.models = catalog.Codex
-	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := codexModels(ctx, acct.sign)
-		if err != nil {
-			return nil, err
-		}
-		catalog.SaveLive(accountModels("codex", acct.User), CodexBase, ms)
-		codexFetchSaved(ctx)
-		return ms, catalog.SaveLive("codex", CodexBase, ms)
-	}
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
-}
-
-// codexSign authenticates a request to the ChatGPT backend with the
-// tokens token hands out.
-func codexSign(token func(context.Context) (tok, accountID string, err error)) func(context.Context, *http.Request, []byte) error {
-	return func(ctx context.Context, req *http.Request, _ []byte) error {
-		tok, accountID, err := token(ctx)
+	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
+		tok, accountID, err := codexToken(ctx, path)
 		if err != nil {
 			return err
 		}
@@ -669,6 +628,10 @@ func codexSign(token func(context.Context) (tok, accountID string, err error)) f
 		req.Header.Set("originator", "magpie")
 		return nil
 	}
+	acct.body = codexBody
+	acct.models = catalog.Codex
+	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
+	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI
@@ -688,39 +651,16 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 	if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
 		return a.Tokens.AccessToken, accountID, nil
 	}
-	var raw map[string]any
-	if !readJSON(path, &raw) {
-		return "", "", errors.New("Codex is signed out; run codex login")
-	}
-	tok, err = codexRefresh(ctx, raw)
+	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
+		"refresh_token": a.Tokens.RefreshToken, "scope": "openid profile email"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, bytes.NewReader(body))
 	if err != nil {
 		return "", "", err
 	}
-	// keep every other field of the file as Codex CLI wrote it
-	if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
-		os.WriteFile(path, append(out, '\n'), 0o600)
-	}
-	return tok, accountID, nil
-}
-
-// codexRefresh renews the tokens of an auth.json-shaped sign-in in place,
-// every other field left as it was, and returns the new access token.
-func codexRefresh(ctx context.Context, raw map[string]any) (string, error) {
-	toks, _ := raw["tokens"].(map[string]any)
-	if toks == nil {
-		toks = map[string]any{}
-	}
-	refresh, _ := toks["refresh_token"].(string)
-	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
-		"refresh_token": refresh, "scope": "openid profile email"})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := netproxy.Client().Do(req)
 	if err != nil {
-		return "", errors.New("Codex token refresh: " + err.Error())
+		return "", "", errors.New("Codex token refresh: " + err.Error())
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -730,18 +670,29 @@ func codexRefresh(ctx context.Context, raw map[string]any) (string, error) {
 		RefreshToken string `json:"refresh_token"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return "", errors.New("Codex is signed out (token refresh failed); run codex login")
+		return "", "", errors.New("Codex is signed out (token refresh failed); run codex login")
 	}
-	toks["access_token"] = fresh.AccessToken
-	if fresh.IDToken != "" {
-		toks["id_token"] = fresh.IDToken
+	// keep every other field of the file as Codex CLI wrote it
+	var raw map[string]any
+	if readJSON(path, &raw) {
+		toks, _ := raw["tokens"].(map[string]any)
+		if toks == nil {
+			toks = map[string]any{}
+		}
+		toks["access_token"] = fresh.AccessToken
+		if fresh.IDToken != "" {
+			toks["id_token"] = fresh.IDToken
+		}
+		if fresh.RefreshToken != "" {
+			toks["refresh_token"] = fresh.RefreshToken
+		}
+		raw["tokens"] = toks
+		raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
+		if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
+			os.WriteFile(path, append(out, '\n'), 0o600)
+		}
 	}
-	if fresh.RefreshToken != "" {
-		toks["refresh_token"] = fresh.RefreshToken
-	}
-	raw["tokens"] = toks
-	raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
-	return fresh.AccessToken, nil
+	return fresh.AccessToken, accountID, nil
 }
 
 // codexBody makes a Responses request acceptable to the ChatGPT backend:
@@ -763,16 +714,6 @@ func codexBody(body []byte) []byte {
 		m["input"] = []any{map[string]any{"type": "message", "role": "user",
 			"content": []any{map[string]any{"type": "input_text", "text": s}}}}
 	}
-	// Codex rejects system messages in input; developer preserves their
-	// instruction role without moving them out of conversation order.
-	if input, ok := m["input"].([]any); ok {
-		for _, item := range input {
-			msg, ok := item.(map[string]any)
-			if ok && msg["role"] == "system" && (msg["type"] == nil || msg["type"] == "message") {
-				msg["role"] = "developer"
-			}
-		}
-	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return body
@@ -788,32 +729,6 @@ var CopilotTokenURL = "https://api.github.com/copilot_internal/v2/token"
 
 const copilotBase = "https://api.githubcopilot.com"
 
-// copilotAPI names the API a Copilot model's supported_endpoints entry stands
-// for; the others (websocket, embeddings…) are not one magpie speaks.
-func copilotAPI(endpoint string) string {
-	switch endpoint {
-	case "/chat/completions":
-		return "chat"
-	case "/responses":
-		return "responses"
-	case "/v1/messages":
-		return "anthropic"
-	}
-	return ""
-}
-
-// copilotAPIs is the APIs a model's supported_endpoints declare, nil when
-// the list is missing or names none of them (unknown).
-func copilotAPIs(endpoints []string) []string {
-	var out []string
-	for _, e := range endpoints {
-		if a := copilotAPI(e); a != "" && !slices.Contains(out, a) {
-			out = append(out, a)
-		}
-	}
-	return out
-}
-
 var copilotHeaders = map[string]string{
 	"Editor-Version":         "vscode/1.104.0",
 	"Editor-Plugin-Version":  "copilot-chat/0.31.0",
@@ -827,15 +742,6 @@ type copilotSession struct {
 	Endpoints struct {
 		API string `json:"api"`
 	} `json:"endpoints"`
-	direct bool // the Copilot CLI's token, sent as is
-}
-
-// headers are what a request with this session carries.
-func (s copilotSession) headers() map[string]string {
-	if s.direct {
-		return copilotCLIHeaders
-	}
-	return copilotHeaders
 }
 
 var (
@@ -846,7 +752,6 @@ var (
 type copilotApp struct {
 	User  string `json:"user"`
 	Token string `json:"oauth_token"`
-	cli   bool // the standalone Copilot CLI's sign-in
 }
 
 // copilotLogin finds the GitHub token Copilot's editors and CLI keep.
@@ -867,25 +772,20 @@ func copilotLogin(cfg string) (copilotApp, bool) {
 			}
 		}
 	}
-	return copilotCLILogin()
+	return copilotApp{}, false
 }
 
-// session is what this sign-in's requests carry.
-func (a copilotApp) session(ctx context.Context) (copilotSession, error) {
-	if a.cli {
-		return copilotDirect(ctx, a.Token)
+func copilotAccount(cfg string) (Provider, bool) {
+	app, ok := copilotLogin(cfg)
+	if !ok {
+		return Provider{}, false
 	}
-	return copilotToken(ctx, a.Token)
-}
-
-// copilotProvider is Copilot as one GitHub account serves it.
-func copilotProvider(app copilotApp, plan string) Provider {
-	acct := &Account{Agent: "copilot", User: app.User, Plan: plan}
+	acct := &Account{Agent: "copilot", User: app.User}
 	if acct.User == "" {
 		acct.User = "GitHub"
 	}
 	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
-		s, err := app.session(ctx)
+		s, err := copilotToken(ctx, app.Token)
 		if err != nil {
 			return err
 		}
@@ -895,124 +795,41 @@ func copilotProvider(app copilotApp, plan string) Provider {
 			}
 		}
 		req.Header.Set("Authorization", "Bearer "+s.Token)
-		for k, v := range s.headers() {
+		for k, v := range copilotHeaders {
 			req.Header.Set(k, v)
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
 		req.Header.Set("X-Initiator", "agent")
-		if copilotUserTurn(body) {
+		if lastRole(body) == "user" {
 			req.Header.Set("X-Initiator", "user")
 		}
-		if copilotHasImage(body) {
+		if bytes.Contains(body, []byte(`"image_url"`)) {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
 	}
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := copilotModels(ctx, app)
+		ms, err := copilotModels(ctx, app.Token)
 		if err != nil {
 			return nil, err
 		}
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
-	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
+	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Website: "https://github.com/features/copilot", Account: acct}, true
 }
 
-// copilotUserTurn is whether the last turn of a request was typed by the
-// user, as opposed to an agent's reply to a tool. It reads all three shapes:
-// Chat (messages; a tool's answer is role "tool"), Anthropic (messages; a
-// user turn made only of tool_result blocks is the agent's), and Responses
-// (input; a string is the user's, a function output is the agent's).
-func copilotUserTurn(body []byte) bool {
+// lastRole is the role of the last message in a chat request.
+func lastRole(body []byte) string {
 	var v struct {
-		Messages []json.RawMessage `json:"messages"`
-		Input    json.RawMessage   `json:"input"`
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
 	}
-	if json.Unmarshal(body, &v) != nil {
-		return false
+	if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
+		return ""
 	}
-	if len(v.Messages) > 0 {
-		var m struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		}
-		if json.Unmarshal(v.Messages[len(v.Messages)-1], &m) != nil || m.Role != "user" {
-			return false
-		}
-		var blocks []struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(m.Content, &blocks) == nil && len(blocks) > 0 {
-			for _, b := range blocks {
-				if b.Type != "tool_result" {
-					return true
-				}
-			}
-			return false
-		}
-		return true
-	}
-	var s string
-	if json.Unmarshal(v.Input, &s) == nil {
-		return true // a plain string input is the user's text
-	}
-	var items []struct {
-		Type string `json:"type"`
-		Role string `json:"role"`
-	}
-	if json.Unmarshal(v.Input, &items) != nil || len(items) == 0 {
-		return false
-	}
-	last := items[len(items)-1]
-	return (last.Type == "" || last.Type == "message") && last.Role == "user"
-}
-
-// copilotHasImage is whether a request carries an image part in any of the
-// three shapes: Chat image_url, Responses input_image, Anthropic image.
-func copilotHasImage(body []byte) bool {
-	var v struct {
-		Messages json.RawMessage `json:"messages"`
-		Input    json.RawMessage `json:"input"`
-	}
-	if json.Unmarshal(body, &v) != nil {
-		return false
-	}
-	return hasImagePart(v.Messages) || hasImagePart(v.Input)
-}
-
-// hasImagePart searches a JSON value, recursively, for an object whose type is
-// an image part.
-func hasImagePart(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return false
-	}
-	var walk func(any) bool
-	walk = func(x any) bool {
-		switch x := x.(type) {
-		case map[string]any:
-			if t, _ := x["type"].(string); t == "image_url" || t == "input_image" || t == "image" {
-				return true
-			}
-			for _, c := range x {
-				if walk(c) {
-					return true
-				}
-			}
-		case []any:
-			for _, c := range x {
-				if walk(c) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	return walk(v)
+	return v.Messages[len(v.Messages)-1].Role
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {
@@ -1030,7 +847,7 @@ func copilotToken(ctx context.Context, github string) (copilotSession, error) {
 	for k, v := range copilotHeaders {
 		req.Header.Set(k, v)
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := netproxy.Client().Do(req)
 	if err != nil {
 		return copilotSession{}, errors.New("Copilot sign-in: " + err.Error())
 	}
@@ -1048,8 +865,8 @@ func copilotToken(ctx context.Context, github string) (copilotSession, error) {
 var copilotInternal = regexp.MustCompile(`^(copilot-search|exec-agent|trajectory)|-(secondary|tertiary|4th|free-auto)$`)
 
 // copilotModels asks Copilot which chat models this account may use.
-func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error) {
-	s, err := app.session(ctx)
+func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) {
+	s, err := copilotToken(ctx, github)
 	if err != nil {
 		return nil, err
 	}
@@ -1062,10 +879,10 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.Token)
-	for k, v := range s.headers() {
+	for k, v := range copilotHeaders {
 		req.Header.Set(k, v)
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := netproxy.Client().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1085,8 +902,6 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 			Policy *struct {
 				State string `json:"state"`
 			} `json:"policy"`
-			// SupportedEndpoints is nil when the field is missing: unknown.
-			SupportedEndpoints []string `json:"supported_endpoints"`
 		} `json:"data"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(b, &v) != nil {
@@ -1101,17 +916,10 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		if !m.Picker && (m.Policy == nil || m.Policy.State != "enabled") {
 			continue
 		}
-		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: copilotAPIs(m.SupportedEndpoints)})
+		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts})
 	}
 	if len(out) == 0 {
 		return nil, errors.New("Copilot lists no chat model for this account")
 	}
 	return out, nil
-}
-
-// forgetClaudeStatus drops what `claude auth status` said; tests use it.
-func forgetClaudeStatus() {
-	claudeStatusMu.Lock()
-	claudeStatusAt, claudeStatusUser, claudeStatusPlan, claudeStatusOut = time.Time{}, "", "", false
-	claudeStatusMu.Unlock()
 }
