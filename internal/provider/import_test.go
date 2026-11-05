@@ -211,13 +211,14 @@ func TestImportNameNormalCasesUnchanged(t *testing.T) {
 	if p.Name != "My Relay" || p.ID != "my-relay" {
 		t.Errorf("Name/ID = %q/%q", p.Name, p.ID)
 	}
-	long := strings.Repeat("界", 120)
+	// Mixed ASCII/CJK so the derived id still has letters after Slug.
+	long := strings.Repeat("ab界", 40) // 120 runes
 	p = mustParse(t, "magpie://import?name="+long+"&chat=https://relay.example/v1")
 	if got := len([]rune(p.Name)); got != 80 {
 		t.Errorf("name length = %d, want 80", got)
 	}
-	if p.Name != strings.Repeat("界", 80) {
-		t.Errorf("truncated name content changed")
+	if want := []rune(long)[:80]; string([]rune(p.Name)) != string(want) {
+		t.Errorf("truncated name content changed: %q", p.Name)
 	}
 }
 
