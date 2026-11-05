@@ -33,9 +33,6 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
-		if p.KeyProtocol != "" && proto != p.KeyProtocol {
-			continue // a key limited to one protocol never touches the others
-		}
 		var url, body string
 		switch proto {
 		case Chat:
@@ -90,7 +87,6 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 		r.Error = err.Error()
 		return r
 	}
-	ApplyHeaders(p, req)
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
 	r.Millis = time.Since(start).Milliseconds()

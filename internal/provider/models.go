@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = catalog.Provider(p.Catalog)
+		known = p.catalogModels()
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -36,6 +36,23 @@ func (p Provider) Available() []catalog.Model {
 	for _, m := range known {
 		if !strings.Contains(m.ID, "-exp") && !strings.Contains(m.ID, "preview") {
 			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// catalogModels lists the models of every catalog the provider reads, in
+// the order the catalogs were given. A model listed by an earlier catalog
+// wins over the same id in a later one.
+func (p Provider) catalogModels() []catalog.Model {
+	var out []catalog.Model
+	seen := map[string]bool{}
+	for _, c := range p.CatalogIDs() {
+		for _, m := range catalog.Provider(c) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out = append(out, m)
+			}
 		}
 	}
 	return out
@@ -54,9 +71,6 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		if p.KeyProtocol != "" && proto != p.KeyProtocol {
-			continue // a key limited to one protocol never touches the others
-		}
 		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.CustomHeaders())
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
@@ -73,14 +87,11 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
-	byID := make(map[string]catalog.Model, len(avail))
-	for _, m := range avail {
-		byID[m.ID] = m
-	}
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
-			if m, ok := byID[id]; ok {
+			if m, ok := catalog.Match(avail, id); ok {
+				m.ID = id // keep the id the user wrote; the vendor is asked for that one
 				out = append(out, m)
 			} else {
 				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})

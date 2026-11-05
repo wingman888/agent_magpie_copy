@@ -302,5 +302,8 @@ func Efforts(models []Model, id string) []string {
 			return m.Efforts
 		}
 	}
+	if m, ok := Match(models, id); ok && m.ID != id {
+		return m.Efforts
+	}
 	return nil
 }

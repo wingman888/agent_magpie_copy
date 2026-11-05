@@ -33,19 +33,9 @@ var Protocols = []Protocol{Chat, Responses, Anthropic}
 type Provider struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
-	Icon   string `json:"icon,omitempty"`   // a built-in icon name, or "file:<name>" in the icons folder
+	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
-
-	// KeyName names the key in use; KeyProtocol limits it to one protocol's
-	// endpoint (empty: any). Keys are the others (see keys.go).
-	KeyName     string     `json:"keyName,omitempty"`
-	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
-	Keys        []ExtraKey `json:"keys,omitempty"`
-
-	// Headers are extra request headers a custom vendor needs (see headers.go).
-	// Presets ignore them.
-	Headers map[string]string `json:"headers,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -58,9 +48,17 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
+	Catalog string `json:"catalog,omitempty"` // models.dev id(s), comma-separated, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// Headers are extra request headers sent with every request to a custom
+	// provider (forwarding, tests, model lists). Presets and accounts ignore them.
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// Fallback is the ordered list of "provider/model" ids to try when this
+	// provider cannot answer (see gateway).
+	Fallback []string `json:"fallback,omitempty"`
 
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
@@ -127,6 +125,7 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -190,40 +189,34 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
-		if old, ok := storedProvider(p.ID); ok {
-			carryKeys(old, &p)
-		}
-		if err := checkKeys(p); err != nil {
-			return err
-		}
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
-		if strings.HasPrefix(p.Icon, iconPrefix) && IconPath(p.Icon) == "" {
-			return fmt.Errorf("%s is not an icon magpie stored", p.Icon)
+		if strings.HasPrefix(p.Icon, "file:") && IconFile(strings.TrimPrefix(p.Icon, "file:")) == "" {
+			return fmt.Errorf("%q is not a valid icon reference", p.Icon)
 		}
 	}
 	f := load()
-	found := false
+	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			found = true
+			replaced = true
 			break
 		}
 	}
-	if !found {
+	if !replaced {
 		f.Providers = append(f.Providers, p)
 	}
 	if err := store(f); err != nil {
 		return err
 	}
-	pruneIcons(f)
+	cleanIcons(f.Providers)
 	return nil
 }
 
@@ -271,8 +264,6 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -280,10 +271,9 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
 	p.Headers = cleanHeaders(p.Headers)
-	if p.Preset != "" {
-		p.Headers = nil // a preset's endpoint is its own; headers are for custom vendors
-	}
+	p.Catalog = strings.Join(p.CatalogIDs(), ",")
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -306,6 +296,55 @@ func cleanList(xs []string) []string {
 	for _, x := range xs {
 		if x = strings.TrimSpace(x); x != "" && !contains(out, x) {
 			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// cleanHeaders trims names and values, drops entries with no name, and
+// returns nil for an empty set so nothing is written for it.
+func cleanHeaders(h map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range h {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// CustomHeaders are the extra headers this provider sends. Presets and
+// signed-in accounts send none.
+func (p Provider) CustomHeaders() map[string]string {
+	if p.Account != nil || (p.Preset != "" && Preset(p.Preset) != nil) {
+		return nil
+	}
+	return p.Headers
+}
+
+// validCatalogs is true when every comma-separated part is a slug, as
+// models.dev ids are.
+func validCatalogs(s string) bool {
+	for _, c := range strings.Split(s, ",") {
+		if c = strings.TrimSpace(c); c != "" && c != Slug(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// CatalogIDs lists the models.dev catalogs the provider reads, in the order
+// they were given. "openai,deepseek" reads both, in that order.
+func (p Provider) CatalogIDs() []string {
+	var out []string
+	for _, c := range strings.Split(p.Catalog, ",") {
+		if c = strings.TrimSpace(c); c != "" && !contains(out, c) {
+			out = append(out, c)
 		}
 	}
 	return out

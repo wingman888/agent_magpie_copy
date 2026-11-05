@@ -45,10 +45,6 @@ type Account struct {
 	body   func(body []byte) []byte // request tweaks the backend insists on
 	models func() []catalog.Model
 	fetch  func(ctx context.Context) ([]catalog.Model, error)
-
-	// alts are the remembered accounts of the same agent that are on (see
-	// login_store.go); the gateway tries them after this one, in order.
-	alts []Provider
 }
 
 // Sign authenticates a request to the provider, refreshing what needs it.
@@ -60,6 +56,7 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
+	catalog.SetHeaders(req.Header, p.CustomHeaders())
 	return nil
 }
 
@@ -335,24 +332,11 @@ func claudeAccount() (Provider, bool) {
 	if !ok {
 		return Provider{}, false
 	}
-	user, plan, signedOut := claudeWho(c)
+	user, statusPlan, signedOut := claudeIdentity()
 	if signedOut {
 		return Provider{}, false
 	}
-	rememberLive("claude", user, plan, c.marshalOrNil())
-	return claudeAccountOf(user, plan, claudeToken), true
-}
-
-// claudeWho names the account Claude Code is signed in to, and its plan. The
-// name is a stand-in when the status does not say; signedOut is set when Claude
-// Code itself reports nobody signed in.
-func claudeWho(c claudeCredentials) (user, plan string, signedOut bool) {
-	var statusPlan string
-	user, statusPlan, signedOut = claudeIdentity()
-	if signedOut {
-		return "", "", true
-	}
-	plan = c.OAuth.SubscriptionType
+	plan := c.OAuth.SubscriptionType
 	if statusPlan != "" {
 		plan = statusPlan
 	}
@@ -362,15 +346,9 @@ func claudeWho(c claudeCredentials) (user, plan string, signedOut bool) {
 			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
 		}
 	}
-	return user, plan, false
-}
-
-// claudeAccountOf is a Claude Code subscription as a provider, signed with
-// whatever token source it is given: the agent's own login, or a remembered one.
-func claudeAccountOf(user, plan string, token func(context.Context) (string, error)) Provider {
 	acct := &Account{Agent: "claude", User: user, Plan: plan}
 	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
-		tok, err := token(ctx)
+		tok, err := claudeToken(ctx)
 		if err != nil {
 			return err
 		}
@@ -389,14 +367,14 @@ func claudeAccountOf(user, plan string, token func(context.Context) (string, err
 	acct.body = claudeBody
 	acct.models = func() []catalog.Model { return catalog.Provider("anthropic") }
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := claudeModelsWith(ctx, token)
+		ms, err := claudeModels(ctx)
 		if err != nil {
 			return nil, err
 		}
 		return ms, catalog.SaveLive("claude", claudeBase, ms)
 	}
 	return Provider{ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Anthropic: claudeBase,
-		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}
+		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}, true
 }
 
 // claudeModels asks Anthropic's Models API, authenticated with the account's
@@ -404,11 +382,7 @@ func claudeAccountOf(user, plan string, token func(context.Context) (string, err
 // Nothing here is compiled in: a new model shows up the moment Anthropic
 // lists it (which is what the refresh button runs).
 func claudeModels(ctx context.Context) ([]catalog.Model, error) {
-	return claudeModelsWith(ctx, claudeToken)
-}
-
-func claudeModelsWith(ctx context.Context, token func(context.Context) (string, error)) ([]catalog.Model, error) {
-	tok, err := token(ctx)
+	tok, err := claudeToken(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -495,32 +469,19 @@ func claudeToken(ctx context.Context) (string, error) {
 	if claudeFresh(c) {
 		return c.OAuth.AccessToken, nil
 	}
-	c, err := claudeRefresh(ctx, c)
-	if err != nil {
-		return "", err
-	}
-	if err := saveClaudeCredential(loc, c); err != nil {
-		return "", err
-	}
-	return c.OAuth.AccessToken, nil
-}
-
-// claudeRefresh trades a credential's refresh token for a new access token,
-// returning the credential with the rotated tokens. It saves nothing.
-func claudeRefresh(ctx context.Context, c claudeCredentials) (claudeCredentials, error) {
 	if c.OAuth.RefreshToken == "" {
-		return c, errors.New("Claude Code OAuth token expired; run claude auth login")
+		return "", errors.New("Claude Code OAuth token expired; run claude auth login")
 	}
 	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": c.OAuth.RefreshToken,
 		"client_id": claudeClientID})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeTokenURL, bytes.NewReader(body))
 	if err != nil {
-		return c, err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return c, errors.New("Claude Code token refresh: " + err.Error())
+		return "", errors.New("Claude Code token refresh: " + err.Error())
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -530,7 +491,7 @@ func claudeRefresh(ctx context.Context, c claudeCredentials) (claudeCredentials,
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if res.StatusCode != http.StatusOK || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return c, errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
+		return "", errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
 	}
 	c.OAuth.AccessToken = fresh.AccessToken
 	if fresh.RefreshToken != "" {
@@ -539,7 +500,10 @@ func claudeRefresh(ctx context.Context, c claudeCredentials) (claudeCredentials,
 	if fresh.ExpiresIn > 0 {
 		c.OAuth.ExpiresAt = time.Now().Add(time.Duration(fresh.ExpiresIn) * time.Second).UnixMilli()
 	}
-	return c, nil
+	if err := saveClaudeCredential(loc, c); err != nil {
+		return "", err
+	}
+	return fresh.AccessToken, nil
 }
 
 // Accounts lists the signed-in agents as providers.
@@ -551,10 +515,10 @@ func Accounts() []Provider {
 	}
 	var out []Provider
 	if p, ok := claudeAccount(); ok {
-		out = append(out, withAlternates(p))
+		out = append(out, p)
 	}
 	if p, ok := codexAccount(home); ok {
-		out = append(out, withAlternates(p))
+		out = append(out, p)
 	}
 	if p, ok := copilotAccount(cfg); ok {
 		out = append(out, p)
@@ -631,17 +595,11 @@ func codexAccount(home string) (Provider, bool) {
 		return Provider{}, false
 	}
 	id := jwtClaims(a.Tokens.IDToken)
-	user, plan := codexUser(id, codexAccountID(a)), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")
-	if raw, err := os.ReadFile(path); err == nil {
-		rememberLive("codex", user, plan, raw)
+	acct := &Account{Agent: "codex", Stream: true,
+		User: claimString(id, "email"), Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")}
+	if acct.User == "" {
+		acct.User = "ChatGPT"
 	}
-	return codexAccountOf(user, plan, path), true
-}
-
-// codexAccountOf is a ChatGPT account as a provider, signed with the tokens
-// kept in the auth.json at path: the agent's own file, or a remembered copy.
-func codexAccountOf(user, plan, path string) Provider {
-	acct := &Account{Agent: "codex", Stream: true, User: user, Plan: plan}
 	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
 		tok, accountID, err := codexToken(ctx, path)
 		if err != nil {
@@ -658,7 +616,7 @@ func codexAccountOf(user, plan, path string) Provider {
 	acct.body = codexBody
 	acct.models = catalog.Codex
 	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}
+	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI
