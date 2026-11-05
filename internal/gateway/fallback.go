@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -299,6 +300,14 @@ func (s *Server) resting(id string) bool {
 	return ok
 }
 
+// clearRest lifts a candidate's rest: it answered, so it is ready again.
+func clearRest(id string) {
+	restingUntil.Lock()
+	defer restingUntil.Unlock()
+	delete(restingUntil.m, id)
+	delete(restingUntil.note, id)
+}
+
 // restOf is why a candidate is resting, while it is.
 func restOf(id string) (Rest, bool) {
 	restingUntil.Lock()
@@ -314,44 +323,92 @@ func restOf(id string) (Rest, bool) {
 
 // quotaWords are how vendors say "out of quota" or "slow down" when their
 // status code doesn't: some answer 400 or 403 with it.
-var quotaWords = regexp.MustCompile(`(?i)quota|insufficient.{0,12}(balance|quota|credit)|billing|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
+var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
+
+// modelWords are how vendors say a model is missing, unsupported or not open
+// to the key, when their status code is a 400 or 422 and not a 404.
+var modelWords = regexp.MustCompile(`(?i)(model|模型).{0,80}(not[ _]?(found|exist|exists|supported|available|accessible|enabled|allowed|authorized)|does not exist|doesn't exist|unsupported|no access|not have access|permission|unknown)|unknown model|(不存在|不支持|无权限|未开通|不可用|未找到).{0,8}模型|模型.{0,12}(不存在|不支持|无权限|未开通|不可用|未找到)`)
+
+// contextWords are the 400s that are about the request itself: too long for
+// the model's context, or too many tokens. Another provider won't help.
+var contextWords = regexp.MustCompile(`(?i)context.{0,30}(length|window|limit|exceed|too long)|too long|maximum.{0,30}tokens|token.{0,10}(limit|exceed)|上下文|超长`)
 
 // retryable says whether another provider may do better with a request
-// that failed this way. A 400 or 422 counts only when its words say the
-// account is out of quota or the model is not there for it; other 400s
-// (bad parameters, a context too long) are the request's own fault.
+// that failed this way: a vendor's own refusal, an out-of-quota or rate
+// limit, or an outage. A 400 about the request itself is the agent's to hear.
 func retryable(status int, body []byte) bool {
 	switch {
 	case status == 401, status == 402, status == 403, status == 404, status == 408, status == 429, status >= 500:
 		return true
 	case status == 400, status == 422:
-		return refusedModel(body)
+		if contextWords.Match(body) {
+			return false
+		}
+		return quotaWords.Match(body) || modelWords.Match(body) || notChatModel(status, body) || endpointRefusal.Match(body)
 	}
 	return false
 }
 
-// contextWords say the request itself is too big; that is no reason to try
-// another provider, whatever else the words hold.
-var contextWords = regexp.MustCompile(`(?i)context.{0,3}(length|window)|too long|maximum.{0,30}(token|length|context)|token limit|too many tokens|上下文|超长|超出.{0,8}(长度|限制)`)
+// How a failed request is tried again, when it was the last candidate that
+// failed and the failure may clear up by itself: at most len(retryDelays)
+// more times, waiting retryDelays in turn, or the Retry-After the vendor
+// gave when that is no more than retryMaxAfter.
+var retryDelays = []time.Duration{time.Second, 2 * time.Second}
 
-// modelGoneWords say the model is not there for the account or the key:
-// unknown, unsupported, not enabled, or no permission to use it.
-// The phrases about the model must name it: a bare "not supported" is how
-// vendors refuse a parameter ("temperature is not supported with this model").
-// The endpoint phrases ("use v1/responses") are notChatModel's.
-var modelGoneWords = regexp.MustCompile(`(?i)model.{0,60}(not[ _](found|exist|exists|supported|available|accessible|allowed|enabled|activated|authorized)|does not exist|doesn't exist|unsupported|unavailable|no access|not have access|permission|不存在|不支持|不可用|无权限|无权访问|未开通|没有权限|不可访问)|unsupported[ _]model|unsupported_api_for_model|模型.{0,15}(不存在|不支持|不可用|无权限|无权访问|未开通|没有权限|不可访问)|未开通|无权限`)
+const retryMaxAfter = 8 * time.Second
 
-// refusedModel is whether a 400 or 422 reply says another provider may
-// serve the request: the model is not there, or the account is out of quota.
-func refusedModel(body []byte) bool {
-	if notChatModel(400, body) || modelGoneWords.Match(body) {
-		return true
+// explicitRetryAfter is the Retry-After a reply gave, in seconds or as a
+// date, and whether it gave one at all.
+func explicitRetryAfter(h http.Header) (time.Duration, bool) {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0, false
 	}
-	if contextWords.Match(body) {
-		return false
+	if secs, err := strconv.ParseFloat(v, 64); err == nil {
+		return max(time.Duration(secs*float64(time.Second)), 0), true
 	}
-	return quotaWords.Match(body)
+	if t, err := http.ParseTime(v); err == nil {
+		return max(time.Until(t), 0), true
+	}
+	return 0, false
 }
+
+// transient says whether a failure may clear up by itself, so the last
+// candidate may be asked again: a timeout, an outage, or a 429 that says when
+// to come back. A bare 429 says nothing of the kind.
+func transient(status int, h http.Header) bool {
+	switch status {
+	case 408, 500, 502, 503, 504, 529:
+		return true
+	case 429:
+		_, ok := explicitRetryAfter(h)
+		return ok
+	}
+	return false
+}
+
+// retryDelay is how long to wait before the (n+1)th try, counting from 0,
+// and whether to try at all.
+func retryDelay(n int, h http.Header) (time.Duration, bool) {
+	if n >= len(retryDelays) {
+		return 0, false
+	}
+	if d, ok := explicitRetryAfter(h); ok {
+		return d, d <= retryMaxAfter
+	}
+	return retryDelays[n], true
+}
+
+// Why a try ended in the trace, beside the rest it set off: it was tried again,
+// or the agent went away.
+const (
+	failRetry    = "retry"
+	failCanceled = "canceled"
+)
+
+// statusClientClosed is what a request is recorded with when its agent went
+// away before it was answered.
+const statusClientClosed = 499
 
 // holdWriter keeps an error reply back while another provider may still
 // answer: headers and body wait until release, or are dropped for the next
