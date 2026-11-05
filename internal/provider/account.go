@@ -69,14 +69,24 @@ func (p Provider) Prepare(body []byte) []byte {
 
 // Exclusion is a sign-in magpie found but will not offer as a provider.
 type Exclusion struct {
-	Agent string `json:"agent"`
-	Why   string `json:"why"`
+	Agent    string `json:"agent"`
+	Provider string `json:"provider"` // the provider id, e.g. codex
+	Why      string `json:"why"`
 }
 
-// Excluded lists sign-ins magpie detects but cannot expose. It is currently
-// empty, but remains part of the API so the CLI and GUI can explain future
-// account types that are detectable but not usable.
-func Excluded() []Exclusion { return nil }
+// Excluded lists signed-in accounts the user removed from magpie. They stay
+// signed in for their agent; `magpie provider add <id>` brings them back.
+func Excluded() []Exclusion {
+	hidden := load().Removed
+	var out []Exclusion
+	for _, a := range Accounts() {
+		if contains(hidden, a.ID) {
+			out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID,
+				Why: "removed from magpie; magpie provider add " + a.ID + " brings it back"})
+		}
+	}
+	return out
+}
 
 const (
 	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -111,6 +121,7 @@ var (
 	claudeStatusAt   time.Time
 	claudeStatusUser string
 	claudeStatusPlan string
+	claudeStatusOut  bool // the last `claude auth status` said "not logged in"
 
 	claudeCacheMu  sync.Mutex
 	claudeCacheAt  time.Time
@@ -289,31 +300,63 @@ func claudeIdentity() (string, string) {
 		return claudeStatusUser, claudeStatusPlan
 	}
 	claudeStatusAt = time.Now()
+	claudeStatusOut = false // unknown until the command says otherwise
 	path := claudeExecutable()
 	if path == "" {
 		return claudeStatusUser, claudeStatusPlan
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
-	if err != nil {
+	// Output keeps stdout even on a non-zero exit, and a signed-out Claude
+	// Code prints its status there, so the exit code is not what we read.
+	out, _ := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
+	st, ok := parseClaudeStatus(out)
+	if !ok {
 		return claudeStatusUser, claudeStatusPlan
 	}
-	var status struct {
-		LoggedIn         bool   `json:"loggedIn"`
+	if !st.LoggedIn {
+		claudeStatusOut = true
+		claudeStatusUser, claudeStatusPlan = "", ""
+		return "", ""
+	}
+	claudeStatusUser, claudeStatusPlan = st.Email, st.Plan
+	return claudeStatusUser, claudeStatusPlan
+}
+
+// claudeStatus is what `claude auth status --json` reports about the login.
+type claudeStatus struct {
+	LoggedIn bool
+	Email    string
+	Plan     string
+}
+
+// parseClaudeStatus reads `claude auth status --json`. ok is false when the
+// output is not that JSON, and the caller then keeps its own judgment.
+func parseClaudeStatus(out []byte) (claudeStatus, bool) {
+	var raw struct {
+		LoggedIn         *bool  `json:"loggedIn"`
 		Email            string `json:"email"`
 		SubscriptionType string `json:"subscriptionType"`
 	}
-	if json.Unmarshal(out, &status) == nil && status.LoggedIn {
-		claudeStatusUser = strings.TrimSpace(status.Email)
-		claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
+	if json.Unmarshal(bytes.TrimSpace(out), &raw) != nil || raw.LoggedIn == nil {
+		return claudeStatus{}, false
 	}
-	return claudeStatusUser, claudeStatusPlan
+	return claudeStatus{LoggedIn: *raw.LoggedIn, Email: strings.TrimSpace(raw.Email),
+		Plan: strings.TrimSpace(raw.SubscriptionType)}, true
+}
+
+// claudeSignedOut is true only when Claude Code itself says it is signed out.
+// Unknown (no claude command, unreadable output) counts as signed in.
+func claudeSignedOut() bool {
+	claudeIdentity()
+	claudeStatusMu.Lock()
+	defer claudeStatusMu.Unlock()
+	return claudeStatusOut
 }
 
 func claudeAccount() (Provider, bool) {
 	c, _, ok := claudeCredential()
-	if !ok {
+	if !ok || claudeSignedOut() {
 		return Provider{}, false
 	}
 	user, statusPlan := claudeIdentity()

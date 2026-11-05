@@ -59,6 +59,9 @@ type Provider struct {
 
 type file struct {
 	Providers []Provider `json:"providers"`
+	// Removed lists signed-in accounts the user hid from magpie. Their model
+	// picks stay in Providers, so adding the account back restores them.
+	Removed []string `json:"removed,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -97,10 +100,10 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
-	stored := load().Providers
+	f := load()
 	picks := map[string][]string{}
 	var out []Provider
-	for _, p := range stored {
+	for _, p := range f.Providers {
 		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			picks[p.ID] = p.Models
@@ -109,7 +112,7 @@ func All() []Provider {
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken {
+		if _, taken := find(out, a.ID); taken || contains(f.Removed, a.ID) {
 			continue
 		}
 		a.Models = picks[a.ID]
@@ -160,7 +163,15 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
+	f := load()
 	if a, ok := find(Accounts(), p.ID); ok {
+		if contains(f.Removed, a.ID) {
+			// bringing a removed account back restores its model picks
+			f.Removed = drop(f.Removed, a.ID)
+			if len(p.Models) == 0 {
+				p.Models = picksIn(f.Providers, a.ID)
+			}
+		}
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in
 		p = Provider{ID: a.ID, Models: p.Models}
@@ -172,7 +183,6 @@ func Save(p Provider) error {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
-	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
@@ -183,18 +193,35 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider. For an account it forgets the model picks;
-// signing out is the agent's job.
+// picksIn returns the model picks stored for an account, if any.
+func picksIn(ps []Provider, id string) []string {
+	for _, p := range ps {
+		if p.ID == id && p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+			return p.Models
+		}
+	}
+	return nil
+}
+
+// drop returns xs without x.
+func drop(xs []string, x string) []string {
+	var out []string
+	for _, v := range xs {
+		if v != x {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// Delete removes a provider. For a signed-in account it only hides it: the
+// model picks are kept, and the agent's own sign-in is left alone.
 func Delete(id string) error {
 	if _, ok := find(Accounts(), id); ok {
 		f := load()
-		keep := f.Providers[:0]
-		for _, p := range f.Providers {
-			if p.ID != id {
-				keep = append(keep, p)
-			}
+		if !contains(f.Removed, id) {
+			f.Removed = append(f.Removed, id)
 		}
-		f.Providers = keep
 		return store(f)
 	}
 	f := load()

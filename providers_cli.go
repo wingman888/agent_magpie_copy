@@ -192,6 +192,11 @@ func providerCmd(args []string) error {
 		if err := provider.Delete(p.ID); err != nil {
 			return err
 		}
+		if p.Account != nil {
+			// the agent stays signed in; only magpie stops offering it
+			fmt.Println(green.Render("✓"), "removed", p.Name, muted.Render("from magpie · magpie provider add "+p.ID+" brings it back"))
+			return nil
+		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil
 	case "test":
