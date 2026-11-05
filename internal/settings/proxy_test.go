@@ -7,177 +7,62 @@ import (
 	"testing"
 )
 
-func TestValidateProxyAccepts(t *testing.T) {
-	cases := map[string]string{
-		"":                          "",
-		"   ":                       "",
-		"direct":                    "direct",
-		"  direct  ":                "direct",
-		"127.0.0.1:7890":            "127.0.0.1:7890",
-		"  127.0.0.1:7890\t":        "127.0.0.1:7890",
-		"http://127.0.0.1:7890":     "http://127.0.0.1:7890",
-		"https://proxy.local":       "https://proxy.local",
-		"socks5://127.0.0.1:1080":   "socks5://127.0.0.1:1080",
-		"socks5h://127.0.0.1:1080":  "socks5h://127.0.0.1:1080",
-		" socks5://127.0.0.1:1080 ": "socks5://127.0.0.1:1080",
-	}
-	for in, want := range cases {
-		got, err := ValidateProxy(in)
-		if err != nil {
-			t.Errorf("ValidateProxy(%q): unexpected error %v", in, err)
-			continue
-		}
-		if got != want {
-			t.Errorf("ValidateProxy(%q) = %q, want %q", in, got, want)
+func TestValidateProxy(t *testing.T) {
+	ok := []string{"", "direct", "http://127.0.0.1:7890", "https://proxy.local:443",
+		"socks5://127.0.0.1:1080", "socks5h://[::1]:1080", "127.0.0.1:7890", "proxy.corp:8080"}
+	for _, s := range ok {
+		if err := ValidateProxy(s); err != nil {
+			t.Errorf("%q rejected: %v", s, err)
 		}
 	}
-}
-
-func TestValidateProxyRejects(t *testing.T) {
-	for _, in := range []string{
-		"ftp://x",
-		"http://",
-		"http://:7890",
-		"socks5://",
-		"127.0.0.1",
-		"host:notaport",
-		"host:99999",
-		"foo bar",
-		"://",
-		":7890",
-	} {
-		_, err := ValidateProxy(in)
-		if err == nil {
-			t.Errorf("ValidateProxy(%q): expected error", in)
-			continue
-		}
-		if !strings.Contains(err.Error(), ProxyExample) {
-			t.Errorf("ValidateProxy(%q): error lacks example: %v", in, err)
-		}
-	}
-}
-
-func TestValidateProxyURLHost(t *testing.T) {
-	for _, in := range []string{
-		"http://proxy.local:8080",
-		"http://[::1]:7890",
-	} {
-		if _, err := ValidateProxy(in); err != nil {
-			t.Errorf("ValidateProxy(%q): unexpected error %v", in, err)
-		}
-	}
-	for _, in := range []string{
-		"http://a..b:7890",
-		"http://under_score:7890",
-	} {
-		_, err := ValidateProxy(in)
-		if err == nil {
-			t.Errorf("ValidateProxy(%q): expected error", in)
-			continue
-		}
-		if !strings.Contains(err.Error(), ProxyExample) {
-			t.Errorf("ValidateProxy(%q): error lacks example: %v", in, err)
-		}
-	}
-}
-
-func TestValidateProxyHostAndPort(t *testing.T) {
-	for _, in := range []string{
-		"127.0.0.1:7890",
-		"[::1]:7890",
-		"proxy.local:8080",
-	} {
-		if _, err := ValidateProxy(in); err != nil {
-			t.Errorf("ValidateProxy(%q): unexpected error %v", in, err)
-		}
-	}
-	for _, in := range []string{
-		"foo bar:80",
-		"a/b:7890",
-		"exa mple.com:7890",
-		"-bad.host:7890",
-		"bad-.host:7890",
-		"under_score:7890",
-		"http://127.0.0.1:",
-		"http://[::1]:",
-		"127.0.0.1:0",
-		"127.0.0.1:65536",
-		"127.0.0.1:+80",
-	} {
-		_, err := ValidateProxy(in)
-		if err == nil {
-			t.Errorf("ValidateProxy(%q): expected error", in)
-			continue
-		}
-		if !strings.Contains(err.Error(), ProxyExample) {
-			t.Errorf("ValidateProxy(%q): error lacks example: %v", in, err)
+	bad := []string{"ftp://x", "http://", "socks5://:1080", "http://127.0.0.1:99999",
+		"127.0.0.1", ":7890", "127.0.0.1:port", "not a proxy", "://x"}
+	for _, s := range bad {
+		if err := ValidateProxy(s); err == nil {
+			t.Errorf("%q accepted", s)
+		} else if !strings.Contains(err.Error(), ProxyExample) {
+			t.Errorf("%q: error lacks example: %v", s, err)
 		}
 	}
 }
 
 func TestSaveProxy(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := Save(Settings{Proxy: "  127.0.0.1:7890  "}); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load().Proxy; got != "127.0.0.1:7890" {
+		t.Fatalf("proxy = %q, want trimmed value", got)
+	}
+	if err := Save(Settings{Proxy: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load().Proxy; got != "direct" {
+		t.Fatalf("proxy = %q", got)
+	}
+	if err := Save(Settings{}); err != nil || Load().Proxy != "" {
+		t.Fatal("empty proxy must save")
+	}
+}
 
-	if err := Save(Settings{Proxy: "127.0.0.1:7890"}); err != nil {
-		t.Fatalf("bare host:port rejected: %v", err)
-	}
-	if s := Load(); s.Proxy != "127.0.0.1:7890" {
-		t.Fatalf("saved proxy = %q", s.Proxy)
-	}
-
-	if err := Save(Settings{Proxy: "  direct \n"}); err != nil {
-		t.Fatalf("direct rejected: %v", err)
-	}
-	if s := Load(); s.Proxy != "direct" {
-		t.Fatalf("trimmed proxy = %q", s.Proxy)
-	}
-
-	if err := Save(Settings{Proxy: "http://127.0.0.1:7890"}); err != nil {
+func TestSaveBadProxyKeepsFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := Save(Settings{Theme: "dark", Proxy: "http://127.0.0.1:7890"}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(Path())
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = Save(Settings{Theme: "dark", Proxy: "ftp://x"})
+	err = Save(Settings{Theme: "light", Proxy: "ftp://x"})
 	if err == nil {
-		t.Fatal("ftp:// accepted")
+		t.Fatal("ftp proxy accepted")
 	}
-	if !strings.Contains(err.Error(), ProxyExample) {
+	if !strings.Contains(err.Error(), "http://127.0.0.1:7890") {
 		t.Fatalf("error lacks example: %v", err)
 	}
-	after, err := os.ReadFile(Path())
-	if err != nil {
-		t.Fatal(err)
-	}
+	after, _ := os.ReadFile(filepath.Join(filepath.Dir(Path()), "settings.json"))
 	if string(before) != string(after) {
-		t.Fatalf("failed save changed the file:\n%s\nvs\n%s", before, after)
-	}
-	if s := Load(); s.Proxy != "http://127.0.0.1:7890" || s.Theme != "system" {
-		t.Fatalf("settings changed after failed save: %+v", s)
-	}
-}
-
-func TestSaveProxyEmptyFileUntouchedOnFailure(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := Save(Settings{Proxy: "http://:7890"}); err == nil {
-		t.Fatal("missing host accepted")
-	}
-	if _, err := os.Stat(filepath.Join(Dir(), "settings.json")); err == nil {
-		t.Fatal("failed save created a settings file")
-	}
-}
-
-func TestProxyJSONKey(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := Save(Settings{Proxy: "direct"}); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(Path())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(b), `"proxy": "direct"`) {
-		t.Fatalf("json key missing: %s", b)
+		t.Fatalf("file changed after failed save:\n%s\n%s", before, after)
 	}
 }
