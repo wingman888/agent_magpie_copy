@@ -4,180 +4,174 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-const importUsage = `usage: magpie import [-y|--yes] '<magpie:// link>'
-  shows what the link would add and asks before saving it; -y skips the question`
+const importUsage = `usage: magpie import [-y|--yes] <link>
+  e.g. magpie import 'magpie://import?preset=deepseek&key=sk-…'
+  the link is shown first; nothing is added until you answer y`
 
-// isImportLink reports whether a command-line argument is a magpie:// link,
-// which is how the operating system hands one over when it is opened.
-func isImportLink(arg string) bool {
-	return strings.HasPrefix(strings.ToLower(arg), provider.Scheme+":")
-}
-
-// importCmd: `magpie import [-y|--yes] <link>`. The protocol handler calls it
-// with just the link, so opening a link behaves like typing it.
+// importCmd: `magpie import [-y] <link>`, also reached when the first argument
+// is a magpie: link handed over by the OS. The link is parsed (no disk, no
+// network), summarised, and saved only after the user agrees.
 func importCmd(args []string) error {
 	yes := false
-	var links []string
+	link := ""
 	for _, a := range args {
-		switch a {
-		case "-y", "--yes":
+		switch {
+		case a == "-y" || a == "--yes":
 			yes = true
+		case strings.HasPrefix(a, "-") && !isImportLink(a):
+			return fmt.Errorf("unknown flag %q\n\n%s", a, importUsage)
+		case link != "":
+			return fmt.Errorf("one import link at a time\n\n%s", importUsage)
 		default:
-			if strings.HasPrefix(a, "-") {
-				return fmt.Errorf("unknown flag %q\n\n%s", a, importUsage)
-			}
-			links = append(links, a)
+			link = a
 		}
 	}
-	if len(links) != 1 {
-		return fmt.Errorf("%s", importUsage)
+	if link == "" {
+		return errors.New(importUsage)
 	}
-	return runImport(links[0], yes, os.Stdin, os.Stdout, isTerminal(os.Stdin))
-}
 
-// runImport parses link, shows what it would add, and saves it only after the
-// user confirms (or yes is set). interactive says whether the answer can come
-// from a person; when it cannot and yes is false, nothing is saved.
-func runImport(link string, yes bool, in io.Reader, out io.Writer, interactive bool) error {
 	p, err := provider.ParseImport(link)
 	if err != nil {
 		return err
 	}
-	for _, a := range provider.Accounts() {
-		if a.ID == p.ID {
-			return fmt.Errorf("%q is the id of a signed-in agent account; the link needs another id or name", p.ID)
-		}
+	if accountConflict(p.ID, provider.Accounts()) {
+		return fmt.Errorf("id %q is already used by an account", p.ID)
 	}
-	existing := false
-	for _, e := range provider.All() {
-		if e.ID == p.ID {
-			existing = true
+	replacing := false
+	for _, q := range provider.All() {
+		if q.ID == p.ID {
+			replacing = true
 			break
 		}
 	}
-
-	printImportSummary(out, p)
-	if existing {
-		fmt.Fprintln(out, amber.Render("!"), fmt.Sprintf("This will replace the existing provider %s", p.ID))
-	}
+	fmt.Print(importSummary(p, replacing))
 
 	if !yes {
-		if !interactive {
-			return errors.New("not added: standard input is not a terminal, so there is no way to confirm; re-run with -y to add it without asking")
+		if !stdinIsTerminal() {
+			return errors.New("refusing to add a provider without asking: standard input is not a terminal; pass -y to add it anyway")
 		}
-		fmt.Fprint(out, "Add it? [y/N] ")
-		line, _ := bufio.NewReader(in).ReadString('\n')
-		switch strings.ToLower(strings.TrimSpace(line)) {
-		case "y", "yes":
-		default:
+		fmt.Print("Add it? [y/N] ")
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		if !confirmYes(line) {
 			return errors.New("nothing added")
 		}
 	}
 
-	var saved *provider.Provider
-	if p.Ready() {
-		// same save and model fetch as `provider add`
-		saved, err = saveProvider(p)
-	} else {
-		// no key in the link: save it as unavailable until a key is added,
-		// without a fetch that would only fail
-		saved, err = saveUnkeyed(p, out)
+	save := provider.Save
+	if p.Key == "" {
+		save = provider.SaveWithoutKey
 	}
+	saved, err := saveAndReport(p, save)
 	if err != nil {
 		return err
 	}
 	if !saved.Ready() {
-		fmt.Fprintln(out, amber.Render("!"), "no API key yet · add one with", "magpie provider key "+saved.ID+" <key>")
+		fmt.Println(amber.Render("!"), "no key yet · magpie provider key", saved.ID, "<key>")
 	}
 	return nil
 }
 
-// saveUnkeyed saves a remote provider that the link gave no key for. It is
-// stored unavailable until the user runs `magpie provider key`.
-func saveUnkeyed(p provider.Provider, out io.Writer) (*provider.Provider, error) {
-	if err := provider.SaveImported(p); err != nil {
-		return nil, err
-	}
-	saved, err := provider.Find(p.ID)
-	if err != nil {
-		saved, err = provider.Find(p.Name)
-	}
-	if err != nil {
-		return nil, err
-	}
-	fmt.Fprintln(out, green.Render("✓"), "added", saved.Name, muted.Render("("+saved.ID+")"))
-	return saved, nil
+// isImportLink reports whether an argument is a magpie: link (any case).
+func isImportLink(arg string) bool {
+	return strings.HasPrefix(strings.ToLower(arg), provider.Scheme+":")
 }
 
-// printImportSummary lists what the link adds, including every host that will
-// receive the prompts and, when there is one, the API key.
-func printImportSummary(w io.Writer, p provider.Provider) {
-	row := func(k, v string) {
-		fmt.Fprintf(w, "  %s %s\n", muted.Render(pad(k, 10)), v)
+// stdinIsTerminal reports whether standard input is a character device, i.e.
+// a person can answer the question.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && isCharDeviceNotNull(fi)
+}
+
+// isCharDeviceNotNull reports whether fi is a character device other than
+// os.DevNull (/dev/null is a character device too, but nobody can answer there).
+// If os.DevNull cannot be stat'ed, nothing is excluded.
+func isCharDeviceNotNull(fi os.FileInfo) bool {
+	if fi.Mode()&os.ModeCharDevice == 0 {
+		return false
 	}
-	fmt.Fprintln(w, "This link adds a provider:")
-	row("name", bold.Render(p.Name)+muted.Render("  id "+p.ID))
-	if p.Preset != "" {
-		row("preset", p.Preset)
+	null, err := os.Stat(os.DevNull)
+	if err != nil {
+		return true
 	}
-	for _, ep := range []struct{ label, base string }{
-		{"chat", p.Chat}, {"responses", p.Responses}, {"anthropic", p.Anthropic},
-	} {
-		if ep.base != "" {
-			row(ep.label, ep.base)
+	return !os.SameFile(fi, null)
+}
+
+// accountConflict reports whether id is already used by one of the signed-in
+// agent accounts, which an import must not overwrite.
+func accountConflict(id string, accounts []provider.Provider) bool {
+	for _, a := range accounts {
+		if a.ID == id {
+			return true
 		}
 	}
+	return false
+}
+
+// confirmYes accepts only y or yes, in any case. Empty input, or anything
+// else, means no.
+func confirmYes(line string) bool {
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
+}
+
+// importSummary describes what importing p will do: the endpoints, and the
+// hosts that will receive prompts and the key. replacing adds the warning.
+func importSummary(p provider.Provider, replacing bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s  (id %s)", p.Name, p.ID)
+	if p.Preset != "" {
+		fmt.Fprintf(&b, "  preset %s", p.Preset)
+	}
+	b.WriteString("\n")
 
 	var hosts []string
 	seen := map[string]bool{}
-	for _, pr := range provider.Protocols {
-		if u := p.Base(pr); u != "" {
-			if h := provider.HostOf(u); !seen[h] {
-				seen[h] = true
-				hosts = append(hosts, h)
-			}
+	for _, proto := range p.Speaks() {
+		u := p.Base(proto)
+		h := provider.HostOf(u)
+		fmt.Fprintf(&b, "  %-10s %s  → %s\n", proto, u, h)
+		if !seen[h] {
+			seen[h] = true
+			hosts = append(hosts, h)
 		}
 	}
+
 	if p.Key != "" {
-		row("key", provider.Mask(p.Key))
-		row("sent to", amber.Render("your prompts and your API key will go to ")+bold.Render(strings.Join(hosts, ", ")))
+		fmt.Fprintf(&b, "  key        %s\n", provider.Mask(p.Key))
 	} else {
-		row("key", muted.Render("none in the link"))
-		if !p.Ready() {
-			row("", amber.Render("no key: will be unavailable until you add one"))
+		b.WriteString("  key        no key (add one later with magpie provider key)\n")
+	}
+
+	if len(p.Models) > 0 {
+		fmt.Fprintf(&b, "  models     %s\n", strings.Join(p.Models, ", "))
+	} else {
+		b.WriteString("  models     none listed; fetched from the provider when saved\n")
+	}
+
+	what := "Prompts"
+	if p.Key != "" {
+		what = "Prompts and key"
+	}
+	if len(hosts) == 0 {
+		hosts = []string{"(no endpoint)"}
+	}
+	fmt.Fprintf(&b, "%s will be sent to: %s\n", what, strings.Join(hosts, ", "))
+
+	if replacing {
+		fmt.Fprintf(&b, "Warning: This will replace the existing provider %s\n", p.ID)
+		if p.Key == "" {
+			fmt.Fprintf(&b, "Note: the existing key for %s will be cleared; add one with magpie provider key %s <key>\n", p.ID, p.ID)
 		}
-		row("sent to", "your prompts will go to "+bold.Render(strings.Join(hosts, ", ")))
 	}
-
-	switch {
-	case len(p.Models) > 0:
-		row("models", strings.Join(p.Models, ", "))
-	case p.Catalog != "":
-		row("models", "the vendor's list, named from models.dev ("+p.Catalog+")")
-	default:
-		row("models", "the vendor's own list, fetched after adding")
-	}
-	if p.Catalog != "" && len(p.Models) > 0 {
-		row("catalog", p.Catalog)
-	}
-	if p.Website != "" {
-		row("website", p.Website)
-	}
-	if p.KeysURL != "" {
-		row("keys", p.KeysURL)
-	}
-}
-
-// isTerminal reports whether f is a character device, i.e. a terminal a
-// person can answer on. Redirected or piped input is not.
-func isTerminal(f *os.File) bool {
-	fi, err := f.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return b.String()
 }

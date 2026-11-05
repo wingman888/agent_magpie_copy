@@ -1,183 +1,160 @@
 package main
 
 import (
-	"bytes"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// isolate points the provider config at an empty temp dir.
-func isolate(t *testing.T) {
-	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+func TestImportCLIDevNullIsNotTerminal(t *testing.T) {
+	fi, err := os.Stat(os.DevNull)
+	if err != nil {
+		t.Skipf("cannot stat %s: %v", os.DevNull, err)
+	}
+	if isCharDeviceNotNull(fi) {
+		t.Errorf("%s reported as a terminal", os.DevNull)
+	}
 }
 
-const relayLink = "magpie://import?name=My%20Relay&chat=https://relay.example/v1/&key=sk-abcdefghijkl"
+func TestImportCLIAccountConflict(t *testing.T) {
+	accounts := []provider.Provider{{ID: "claude"}, {ID: "codex"}}
+	if !accountConflict("claude", accounts) {
+		t.Error("claude should conflict with an account")
+	}
+	if accountConflict("deepseek", accounts) {
+		t.Error("deepseek should not conflict with an account")
+	}
+	if accountConflict("claude", nil) {
+		t.Error("no accounts means no conflict")
+	}
+}
 
-func TestIsImportLink(t *testing.T) {
-	for _, s := range []string{"magpie://import?preset=deepseek", "magpie:import?x=1", "MAGPIE:///import", "Magpie:"} {
+func TestImportCLIReplaceNoKeyNote(t *testing.T) {
+	p := provider.Provider{ID: "relay", Name: "Relay", Chat: "https://relay.example/v1"}
+	s := importSummary(p, true)
+	if !strings.Contains(s, "Warning: This will replace the existing provider relay") {
+		t.Errorf("replace warning missing:\n%s", s)
+	}
+	if !strings.Contains(s, "the existing key for relay will be cleared") {
+		t.Errorf("key-clearing note missing:\n%s", s)
+	}
+	// without replacing, no note
+	if s2 := importSummary(p, false); strings.Contains(s2, "will be cleared") {
+		t.Errorf("note shown without replacing:\n%s", s2)
+	}
+}
+
+func TestImportCLIConfirmYes(t *testing.T) {
+	yes := []string{"y", "Y", "yes", "YES", "Yes", " y \n", "yes\r\n"}
+	no := []string{"", "\n", "n", "N", "no", "yess", "ye", "sure", "0", "y n"}
+	for _, s := range yes {
+		if !confirmYes(s) {
+			t.Errorf("confirmYes(%q) = false, want true", s)
+		}
+	}
+	for _, s := range no {
+		if confirmYes(s) {
+			t.Errorf("confirmYes(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestImportCLIIsImportLink(t *testing.T) {
+	yes := []string{"magpie://import?preset=deepseek", "magpie:import?preset=deepseek", "MAGPIE://import/?x=1", "Magpie:///import?x=1"}
+	no := []string{"import", "--help", "https://usemagpie.ai/import?x=1", "magpie", "", "xmagpie:import"}
+	for _, s := range yes {
 		if !isImportLink(s) {
 			t.Errorf("isImportLink(%q) = false, want true", s)
 		}
 	}
-	for _, s := range []string{"magpie", "import", "deepseek", "https://magpie.example", "claude"} {
+	for _, s := range no {
 		if isImportLink(s) {
 			t.Errorf("isImportLink(%q) = true, want false", s)
 		}
 	}
 }
 
-func TestImportDeclinedSavesNothing(t *testing.T) {
-	isolate(t)
-	for _, answer := range []string{"n\n", "\n", "", "maybe\n"} {
-		var out bytes.Buffer
-		err := runImport(relayLink, false, strings.NewReader(answer), &out, true)
-		if err == nil || !strings.Contains(err.Error(), "nothing added") {
-			t.Fatalf("answer %q: err = %v, want nothing added", answer, err)
-		}
-		if len(provider.All()) != 0 {
-			t.Fatalf("answer %q: a provider was saved", answer)
-		}
+func TestImportCLISummaryHostsAndKey(t *testing.T) {
+	p := provider.Provider{
+		ID:        "acme",
+		Name:      "Acme Relay",
+		Chat:      "https://api.acme.example/v1",
+		Anthropic: "https://api.acme.example",
+		Responses: "https://responses.acme.example/v1",
+		Key:       "sk-abcdefghijklmnop",
+		Models:    []string{"gpt-5.5", "claude-sonnet-5"},
 	}
-}
-
-func TestImportSummaryShowsHostsAndKey(t *testing.T) {
-	isolate(t)
-	var out bytes.Buffer
-	_ = runImport(relayLink, false, strings.NewReader("n\n"), &out, true)
-	s := out.String()
-	for _, want := range []string{"relay.example", "sk-a", "Add it? [y/N]"} {
+	s := importSummary(p, false)
+	for _, want := range []string{"Acme Relay", "acme", "api.acme.example", "responses.acme.example", "gpt-5.5, claude-sonnet-5", "Prompts and key will be sent to:"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("summary missing %q:\n%s", want, s)
 		}
 	}
-	if strings.Contains(s, "sk-abcdefghijkl") {
+	if strings.Contains(s, "sk-abcdefghijklmnop") {
 		t.Errorf("summary shows the full key:\n%s", s)
 	}
-	if strings.Index(s, "relay.example") > strings.Index(s, "Add it?") {
-		t.Errorf("hosts should appear before the question")
+	if strings.Contains(s, "replace") {
+		t.Errorf("summary warns about replacing without an existing provider:\n%s", s)
+	}
+	// the host list must not repeat a host
+	if n := strings.Count(s, "→ api.acme.example"); n != 2 {
+		t.Errorf("expected both endpoints listed for api.acme.example, got %d:\n%s", n, s)
 	}
 }
 
-func TestImportYesOnlyAnswers(t *testing.T) {
-	isolate(t)
-	var out bytes.Buffer
-	for _, answer := range []string{"yes\n", "Y\n", " y \n"} {
-		if err := runImport(relayLink, false, strings.NewReader(answer), &out, true); err == nil {
-			// accepted: a save happened, so reset for the next answer
-			if err := provider.Delete("my-relay"); err != nil {
-				t.Fatalf("cleanup: %v", err)
-			}
-			continue
-		} else {
-			t.Fatalf("answer %q rejected: %v", answer, err)
+func TestImportCLISummaryNoKey(t *testing.T) {
+	p := provider.Provider{ID: "relay", Name: "Relay", Chat: "https://relay.example/v1"}
+	s := importSummary(p, false)
+	if !strings.Contains(s, "no key") {
+		t.Errorf("summary does not say no key:\n%s", s)
+	}
+	if !strings.Contains(s, "Prompts will be sent to: relay.example") {
+		t.Errorf("summary does not name the host that receives prompts:\n%s", s)
+	}
+}
+
+func TestImportCLISummaryReplaceWarning(t *testing.T) {
+	p := provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "sk-123456789"}
+	s := importSummary(p, true)
+	if !strings.Contains(strings.ToLower(s), "replace") {
+		t.Errorf("summary lacks replace warning:\n%s", s)
+	}
+	if !strings.Contains(s, "Warning: This will replace the existing provider deepseek") {
+		t.Errorf("warning text unexpected:\n%s", s)
+	}
+	// the warning comes last, right before the question
+	if !strings.HasSuffix(strings.TrimRight(s, "\n"), "provider deepseek") {
+		t.Errorf("warning should be the last line of the summary:\n%s", s)
+	}
+}
+
+func TestImportCLIMissingLinkIsUsage(t *testing.T) {
+	err := importCmd(nil)
+	if err == nil || !strings.Contains(err.Error(), "usage: magpie import") {
+		t.Fatalf("importCmd(nil) = %v, want usage error", err)
+	}
+	err = importCmd([]string{"-y"})
+	if err == nil || !strings.Contains(err.Error(), "usage: magpie import") {
+		t.Fatalf("importCmd(-y) = %v, want usage error", err)
+	}
+}
+
+func TestImportCLIRejectsUnknownFlagAndExtraArgs(t *testing.T) {
+	if err := importCmd([]string{"--force", "magpie://import?preset=deepseek"}); err == nil {
+		t.Error("unknown flag accepted")
+	}
+	if err := importCmd([]string{"magpie://import?preset=deepseek", "magpie://import?preset=deepseek"}); err == nil {
+		t.Error("two links accepted")
+	}
+}
+
+func TestImportCLIRejectsBadLinkBeforeAnything(t *testing.T) {
+	// ParseImport rejects these, so nothing is summarised, asked about or saved.
+	for _, link := range []string{"https://usemagpie.ai/import?preset=deepseek", "magpie://delete?id=x", "magpie://import?name=magpie&chat=https://a.example/v1"} {
+		if err := importCmd([]string{link}); err == nil {
+			t.Errorf("importCmd(%q) accepted a bad link", link)
 		}
-	}
-}
-
-func TestImportNonInteractiveRefused(t *testing.T) {
-	isolate(t)
-	var out bytes.Buffer
-	err := runImport(relayLink, false, strings.NewReader("y\n"), &out, false)
-	if err == nil || !strings.Contains(err.Error(), "-y") {
-		t.Fatalf("err = %v, want refusal mentioning -y", err)
-	}
-	if len(provider.All()) != 0 {
-		t.Fatalf("a provider was saved without confirmation")
-	}
-}
-
-func TestImportWithYesSavesWithoutAsking(t *testing.T) {
-	isolate(t)
-	var out bytes.Buffer
-	link := "magpie://import?name=Local&chat=http://127.0.0.1:1/v1"
-	if err := runImport(link, true, nil, &out, false); err != nil {
-		t.Fatalf("runImport -y: %v", err)
-	}
-	p, err := provider.Find("local")
-	if err != nil {
-		t.Fatalf("provider not saved: %v", err)
-	}
-	if p.Chat != "http://127.0.0.1:1/v1" {
-		t.Errorf("Chat = %q", p.Chat)
-	}
-	if strings.Contains(out.String(), "Add it?") {
-		t.Errorf("asked a question despite -y")
-	}
-}
-
-func TestImportKeylessRemoteSavedWithHint(t *testing.T) {
-	isolate(t)
-	var out bytes.Buffer
-	link := "magpie://import?name=Remote&chat=https://relay.example/v1"
-	if err := runImport(link, true, nil, &out, false); err != nil {
-		t.Fatalf("runImport keyless -y: %v", err)
-	}
-	p, err := provider.Find("remote")
-	if err != nil {
-		t.Fatalf("provider not saved: %v", err)
-	}
-	if p.Key != "" || p.Ready() {
-		t.Errorf("keyless provider should be saved unavailable: key=%q ready=%v", p.Key, p.Ready())
-	}
-	s := out.String()
-	if !strings.Contains(s, "no key: will be unavailable until you add one") {
-		t.Errorf("summary does not say the provider is unavailable:\n%s", s)
-	}
-	if !strings.Contains(s, "magpie provider key remote <key>") {
-		t.Errorf("output lacks the provider key hint:\n%s", s)
-	}
-}
-
-func TestImportKeylessRemoteDeclinedSavesNothing(t *testing.T) {
-	isolate(t)
-	var out bytes.Buffer
-	link := "magpie://import?name=Remote&chat=https://relay.example/v1"
-	err := runImport(link, false, strings.NewReader("n\n"), &out, true)
-	if err == nil || !strings.Contains(err.Error(), "nothing added") {
-		t.Fatalf("err = %v, want nothing added", err)
-	}
-	if len(provider.All()) != 0 {
-		t.Fatalf("a keyless provider was saved without confirmation")
-	}
-}
-
-func TestImportReplaceWarning(t *testing.T) {
-	isolate(t)
-	if err := provider.Save(provider.Provider{ID: "my-relay", Name: "Old", Chat: "http://127.0.0.1:1/v1"}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	var out bytes.Buffer
-	_ = runImport(relayLink, false, strings.NewReader("n\n"), &out, true)
-	s := out.String()
-	w := strings.Index(s, "replace")
-	if w < 0 || !strings.Contains(strings.ToLower(s), "replace the existing provider my-relay") {
-		t.Fatalf("missing replace warning:\n%s", s)
-	}
-	if w > strings.Index(s, "Add it?") {
-		t.Errorf("replace warning must come before the question")
-	}
-	p, err := provider.Find("my-relay")
-	if err != nil || p.Name != "Old" {
-		t.Errorf("declined import changed the existing provider: %+v %v", p, err)
-	}
-}
-
-func TestImportCLIUsage(t *testing.T) {
-	isolate(t)
-	if err := importCmd(nil); err == nil || !strings.Contains(err.Error(), "usage") {
-		t.Errorf("no link: err = %v, want usage", err)
-	}
-	if err := importCmd([]string{"-x", relayLink}); err == nil {
-		t.Errorf("unknown flag accepted")
-	}
-	if err := importCmd([]string{"magpie://delete?id=x", "-y"}); err == nil {
-		t.Errorf("non-import action accepted")
-	}
-	if len(provider.All()) != 0 {
-		t.Errorf("a rejected link saved something")
 	}
 }

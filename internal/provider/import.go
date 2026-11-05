@@ -1,200 +1,194 @@
 package provider
 
+// Import links let a vendor or relay hand over a configured provider as one
+// string: magpie://import?preset=deepseek&key=sk-…, or a custom provider with
+// its own base URLs. Parsing only validates; nothing is saved and nothing is
+// fetched here. The caller shows the result and saves it after the user agrees.
+
 import (
-	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
-// Scheme is the URL scheme of import links: magpie://import?preset=deepseek&key=…
+// Scheme is the URL scheme of import links.
 const Scheme = "magpie"
 
 const (
-	importMaxName   = 80
+	importMaxName   = 80   // runes; longer names are truncated
+	importMaxKey    = 4096 // bytes
 	importMaxModels = 200
-	importMaxKey    = 4096
+	importReserved  = "magpie" // the gateway's own name for agents; not a provider id
 )
 
-var catalogRe = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*$`)
+// importCatalogRe is what a valid catalog value looks like: a models.dev
+// provider id made of lowercase letters, digits, '-' and '_'. Anything else
+// is ignored rather than rejected.
+var importCatalogRe = regexp.MustCompile(`^[a-z0-9_-]+$`)
 
-// ParseImport turns an import link into the provider it would add. It does
-// not save anything, touch the disk, or reach the network: the caller shows
-// the result to the user and saves it only after they confirm.
-//
-// Any link that fails validation is rejected with an error; nothing is
-// silently repaired except the cosmetic cases the spec allows (trailing
-// slashes, over-long names, excess models, unknown catalog ids, non-https
-// website fields).
+// ParseImport turns an import link into the provider it describes. It does
+// not save the provider or touch the network. Invalid links are rejected with
+// an error; dangerous values are never silently corrected. The exceptions are
+// the fields the link spec says to ignore: catalog, website and keys.
 func ParseImport(link string) (Provider, error) {
 	link = strings.TrimSpace(link)
-	for _, r := range link {
-		if r < 0x20 || r == 0x7f {
-			return Provider{}, errors.New("import link contains control characters")
-		}
+	i := strings.IndexByte(link, ':')
+	if i < 0 || !strings.EqualFold(link[:i], Scheme) {
+		return Provider{}, fmt.Errorf("not a %s:// import link", Scheme)
 	}
-	if len(link) < len(Scheme)+1 || !strings.EqualFold(link[:len(Scheme)+1], Scheme+":") {
-		return Provider{}, fmt.Errorf("not a %s:// link", Scheme)
+	rest := link[i+1:]
+	if strings.Contains(rest, "#") {
+		return Provider{}, fmt.Errorf("import link must not contain a fragment (#)")
 	}
-	rest := link[len(Scheme)+1:]
-	path, rawQuery := rest, ""
-	if i := strings.Index(rest, "?"); i >= 0 {
-		path, rawQuery = rest[:i], rest[i+1:]
-	}
-	// "magpie:import", "magpie://import", "magpie:///import", "MAGPIE://import/"
-	action := strings.Trim(path, "/")
+	path, rawQuery, hasQuery := strings.Cut(rest, "?")
+
+	action := strings.TrimRight(strings.TrimLeft(path, "/"), "/")
 	if !strings.EqualFold(action, "import") {
-		return Provider{}, fmt.Errorf("unsupported action %q; only import is allowed", action)
+		return Provider{}, fmt.Errorf("%s link action must be import, not %q", Scheme, action)
 	}
-	q, err := url.ParseQuery(rawQuery)
+	if !hasQuery {
+		return Provider{}, fmt.Errorf("import link has no parameters")
+	}
+
+	vals, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		return Provider{}, fmt.Errorf("malformed link parameters: %v", err)
+		return Provider{}, fmt.Errorf("import link has malformed parameters: %v", err)
 	}
-	get := func(k string) string { return strings.TrimSpace(q.Get(k)) }
+	// Unknown parameters are ignored. A repeated parameter takes its first
+	// value, which is what url.Values.Get returns.
+	get := func(k string) string { return strings.TrimSpace(vals.Get(k)) }
 
-	// --- preset or custom endpoints ---
-	presetID := get("preset")
-	var pr *PresetDef
-	if presetID != "" {
-		pr = Preset(presetID)
-		if pr == nil {
-			return Provider{}, fmt.Errorf("no preset %q — magpie presets lists them", presetID)
-		}
+	name := get("name")
+	if hasControl(name) {
+		return Provider{}, fmt.Errorf("name contains control characters")
 	}
-
-	// Check the raw value before trimming or truncating: control characters
-	// must reject the link rather than be stripped or cut away silently.
-	rawName := q.Get("name")
-	for _, r := range rawName {
-		if r < 0x20 || r == 0x7f {
-			return Provider{}, errors.New("name contains control characters")
-		}
-	}
-	name := strings.TrimSpace(rawName)
-	if name != "" && utf8.RuneCountInString(name) > importMaxName {
-		name = string([]rune(name)[:importMaxName])
-		name = strings.TrimSpace(name)
-	}
-	if pr == nil && name == "" {
-		return Provider{}, errors.New("an import link needs a preset or a name")
+	if utf8.RuneCountInString(name) > importMaxName {
+		name = strings.TrimSpace(string([]rune(name)[:importMaxName]))
 	}
 
-	p := Provider{}
-	if pr != nil {
-		p.Preset = pr.ID
-		p.ID = pr.ID
-		p.Name = pr.Name
-		p.Icon = pr.Icon
-		p.Chat, p.Responses, p.Anthropic = pr.Chat, pr.Responses, pr.Anthropic
-		p.Catalog = pr.Catalog
-		p.Website = pr.Website
-		p.KeysURL = pr.KeysURL
-		reg := get("region")
-		if len(pr.Regions) == 0 {
-			if reg != "" {
-				return Provider{}, fmt.Errorf("preset %q has no regions, so region %q does not exist", pr.ID, reg)
-			}
-		} else {
-			if reg == "" {
-				reg = pr.Regions[0].ID // the first region is the default
-			}
-			found := false
-			for _, r := range pr.Regions {
-				if r.ID == reg {
-					p.Chat, p.Responses, p.Anthropic = r.Chat, r.Responses, r.Anthropic
-					found = true
-					break
-				}
-			}
-			if !found {
-				return Provider{}, fmt.Errorf("preset %q has no region %q", pr.ID, reg)
-			}
+	// The key is checked before trimming: a newline or other control character
+	// is a malformed link, not whitespace to strip.
+	rawKey := vals.Get("key")
+	if hasControl(rawKey) {
+		return Provider{}, fmt.Errorf("key contains control characters")
+	}
+	key := strings.TrimSpace(rawKey)
+	if len(key) > importMaxKey {
+		return Provider{}, fmt.Errorf("key is longer than %d characters", importMaxKey)
+	}
+
+	models, err := importModels(vals.Get("models"))
+	if err != nil {
+		return Provider{}, err
+	}
+
+	var p Provider
+	if preset := strings.ToLower(get("preset")); preset != "" {
+		p, err = importFromPreset(preset, get("region"))
+		if err != nil {
+			return Provider{}, err
 		}
 		if name != "" {
 			p.Name = name
 		}
+		p.ID = p.Preset
 		if id := get("id"); id != "" {
-			p.ID = id
+			if p.ID, err = importID(id); err != nil {
+				return Provider{}, err
+			}
 		}
 	} else {
-		p.Name = name
-		p.Chat, err = importBaseURL(get("chat"), "chat")
-		if err != nil {
+		// region only means something with a preset; without one it is ignored.
+		if name == "" {
+			return Provider{}, fmt.Errorf("import link needs either preset or name")
+		}
+		p = Provider{Name: name}
+		if p.Chat, err = importBase("chat", get("chat")); err != nil {
 			return Provider{}, err
 		}
-		p.Responses, err = importBaseURL(get("responses"), "responses")
-		if err != nil {
+		if p.Responses, err = importBase("responses", get("responses")); err != nil {
 			return Provider{}, err
 		}
-		p.Anthropic, err = importBaseURL(get("anthropic"), "anthropic")
-		if err != nil {
+		if p.Anthropic, err = importBase("anthropic", get("anthropic")); err != nil {
 			return Provider{}, err
 		}
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			return Provider{}, errors.New("a custom import link needs at least one of chat, responses or anthropic")
+			return Provider{}, fmt.Errorf("custom import link needs at least one base URL (chat, responses or anthropic)")
 		}
-		if c := get("catalog"); c != "" && len(c) <= 64 && catalogRe.MatchString(c) {
+		if c := get("catalog"); importCatalogRe.MatchString(c) {
 			p.Catalog = c
 		}
-		p.Website = importHTTPS(get("website"))
-		p.KeysURL = importHTTPS(get("keys"))
-		p.ID = get("id")
-		if p.ID == "" {
-			p.ID = Slug(p.Name)
+		p.Website = importHTTPSOnly(get("website"))
+		p.KeysURL = importHTTPSOnly(get("keys"))
+		idSource := name
+		if id := get("id"); id != "" {
+			idSource = id
+		}
+		if p.ID, err = importID(idSource); err != nil {
+			return Provider{}, err
 		}
 	}
-
-	// id: normalise like Save does, then reject empty and reserved names.
-	p.ID = Slug(p.ID)
-	if p.ID == "" {
-		return Provider{}, errors.New("the import link's id (or name) has no letters or digits")
-	}
-	if p.ID == Scheme {
-		return Provider{}, errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
-	}
-	if p.Name == "" {
-		p.Name = p.ID
-	}
-
-	// key
-	rawKey := q.Get("key")
-	if len(rawKey) > importMaxKey {
-		return Provider{}, fmt.Errorf("key is longer than %d characters", importMaxKey)
-	}
-	for _, r := range rawKey {
-		if r < 0x20 || r == 0x7f {
-			return Provider{}, errors.New("key contains control characters")
-		}
-	}
-	p.Key = strings.TrimSpace(rawKey)
-
-	// models
-	for _, m := range strings.Split(q.Get("models"), ",") {
-		m = strings.TrimSpace(m)
-		if m == "" {
-			continue
-		}
-		for _, r := range m {
-			if r < 0x20 || r == 0x7f {
-				return Provider{}, errors.New("a model id contains control characters")
-			}
-		}
-		p.Models = append(p.Models, m)
-	}
-	p.Models = cleanList(p.Models)
-	if len(p.Models) > importMaxModels {
-		p.Models = p.Models[:importMaxModels]
-	}
-
+	p.Key = key
+	p.Models = models
 	return p, nil
 }
 
-// importBaseURL validates one base URL of a custom link and returns it with
-// trailing slashes removed. Empty input yields "" with no error.
-func importBaseURL(raw, field string) (string, error) {
+// importFromPreset starts a provider from a preset and, when given, the
+// region of that preset. Without a region the first (default) region is used.
+func importFromPreset(id, region string) (Provider, error) {
+	pr := Preset(id)
+	if pr == nil {
+		return Provider{}, fmt.Errorf("no preset %q — magpie presets lists them", id)
+	}
+	p, err := FromPreset(pr.ID)
+	if err != nil {
+		return Provider{}, err
+	}
+	if len(pr.Regions) == 0 {
+		if region != "" {
+			return Provider{}, fmt.Errorf("preset %q has no regions", pr.ID)
+		}
+		return p, nil
+	}
+	r := pr.Regions[0]
+	if region != "" {
+		found := false
+		for _, cand := range pr.Regions {
+			if strings.EqualFold(cand.ID, region) {
+				r, found = cand, true
+				break
+			}
+		}
+		if !found {
+			return Provider{}, fmt.Errorf("preset %q has no region %q", pr.ID, region)
+		}
+	}
+	p.Chat, p.Responses, p.Anthropic = r.Chat, r.Responses, r.Anthropic
+	return p, nil
+}
+
+// importID normalises an id the way Slug does and rejects ids that come out
+// empty or reserved.
+func importID(raw string) (string, error) {
+	id := Slug(raw)
+	if id == "" {
+		return "", fmt.Errorf("%q gives an empty provider id; pass id= with letters or digits", raw)
+	}
+	if id == importReserved {
+		return "", fmt.Errorf("%q is a reserved provider id; pick another name or id", id)
+	}
+	return id, nil
+}
+
+// importBase validates one base URL. It must be https, except for hosts on
+// this machine or the local network. It may not carry credentials, a query or
+// a fragment. The trailing slash is removed.
+func importBase(field, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", nil
 	}
@@ -203,52 +197,68 @@ func importBaseURL(raw, field string) (string, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("%s URL is malformed: %v", field, err)
+		return "", fmt.Errorf("%s URL is not valid: %v", field, err)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if !importLocalHost(u.Hostname()) {
+			return "", fmt.Errorf("%s URL must be https (http is only allowed for localhost, loopback, private-network or .local hosts)", field)
+		}
+	default:
+		return "", fmt.Errorf("%s URL must be https, not %q", field, u.Scheme)
 	}
 	if u.User != nil {
 		return "", fmt.Errorf("%s URL must not contain a username or password", field)
 	}
-	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" {
-		return "", fmt.Errorf("%s URL must not contain a query or fragment", field)
-	}
-	host := u.Hostname()
-	if host == "" {
+	if u.Host == "" {
 		return "", fmt.Errorf("%s URL has no host", field)
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-	case "http":
-		if !isLocalHost(host) {
-			return "", fmt.Errorf("%s URL must use https (plain http is only allowed for localhost or LAN addresses)", field)
-		}
-	default:
-		return "", fmt.Errorf("%s URL must use https, not %q", field, u.Scheme)
 	}
 	return strings.TrimRight(raw, "/"), nil
 }
 
-// isLocalHost reports whether host is one this machine or its LAN can reach
-// directly: localhost, a loopback or private IP, or a .local name.
-func isLocalHost(host string) bool {
+// importLocalHost reports whether a host is on this machine or the local
+// network: localhost, a loopback or private IP address, or a .local name.
+func importLocalHost(host string) bool {
 	h := strings.ToLower(host)
 	if h == "localhost" || strings.HasSuffix(h, ".local") {
 		return true
 	}
-	if ip := net.ParseIP(h); ip != nil {
-		return ip.IsLoopback() || ip.IsPrivate()
-	}
-	return false
+	ip := net.ParseIP(h)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
 }
 
-// importHTTPS keeps a website or key-page URL only when it is a well-formed
-// https URL; anything else is ignored.
-func importHTTPS(raw string) string {
-	if raw == "" || strings.ContainsAny(raw, "?#") {
-		return ""
-	}
+// importHTTPSOnly keeps a website or keys URL only when it is an https URL
+// with a host. Anything else is ignored.
+func importHTTPSOnly(raw string) string {
+	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return ""
 	}
-	return strings.TrimRight(raw, "/")
+	return raw
+}
+
+// importModels splits the comma-separated model list. Empty items and
+// surrounding spaces are dropped; duplicates are dropped too, as elsewhere.
+func importModels(raw string) ([]string, error) {
+	ms := cleanList(strings.Split(raw, ","))
+	for _, m := range ms {
+		if hasControl(m) {
+			return nil, fmt.Errorf("model %q contains control characters", m)
+		}
+	}
+	if len(ms) > importMaxModels {
+		return nil, fmt.Errorf("import link lists %d models; the limit is %d", len(ms), importMaxModels)
+	}
+	return ms, nil
+}
+
+func hasControl(s string) bool {
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
 }

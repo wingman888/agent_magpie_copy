@@ -146,20 +146,13 @@ func Slug(name string) string {
 }
 
 // Save adds or replaces a provider.
-func Save(p Provider) error {
-	return save(p, true)
-}
+func Save(p Provider) error { return save(p, false) }
 
-// SaveImported is Save for a provider the user confirmed from an import link.
-// Unlike Save it accepts a remote provider without a key: it is saved, and
-// stays unavailable (Ready() is false) until a key is added.
-func SaveImported(p Provider) error {
-	return save(p, false)
-}
+// SaveWithoutKey is Save for a provider whose key the user will add later,
+// as an import link without a key asks for. Only the key check differs.
+func SaveWithoutKey(p Provider) error { return save(p, true) }
 
-// save is the shared body of Save and SaveImported. needKey decides whether a
-// remote provider without a key is refused.
-func save(p Provider, needKey bool) error {
+func save(p Provider, allowNoKey bool) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -181,7 +174,7 @@ func save(p Provider, needKey bool) error {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
-		if needKey && p.Key == "" && !keyOptional(p) {
+		if p.Key == "" && !allowNoKey && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
