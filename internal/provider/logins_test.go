@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,9 +79,6 @@ func addSecondCodex(t *testing.T, home string) Login {
 func TestSwitchMovesCredentialsAndKeepsOtherFields(t *testing.T) {
 	home := signIn(t)
 	path := filepath.Join(home, ".codex", "auth.json")
-	m := readMap(t, path)
-	m["extra"] = "keep"
-	writeFile(t, path, m)
 
 	added := addSecondCodex(t, home)
 	if added.User != "other@example.com" || !added.On || !added.Current {
@@ -89,6 +87,12 @@ func TestSwitchMovesCredentialsAndKeepsOtherFields(t *testing.T) {
 	if got := codexRefreshOnDisk(t, home); got != "r2" {
 		t.Fatalf("after sign-in refresh = %q, want r2", got)
 	}
+	if me := findLoginNamed(t, "codex", "me@example.com"); !me.On || me.Current {
+		t.Fatalf("displaced account = %+v, want on and not current", me)
+	}
+	m := readMap(t, path)
+	m["extra"] = "keep"
+	writeFile(t, path, m)
 
 	if err := SwitchLogin("codex", "ME@example.com"); err != nil {
 		t.Fatal(err)
@@ -99,8 +103,8 @@ func TestSwitchMovesCredentialsAndKeepsOtherFields(t *testing.T) {
 	if got := readMap(t, path)["extra"]; got != "keep" {
 		t.Fatalf("agent's other field = %v, want keep", got)
 	}
-	if other := findLoginNamed(t, "codex", "other@example.com"); other.Current || !other.Held || other.On {
-		t.Fatalf("replaced account = %+v, want held, off (it inherits the target's off state)", other)
+	if other := findLoginNamed(t, "codex", "other@example.com"); other.Current || !other.Held || !other.On {
+		t.Fatalf("replaced account = %+v, want held and on (it inherits the target's on state)", other)
 	}
 
 	// the account switched away from kept its newest credentials
@@ -153,18 +157,48 @@ func TestOtherAccountServesAlongsideCurrent(t *testing.T) {
 	if len(cs) != 2 {
 		t.Fatalf("candidates = %d, want 2 (current, then the on account)", len(cs))
 	}
-	if cs[0].Provider.Account.User != "me@example.com" || cs[1].Provider.Account.User != "other@example.com" {
+	if cs[0].Provider.Account.User != "other@example.com" || cs[1].Provider.Account.User != "me@example.com" {
 		t.Fatalf("order = %s, %s", cs[0].Provider.Account.User, cs[1].Provider.Account.User)
 	}
 	if cs[0].Ref == cs[1].Ref {
 		t.Fatal("each login needs its own fingerprint, or one rest would hide the other")
 	}
 
-	if err := SetLoginOn("codex", "other@example.com", false); err != nil {
+	if err := SetLoginOn("codex", "me@example.com", false); err != nil {
 		t.Fatal(err)
 	}
-	if cs := p.Choices(Responses, "gpt-5.5"); len(cs) != 1 {
-		t.Fatalf("with the second account off, candidates = %d, want 1", len(cs))
+	if cs := p.Choices(Responses, "gpt-5.5"); len(cs) != 1 || cs[0].Provider.Account.User != "other@example.com" {
+		t.Fatalf("with the displaced account off, candidates = %d, want only the current one", len(cs))
+	}
+}
+
+// A login magpie holds signs requests with its own tokens, not the agent's.
+func TestHeldLoginSignsWithItsOwnTokens(t *testing.T) {
+	home := signIn(t)
+	addSecondCodex(t, home)
+
+	f := loadLogins()
+	held := f.Logins[findLogin(f, "codex", "me@example.com")]
+	toks, _ := held.Auth["tokens"].(map[string]any)
+	heldAccess, _ := toks["access_token"].(string)
+	if heldAccess == "" {
+		t.Fatal("magpie should hold the displaced account's tokens")
+	}
+
+	p, err := Find("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := p.Choices(Responses, "gpt-5.5")
+	req, _ := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err := cs[1].Provider.Sign(context.Background(), req, Responses, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer "+heldAccess {
+		t.Fatalf("held login signed with %q, want its own token", got)
+	}
+	if got := req.Header.Get("chatgpt-account-id"); got != "acct-1" { // signIn's account for me@example.com
+		t.Fatalf("account id = %q", got)
 	}
 }
 
@@ -252,6 +286,29 @@ func TestClaudeSwitchKeepsAgentFileIntact(t *testing.T) {
 	}
 	if pro := findLoginNamed(t, "claude", "Claude Pro"); !pro.Held || pro.Current {
 		t.Fatalf("replaced account = %+v", pro)
+	}
+
+	// a held Claude login runs from a private config dir holding its tokens,
+	// which is removed once the run is over
+	p, err := Find("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := p.Choices(Anthropic, "claude-sonnet-5-5")
+	if len(cs) != 2 {
+		t.Fatalf("claude candidates = %d, want 2", len(cs))
+	}
+	env, done, err := cs[1].Provider.AgentEnv(context.Background())
+	if err != nil || len(env) != 1 || !strings.HasPrefix(env[0], "CLAUDE_CONFIG_DIR=") {
+		t.Fatalf("held login env = %v, %v", env, err)
+	}
+	runDir := strings.TrimPrefix(env[0], "CLAUDE_CONFIG_DIR=")
+	if oauth, _ := readMap(t, filepath.Join(runDir, ".credentials.json"))["claudeAiOauth"].(map[string]any); oauth["accessToken"] != "a-pro" {
+		t.Fatalf("run dir token = %v, want a-pro", oauth["accessToken"])
+	}
+	done()
+	if _, err := os.Stat(runDir); !os.IsNotExist(err) {
+		t.Fatalf("run dir should be removed, stat err = %v", err)
 	}
 
 	if err := SwitchLogin("claude", "Claude Pro"); err != nil {

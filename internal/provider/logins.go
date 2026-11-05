@@ -358,7 +358,9 @@ func AddLogin(agent string, run func() error) (Login, error) {
 	}
 	loginsMu.Lock()
 	f := loadLogins()
+	var before string // the login being replaced, which stays on
 	if prev, ok := remember(&f, agent); ok {
+		before = prev.user
 		f.Logins[findLogin(f, agent, prev.user)].Auth = prev.auth
 	}
 	err := storeLogins(f)
@@ -374,6 +376,12 @@ func AddLogin(agent string, run func() error) (Login, error) {
 	forgetCaches()
 	f = loadLogins()
 	cur, ok := remember(&f, agent)
+	if ok && before != "" && !strings.EqualFold(before, cur.user) {
+		// the account it displaces keeps serving alongside the new one
+		if i := findLogin(f, agent, before); i >= 0 {
+			f.Logins[i].On = true
+		}
+	}
 	if err := storeLogins(f); err != nil {
 		return Login{}, err
 	}
