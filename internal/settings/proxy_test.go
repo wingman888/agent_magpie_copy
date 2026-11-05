@@ -57,6 +57,30 @@ func TestValidateProxyRejects(t *testing.T) {
 	}
 }
 
+func TestValidateProxyURLHost(t *testing.T) {
+	for _, in := range []string{
+		"http://proxy.local:8080",
+		"http://[::1]:7890",
+	} {
+		if _, err := ValidateProxy(in); err != nil {
+			t.Errorf("ValidateProxy(%q): unexpected error %v", in, err)
+		}
+	}
+	for _, in := range []string{
+		"http://a..b:7890",
+		"http://under_score:7890",
+	} {
+		_, err := ValidateProxy(in)
+		if err == nil {
+			t.Errorf("ValidateProxy(%q): expected error", in)
+			continue
+		}
+		if !strings.Contains(err.Error(), ProxyExample) {
+			t.Errorf("ValidateProxy(%q): error lacks example: %v", in, err)
+		}
+	}
+}
+
 func TestValidateProxyHostAndPort(t *testing.T) {
 	for _, in := range []string{
 		"127.0.0.1:7890",

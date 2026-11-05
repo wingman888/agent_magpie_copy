@@ -55,6 +55,10 @@ func ValidateProxy(s string) (string, error) {
 		if u.Hostname() == "" {
 			return "", proxyError(s, "the host is missing")
 		}
+		// Hostname strips the brackets of an IPv6 literal, which validHost accepts.
+		if !validHost(u.Hostname()) {
+			return "", proxyError(s, "the host is neither an IP address nor a host name")
+		}
 		// url.Parse accepts "http://host:" with an empty port; refuse it.
 		if strings.HasSuffix(u.Host, ":") {
 			return "", proxyError(s, "the port is empty")
