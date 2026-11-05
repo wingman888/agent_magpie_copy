@@ -90,11 +90,10 @@ func TestStoreIconRefusesBadInput(t *testing.T) {
 			t.Errorf("non-image %q accepted", text)
 		}
 	}
-	if _, err := os.Stat(IconDir()); err == nil {
-		entries, _ := os.ReadDir(IconDir())
-		if len(entries) != 0 {
-			t.Errorf("refused images were stored: %d files", len(entries))
-		}
+	// Only the one accepted image (exactly MaxIcon) may be in the folder.
+	entries, _ := os.ReadDir(IconDir())
+	if len(entries) != 1 {
+		t.Errorf("icons folder has %d files, want only the accepted image", len(entries))
 	}
 }
 
