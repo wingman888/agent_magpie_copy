@@ -874,7 +874,7 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
 		req.Header.Set("X-Initiator", "agent")
-		if copilotUserTurn(body) {
+		if copilotUserTurn(req.URL.Path, body) {
 			req.Header.Set("X-Initiator", "user")
 		}
 		if copilotHasImage(body) {
@@ -889,7 +889,127 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
-	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website:"https://github.com/features/copilot", Account: acct}
+	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
+}
+
+// copilotUserTurn reports whether a request's last turn is one the user typed,
+// judged by the wire API the path names. A turn that only carries tool results
+// is the agent talking to itself, not the user.
+func copilotUserTurn(path string, body []byte) bool {
+	switch {
+	case strings.HasSuffix(path, "/responses"):
+		var v struct {
+			Input json.RawMessage `json:"input"`
+		}
+		if json.Unmarshal(body, &v) != nil || len(v.Input) == 0 {
+			return false
+		}
+		var s string
+		if json.Unmarshal(v.Input, &s) == nil {
+			return true // a bare string input is the user's text
+		}
+		var items []struct {
+			Type string `json:"type"`
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(v.Input, &items) != nil || len(items) == 0 {
+			return false
+		}
+		last := items[len(items)-1]
+		return last.Role == "user" && (last.Type == "" || last.Type == "message")
+	case strings.Contains(path, "/messages"):
+		var v struct {
+			Messages []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
+			return false
+		}
+		last := v.Messages[len(v.Messages)-1]
+		if last.Role != "user" {
+			return false
+		}
+		var s string
+		if json.Unmarshal(last.Content, &s) == nil {
+			return true
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(last.Content, &blocks) != nil {
+			return false
+		}
+		for _, b := range blocks {
+			if b.Type != "tool_result" {
+				return true // text, image, document: the user spoke
+			}
+		}
+		return false // nothing but tool results: the agent's turn
+	}
+	return lastRole(body) == "user"
+}
+
+// copilotHasImage reports whether a request carries an image part in any of
+// the three wire formats: Chat image_url, Responses input_image, Anthropic image.
+func copilotHasImage(body []byte) bool {
+	var v any
+	if json.Unmarshal(body, &v) != nil {
+		return false
+	}
+	var walk func(any) bool
+	walk = func(x any) bool {
+		switch x := x.(type) {
+		case map[string]any:
+			if t, _ := x["type"].(string); t == "image_url" || t == "input_image" || t == "image" {
+				return true
+			}
+			for _, c := range x {
+				if walk(c) {
+					return true
+				}
+			}
+		case []any:
+			for _, c := range x {
+				if walk(c) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(v)
+}
+
+// copilotAPIs maps Copilot's supported_endpoints to the protocols magpie
+// speaks; other endpoints (websocket, embeddings) are ignored.
+func copilotAPIs(endpoints []string) []string {
+	var out []string
+	for _, e := range endpoints {
+		switch e {
+		case "/chat/completions":
+			out = append(out, "chat")
+		case "/responses":
+			out = append(out, "responses")
+		case "/v1/messages":
+			out = append(out, "anthropic")
+		}
+	}
+	return out
+}
+
+// lastRole is the role of the last message in a chat request.
+func lastRole(body []byte) string {
+	var v struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
+		return ""
+	}
+	return v.Messages[len(v.Messages)-1].Role
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {

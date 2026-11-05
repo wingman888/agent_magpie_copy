@@ -50,6 +50,34 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
+// APIs lists the protocols the provider's last model list declares for model,
+// in the order the list gives them. Nil when the list has no such model or
+// does not say which APIs it is served on.
+func (p Provider) APIs(model string) []Protocol {
+	ms, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return nil
+	}
+	for _, m := range ms {
+		if m.ID != model {
+			continue
+		}
+		var out []Protocol
+		for _, a := range m.APIs {
+			switch a {
+			case "chat":
+				out = append(out, Chat)
+			case "responses":
+				out = append(out, Responses)
+			case "anthropic":
+				out = append(out, Anthropic)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 func (p Provider) firstCatalog() string {
 	if cs := p.Catalogs(); len(cs) > 0 {
 		return cs[0]
@@ -168,55 +196,6 @@ func (p Provider) Serves(k KeyAccount, model string) bool {
 		}
 	}
 	return true
-}
-
-// APIs are the protocols the vendor's last model list declares for model, in
-// the order it lists them. nil when the list does not say (or has no entry).
-func (p Provider) APIs(model string) []Protocol {
-	live, _, ok := catalog.Live(p.ID)
-	if !ok {
-		return nil
-	}
-	for _, m := range live {
-		if m.ID != model {
-			continue
-		}
-		var out []Protocol
-		for _, a := range m.APIs {
-			if pr, ok := apiProtocol(a); ok && !slices.Contains(out, pr) {
-				out = append(out, pr)
-			}
-		}
-		return out
-	}
-	return nil
-}
-
-// apiProtocol maps a catalog API name to its protocol.
-func apiProtocol(api string) (Protocol, bool) {
-	switch api {
-	case "chat":
-		return Chat, true
-	case "responses":
-		return Responses, true
-	case "anthropic":
-		return Anthropic, true
-	}
-	return "", false
-}
-
-// declaresAPI is false only when m's list names APIs and proto is not one of
-// them; a model with no declared APIs may be tried on any protocol.
-func declaresAPI(m catalog.Model, proto Protocol) bool {
-	if len(m.APIs) == 0 {
-		return true
-	}
-	for _, a := range m.APIs {
-		if pr, ok := apiProtocol(a); ok && pr == proto {
-			return true
-		}
-	}
-	return false
 }
 
 // Exposed lists the models magpie offers to agents for this provider: the

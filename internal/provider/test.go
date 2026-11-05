@@ -86,7 +86,7 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 	} {
 		for _, pool := range pools {
 			for _, m := range pool {
-				if want(m.ID) && declaresAPI(m, proto) && (k.Key == "" || p.Serves(k, m.ID)) {
+				if want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
 					return m.ID
 				}
 			}
