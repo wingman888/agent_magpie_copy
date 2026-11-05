@@ -17,10 +17,20 @@ import (
 // magpieID is the provider id agents know the gateway by.
 const magpieID = "magpie"
 
-// viaMagpie lists the catalog for a picker, one group per provider.
+// viaMagpie lists the catalog for a picker, one group per provider. Routing
+// groups come first, in a section of their own.
 func viaMagpie(prefix string) []Option {
 	var out []Option
-	for _, e := range provider.Catalog() {
+	cat := provider.Catalog()
+	for _, e := range cat {
+		if e.Group != "" {
+			out = append(out, groupOption(prefix, e))
+		}
+	}
+	for _, e := range cat {
+		if e.Group != "" {
+			continue
+		}
 		note := e.Provider.Name + " · via magpie"
 		if a := e.Provider.Account; a != nil {
 			note = a.User + " · via magpie"
@@ -29,6 +39,22 @@ func viaMagpie(prefix string) []Option {
 			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
 	}
 	return out
+}
+
+// groupOption is the picker entry for a routing group. Its icons are the
+// logos of the ready providers behind it, each provider's once.
+func groupOption(prefix string, e provider.Entry) Option {
+	_, ms, _ := provider.FindGroup(e.ID)
+	var icons []string
+	seen := map[string]bool{}
+	for _, m := range ms {
+		if ic := m.Provider.Icon; ic != "" && !seen[ic] {
+			seen[ic] = true
+			icons = append(icons, ic)
+		}
+	}
+	return Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
+		Icons: icons, Group: e.Provider.Name, Ref: e.ID}
 }
 
 // viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going

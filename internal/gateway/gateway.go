@@ -349,49 +349,49 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	var p provider.Provider
-	var model string
+	var group *GroupRoute
+	var grp provider.Group
+	var members []provider.Member
+	if strings.HasPrefix(call.Model, "group/") {
+		g, ms, ok := provider.FindGroup(call.Model)
+		if !ok {
+			call.Status, call.Error = 404, "routing group has no model ready"
+			writeError(w, from, 404, fmt.Sprintf("routing group %q has no model ready", strings.TrimPrefix(call.Model, "group/")))
+			finishCapture()
+			s.record(call)
+			return
+		}
+		group = &GroupRoute{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto}
+		for _, m := range ms {
+			group.Members = append(group.Members, m.Ref)
+		}
+		grp, members = g, ms
+	}
+	p, model, ok := provider.Resolve(call.Model)
+	if !ok {
+		call.Status, call.Error = 404, "unknown model"
+		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
+		if ids := provider.IDs(); len(ids) > 0 {
+			msg += "; it has " + strings.Join(ids, ", ")
+		} else {
+			msg += "; add a provider in magpie first"
+		}
+		writeError(w, from, 404, msg)
+		finishCapture()
+		s.record(call)
+		return
+	}
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
+	cv := conversationOf(r.Header, body, call.Model)
 	var cands []candidate
 	var pl planned
-	var group *GroupRoute
-	var gc *groupCall
-	var aff *AffinityRoute
-	if id := strings.TrimSpace(call.Model); strings.HasPrefix(id, provider.GroupPrefix) {
-		// a routing group: its members' keys and accounts weighed together
-		g, ms, ok := provider.FindGroup(id)
-		if !ok {
-			msg := fmt.Sprintf("routing group %s has no model ready", id)
-			call.Status, call.Error = 404, msg
-			writeError(w, from, 404, msg)
-			finishCapture()
-			s.record(call)
-			return
-		}
-		p, model = ms[0].Provider, ms[0].Model
-		group = groupRoute(g, ms)
-		gc = groupCallOf(r.Header, from, body, g.ID)
-		cands, pl, aff = s.planGroup(g, ms, from, gc)
+	if group != nil {
+		cands, pl = s.planGroup(grp, members, from, cv)
 	} else {
-		var ok bool
-		p, model, ok = provider.Resolve(call.Model)
-		if !ok {
-			call.Status, call.Error = 404, "unknown model"
-			msg := fmt.Sprintf("magpie knows no model %q", call.Model)
-			if ids := provider.IDs(); len(ids) > 0 {
-				msg += "; it has " + strings.Join(ids, ", ")
-			} else {
-				msg += "; add a provider in magpie first"
-			}
-			writeError(w, from, 404, msg)
-			finishCapture()
-			s.record(call)
-			return
-		}
-		// the primary, then its fallbacks while it can't take the request and
-		// nothing has been sent yet
-		cands, pl = s.plan(p, model, from)
+		cands, pl = s.planConv(p, model, from, cv)
 	}
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left, Group: group, Affinity: aff})
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left, Group: group, Affinity: pl.affinity})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
@@ -412,9 +412,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			if gc != nil {
-				gc.answered(c, call.Usage.CacheRead)
-			}
+			remember(cv, c, call.Usage.CacheRead)
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}
@@ -847,14 +845,23 @@ var sessionHeaders = []string{
 	"session_id", "session-id", "x-claude-code-session-id",
 }
 
-// conversationID is a stable id for the conversation a request belongs to.
-// It is the agent's own session id when it sends one; otherwise it is derived
-// from the conversation's first user message, which every later turn repeats.
-func conversationID(in http.Header, body []byte) string {
+// sessionOf is the session id the agent sent with the request: the first of
+// sessionHeaders that is set, or "" when it sends none.
+func sessionOf(in http.Header) string {
 	for _, h := range sessionHeaders {
 		if v := strings.TrimSpace(in.Get(h)); v != "" {
 			return v
 		}
+	}
+	return ""
+}
+
+// conversationID is a stable id for the conversation a request belongs to.
+// It is the agent's own session id when it sends one; otherwise it is derived
+// from the conversation's first user message, which every later turn repeats.
+func conversationID(in http.Header, body []byte) string {
+	if id := sessionOf(in); id != "" {
+		return id
 	}
 	var m struct {
 		Messages []json.RawMessage `json:"messages"`
