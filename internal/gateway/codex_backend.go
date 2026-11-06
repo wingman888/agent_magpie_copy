@@ -260,11 +260,7 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 		if e.Provider.Account != nil && e.Provider.Account.Agent == "codex" {
 			continue
 		}
-		name := e.Name + " · " + e.Provider.Name
-		if e.Kind == provider.KindGroup {
-			name = e.Name + " · routing group"
-		}
-		ms = append(ms, catalog.Model{ID: e.ID, Name: name, Efforts: e.Efforts})
+		ms = append(ms, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Efforts: e.Efforts})
 	}
 	if etag != "" {
 		w.Header().Set("ETag", etag)
