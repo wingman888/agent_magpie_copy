@@ -332,7 +332,6 @@ var builtin = map[string][]Model{
 		{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"},
 	},
 	"copilot": {
-		{ID: "auto", Name: "Let Copilot pick"},
 		{ID: "claude-fable-5", Name: "Claude Fable 5"},
 		{ID: "claude-opus-4.8", Name: "Claude Opus 4.8"},
 		{ID: "claude-sonnet-4.5", Name: "Claude Sonnet 4.5"},
