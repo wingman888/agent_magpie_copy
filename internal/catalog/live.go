@@ -115,6 +115,24 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 	return nil, lastErr
 }
 
+// SetHeaders sets extra headers on h after the auth headers, so a user's
+// value wins over a same-named one. Names are written exactly as given: an
+// http.Header Set would canonicalise X-ORG-id to X-Org-Id. A differently
+// cased copy of a name the user set is dropped, so only the user's value goes
+// upstream.
+func SetHeaders(h http.Header, extra map[string]string) {
+	for name := range extra {
+		for k := range h {
+			if k != name && strings.EqualFold(k, name) {
+				delete(h, k)
+			}
+		}
+	}
+	for name, v := range extra {
+		h[name] = []string{v}
+	}
+}
+
 func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -131,14 +149,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[st
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	for name, v := range extra {
-		for k := range req.Header {
-			if k != name && strings.EqualFold(k, name) {
-				delete(req.Header, k)
-			}
-		}
-		req.Header[name] = []string{v}
-	}
+	SetHeaders(req.Header, extra)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err

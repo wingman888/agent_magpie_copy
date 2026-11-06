@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -315,24 +314,6 @@ func (p Provider) customHeaders() map[string]string {
 		return nil
 	}
 	return p.Headers
-}
-
-// ApplyHeaders sets extra headers on h after the auth headers, so a user's
-// value wins over a same-named one. Names are written exactly as given: an
-// http.Header Set would canonicalise X-ORG-id to X-Org-Id. A differently
-// cased copy of a name the user set is dropped, so only the user's value goes
-// upstream.
-func ApplyHeaders(h http.Header, extra map[string]string) {
-	for name := range extra {
-		for k := range h {
-			if k != name && strings.EqualFold(k, name) {
-				delete(h, k)
-			}
-		}
-	}
-	for name, v := range extra {
-		h[name] = []string{v}
-	}
 }
 
 func contains(xs []string, x string) bool {
