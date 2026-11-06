@@ -145,10 +145,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
+	// Gemini API: model ids contain slashes, so the rest of the path is taken whole
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
-	mux.HandleFunc("POST /v1beta/models/{name...}", s.geminiPost)
+	mux.HandleFunc("GET /v1beta/models/{rest...}", s.geminiModel)
+	mux.HandleFunc("POST /v1beta/models/{rest...}", s.geminiPost)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and the Gemini API at /v1beta/models, /v1beta/models/{model}:generateContent, /v1beta/models/{model}:streamGenerateContent and /v1beta/models/{model}:countTokens")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses and /v1/messages; also /v1beta/models/{model}:generateContent, :streamGenerateContent, :countTokens")
 	})
 	return mux
 }
@@ -418,7 +420,7 @@ func parse(proto provider.Protocol, body []byte) (*Request, error) {
 		return parseChat(body)
 	case provider.Responses:
 		return parseResponses(body)
-	case geminiClient:
+	case geminiProto:
 		return parseGemini(body)
 	}
 	return parseAnthropic(body)
@@ -457,7 +459,7 @@ func encoder(proto provider.Protocol, w *sseWriter, model string) streamEncoder 
 		return &chatEncoder{w: w, model: model}
 	case provider.Responses:
 		return &responsesEncoder{w: w, model: model}
-	case geminiClient:
+	case geminiProto:
 		return &geminiEncoder{w: w, model: model}
 	}
 	return &anthropicEncoder{w: w, model: model}
@@ -469,7 +471,7 @@ func render(proto provider.Protocol, res Result, model string) []byte {
 		return renderChat(res, model)
 	case provider.Responses:
 		return renderResponses(res, model)
-	case geminiClient:
+	case geminiProto:
 		return renderGemini(res, model)
 	}
 	return renderAnthropic(res, model)
@@ -527,8 +529,8 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 	var v any
 	if proto == provider.Anthropic {
 		v = map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
-	} else if proto == geminiClient {
-		v = map[string]any{"error": map[string]any{"code": status, "message": msg, "status": geminiStatus(status)}}
+	} else if proto == geminiProto {
+		v = map[string]any{"error": gErr(status, msg)}
 	} else {
 		v = map[string]any{"error": map[string]any{"message": msg, "type": typ, "code": nil, "param": nil}}
 	}

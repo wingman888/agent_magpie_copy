@@ -29,9 +29,9 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
-	// ByLabel lets Field find this field by its Label as well as its Key.
-	// The Key always wins; the Label is only tried when no Key matches.
-	ByLabel bool
+	// Alias, if set, is a display name the field also answers to (for
+	// `dial gemini auth …` where the key is "provider" and the label "auth").
+	Alias string
 }
 
 // Agent is one supported coding agent.
@@ -81,7 +81,8 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key, then by label for fields that opt in.
+// Field looks a field up by key. A key that matches no field is tried
+// against the fields' Alias (display names) as a fallback.
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
@@ -89,7 +90,7 @@ func (a *Agent) Field(key string) *Field {
 		}
 	}
 	for i := range a.Fields {
-		if a.Fields[i].ByLabel && a.Fields[i].Label == key {
+		if a.Fields[i].Alias != "" && a.Fields[i].Alias == key {
 			return &a.Fields[i]
 		}
 	}
