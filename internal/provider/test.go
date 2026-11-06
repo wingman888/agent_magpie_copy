@@ -30,6 +30,9 @@ func (p Provider) Test(ctx context.Context) []Result {
 	} else if ms := p.Available(); len(ms) > 0 {
 		model = ms[0].ID
 	}
+	if p.Account != nil {
+		return []Result{p.probeAccount(ctx, model)}
+	}
 	var out []Result
 	for _, proto := range p.Speaks() {
 		var url, body string
@@ -49,6 +52,46 @@ func (p Provider) Test(ctx context.Context) []Result {
 		out = append(out, probe(ctx, proto, url, body, model, headers))
 	}
 	return out
+}
+
+// probeAccount sends the smallest request the account's upstream takes. It is
+// signed and prepared the same way dial signs real traffic.
+func (p Provider) probeAccount(ctx context.Context, model string) Result {
+	proto := Chat
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
+	if p.Account.Agent == "codex" {
+		proto = Responses
+		body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
+	}
+	r := Result{Protocol: proto, Model: model}
+	if model == "" {
+		r.Error = "no model to try: expose one, or refresh the model list"
+		return r
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req := (&http.Request{Method: http.MethodPost, Header: http.Header{}}).WithContext(ctx)
+	req.Header.Set("Accept", "text/event-stream, application/json")
+	if err := p.Sign(ctx, req, proto, p.Prepare([]byte(body))); err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	start := time.Now()
+	res, err := http.DefaultClient.Do(req)
+	r.Millis = time.Since(start).Milliseconds()
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	defer res.Body.Close()
+	r.Status = res.StatusCode
+	if res.StatusCode >= 200 && res.StatusCode < 300 {
+		r.OK = true
+		return r
+	}
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+	r.Error = APIError(b, res.Status)
+	return r
 }
 
 // AuthHeaders is how a request to the vendor proves who it is. Anthropic's
