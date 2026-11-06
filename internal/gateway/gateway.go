@@ -89,7 +89,7 @@ type Server struct {
 	debug        bool
 	// cooling maps a provider id to when its fallback rest period ends. It
 	// lives in memory only, so a restart clears it.
-	cooling map[string]time.Time
+	cooling map[string]restEntry
 }
 
 // New makes a gateway.
@@ -103,7 +103,7 @@ func New() *Server {
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
-		cooling:      make(map[string]time.Time),
+		cooling:      make(map[string]restEntry),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}

@@ -80,7 +80,7 @@ func (s *Server) nextCandidate(cands []candidate) int {
 	defer s.mu.Unlock()
 	now := time.Now()
 	for i, c := range cands {
-		if !now.Before(s.cooling[c.p.ID]) {
+		if !now.Before(s.cooling[c.p.ID].until) {
 			return i
 		}
 	}
@@ -88,13 +88,20 @@ func (s *Server) nextCandidate(cands []candidate) int {
 }
 
 // restProvider sends a provider to its rest period after a switchable failure.
-func (s *Server) restProvider(providerID string) {
+func (s *Server) restProvider(providerID, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cooling == nil {
-		s.cooling = make(map[string]time.Time)
+		s.cooling = make(map[string]restEntry)
 	}
-	s.cooling[providerID] = time.Now().Add(restPeriod)
+	s.cooling[providerID] = restEntry{until: time.Now().Add(restPeriod), reason: reason}
+}
+
+// restReason is why a provider is resting: its last switchable failure.
+func (s *Server) restReason(providerID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cooling[providerID].reason
 }
 
 // serveFallbacks tries the candidates in turn until one answers without a
@@ -102,8 +109,17 @@ func (s *Server) restProvider(providerID string) {
 // call records who answered and which providers failed before.
 func (s *Server) serveFallbacks(w http.ResponseWriter, r *http.Request, from provider.Protocol, cands []candidate, body []byte, call *Call) candidate {
 	var failures []string
+	noted := map[string]bool{}
 	for {
 		i := s.nextCandidate(cands)
+		// candidates passed over because they are resting count as failed
+		// here, so the record says why another provider answered
+		for _, skipped := range cands[:i] {
+			if !noted[skipped.p.ID] {
+				noted[skipped.p.ID] = true
+				failures = append(failures, skipped.p.ID+": resting after "+s.restReason(skipped.p.ID))
+			}
+		}
 		c := cands[i]
 		rest := append(append([]candidate{}, cands[:i]...), cands[i+1:]...)
 		// the reply is held back until it is known to be a success
@@ -111,8 +127,9 @@ func (s *Server) serveFallbacks(w http.ResponseWriter, r *http.Request, from pro
 		var u Usage
 		to, status, msg := s.attempt(aw, r, c.p, from, c.model, body, &u)
 		retry := status >= 400 && switchable(status, msg)
+		reason := fmt.Sprintf("HTTP %d %s", status, oneLine(msg))
 		if retry {
-			s.restProvider(c.p.ID)
+			s.restProvider(c.p.ID, reason)
 		}
 		if !retry || len(rest) == 0 || r.Context().Err() != nil {
 			aw.release()
@@ -126,7 +143,7 @@ func (s *Server) serveFallbacks(w http.ResponseWriter, r *http.Request, from pro
 			}
 			return c
 		}
-		failures = append(failures, fmt.Sprintf("%s: HTTP %d %s", c.p.ID, status, oneLine(msg)))
+		failures = append(failures, c.p.ID+": "+reason)
 		cands = rest
 	}
 }
@@ -215,4 +232,10 @@ func (a *attemptWriter) release() {
 	}
 	a.dst.WriteHeader(a.status)
 	a.dst.Write(a.body.Bytes())
+}
+
+// restEntry is a provider's rest period and the failure that started it.
+type restEntry struct {
+	until  time.Time
+	reason string
 }
