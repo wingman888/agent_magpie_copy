@@ -59,11 +59,6 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
-
-	// Headers are extra request headers sent with every request to a custom
-	// provider, names exactly as the user typed them. Presets and signed-in
-	// accounts never send them.
-	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type file struct {
@@ -193,27 +188,16 @@ func Save(p Provider) error {
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
-		if err := validIcon(p.Icon); err != nil {
-			return err
-		}
 	}
 	f := load()
-	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			replaced = true
-			break
+			return store(f)
 		}
 	}
-	if !replaced {
-		f.Providers = append(f.Providers, p)
-	}
-	if err := store(f); err != nil {
-		return err
-	}
-	pruneIcons(f)
-	return nil
+	f.Providers = append(f.Providers, p)
+	return store(f)
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -267,7 +251,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Headers = cleanHeaders(p.Headers)
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
