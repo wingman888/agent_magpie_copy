@@ -35,17 +35,18 @@ func TestProbeAndFetchCarryCustomHeaders(t *testing.T) {
 	custom.Fetch(context.Background())
 
 	mu.Lock()
-	defer mu.Unlock()
-	if len(seen) < 2 {
-		t.Fatalf("upstream saw %v, want the test and the model list request", seen)
+	got := append([]string(nil), seen...)
+	seen = nil
+	mu.Unlock()
+	if len(got) < 2 {
+		t.Fatalf("upstream saw %v, want the test and the model list request", got)
 	}
-	for _, s := range seen {
+	for _, s := range got {
 		if !strings.HasSuffix(s, " acme") {
 			t.Fatalf("request %q did not carry the custom header", s)
 		}
 	}
 
-	seen = nil
 	preset := custom
 	preset.Preset = "deepseek"
 	preset.ID = "deepseek"
@@ -53,10 +54,13 @@ func TestProbeAndFetchCarryCustomHeaders(t *testing.T) {
 	preset.Models = []string{"m1"}
 	preset.Test(context.Background())
 	preset.Fetch(context.Background())
-	if len(seen) == 0 {
+	mu.Lock()
+	got = append([]string(nil), seen...)
+	mu.Unlock()
+	if len(got) == 0 {
 		t.Fatal("the preset made no requests")
 	}
-	for _, s := range seen {
+	for _, s := range got {
 		if strings.HasSuffix(s, " acme") {
 			t.Fatalf("preset request %q carried a custom header", s)
 		}
