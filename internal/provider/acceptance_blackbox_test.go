@@ -508,9 +508,12 @@ func TestSignWithoutCredentialsReturnsError(t *testing.T) {
 		if _, err := p.SignedRequest(ctx, provider.Chat, body); err == nil {
 			t.Errorf("%s: SignedRequest without a sign-in returned no error", p.ID)
 		}
-		if _, err := p.Fetch(ctx); err == nil {
-			t.Errorf("%s: Fetch without a sign-in returned no error", p.ID)
-		}
+	}
+	// Copilot's refresh needs the sign-in; Codex's refresh is the built-in list
+	// and needs none, so only Copilot is checked here.
+	cpOnly := provider.Provider{ID: "copilot", Name: "Copilot", Account: &provider.Account{Agent: "copilot"}}
+	if _, err := cpOnly.Fetch(ctx); err == nil {
+		t.Error("copilot: Fetch without a sign-in returned no error")
 	}
 
 	// A provider of one's own still signs with its key.

@@ -219,7 +219,7 @@ func TestAcceptance5StreamingCodexRelayedWithoutBackendContentType(t *testing.T)
 		t.Errorf("content type = %q, want text/event-stream", ct)
 	}
 	body := rec.Body.String()
-	if strings.Count(body, "response.output_text.delta") != 2 || !strings.Contains(body, "response.completed") {
+	if strings.Count(body, `"type":"response.output_text.delta"`) != 2 || !strings.Contains(body, "response.completed") {
 		t.Errorf("stream not relayed in full: %s", body)
 	}
 	bbCheckBackend(t, b, access)
