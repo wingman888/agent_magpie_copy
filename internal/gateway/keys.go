@@ -25,6 +25,7 @@ type attemptKey struct {
 	name  string
 	proto provider.Protocol // "" is any protocol
 	rank  int
+	model string // the model this candidate is asked for (a fallback's own)
 }
 
 func (a attemptKey) id() string { return a.view.ID + "\x00" + a.ref }
@@ -173,7 +174,7 @@ func retryable(status int, msg string) bool {
 		return true
 	case 403:
 		m := strings.ToLower(msg)
-		for _, w := range []string{"quota", "exceed", "insufficient", "balance", "credit", "limit", "额度", "余额"} {
+		for _, w := range []string{"quota", "exceed", "exhaust", "insufficient", "balance", "credit", "limit", "额度", "余额"} {
 			if strings.Contains(m, w) {
 				return true
 			}

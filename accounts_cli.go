@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/provider"
@@ -103,9 +102,8 @@ func listAccounts(agents []string) error {
 			fmt.Println("  " + muted.Render("no remembered accounts · magpie accounts add "+name+" signs one in"))
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		usage := provider.LoginUsage(ctx, name)
-		cancel()
+		// LoginUsage bounds each account on its own, so the accounts do not share one deadline
+		usage := provider.LoginUsage(context.Background(), name)
 		for _, l := range logins {
 			mark, state := faint.Render("○"), muted.Render("off")
 			switch {

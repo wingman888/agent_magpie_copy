@@ -295,6 +295,12 @@ func Codex() []Model {
 	return out
 }
 
+// ShortID is a model id without its vendor prefix: "deepseek/deepseek-chat"
+// names "deepseek-chat" in a catalog. An id with no "/" is returned as it is.
+func ShortID(id string) string {
+	return id[strings.LastIndex(id, "/")+1:]
+}
+
 // Efforts returns the reasoning levels a model supports, if known.
 func Efforts(models []Model, id string) []string {
 	for _, m := range models {

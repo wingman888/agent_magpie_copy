@@ -80,7 +80,7 @@ func ParseImport(link string) (Provider, error) {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return Provider{}, errors.New("the link gives no base URL: it needs chat=, responses= or anthropic=")
 		}
-		if p.Catalog != "" && p.Catalog != Slug(p.Catalog) {
+		if checkCatalogs(p.Catalog) != nil {
 			p.Catalog = ""
 		}
 		if p.Catalog != "" {

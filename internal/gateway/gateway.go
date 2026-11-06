@@ -362,11 +362,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	// try each way to reach the provider in turn: a key, limited to a protocol
-	// or not, or a subscription login. Only a failure the client can be spared
-	// (see retryable) moves on, and only before any of its reply has been sent.
-	// The last candidate's reply is final.
-	attempts := s.keyOrder(p, from, model)
+	// try each candidate in turn: a key, limited to a protocol or not, or a
+	// subscription login, then the provider's fallback targets (see candidates).
+	// Only a failure the client can be spared (see retryable) moves on, and only
+	// before any of its reply has been sent. The last candidate's reply is final.
+	attempts := s.candidates(p, from, model)
 	if len(attempts) == 0 {
 		call.Status, call.Error = 502, p.Name+" has no usable key for this request"
 		writeError(w, from, call.Status, call.Error)
@@ -376,14 +376,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	var failed []string
+	var last attemptKey
 	for i, a := range attempts {
+		last = a
 		var g *gate
 		out := w
 		if i < len(attempts)-1 {
 			g = newGate(w)
 			out = g
 		}
-		call.To, call.Status, call.Error = s.tryCandidate(out, r, a, from, model, body, &call.Usage)
+		call.To, call.Status, call.Error = s.tryCandidate(out, r, a, from, a.model, body, &call.Usage)
 		if g != nil {
 			if g.failed() && retryable(call.Status, call.Error) {
 				s.cooldown(a)
@@ -394,6 +396,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		break
 	}
+	call.Provider = last.view.ID
 	if len(failed) > 0 {
 		call.Fallback = strings.Join(failed, ", ")
 	}
@@ -408,7 +411,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// no endpoint at all: nothing was sent, so nothing is recorded as used
 		return
 	}
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: last.view.ID, Model: last.model,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }

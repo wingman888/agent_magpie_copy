@@ -61,6 +61,41 @@ type Login struct {
 // network call, so reading the file (Accounts runs on every request) never waits.
 var loginsMu sync.Mutex
 
+// loginRefreshMu holds one mutex per stored login (by agent and email). Holding
+// it spans "read the record, see it is expired, refresh, write back", so two
+// callers never spend the same refresh token: the second one re-reads the
+// record under the lock and finds the rotated tokens the first one saved.
+var loginRefreshMu struct {
+	sync.Mutex
+	m map[string]*sync.Mutex
+}
+
+func loginRefreshLock(agent, user string) *sync.Mutex {
+	loginRefreshMu.Lock()
+	defer loginRefreshMu.Unlock()
+	if loginRefreshMu.m == nil {
+		loginRefreshMu.m = map[string]*sync.Mutex{}
+	}
+	key := agent + "\x00" + strings.ToLower(user)
+	mu, ok := loginRefreshMu.m[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		loginRefreshMu.m[key] = mu
+	}
+	return mu
+}
+
+// storedCreds is the saved credential blob of a remembered login, or nil.
+func storedCreds(agent, user string) json.RawMessage {
+	var creds json.RawMessage
+	for _, l := range loadLogins().Logins {
+		if l.Agent == agent && strings.EqualFold(l.User, user) {
+			creds = l.Creds
+		}
+	}
+	return creds
+}
+
 // LoginAgent maps an agent name, or its alias, to the id used for logins.
 func LoginAgent(name string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
@@ -275,35 +310,116 @@ func SwitchLogin(agent, user string) (bool, error) {
 	if err := RememberLogins(); err != nil {
 		return false, err
 	}
-	var target savedLogin
-	switched := false
-	err := updateLogins(func(f *loginsFile) (bool, error) {
-		i := findLogin(f.Logins, name, user)
-		if i < 0 {
-			return false, fmt.Errorf("no remembered %s account %q; magpie accounts %s lists them", name, user, name)
-		}
-		target = f.Logins[i]
-		cur, has := currentLogin(name)
-		if has && strings.EqualFold(cur.User, target.User) {
-			return false, nil
-		}
-		switched = true
-		if has {
-			if j := findLogin(f.Logins, name, cur.User); j >= 0 {
-				f.Logins[j].Creds, f.Logins[j].Plan, f.Logins[j].On = cur.Creds, cur.Plan, target.On
-			}
-		}
-		return true, nil
-	})
-	if err != nil || !switched {
+	// The agent's file is written first, and accounts.json only once that has
+	// worked, so a failed switch leaves the stored logins as they were. Both
+	// happen under loginsMu, so nothing else changes the record in between.
+	loginsMu.Lock()
+	defer loginsMu.Unlock()
+	f := loadLogins()
+	i := findLogin(f.Logins, name, user)
+	if i < 0 {
+		return false, fmt.Errorf("no remembered %s account %q; magpie accounts %s lists them", name, user, name)
+	}
+	target := f.Logins[i]
+	cur, has := currentLogin(name)
+	if has && strings.EqualFold(cur.User, target.User) {
+		return false, nil
+	}
+	restore, err := snapshotAgentLogin(name)
+	if err != nil {
 		return false, err
 	}
 	if err := writeLogin(name, target.Creds); err != nil {
 		return false, err
 	}
+	if err := verifyAgentLogin(name, target.User); err != nil {
+		if rerr := restore(); rerr != nil {
+			return false, fmt.Errorf("%w; putting the previous %s login back also failed: %v", err, name, rerr)
+		}
+		return false, err
+	}
+	if has {
+		if j := findLogin(f.Logins, name, cur.User); j >= 0 {
+			f.Logins[j].Creds, f.Logins[j].Plan, f.Logins[j].On = cur.Creds, cur.Plan, target.On
+		}
+	}
+	if err := storeLogins(f); err != nil {
+		// the outgoing login's latest tokens exist only in the agent's file
+		// until this is saved, so put that file back as it was
+		if rerr := restore(); rerr != nil {
+			return false, fmt.Errorf("%w; putting the previous %s login back also failed: %v", err, name, rerr)
+		}
+		return false, err
+	}
 	forgetClaudeCredential()
 	forgetClaudeStatus()
 	return true, nil
+}
+
+// snapshotAgentLogin records the agent's login as it is now and returns the
+// function that puts it back, for a switch that fails after the agent's file
+// was written.
+func snapshotAgentLogin(agent string) (func() error, error) {
+	switch agent {
+	case "claude":
+		c, loc, ok := readClaudeCredential()
+		if !ok {
+			path := claudeCredentialsPath()
+			return func() error {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+				return nil
+			}, nil
+		}
+		return func() error { return saveClaudeCredential(loc, c) }, nil
+	case "codex":
+		path := codexAuthFile(homeDir())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return nil, err
+			}
+			return func() error {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+				return nil
+			}, nil
+		}
+		return func() error { return os.WriteFile(path, b, 0o600) }, nil
+	}
+	return nil, fmt.Errorf("unknown agent %q", agent)
+}
+
+// verifyAgentLogin checks that the agent now reports the wanted account. Claude
+// Code is asked with its own `auth status`. Codex has no status command used
+// here, so its auth file is read back instead: this confirms what was written,
+// not what Codex itself reports. When Claude Code is not installed nothing can
+// be asked, and the switch is not verified.
+func verifyAgentLogin(agent, user string) error {
+	switch agent {
+	case "claude":
+		if claudeExecutable() == "" {
+			return nil
+		}
+		forgetClaudeStatus()
+		who, _, signedOut := claudeIdentity()
+		if signedOut || !strings.EqualFold(who, user) {
+			return fmt.Errorf("Claude Code reports it is signed in as %q, not %s", who, user)
+		}
+	case "codex":
+		cur, ok := currentLogin(agent)
+		if !ok || !strings.EqualFold(cur.User, user) {
+			return fmt.Errorf("Codex's login file does not hold %s after the switch", user)
+		}
+	}
+	return nil
+}
+
+func homeDir() string {
+	home, _ := os.UserHomeDir()
+	return home
 }
 
 // ForgetLogin removes a remembered account. The account the agent is signed in
@@ -414,8 +530,11 @@ func claudeCredentialsPath() string {
 }
 
 // writeCodexLogin replaces the tokens (and last_refresh) of Codex's auth.json.
-// Other keys are left as Codex wrote them; an API-key login is switched to
-// ChatGPT mode, since a ChatGPT login is the only kind this replaces.
+// Other keys are left as Codex wrote them. auth_mode is the one exception: Codex
+// reads it to decide which credential to use, so a file left in "apikey" mode
+// would ignore the ChatGPT tokens written here. It is therefore switched to
+// "chatgpt" in that case, and kept as it is otherwise. OPENAI_API_KEY, if
+// present, is left alone.
 func writeCodexLogin(creds json.RawMessage) error {
 	var in struct {
 		Tokens      map[string]any `json:"tokens"`
@@ -504,12 +623,10 @@ func AddLogin(agent string) (string, error) {
 // login, refreshing it through Anthropic when it is about to expire. The
 // rotated pair is saved back to that login's record.
 func storedClaudeToken(ctx context.Context, user string) (string, error) {
-	var creds json.RawMessage
-	for _, l := range loadLogins().Logins {
-		if l.Agent == "claude" && strings.EqualFold(l.User, user) {
-			creds = l.Creds
-		}
-	}
+	mu := loginRefreshLock("claude", user)
+	mu.Lock()
+	defer mu.Unlock()
+	creds := storedCreds("claude", user)
 	if creds == nil {
 		return "", fmt.Errorf("Claude account %s is no longer remembered", user)
 	}
@@ -600,12 +717,10 @@ func postRefresh(ctx context.Context, url string, body []byte) (oauthRefresh, er
 // remembered Codex login, refreshing it when needed and saving the rotated
 // tokens back to that login's record.
 func storedCodexToken(ctx context.Context, user string) (string, string, error) {
-	var creds json.RawMessage
-	for _, l := range loadLogins().Logins {
-		if l.Agent == "codex" && strings.EqualFold(l.User, user) {
-			creds = l.Creds
-		}
-	}
+	mu := loginRefreshLock("codex", user)
+	mu.Lock()
+	defer mu.Unlock()
+	creds := storedCreds("codex", user)
 	if creds == nil {
 		return "", "", fmt.Errorf("ChatGPT account %s is no longer remembered", user)
 	}

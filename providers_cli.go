@@ -28,6 +28,7 @@ const providerUsage = `usage:
   magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.<Name>
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name|"">  set a custom vendor's icon: a picture file or a built-in name; "" restores the default
+  magpie provider fallback <id> [p/m …]   show or set the fallback list: when the provider is out of quota, rate limited or down, try these in order
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
@@ -216,6 +217,41 @@ func providerCmd(args []string) error {
 			fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(icon))
 		}
 		return nil
+	case "fallback":
+		if len(rest) < 1 {
+			return fmt.Errorf("magpie provider fallback <id> [provider/model …]   e.g. magpie provider fallback relay openai/gpt-5.5 \"\"")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if len(rest) == 1 {
+			if len(p.Fallback) == 0 {
+				fmt.Println(muted.Render(p.Name + " has no fallback; magpie provider fallback " + p.ID + " provider/model …"))
+				return nil
+			}
+			for i, f := range p.Fallback {
+				fmt.Printf("%d. %s\n", i+1, f)
+			}
+			return nil
+		}
+		var list []string
+		for _, a := range rest[1:] {
+			list = append(list, strings.Split(a, ",")...)
+		}
+		if err := provider.SetFallback(p.ID, list); err != nil {
+			return err
+		}
+		p, err = provider.Find(p.ID)
+		if err != nil {
+			return err
+		}
+		if len(p.Fallback) == 0 {
+			fmt.Println(green.Render("✓"), p.Name, "has no fallback now")
+			return nil
+		}
+		fmt.Println(green.Render("✓"), p.Name, "falls back to", muted.Render(strings.Join(p.Fallback, " → ")))
+		return nil
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -374,6 +410,9 @@ func showProvider(p provider.Provider) error {
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
+	if len(p.Fallback) > 0 {
+		kv("fallback", strings.Join(p.Fallback, " → "))
+	}
 	if p.Preset == "" && p.Account == nil {
 		kv("icon", p.Icon)
 		names := make([]string, 0, len(p.Headers))

@@ -34,19 +34,28 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 		return out
 	}
 	c := &loginUsageCache
+	// The lock covers the cache only: the vendor calls below run without it,
+	// so a slow account never holds up other readers.
 	c.Lock()
-	defer c.Unlock()
 	if c.data == nil {
 		c.data, c.at = map[string]map[string]SubscriptionQuota{}, map[string]time.Time{}
 	}
 	if time.Since(c.at[name]) < loginUsageTTL {
-		return copyQuotas(c.data[name])
+		out := copyQuotas(c.data[name])
+		c.Unlock()
+		return out
 	}
-	known := c.data[name]
+	known := copyQuotas(c.data[name])
+	c.Unlock()
+
 	res := map[string]SubscriptionQuota{}
 	for _, l := range listLogins(name) {
 		key := strings.ToLower(l.User)
-		q, err := usageFetch(ctx, l)
+		// each account gets its own time limit, so one slow account cannot
+		// use up the time of the others
+		actx, cancel := context.WithTimeout(ctx, subscriptionTimeout)
+		q, err := usageFetch(actx, l)
+		cancel()
 		if err != nil {
 			if prev, ok := known[key]; ok {
 				res[key] = prev
@@ -56,7 +65,10 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 		}
 		res[key] = q
 	}
+
+	c.Lock()
 	c.data[name], c.at[name] = res, time.Now()
+	c.Unlock()
 	return copyQuotas(res)
 }
 

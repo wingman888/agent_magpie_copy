@@ -217,7 +217,9 @@ func TestClaudeSwitchKeepsOtherKeysAndLatestTokens(t *testing.T) {
 	dir := filepath.Join(home, ".claude")
 	who := filepath.Join(home, "who.json")
 	script := filepath.Join(home, "claude")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat "+who+"\n"), 0o755); err != nil {
+	// the stub signs in as whoever the credential file names, as Claude Code does
+	stub := "#!/bin/sh\nif grep -q '\"A1\"' " + filepath.Join(dir, ".credentials.json") + "; then echo '{\"loggedIn\":true,\"email\":\"a@x.com\",\"subscriptionType\":\"max\"}'; else cat " + who + "; fi\n"
+	if err := os.WriteFile(script, []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	claudeExecutable = func() string { return script }

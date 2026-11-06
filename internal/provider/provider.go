@@ -70,6 +70,10 @@ type Provider struct {
 	KeyName     string     `json:"keyName,omitempty"`
 	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
 	Keys        []KeyEntry `json:"keys,omitempty"`
+
+	// Fallback lists "provider/model" targets tried, in order, once this
+	// provider's candidates have failed with a quota, rate or outage error.
+	Fallback []string `json:"fallback,omitempty"`
 }
 
 type file struct {
@@ -128,6 +132,7 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -191,7 +196,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -276,6 +281,8 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = joinCatalogs(p.Catalog)
 	p.Headers = cleanHeaders(p.Headers)
 	p = normalizeKeys(p)
 	if pr := Preset(p.Preset); pr != nil {

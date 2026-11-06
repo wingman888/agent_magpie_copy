@@ -20,12 +20,7 @@ const manyModels = 24
 // for an account, whatever the agent's own sign-in can see).
 func (p Provider) Available() []catalog.Model {
 	signedIn := p.Account != nil && p.Account.models != nil
-	var known []catalog.Model
-	if signedIn {
-		known = p.Account.models()
-	} else {
-		known = catalog.Provider(p.Catalog)
-	}
+	known := p.known()
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
 	}
@@ -39,6 +34,16 @@ func (p Provider) Available() []catalog.Model {
 		}
 	}
 	return out
+}
+
+// known is what the catalogs (or, for an account, the agent's sign-in) say
+// about the provider's models, before the vendor's own list is layered over.
+// A custom provider may name several catalogs; they are searched in order.
+func (p Provider) known() []catalog.Model {
+	if p.Account != nil && p.Account.models != nil {
+		return p.Account.models()
+	}
+	return catalogModels(p.Catalog)
 }
 
 // Fetched reports when the vendor's own list was last fetched.
@@ -70,14 +75,16 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
-	byID := make(map[string]catalog.Model, len(avail))
-	for _, m := range avail {
-		byID[m.ID] = m
-	}
+	known := p.known()
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
-			if m, ok := byID[id]; ok {
+			m, ok := matchModel(avail, id)
+			if !ok {
+				m, ok = matchModel(known, id)
+			}
+			if ok {
+				m.ID = id
 				out = append(out, m)
 			} else {
 				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
@@ -102,10 +109,8 @@ func (p Provider) Exposed() []catalog.Model {
 // plus the vendor's own list — so a model released after this binary was
 // built is handled without a code change.
 func (p Provider) RejectsTemperature(model string) bool {
-	for _, m := range p.Available() {
-		if m.ID == model && m.Temperature != nil {
-			return !*m.Temperature
-		}
+	if m, ok := matchModel(p.Available(), model); ok && m.Temperature != nil {
+		return !*m.Temperature
 	}
 	return false
 }
@@ -180,11 +185,8 @@ func Resolve(id string) (Provider, string, bool) {
 		if !p.Ready() {
 			continue
 		}
-		for _, m := range p.Available() {
-			if m.ID == id {
-				found = append(found, p)
-				break
-			}
+		if _, ok := matchModel(p.Available(), id); ok {
+			found = append(found, p)
 		}
 	}
 	if len(found) == 1 {
