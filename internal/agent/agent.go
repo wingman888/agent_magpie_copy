@@ -29,9 +29,6 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
-	// Alias, if set, is a display name the field also answers to (for
-	// `dial gemini auth …` where the key is "provider" and the label "auth").
-	Alias string
 }
 
 // Agent is one supported coding agent.
@@ -81,16 +78,10 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key. A key that matches no field is tried
-// against the fields' Alias (display names) as a fallback.
+// Field looks a field up by key.
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
-			return &a.Fields[i]
-		}
-	}
-	for i := range a.Fields {
-		if a.Fields[i].Alias != "" && a.Fields[i].Alias == key {
 			return &a.Fields[i]
 		}
 	}
