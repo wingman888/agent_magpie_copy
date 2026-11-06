@@ -145,15 +145,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
+	mux.HandleFunc("GET /v1beta/models", s.geminiList)
+	mux.HandleFunc("POST /v1beta/models/{model...}", s.geminiModels)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses and /v1/messages")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and the Gemini API under /v1beta/models/{model}:generateContent")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
+	apis := []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"}
+	apis = append(apis, geminiAPIs...)
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"}})
+		"apis": apis})
 }
 
 func modelObject(e provider.Entry) map[string]any {
