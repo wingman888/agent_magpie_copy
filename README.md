@@ -301,6 +301,30 @@ magpie rm work
 magpie sync                     # refresh the models.dev catalog and every live model list
 ```
 
+### Moving to another machine
+
+`magpie backup` writes everything magpie is set up with into one file:
+providers and their keys, provider icons, settings, saved profiles and each
+agent's current model. The file is encrypted with a passphrase you choose
+(AES-256-GCM, key derived with PBKDF2-SHA256); it is written readable only by
+you. Keep the passphrase: without it the file cannot be opened.
+
+```sh
+magpie backup                          # ./magpie.magpie-backup, asks for a passphrase twice
+magpie backup --no-keys ~/share.magpie-backup   # no API keys or credential headers, to share
+echo "passphrase" | magpie backup ~/b.magpie-backup   # from a script: first line of stdin
+
+magpie restore magpie.magpie-backup    # on the new machine: asks for the passphrase once
+magpie restore --no-agents b.magpie-backup     # providers, settings and profiles only
+```
+
+Restoring replaces providers with the same id, adds the others, and keeps this
+machine's own key for a provider whose backup has no key. Providers left
+without a key are listed with the `magpie provider key <id>` command to add
+one. Agent models are set only for agents installed on this machine; the
+others are listed as skipped. Subscriptions are never in a backup: sign in
+again on the new machine (`magpie accounts`).
+
 In the app, click any value to open a filtered list; type to search or to
 enter something that is not listed; `esc` closes the panel. Profiles are the
 chips at the bottom: click to apply, `×` to delete, *+ save current* to add.
@@ -324,36 +348,6 @@ Keys in the terminal version:
 
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
-
-### Backup and restore
-
-Move your setup to another machine in one encrypted file:
-
-```sh
-magpie backup                       # asks for a passphrase twice, writes magpie.magpie-backup
-magpie backup --no-keys ~/b.magpie-backup   # no API keys or credential headers inside
-magpie restore magpie.magpie-backup         # asks for the passphrase once
-magpie restore --no-agents b.magpie-backup  # providers, settings, profiles only
-echo "pw" | magpie backup           # passphrase from stdin (scripts)
-echo "pw" | magpie restore magpie.magpie-backup
-```
-
-A backup holds your providers with their keys (including several keys per
-provider and custom request headers), the icons you picked, settings, every
-saved profile and each agent's current model. It is encrypted with
-AES-256-GCM under a key derived from the passphrase with PBKDF2-SHA256, and
-the file is readable only by you. If you lose the passphrase, the file cannot
-be opened.
-
-Restoring replaces providers with the same id and adds the rest; a provider
-that comes without keys keeps this machine's own keys. Settings are replaced,
-and profiles with the same name are overwritten while others are kept. Agent
-models are set only for agents installed here; anything skipped is listed
-with the reason. Providers that end up without a key are listed so you can
-run `magpie provider key <id>`.
-
-Subscription logins (Claude Code or Codex signed in on the agent) are never
-part of a backup. Sign in again on the new machine with `magpie accounts add`.
 
 ## Files
 
