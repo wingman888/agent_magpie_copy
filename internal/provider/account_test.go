@@ -226,11 +226,21 @@ func TestStoredPicksOnlyModels(t *testing.T) {
 func TestOwnProviderWinsOverAccount(t *testing.T) {
 	setupEnv(t)
 	writeCodex(t, "chatgpt", map[string]any{"email": "dev@example.com"})
-	if err := Save(Provider{ID: "codex", Name: "My Codex", Chat: "https://relay.example.com/v1", Key: "sk-own"}); err != nil {
-		t.Fatal(err)
-	}
+	// The user's own addressed provider is written straight into the config, as
+	// the user would have left it; Save is not used to create it.
+	writeFile(t, Path(), `{"providers":[{"id":"codex","name":"My Codex","chat":"https://relay.example.com/v1","key":"sk-own"}]}`)
 	if p := findAccount(Accounts(), "codex"); p != nil {
 		t.Fatalf("user's own codex provider should win, got account %+v", p)
+	}
+	p, err := Find("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Account != nil || p.Name != "My Codex" || p.Chat != "https://relay.example.com/v1" || p.Key != "sk-own" {
+		t.Errorf("Find should return the user's own record, got %+v", p)
+	}
+	if n := len(All()); n != 1 || findAccount(All(), "codex").Chat != "https://relay.example.com/v1" {
+		t.Errorf("All should hold only the own record, got %+v", All())
 	}
 }
 

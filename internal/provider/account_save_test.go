@@ -11,9 +11,7 @@ func TestSaveUnderOwnProviderEditsItAsUsual(t *testing.T) {
 	setupEnv(t)
 	isolateCache(t)
 	writeCodex(t, "chatgpt", map[string]any{"email": "dev@example.com"})
-	if err := store(file{Providers: []Provider{{ID: "codex", Chat: "https://own.example.com/v1", Key: "sk-own"}}}); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, Path(), `{"providers":[{"id":"codex","name":"codex","chat":"https://own.example.com/v1","key":"sk-own"}]}`)
 	if err := Save(Provider{ID: "codex", Chat: "https://other.example.com/v1", Key: "sk-other"}); err != nil {
 		t.Fatal(err)
 	}
