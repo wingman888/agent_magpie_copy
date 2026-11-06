@@ -628,7 +628,7 @@ func (r *subscriptionRun) abort() {
 
 func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	if b == nil {
-		// a run not created by start has no bridge to leave; still drop its files
+		// a run built without a bridge (tests, or a run that never got one) has nothing registered
 		_ = os.RemoveAll(run.tmp)
 		return
 	}
