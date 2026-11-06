@@ -31,13 +31,9 @@ func (p Provider) Test(ctx context.Context) []Result {
 	} else if ms := p.Available(); len(ms) > 0 {
 		model = ms[0].ID
 	}
-	if p.Account != nil {
-		return p.testAccount(ctx, model)
-	}
 	var out []Result
 	for _, proto := range p.Speaks() {
 		var url, body string
-		headers := map[string]string{"Authorization": "Bearer " + p.Key}
 		switch proto {
 		case Chat:
 			url = p.Chat + "/chat/completions"
@@ -48,64 +44,10 @@ func (p Provider) Test(ctx context.Context) []Result {
 		case Anthropic:
 			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
-			headers = AuthHeaders(p, Anthropic)
 		}
-		out = append(out, probe(ctx, proto, url, body, model, headers))
+		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
 	}
 	return out
-}
-
-// testAccount probes an agent account the way its agent calls the backend: the
-// body follows the backend's rules (Prepare) and the request is authorised by
-// the agent's own sign-in (Sign). Codex speaks Responses, Copilot Chat.
-func (p Provider) testAccount(ctx context.Context, model string) []Result {
-	proto := Responses
-	body := fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
-	if p.Account.Agent == "copilot" {
-		proto = Chat
-		body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
-	}
-	return []Result{probeSigned(ctx, p, proto, p.Prepare([]byte(body)), model)}
-}
-
-// probeSigned sends one request whose URL and credentials come from the
-// provider's Sign, the way a proxied request would be sent.
-func probeSigned(ctx context.Context, p Provider, proto Protocol, body []byte, model string) Result {
-	r := Result{Protocol: proto, Model: model}
-	if model == "" {
-		r.Error = "no model to try: expose one, or refresh the model list"
-		return r
-	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	// Sign replaces the placeholder URL with the agent's endpoint.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://account.invalid/", bytes.NewReader(body))
-	if err != nil {
-		r.Error = err.Error()
-		return r
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if err := p.Sign(ctx, req, proto, body); err != nil {
-		r.Error = err.Error()
-		return r
-	}
-	url := req.URL.String()
-	start := time.Now()
-	res, err := http.DefaultClient.Do(req)
-	r.Millis = time.Since(start).Milliseconds()
-	if err != nil {
-		r.Error = strings.TrimPrefix(err.Error(), "Post \""+url+"\": ")
-		return r
-	}
-	defer res.Body.Close()
-	r.Status = res.StatusCode
-	if res.StatusCode >= 200 && res.StatusCode < 300 {
-		r.OK = true
-		return r
-	}
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-	r.Error = APIError(b, res.Status)
-	return r
 }
 
 // AuthHeaders is how a request to the vendor proves who it is. Anthropic's
@@ -123,7 +65,7 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
-func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string) Result {
+func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -131,15 +73,19 @@ func probe(ctx context.Context, proto Protocol, url, body, model string, headers
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		r.Error = err.Error()
 		return r
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	for k, v := range headers {
-		req.Header.Set(k, v)
+	if p.IsOpenCode() {
+		req.Header.Set("x-opencode-session", "magpie-test-"+randomUUID())
+	}
+	if err := p.Sign(ctx, req, proto, body); err != nil {
+		r.Error = err.Error()
+		return r
 	}
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
