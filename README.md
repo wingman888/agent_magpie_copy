@@ -287,10 +287,103 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
+### Import links
+
+A link can add a provider in one click. Nothing is saved until you confirm:
+magpie shows the name, the hosts the requests and key will go to, and the
+models, then asks first.
+
+```
+magpie://import?preset=deepseek&key=sk-…
+magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…
+```
+
+`magpie:import?…`, `magpie:///import?…` and any capitalisation of the scheme
+are accepted too. Other schemes and other actions are refused. Every value is
+URL-encoded.
+
+| Parameter            | Meaning                                                                  |
+| -------------------- | ------------------------------------------------------------------------ |
+| `preset`             | a preset id; its endpoints are used                                      |
+| `region`             | the region of a preset that has several; an unknown region is an error   |
+| `name`               | display name; required without `preset`; overrides the preset's name     |
+| `id`                 | provider id; derived from the name (or the preset id) when omitted       |
+| `key`                | API key; without it, fill it in later                                    |
+| `chat` / `responses` / `anthropic` | base URL per protocol (Anthropic: the root, without `/v1`) |
+| `models`             | comma-separated model ids (up to 200)                                    |
+| `catalog`            | a models.dev provider id, for model names and reasoning levels           |
+| `website` / `keys`   | the vendor's site / its key page; only `https` is kept, others are ignored |
+
+Without `preset` a `name` and at least one base URL are required. Base URLs
+must be `https`; plain `http` is allowed only for localhost, loopback, private
+addresses and `.local` names. A base URL may not carry credentials, a query or
+a fragment. A link that breaks any rule is refused as a whole.
+
+From the terminal:
+
+```sh
+magpie import 'magpie://import?preset=deepseek&key=sk-…'   # shows it, asks Add it? [y/N]
+magpie import -y '<link>'                                  # no question
+```
+
+If the id already exists, magpie says it will replace that provider. If the
+link had no key and the provider still has none, magpie tells you to run
+`magpie provider key <id> <key>`. A non-interactive terminal needs `-y`.
+
+Web pages and GitHub cannot reliably open custom schemes, so for a link you
+publish, use the same parameters after `https://usemagpie.ai/import#`:
+
+```
+https://usemagpie.ai/import#name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…
+```
+
+The parameters are in the fragment, so they are never sent to the server.
+
+### Claude Code model tiers
+
+Claude Code has four model tiers: `opus`, `sonnet`, `haiku` and `fable`.
+Each can name its own model; a tier you do not set follows the main model.
+
+```sh
+magpie claude deepseek/pro          # main model; every tier follows it
+magpie claude haiku deepseek/flash  # haiku alone changes; it is also the small fast model
+magpie claude haiku ""              # haiku follows the main model again
+```
+
+Once any tier is set separately, subagents are no longer forced onto one
+model. If every tier equals the main model, the setting is back to uniform.
+Setting `magpie claude <model>` with a bare model changes the main model.
+Clearing the main model restores Claude Code as it was, and removes these
+tier settings but keeps your other settings (such as the theme).
+
+### Settings file
+
+`~/.config/magpie/settings.json` holds the app preferences:
+
+```json
+{ "theme": "system", "lang": "system", "tray": "panel", "proxy": "" }
+```
+
+- `tray`: what clicking the tray icon does: `panel` (default) or `window`.
+- `proxy`: the proxy magpie uses for its own requests, including the gateway's
+  calls to providers and the model-list and usage requests.
+  - empty (default): follow the environment, then the system proxy;
+  - `direct`: never use a proxy;
+  - an address: `http://host:port`, `https://…`, `socks5://…`, `socks5h://…`,
+    or a bare `host:port` (taken as HTTP). Example: `socks5://127.0.0.1:1080`.
+
+  Order when empty: `HTTPS_PROXY` / `HTTP_PROXY` and `NO_PROXY` from the
+  environment, then the system proxy (macOS network settings, Windows Internet
+  Options, both with their exception lists). On Linux only the environment
+  applies. Loopback addresses (`localhost`, `127.0.0.0/8`, `::1`) never use a proxy.
+  Apps started from the Dock or Start menu do not see your shell's variables,
+  so set `proxy` there.
+
 ## Files
 
 - `~/.config/magpie/profiles.json` — saved profiles
 - `~/.config/magpie/providers.json` — your providers, keys included (0600)
+- `~/.config/magpie/settings.json` — theme, language, tray click, proxy
 - `~/.config/magpie/stash.json` — values magpie replaced, restored on switch-back
 - `~/.cache/magpie/models.json` — models.dev catalog (OpenCode's cache at
   `~/.cache/opencode/models.json` is used when present)

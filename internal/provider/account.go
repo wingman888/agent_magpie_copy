@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // Account is the signed-in agent behind a provider.
@@ -430,7 +431,7 @@ func claudeModels(ctx context.Context) ([]catalog.Model, error) {
 		req.Header.Set("anthropic-beta", claudeBetaHeader(""))
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", claudeUserAgent())
-		res, err := http.DefaultClient.Do(req)
+		res, err := netproxy.Client().Do(req)
 		if err != nil {
 			return nil, errors.New("Claude model list: " + err.Error())
 		}
@@ -507,7 +508,7 @@ func claudeToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := netproxy.Client().Do(req)
 	if err != nil {
 		return "", errors.New("Claude Code token refresh: " + err.Error())
 	}
@@ -671,7 +672,7 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 		return "", "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := netproxy.Client().Do(req)
 	if err != nil {
 		return "", "", errors.New("Codex token refresh: " + err.Error())
 	}
@@ -860,7 +861,7 @@ func copilotToken(ctx context.Context, github string) (copilotSession, error) {
 	for k, v := range copilotHeaders {
 		req.Header.Set(k, v)
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := netproxy.Client().Do(req)
 	if err != nil {
 		return copilotSession{}, errors.New("Copilot sign-in: " + err.Error())
 	}
@@ -895,7 +896,7 @@ func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) 
 	for k, v := range copilotHeaders {
 		req.Header.Set(k, v)
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := netproxy.Client().Do(req)
 	if err != nil {
 		return nil, err
 	}
