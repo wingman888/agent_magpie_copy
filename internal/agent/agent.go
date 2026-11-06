@@ -1,4 +1,4 @@
-// Package agent describes every coding agent magpie can drive: where its config
+// Package agent describes every coding agent dial can drive: where its config
 // lives, which fields matter (model, effort, …) and which values to offer.
 package agent
 
@@ -21,7 +21,7 @@ type Option struct {
 }
 
 // Field is one tunable setting of an agent. Set with an empty value puts
-// the field back to the agent's own default: anything magpie wired in (the
+// the field back to the agent's own default: anything dial wired in (the
 // gateway as a provider, its model catalog) comes out and the key is removed.
 type Field struct {
 	Key     string
@@ -29,10 +29,9 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
-	// Extra marks a field that refines another one (Claude Code's per-tier
-	// models): listings hide it while it is empty, and a bare value on the
-	// command line never selects it, so the main field keeps that meaning.
-	Extra bool
+	// Alias, if set, is a display name the field also answers to (for
+	// `dial gemini auth …` where the key is "provider" and the label "auth").
+	Alias string
 }
 
 // Agent is one supported coding agent.
@@ -43,7 +42,7 @@ type Agent struct {
 	Aliases []string
 	Bin     string // executable name, used for detection
 	Dir     string // config directory, used for detection
-	Path    string // config file magpie edits
+	Path    string // config file dial edits
 	Fields  []Field
 	// Notice, if set, is advice worth showing after a change: agents that
 	// read their config once at start-up need a restart to see it.
@@ -82,7 +81,8 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key.
+// Field looks a field up by key. A key that matches no field is tried
+// against the fields' Alias (display names) as a fallback.
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
@@ -90,7 +90,7 @@ func (a *Agent) Field(key string) *Field {
 		}
 	}
 	for i := range a.Fields {
-		if a.Fields[i].Label == key { // `magpie gemini auth …`: the label as shown
+		if a.Fields[i].Alias != "" && a.Fields[i].Alias == key {
 			return &a.Fields[i]
 		}
 	}
