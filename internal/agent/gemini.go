@@ -72,7 +72,7 @@ func gemini(home string) *Agent {
 			kv, kok := edit.GetEnvFile(envPath, "GEMINI_API_KEY")
 			av, aok := edit.GetJSON(path, "security.auth.selectedType")
 			mv, mok := edit.GetJSON(path, "model.name")
-			stashOriginals(map[string]original{
+			gemStashOriginals(map[string]gemOriginal{
 				gemStashBase:  {bv, bok},
 				gemStashKey:   {kv, kok},
 				gemStashAuth:  {av, aok},
@@ -96,10 +96,10 @@ func gemini(home string) *Agent {
 	// The stash is read first and cleared last, after every write has succeeded,
 	// so a failed write leaves the originals in place to retry.
 	unroute := func() error {
-		bv, bok := peek(gemStashBase)
-		kv, kok := peek(gemStashKey)
-		av, aok := peek(gemStashAuth)
-		mv, mok := peek(gemStashModel)
+		bv, bok := gemPeek(gemStashBase)
+		kv, kok := gemPeek(gemStashKey)
+		av, aok := gemPeek(gemStashAuth)
+		mv, mok := gemPeek(gemStashModel)
 
 		var envSet []edit.KV
 		var envDel []string

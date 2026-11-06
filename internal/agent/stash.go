@@ -13,10 +13,10 @@ import (
 
 func stashPath() string { return filepath.Join(filepath.Dir(provider.Path()), "stash.json") }
 
-// stashSet marks a key whose original setting existed, even when its value
+// gemStashSet marks a key whose original setting existed, even when its value
 // was empty. stash() never writes empty values, so claude and codex entries
 // never carry it.
-const stashSet = ".set"
+const gemStashSet = ".set"
 
 func stashLoad() map[string]string {
 	out := map[string]string{}
@@ -26,7 +26,7 @@ func stashLoad() map[string]string {
 	return out
 }
 
-func stashWrite(m map[string]string) {
+func gemStashWrite(m map[string]string) {
 	b, _ := json.MarshalIndent(m, "", "  ")
 	os.MkdirAll(filepath.Dir(stashPath()), 0o755)
 	os.WriteFile(stashPath(), b, 0o600)
@@ -46,33 +46,33 @@ func stash(kv map[string]string) {
 	os.WriteFile(stashPath(), b, 0o600)
 }
 
-// original is one setting as it was found: present says whether it existed,
+// gemOriginal is one setting as it was found: present says whether it existed,
 // so an empty value that was there is put back as empty, and an absent one
 // is removed.
-type original struct {
+type gemOriginal struct {
 	value   string
 	present bool
 }
 
-// stashOriginals records the originals exactly, replacing older entries for the same keys.
-func stashOriginals(kv map[string]original) {
+// gemStashOriginals records the originals exactly, replacing older entries for the same keys.
+func gemStashOriginals(kv map[string]gemOriginal) {
 	m := stashLoad()
 	for k, o := range kv {
 		delete(m, k)
-		delete(m, k+stashSet)
+		delete(m, k+gemStashSet)
 		if o.present {
 			m[k] = o.value
-			m[k+stashSet] = "1"
+			m[k+gemStashSet] = "1"
 		}
 	}
-	stashWrite(m)
+	gemStashWrite(m)
 }
 
-// peek reads a stashed original without removing it.
-func peek(key string) (string, bool) {
+// gemPeek reads a stashed original without removing it.
+func gemPeek(key string) (string, bool) {
 	m := stashLoad()
 	v, ok := m[key]
-	_, marked := m[key+stashSet]
+	_, marked := m[key+gemStashSet]
 	return v, marked || (ok && v != "")
 }
 
@@ -81,7 +81,7 @@ func forget(keys ...string) {
 	m := stashLoad()
 	for _, k := range keys {
 		delete(m, k)
-		delete(m, k+stashSet)
+		delete(m, k+gemStashSet)
 	}
 	b, _ := json.MarshalIndent(m, "", "  ")
 	os.WriteFile(stashPath(), b, 0o600)

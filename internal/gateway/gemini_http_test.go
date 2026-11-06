@@ -3,6 +3,8 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,9 +12,76 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
+// gemhttpFake is a self-contained upstream stub: it records what it got and
+// replies with a script. Copied here so this file does not depend on other
+// test files in the package.
+type gemhttpFake struct {
+	t     *testing.T
+	got   []byte
+	path  string
+	head  http.Header
+	reply string // SSE body
+	ctype string
+	code  int
+}
+
+func (f *gemhttpFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.got, _ = io.ReadAll(r.Body)
+	f.path, f.head = r.URL.Path, r.Header
+	ct := f.ctype
+	if ct == "" {
+		ct = "text/event-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	if f.code != 0 {
+		w.WriteHeader(f.code)
+	}
+	io.WriteString(w, f.reply)
+}
+
+func gemhttpSSE(lines ...string) string {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l + "\n\n")
+	}
+	return b.String()
+}
+
+// gemhttpSetup points dial's provider file at a temp dir and adds one provider
+// speaking only the given protocol, backed by the stub upstream.
+func gemhttpSetup(t *testing.T, proto provider.Protocol, f *gemhttpFake) *httptest.Server {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	up := httptest.NewServer(f)
+	t.Cleanup(up.Close)
+	p := provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}}
+	switch proto {
+	case provider.Chat:
+		p.Chat = up.URL + "/v1"
+	case provider.Responses:
+		p.Responses = up.URL + "/v1"
+	case provider.Anthropic:
+		p.Anthropic = up.URL
+	}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	return up
+}
+
+// gemhttpPost sends a POST through a fresh gateway.
+func gemhttpPost(t *testing.T, path, body string) (int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	New().Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
 // gemhttpReply is an upstream Chat stream with reasoning, text and a whole
 // tool call, ending in usage of 10 prompt, 5 completion of which 2 reasoning.
-var gemhttpReply = sse(
+var gemhttpReply = gemhttpSSE(
 	`data: {"id":"c1","model":"m1","choices":[{"delta":{"role":"assistant","reasoning_content":"hmm"}}]}`,
 	`data: {"id":"c1","choices":[{"delta":{"content":"Hi "}}]}`,
 	`data: {"id":"c1","choices":[{"delta":{"content":"there"}}]}`,
@@ -88,9 +157,9 @@ func gemhttpErr(t *testing.T, body string) map[string]any {
 }
 
 func TestGemHTTPStreamSSE(t *testing.T) {
-	f := &fake{t: t, reply: gemhttpReply}
-	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", gemhttpBody)
+	f := &gemhttpFake{t: t, reply: gemhttpReply}
+	gemhttpSetup(t, provider.Chat, f)
+	code, body := gemhttpPost(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", gemhttpBody)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
@@ -147,9 +216,9 @@ func TestGemHTTPStreamSSE(t *testing.T) {
 }
 
 func TestGemHTTPGenerateContentJSON(t *testing.T) {
-	f := &fake{t: t, reply: gemhttpReply}
-	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", gemhttpBody)
+	f := &gemhttpFake{t: t, reply: gemhttpReply}
+	gemhttpSetup(t, provider.Chat, f)
+	code, body := gemhttpPost(t, "/v1beta/models/fake/m1:generateContent", gemhttpBody)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
@@ -187,16 +256,16 @@ func TestGemHTTPGenerateContentJSON(t *testing.T) {
 }
 
 func TestGemHTTPStreamNeedsSSE(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t, reply: gemhttpReply})
-	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent", gemhttpBody)
+	gemhttpSetup(t, provider.Chat, &gemhttpFake{t: t, reply: gemhttpReply})
+	code, body := gemhttpPost(t, "/v1beta/models/fake/m1:streamGenerateContent", gemhttpBody)
 	if code != 400 || gemhttpErr(t, body)["status"] != "INVALID_ARGUMENT" {
 		t.Errorf("%d %s", code, body)
 	}
 }
 
 func TestGemHTTPUpstreamErrorIsGeminiShaped(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance"}}`})
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", gemhttpBody)
+	gemhttpSetup(t, provider.Chat, &gemhttpFake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance"}}`})
+	code, body := gemhttpPost(t, "/v1beta/models/fake/m1:generateContent", gemhttpBody)
 	e := gemhttpErr(t, body)
 	if code != 402 || e["code"] != float64(402) || !strings.Contains(e["message"].(string), "Insufficient Balance") {
 		t.Errorf("%d %s", code, body)
@@ -204,24 +273,24 @@ func TestGemHTTPUpstreamErrorIsGeminiShaped(t *testing.T) {
 }
 
 func TestGemHTTPUnknownModel404(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
-	code, body := post(t, "/v1beta/models/nope:generateContent", `{"contents":[]}`)
+	gemhttpSetup(t, provider.Chat, &gemhttpFake{t: t})
+	code, body := gemhttpPost(t, "/v1beta/models/nope:generateContent", `{"contents":[]}`)
 	e := gemhttpErr(t, body)
 	if code != 404 || e["code"] != float64(404) || e["status"] != "NOT_FOUND" || !strings.Contains(e["message"].(string), "nope") {
 		t.Errorf("%d %s", code, body)
 	}
-	code, body = post(t, "/v1beta/models/nope:countTokens", `{"contents":[]}`)
+	code, body = gemhttpPost(t, "/v1beta/models/nope:countTokens", `{"contents":[]}`)
 	if code != 404 || gemhttpErr(t, body)["status"] != "NOT_FOUND" {
 		t.Errorf("countTokens: %d %s", code, body)
 	}
 }
 
 func TestGemHTTPCountTokensBothShapes(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
+	gemhttpSetup(t, provider.Chat, &gemhttpFake{t: t})
 	direct := `{"contents":[{"role":"user","parts":[{"text":"abcdefghijkl"}]}]}`
 	wrapped := `{"generateContentRequest":{"model":"models/fake/m1","contents":[{"role":"user","parts":[{"text":"abcdefghijkl"}]}]}}`
 	for _, b := range []string{direct, wrapped} {
-		code, body := post(t, "/v1beta/models/fake/m1:countTokens", b)
+		code, body := gemhttpPost(t, "/v1beta/models/fake/m1:countTokens", b)
 		var out map[string]any
 		json.Unmarshal([]byte(body), &out)
 		if code != 200 || out["totalTokens"] != float64(3) {
@@ -231,7 +300,7 @@ func TestGemHTTPCountTokensBothShapes(t *testing.T) {
 }
 
 func TestGemHTTPModelList(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
+	gemhttpSetup(t, provider.Chat, &gemhttpFake{t: t})
 	code, body := gemhttpGet(t, "/v1beta/models")
 	var out struct {
 		Models []struct {
@@ -303,9 +372,9 @@ func TestGemHTTPColonInModelID(t *testing.T) {
 	}
 
 	// end to end: the id with colons reaches the upstream intact
-	f := &fake{t: t, reply: gemhttpReply}
-	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/a:b:generateContent", gemhttpBody)
+	f := &gemhttpFake{t: t, reply: gemhttpReply}
+	gemhttpSetup(t, provider.Chat, f)
+	code, body := gemhttpPost(t, "/v1beta/models/fake/a:b:generateContent", gemhttpBody)
 	if code != 200 || !bytes.Contains(f.got, []byte(`"model":"a:b"`)) {
 		t.Errorf("%d %s upstream %s", code, body, f.got)
 	}
@@ -314,13 +383,13 @@ func TestGemHTTPColonInModelID(t *testing.T) {
 // An unknown model is a 404 even when the body is empty or not JSON, so the
 // model is checked before the body is parsed.
 func TestGemHTTPUnknownModelBeforeBody(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
+	gemhttpSetup(t, provider.Chat, &gemhttpFake{t: t})
 	for _, body := range []string{"", "{not json"} {
 		for _, path := range []string{
 			"/v1beta/models/nope:generateContent",
 			"/v1beta/models/nope:streamGenerateContent?alt=sse",
 		} {
-			code, rb := post(t, path, body)
+			code, rb := gemhttpPost(t, path, body)
 			e := gemhttpErr(t, rb)
 			if code != 404 || e["code"] != float64(404) || e["status"] != "NOT_FOUND" {
 				t.Errorf("%s body %q: %d %s", path, body, code, rb)
