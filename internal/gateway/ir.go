@@ -74,9 +74,7 @@ type Request struct {
 	Stream     bool
 	Effort     string // low | medium | high | xhigh | max, when the client asked
 	Thinking   bool   // the client asked for visible reasoning
-	// HideThoughts drops reasoning from the reply (Gemini includeThoughts:false).
-	HideThoughts bool
-	Parallel     *bool // parallel tool calls allowed
+	Parallel   *bool  // parallel tool calls allowed
 }
 
 // EventKind is what a streamed event carries.
