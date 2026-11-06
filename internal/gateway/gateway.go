@@ -234,22 +234,22 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			writeError(w, from, 400, err.Error())
 			return
 		}
-		s.serve(w, r, from, body, modelOf(body), nil)
+		s.gwServe(w, r, from, body, modelOf(body), nil)
 	}
 }
 
-// serve answers one model call, whichever client API it came in. model is
+// gwServe answers one model call, whichever client API it came in. model is
 // the id the client asked for. pre is the request already parsed, for the
 // APIs that keep the model and the stream flag outside the body (Gemini);
 // it is nil for the others, which are parsed from body when translated.
-func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte, model string, pre *Request) {
+func (s *Server) gwServe(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte, model string, pre *Request) {
 	start := time.Now()
 	call := Call{Time: start, From: from, Model: model, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
 	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		s.record(call)
-		writeError(w, from, 404, unknownModel(call.Model))
+		writeError(w, from, 404, gwUnknownModel(call.Model))
 		return
 	}
 	call.Provider = p.ID
@@ -264,7 +264,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		call.To = to[0]
 		if pre != nil {
-			call.Status, call.Error = s.relay(w, r, p, from, to[0], model, pre, &call.Usage)
+			call.Status, call.Error = s.gwRelay(w, r, p, from, to[0], model, pre, &call.Usage)
 		} else {
 			call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 		}
@@ -276,8 +276,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
-// unknownModel is the message for an id dial cannot route.
-func unknownModel(id string) string {
+// gwUnknownModel is the message for an id dial cannot route.
+func gwUnknownModel(id string) string {
 	msg := fmt.Sprintf("dial knows no model %q", id)
 	if ids := provider.IDs(); len(ids) > 0 {
 		msg += "; it has " + strings.Join(ids, ", ")
@@ -365,12 +365,12 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
 	}
-	return s.relay(w, r, p, from, to, model, req, u)
+	return s.gwRelay(w, r, p, from, to, model, req, u)
 }
 
-// relay is translate for a request already parsed (Gemini takes the model
+// gwRelay is translate for a request already parsed (Gemini takes the model
 // and stream flag from the URL, so it cannot go through parse).
-func (s *Server) relay(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, req *Request, u *Usage) (int, string) {
+func (s *Server) gwRelay(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, req *Request, u *Usage) (int, string) {
 	stream := req.Stream
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)

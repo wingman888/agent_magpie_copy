@@ -51,7 +51,7 @@ func (s *Server) gemini(w http.ResponseWriter, r *http.Request) {
 // geminiGenerate serves generateContent and streamGenerateContent.
 func (s *Server) geminiGenerate(w http.ResponseWriter, r *http.Request, model string, stream bool) {
 	if _, _, ok := provider.Resolve(model); !ok {
-		writeGeminiError(w, 404, unknownModel(model))
+		writeGeminiError(w, 404, gwUnknownModel(model))
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
@@ -64,14 +64,14 @@ func (s *Server) geminiGenerate(w http.ResponseWriter, r *http.Request, model st
 		writeGeminiError(w, 400, err.Error())
 		return
 	}
-	s.serve(w, r, provider.Gemini, body, model, req)
+	s.gwServe(w, r, provider.Gemini, body, model, req)
 }
 
 // geminiCount answers countTokens. The count is a rough estimate made here;
 // no upstream is asked. The model must still exist.
 func (s *Server) geminiCount(w http.ResponseWriter, r *http.Request, model string) {
 	if _, _, ok := provider.Resolve(model); !ok {
-		writeGeminiError(w, 404, unknownModel(model))
+		writeGeminiError(w, 404, gwUnknownModel(model))
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
@@ -119,5 +119,5 @@ func (s *Server) geminiModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeGeminiError(w, 404, unknownModel(id))
+	writeGeminiError(w, 404, gwUnknownModel(id))
 }
