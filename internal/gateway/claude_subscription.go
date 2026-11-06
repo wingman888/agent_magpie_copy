@@ -577,15 +577,38 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 
 	if stream {
 		enc := encoder(from, newSSEWriter(w), req.Model)
+		// Nothing is written until the first non-error event, so a run that
+		// fails before producing anything can still be answered with a
+		// retryable 502 instead of a 200 stream carrying only the error.
 		var failed string
-		for ev := range events {
-			if ev.Kind == KError {
-				failed = ev.Text
-			}
+		var held []Event
+		started := false
+		emit := func(ev Event) {
 			if ev.Kind == KStart || ev.Kind == KUsage {
 				usage.add(ev.Usage)
 			}
 			enc.event(ev)
+		}
+		for ev := range events {
+			if ev.Kind == KError {
+				failed = ev.Text
+			}
+			if started {
+				emit(ev)
+				continue
+			}
+			held = append(held, ev)
+			if ev.Kind != KError {
+				started = true
+				for _, h := range held {
+					emit(h)
+				}
+				held = nil
+			}
+		}
+		if !started && failed != "" {
+			run.abort()
+			return writeError(w, from, 502, "Claude Code: "+failed), failed
 		}
 		enc.finish()
 		return 200, failed
