@@ -3,6 +3,7 @@ package settings
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +26,58 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if filepath.Base(Path()) != "settings.json" {
 		t.Fatal(Path())
+	}
+}
+
+func TestProxySave(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := Save(Settings{Proxy: "  direct  "}); err != nil {
+		t.Fatal("direct rejected:", err)
+	}
+	if s := Load(); s.Proxy != "direct" {
+		t.Fatalf("direct not saved trimmed: %q", s.Proxy)
+	}
+	if err := Save(Settings{}); err != nil {
+		t.Fatal("empty rejected:", err)
+	}
+	if err := Save(Settings{Proxy: "127.0.0.1:7890"}); err != nil {
+		t.Fatal("bare host:port rejected:", err)
+	}
+	if s := Load(); s.Proxy != "127.0.0.1:7890" {
+		t.Fatalf("bare host:port not saved: %q", s.Proxy)
+	}
+	for _, v := range []string{"http://127.0.0.1:7890", "https://p:443", "socks5://127.0.0.1:1080", "socks5h://h:1080"} {
+		if err := Save(Settings{Proxy: v}); err != nil {
+			t.Fatalf("%s rejected: %v", v, err)
+		}
+	}
+}
+
+func TestProxyRejected(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := Save(Settings{Theme: "dark", Proxy: "http://127.0.0.1:7890"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"ftp://x", "http://", "socks5://", "://bad", "::::", "just-a-word", "127.0.0.1", "http://h:99999"} {
+		err := Save(Settings{Theme: "light", Proxy: v})
+		if err == nil {
+			t.Fatalf("%q accepted", v)
+		}
+		if !strings.Contains(err.Error(), "http://127.0.0.1:7890") {
+			t.Fatalf("%q: error lacks example: %v", v, err)
+		}
+	}
+	after, err := os.ReadFile(Path())
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("file changed after rejected save: %v", err)
+	}
+	if s := Load(); s.Theme != "dark" || s.Proxy != "http://127.0.0.1:7890" {
+		t.Fatalf("settings changed: %+v", s)
 	}
 }
 

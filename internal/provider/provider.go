@@ -59,20 +59,6 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
-
-	// Headers are extra request headers sent to a custom provider, after the
-	// auth headers; names keep the user's case. Presets and accounts ignore them.
-	Headers map[string]string `json:"headers,omitempty"`
-
-	// Fallback is the ordered list of "provider/model" ids to try when this
-	// provider cannot answer. Kept on signed-in accounts too.
-	Fallback []string `json:"fallback,omitempty"`
-
-	// KeyName names the key in use; KeyProtocol limits it to one protocol
-	// ("" is any). Keys are the other keys, in queue order (see keys.go).
-	KeyName     string     `json:"keyName,omitempty"`
-	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
-	Keys        []KeyEntry `json:"keys,omitempty"`
 }
 
 type file struct {
@@ -115,7 +101,6 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
-	rememberLogins()
 	stored := load().Providers
 	picks := map[string]Provider{}
 	var out []Provider
@@ -132,7 +117,6 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -196,7 +180,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -205,38 +189,15 @@ func Save(p Provider) error {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
-	if p.Preset != "" {
-		p.Headers = nil // presets ignore custom headers
-	}
-	if !validKeyProtocol(p.KeyProtocol) {
-		return fmt.Errorf("key protocol must be chat, responses, anthropic or empty, not %q", p.KeyProtocol)
-	}
-	for _, k := range p.Keys {
-		if !validKeyProtocol(k.Protocol) {
-			return fmt.Errorf("key protocol must be chat, responses, anthropic or empty, not %q", k.Protocol)
-		}
-	}
-	if ref, ok := strings.CutPrefix(p.Icon, "file:"); ok && IconFile(ref) == "" {
-		return fmt.Errorf("icon %q is not a stored icon", p.Icon)
-	}
 	f := load()
-	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
-			p = carryKeys(f.Providers[i], p)
 			f.Providers[i] = p
-			replaced = true
-			break
+			return store(f)
 		}
 	}
-	if !replaced {
-		f.Providers = append(f.Providers, p)
-	}
-	if err := store(f); err != nil {
-		return err
-	}
-	pruneIcons(f.Providers)
-	return nil
+	f.Providers = append(f.Providers, p)
+	return store(f)
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -279,43 +240,10 @@ func keyOptional(p Provider) bool {
 	return strings.HasPrefix(h, "localhost") || strings.HasPrefix(h, "127.0.0.1") || strings.HasPrefix(h, "0.0.0.0")
 }
 
-// carryKeys keeps the keys a provider already has when it is saved again
-// without them: a save that leaves Keys out keeps the queue, and one that
-// keeps the same key in use keeps its name and protocol limit.
-func carryKeys(old, p Provider) Provider {
-	if p.Key == old.Key {
-		if p.KeyName == "" {
-			p.KeyName = old.KeyName
-		}
-		if p.KeyProtocol == "" {
-			p.KeyProtocol = old.KeyProtocol
-		}
-	}
-	if p.Keys == nil {
-		for _, k := range old.Keys {
-			if k.Key != p.Key {
-				p.Keys = append(p.Keys, k)
-			}
-		}
-	}
-	return p
-}
-
 func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	var keys []KeyEntry
-	for _, k := range p.Keys {
-		k.Key = strings.TrimSpace(k.Key)
-		k.Name = strings.TrimSpace(k.Name)
-		if k.Key == "" || k.Key == p.Key || keyTaken(Provider{Keys: keys}, k.Key) {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	p.Keys = keys
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -323,9 +251,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = cleanCatalogs(p.Catalog)
-	p.Headers = cleanHeaders(p.Headers, p.Preset == "")
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -376,13 +301,9 @@ func (p Provider) Base(proto Protocol) string {
 }
 
 // Speaks lists the protocols the vendor serves natively, preferred first.
-// A key limited to one protocol speaks only that one.
 func (p Provider) Speaks() []Protocol {
 	var out []Protocol
 	for _, pr := range Protocols {
-		if p.KeyProtocol != "" && pr != p.KeyProtocol {
-			continue
-		}
 		if p.Base(pr) != "" {
 			out = append(out, pr)
 		}
@@ -392,7 +313,7 @@ func (p Provider) Speaks() []Protocol {
 
 // Host is the vendor's API host, for display.
 func (p Provider) Host() string {
-	for _, pr := range p.Speaks() {
+	for _, pr := range Protocols {
 		if u := p.Base(pr); u != "" {
 			return HostOf(u)
 		}
