@@ -314,7 +314,8 @@ func TestGemrouteRestoresEmptyButPresent(t *testing.T) {
 	if err := gemrouteFieldSet(t, a, "model", "fake/m1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := gemrouteFieldSet(t, a, "model", "gemini-2.5-flash"); err != nil {
+	// "default" while routed restores the originals
+	if err := gemrouteFieldSet(t, a, "model", ""); err != nil {
 		t.Fatal(err)
 	}
 	s := gemrouteRead(t, dir)
