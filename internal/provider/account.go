@@ -56,8 +56,6 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
-	// the vendor's own headers go last, so they may override the defaults
-	catalog.SetRawHeaders(req.Header, p.CustomHeaders())
 	return nil
 }
 
