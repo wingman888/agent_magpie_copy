@@ -145,15 +145,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
+	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
+	mux.HandleFunc("POST /v1beta/models/{rest...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses and /v1/messages")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and the Gemini API under /v1beta/models/{model}:generateContent")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"}})
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages",
+			"/v1beta/models", "/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:streamGenerateContent", "/v1beta/models/{model}:countTokens"}})
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -169,6 +172,9 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"object": "list", "data": data, "has_more": false}
 	if len(data) > 0 {
 		out["first_id"], out["last_id"] = data[0]["id"], data[len(data)-1]["id"]
+	}
+	if u := provider.UnavailableAgents(); len(u) > 0 {
+		out["unavailable"] = u
 	}
 	writeJSON(w, 200, out)
 }
@@ -268,7 +274,16 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
+	url, auth := p.Base(to)+path, provider.AuthHeaders(p, to)
+	if p.Agent != "" {
+		// a signed-in agent's backend: its own address, token and body shape
+		up, err := provider.Route(ctx, p, to, path, body)
+		if err != nil {
+			return nil, err
+		}
+		url, body, auth = up.URL, up.Body, up.Header
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -283,10 +298,21 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	for k, v := range provider.AuthHeaders(p, to) {
+	for k, v := range auth {
 		req.Header.Set(k, v)
 	}
-	return s.client.Do(req)
+	res, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if msg, ok := provider.SessionRefused(p, res.StatusCode); ok {
+		// say how to fix it, in the error shape every client already reads
+		res.Body.Close()
+		b, _ := json.Marshal(map[string]any{"error": map[string]any{"message": msg}})
+		res.Body = io.NopCloser(bytes.NewReader(b))
+		res.Header = http.Header{"Content-Type": {"application/json"}}
+	}
+	return res, nil
 }
 
 // passthrough relays a request the provider understands as-is, with the
@@ -309,17 +335,28 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			h.Set(k, v)
 		}
 	}
-	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+	src, isStream := io.Reader(res.Body), strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
+	if p.Agent != "" {
+		// a signed-in agent's backend may stream without saying so
+		src, isStream = eventStreamBody(res)
+		if isStream && res.Header.Get("Content-Type") == "" {
+			h.Set("Content-Type", "text/event-stream")
+		}
+	}
+	if p.Agent == "codex" && proto == provider.Responses && !clientStreams(body) {
+		return collectCodex(w, p, proto, src, isStream, u)
+	}
+	if isStream {
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Accel-Buffering", "no")
 	}
 	w.WriteHeader(res.StatusCode)
 	f, _ := w.(http.Flusher)
-	sniff := newSniffer(proto, res.Header.Get("Content-Type"))
+	sniff := newSniffer(proto, h.Get("Content-Type"))
 	defer func() { u.add(sniff.usage()) }()
 	buf := make([]byte, 32<<10)
 	for {
-		n, err := res.Body.Read(buf)
+		n, err := src.Read(buf)
 		if n > 0 {
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
@@ -334,6 +371,41 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		}
 	}
 	return res.StatusCode, ""
+}
+
+// collectCodex serves a non-streaming Responses request from Codex, which only
+// streams: the events are read to the end and the final response is returned
+// as one JSON object.
+func collectCodex(w http.ResponseWriter, p provider.Provider, proto provider.Protocol, src io.Reader, isStream bool, u *Usage) (int, string) {
+	raw, err := io.ReadAll(io.LimitReader(src, 64<<20))
+	if err != nil {
+		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
+	}
+	ct := "application/json"
+	if isStream {
+		ct = "text/event-stream"
+	}
+	sn := newSniffer(proto, ct)
+	sn.write(raw)
+	u.add(sn.usage())
+	out, err := provider.CollectResponse(raw)
+	if err != nil {
+		msg := p.Name + ": " + err.Error()
+		return writeError(w, proto, 502, msg), msg
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+	return http.StatusOK, ""
+}
+
+// clientStreams reports whether the client asked for a streamed reply.
+func clientStreams(body []byte) bool {
+	var v struct {
+		Stream bool `json:"stream"`
+	}
+	json.Unmarshal(body, &v)
+	return v.Stream
 }
 
 // translate serves a client API the provider lacks by speaking another
@@ -357,17 +429,22 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(to)
-	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+	rd, isStream := io.Reader(res.Body), strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
+	if p.Agent != "" {
+		// a signed-in agent's backend may stream without saying so
+		rd, isStream = eventStreamBody(res)
+	}
+	if !isStream {
 		// the provider ignored stream:true; read the whole reply as one
 		// event stream would be wrong, so give up cleanly
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), req.Model)
 		var failed string
-		readSSE(res.Body, func(_, data string) error {
+		readSSE(rd, func(_, data string) error {
 			return dec(data, func(ev Event) {
 				switch ev.Kind {
 				case KError:
@@ -382,7 +459,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return 200, failed
 	}
 	var col collector
-	readSSE(res.Body, func(_, data string) error {
+	readSSE(rd, func(_, data string) error {
 		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {

@@ -18,8 +18,8 @@ const manyModels = 24
 // Available lists every model the vendor is known to serve: its own list
 // when fetched (see Fetch), else the models.dev catalog for the vendor.
 func (p Provider) Available() []catalog.Model {
-	if p.Account != nil {
-		return p.accountModels()
+	if p.Agent != "" {
+		return accountAvailable(p)
 	}
 	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
@@ -42,11 +42,8 @@ func (p Provider) Fetched() (time.Time, bool) {
 
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
-	if p.Account != nil {
-		if p.ID == Copilot {
-			return RefreshCopilot(ctx)
-		}
-		return nil, errorf("%s has no model list to fetch; dial uses its built-in list", p.Name)
+	if p.Agent != "" {
+		return fetchAccount(ctx, p)
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
@@ -81,12 +78,23 @@ func (p Provider) Exposed() []catalog.Model {
 		}
 		return out
 	}
+	if p.Agent != "" {
+		// An account's picks are kept only while the account still offers
+		// them (auto, retired or disabled models drop out). No picks means
+		// everything it offers, with no cap.
+		if len(p.Models) == 0 {
+			return avail
+		}
+		out := make([]catalog.Model, 0, len(p.Models))
+		for _, id := range p.Models {
+			if m, ok := byID[id]; ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
 	if len(p.Models) > 0 {
 		return pick(p.Models)
-	}
-	if p.Account != nil {
-		// an account's own list is short and is what the login can use
-		return avail
 	}
 	if pr := Preset(p.Preset); pr != nil && len(pr.Defaults) > 0 {
 		if _, fetched := p.Fetched(); !fetched {

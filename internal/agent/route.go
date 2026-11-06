@@ -19,12 +19,31 @@ const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
 func viaDial(prefix string) []Option {
+	return viaDialExcept(prefix, "")
+}
+
+// viaDialExcept is viaDial without the models of the account agent agentID
+// (for an agent that already reaches those models on its own).
+func viaDialExcept(prefix, agentID string) []Option {
 	var out []Option
 	for _, e := range provider.Catalog() {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
+		if agentID != "" && e.Provider.Agent == agentID {
+			continue
+		}
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: dialNote(e.Provider),
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
+}
+
+// dialNote is the picker note for a provider: an account provider is named
+// by the signed-in user, everything else by its vendor.
+func dialNote(p provider.Provider) string {
+	who := p.Name
+	if p.Agent != "" && p.Login != "" {
+		who = p.Login
+	}
+	return who + " · via dial"
 }
 
 // isDial reports whether a model value is a catalog reference.

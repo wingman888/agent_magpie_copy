@@ -24,6 +24,9 @@ type Result struct {
 // serves, with the first exposed model, and reports what came back.
 func (p Provider) Test(ctx context.Context) []Result {
 	p.Fetch(ctx)
+	if p.Agent != "" {
+		return p.testAccount(ctx)
+	}
 	model := ""
 	if ms := p.Exposed(); len(ms) > 0 {
 		model = ms[0].ID
