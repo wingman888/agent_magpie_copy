@@ -85,8 +85,17 @@ func (a *Agent) Field(key string) *Field {
 			return &a.Fields[i]
 		}
 	}
+	return nil
+}
+
+// Lookup finds a field by key, or failing that by its display label
+// ("auth" for the field keyed "provider"). Keys win over labels.
+func (a *Agent) Lookup(name string) *Field {
+	if f := a.Field(name); f != nil {
+		return f
+	}
 	for i := range a.Fields {
-		if a.Fields[i].Label == key { // `dial gemini auth …`: the label as shown
+		if strings.EqualFold(a.Fields[i].Label, name) {
 			return &a.Fields[i]
 		}
 	}

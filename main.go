@@ -141,7 +141,7 @@ func run(args []string) error {
 }
 
 func set(a *agent.Agent, key, value string) error {
-	f := a.Field(key)
+	f := a.Lookup(key)
 	if f == nil {
 		var keys []string
 		for _, f := range a.Fields {
