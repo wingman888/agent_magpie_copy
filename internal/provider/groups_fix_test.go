@@ -9,7 +9,7 @@ import (
 
 // Two models whose names slug alike (v1.beta and v1-beta) each keep an
 // automatic group: the later one takes a numeric suffix, none is dropped.
-func TestAutoGroupSlugCollisionKeepsBoth(t *testing.T) {
+func TestAutoGroupSlugCollisionKeepsBoth_f09(t *testing.T) {
 	isolate(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -40,8 +40,8 @@ func TestAutoGroupSlugCollisionKeepsBoth(t *testing.T) {
 
 // A group id asked for as a model resolves to its first usable member,
 // the way a direct request for that member would.
-func TestGroupResolvesToFirstMember(t *testing.T) {
-	groupSetup(t)
+func TestGroupResolvesToFirstMember_f09(t *testing.T) {
+	groupSetup_f09(t)
 	p, model, ok := Resolve("group/auto-m")
 	if !ok || p.ID != "a" || model != "m" {
 		t.Fatalf("Resolve(group/auto-m) = %s, %q, %v", p.ID, model, ok)

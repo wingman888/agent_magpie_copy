@@ -4,8 +4,8 @@ import "testing"
 
 // A provider's routing takes order, rotate and least-used; the "usage" an
 // older config saved is least-used; anything else is smart.
-func TestRoutingValues(t *testing.T) {
-	groupSetup(t)
+func TestRoutingValues_f09(t *testing.T) {
+	groupSetup_f09(t)
 	cases := map[string]string{
 		"order":      "order",
 		"rotate":     "rotate",

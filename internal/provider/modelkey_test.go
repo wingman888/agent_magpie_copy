@@ -2,7 +2,7 @@ package provider
 
 import "testing"
 
-func TestNormalizeModelKey(t *testing.T) {
+func TestNormalizeModelKey_f09(t *testing.T) {
 	same := []string{
 		"claude-opus-5-5",
 		"anthropic/claude-opus-5.5",

@@ -8,8 +8,8 @@ import (
 )
 
 // A routing group is owned by the provider of its first usable member.
-func TestGroupOwnedByFirstMember(t *testing.T) {
-	grpIsolate(t)
+func TestGroupOwnedByFirstMember_f09(t *testing.T) {
+	grpIsolate_f09(t)
 	for _, id := range []string{"own-a", "own-b"} {
 		up := "https://" + id + ".example/v1"
 		if err := provider.Save(provider.Provider{ID: id, Name: id, Key: "k", Chat: up}); err != nil {
@@ -38,8 +38,8 @@ func TestGroupOwnedByFirstMember(t *testing.T) {
 
 // A group's own affinity setting is all it has: an empty one is automatic,
 // whatever affinity its members' providers were set to.
-func TestGroupAffinityIsNotInherited(t *testing.T) {
-	grpIsolate(t)
+func TestGroupAffinityIsNotInherited_f09(t *testing.T) {
+	grpIsolate_f09(t)
 	p := provider.Provider{ID: "inh", Name: "inh", Key: "k", Chat: "https://inh.example/v1", Affinity: "session"}
 	ms := []provider.Member{{ProviderID: "inh", Model: "m", Provider: p}}
 	s := New()
@@ -53,14 +53,14 @@ func TestGroupAffinityIsNotInherited(t *testing.T) {
 // when the request came in another protocol (kept for TestKeysMadeForOneProtocol).
 // A model with no family is judged by the request's protocol: the key that
 // names it is the pool, unnamed keys come after it, marked aside.
-func TestKeyTierFollowsRequestProtocol(t *testing.T) {
-	p := keyTierProvider("tier-req")
+func TestKeyTierFollowsRequestProtocol_f09(t *testing.T) {
+	p := keyTierProvider_f09("tier-req")
 	cs, _ := perKeyOf(p, "claude-opus-5-5", provider.Chat)
-	if got := keyNames(p, cs); got != "k1 k2 kc*" {
+	if got := keyNames_f09(p, cs); got != "k1 k2 kc*" {
 		t.Fatalf("claude from chat: %s", got)
 	}
 	cs, _ = perKeyOf(p, "m", provider.Chat)
-	if got := keyNames(p, cs); got != "kc k1* k2*" {
+	if got := keyNames_f09(p, cs); got != "kc k1* k2*" {
 		t.Fatalf("familyless model from chat: %s", got)
 	}
 }

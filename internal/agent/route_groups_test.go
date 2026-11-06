@@ -11,7 +11,7 @@ import (
 
 // The picker lists routing groups first, in a section of their own, each
 // with the icons of its members' providers once.
-func TestPickerRoutingGroupsFirst(t *testing.T) {
+func TestPickerRoutingGroupsFirst_f09(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))

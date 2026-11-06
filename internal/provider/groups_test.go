@@ -8,9 +8,9 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 )
 
-// groupSetup has two ready providers: A offers m and only-a, B offers its
+// groupSetup_f09 has two ready providers: A offers m and only-a, B offers its
 // model as vendor/m, which is the same model (see normalizeModelKey).
-func groupSetup(t *testing.T) {
+func groupSetup_f09(t *testing.T) {
 	t.Helper()
 	isolate(t)
 	t.Setenv("HOME", t.TempDir())
@@ -37,7 +37,7 @@ func groupSetup(t *testing.T) {
 	}
 }
 
-func catalogIDs() []string {
+func catalogIDs_f09() []string {
 	var ids []string
 	for _, e := range Catalog() {
 		ids = append(ids, e.ID)
@@ -45,7 +45,7 @@ func catalogIDs() []string {
 	return ids
 }
 
-func memberRefs(ms []Member) []string {
+func memberRefs_f09(ms []Member) []string {
 	var out []string
 	for _, m := range ms {
 		out = append(out, m.ProviderID+"/"+m.Model)
@@ -56,9 +56,9 @@ func memberRefs(ms []Member) []string {
 // Providers A and B both serve m: the catalog lists each model, then the
 // automatic group, named by the first display name; only A's only-a is not
 // grouped.
-func TestAutoGroupInCatalog(t *testing.T) {
-	groupSetup(t)
-	ids := catalogIDs()
+func TestAutoGroupInCatalog_f09(t *testing.T) {
+	groupSetup_f09(t)
+	ids := catalogIDs_f09()
 	i, j, k := slices.Index(ids, "a/m"), slices.Index(ids, "b/vendor/m"), slices.Index(ids, "group/auto-m")
 	if i < 0 || j <= i || k <= j {
 		t.Fatalf("catalog order %v", ids)
@@ -79,7 +79,7 @@ func TestAutoGroupInCatalog(t *testing.T) {
 	if !ok || !g.Auto || g.Name != "M" {
 		t.Fatalf("FindGroup auto-m: %+v %v", g, ok)
 	}
-	if got := memberRefs(ms); !slices.Equal(got, []string{"a/m", "b/vendor/m"}) {
+	if got := memberRefs_f09(ms); !slices.Equal(got, []string{"a/m", "b/vendor/m"}) {
 		t.Fatalf("members %v", got)
 	}
 	// asked for its capabilities, a group answers as its first usable member
@@ -90,8 +90,8 @@ func TestAutoGroupInCatalog(t *testing.T) {
 }
 
 // A saved group keeps its members in order, and shows in the catalog.
-func TestSaveGroupKeepsOrder(t *testing.T) {
-	groupSetup(t)
+func TestSaveGroupKeepsOrder_f09(t *testing.T) {
+	groupSetup_f09(t)
 	if err := SaveGroup(Group{Name: "Mine", Members: []string{"b/vendor/m", "a/only-a"}, Routing: "order"}); err != nil {
 		t.Fatal(err)
 	}
@@ -99,25 +99,25 @@ func TestSaveGroupKeepsOrder(t *testing.T) {
 	if !ok || g.ID != "mine" || g.Name != "Mine" || g.Routing != "order" || g.Auto {
 		t.Fatalf("group %+v %v", g, ok)
 	}
-	if got := memberRefs(ms); !slices.Equal(got, []string{"b/vendor/m", "a/only-a"}) {
+	if got := memberRefs_f09(ms); !slices.Equal(got, []string{"b/vendor/m", "a/only-a"}) {
 		t.Fatalf("members %v", got)
 	}
-	if !slices.Contains(catalogIDs(), "group/mine") {
-		t.Fatalf("catalog %v lacks group/mine", catalogIDs())
+	if !slices.Contains(catalogIDs_f09(), "group/mine") {
+		t.Fatalf("catalog %v lacks group/mine", catalogIDs_f09())
 	}
 }
 
 // Deleting an automatic group hides it; showing it brings it back. An
 // unknown group is an error.
-func TestDeleteAndShowAutoGroup(t *testing.T) {
-	groupSetup(t)
+func TestDeleteAndShowAutoGroup_f09(t *testing.T) {
+	groupSetup_f09(t)
 	if err := DeleteGroup("auto-m"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, ok := FindGroup("auto-m"); ok {
 		t.Fatalf("hidden group still found")
 	}
-	if slices.Contains(catalogIDs(), "group/auto-m") {
+	if slices.Contains(catalogIDs_f09(), "group/auto-m") {
 		t.Fatalf("hidden group still listed")
 	}
 	if err := ShowGroup("auto-m"); err != nil {
@@ -133,8 +133,8 @@ func TestDeleteAndShowAutoGroup(t *testing.T) {
 
 // A user's group replaces an automatic one of the same id; deleting it
 // hides the automatic one too.
-func TestSaveOverAutoGroup(t *testing.T) {
-	groupSetup(t)
+func TestSaveOverAutoGroup_f09(t *testing.T) {
+	groupSetup_f09(t)
 	if err := SaveGroup(Group{ID: "auto-m", Name: "Mine M", Members: []string{"a/m"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -152,8 +152,8 @@ func TestSaveOverAutoGroup(t *testing.T) {
 
 // Rules on saving: members required, the provider id group is taken, and a
 // group inside a group is ignored, as are repeats.
-func TestGroupRules(t *testing.T) {
-	groupSetup(t)
+func TestGroupRules_f09(t *testing.T) {
+	groupSetup_f09(t)
 	err := SaveGroup(Group{ID: "empty", Name: "Empty"})
 	if err == nil || !strings.Contains(err.Error(), "组里至少要有一个模型") {
 		t.Fatalf("empty members: %v", err)
@@ -167,14 +167,14 @@ func TestGroupRules(t *testing.T) {
 	if err := SaveGroup(Group{ID: "nest", Members: []string{"group/mine", "a/m"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ms, _ := FindGroup("nest"); !slices.Equal(memberRefs(ms), []string{"a/m"}) {
-		t.Fatalf("nested group member not ignored: %v", memberRefs(ms))
+	if _, ms, _ := FindGroup("nest"); !slices.Equal(memberRefs_f09(ms), []string{"a/m"}) {
+		t.Fatalf("nested group member not ignored: %v", memberRefs_f09(ms))
 	}
 	if err := SaveGroup(Group{ID: "d", Members: []string{"a/m", "a/m", "b/vendor/m"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ms, _ := FindGroup("d"); len(ms) != 2 {
-		t.Fatalf("repeated member counted twice: %v", memberRefs(ms))
+		t.Fatalf("repeated member counted twice: %v", memberRefs_f09(ms))
 	}
 	if err := SaveGroup(Group{Name: "My Team!", Members: []string{"a/m"}}); err != nil {
 		t.Fatal(err)
@@ -191,8 +191,8 @@ func TestGroupRules(t *testing.T) {
 }
 
 // A provider's affinity is set and kept; a bad one is refused.
-func TestSetAffinity(t *testing.T) {
-	groupSetup(t)
+func TestSetAffinity_f09(t *testing.T) {
+	groupSetup_f09(t)
 	if err := SetAffinity("a", "turn"); err != nil {
 		t.Fatal(err)
 	}
