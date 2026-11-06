@@ -872,14 +872,7 @@ func copilotProvider(app copilotApp, plan string) Provider {
 			req.Header.Set(k, v)
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
-		// a turn the user typed is billed as one; a tool's reply is not
-		req.Header.Set("X-Initiator", "agent")
-		if lastRole(body) == "user" {
-			req.Header.Set("X-Initiator", "user")
-		}
-		if bytes.Contains(body, []byte(`"image_url"`)) {
-			req.Header.Set("Copilot-Vision-Request", "true")
-		}
+		copilotHeadersFor(req.Header, protoOfPath(req.URL.Path), body)
 		return nil
 	}
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
@@ -890,30 +883,6 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
 	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
-}
-
-// copilotAPIs maps a model's supported_endpoints to the wire APIs magpie
-// speaks, each once. Other endpoints (websocket, embeddings) are ignored;
-// nil when none of ours is listed or the field was absent.
-func copilotAPIs(endpoints []string) []string {
-	var out []string
-	for _, e := range endpoints {
-		var api string
-		switch e {
-		case "/chat/completions":
-			api = "chat"
-		case "/responses":
-			api = "responses"
-		case "/v1/messages":
-			api = "anthropic"
-		default:
-			continue
-		}
-		if !contains(out, api) {
-			out = append(out, api)
-		}
-	}
-	return out
 }
 
 // lastRole is the role of the last message in a chat request.
