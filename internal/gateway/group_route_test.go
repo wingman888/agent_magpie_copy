@@ -99,7 +99,7 @@ func TestGroupWithNoReadyMemberIsNotFound(t *testing.T) {
 	}
 	must(t, provider.SaveGroup(provider.Group{ID: "ghosts", Members: []string{"ghost/x"}}))
 	code, body := sendRoute(s, "/v1/chat/completions", `{"model":"group/ghosts","messages":[{"role":"user","content":"hi"}]}`, nil)
-	if code != 404 || !strings.Contains(body, "没有模型就绪") {
+	if code != 404 || !strings.Contains(body, "group/ghosts has no model ready") {
 		t.Fatalf("no ready member: %d %s", code, body)
 	}
 }
