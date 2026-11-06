@@ -18,40 +18,21 @@ import (
 const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
-func viaDial(prefix string) []Option { return viaDialFor(prefix, "") }
+func viaDial(prefix string) []Option {
+	return viaDialWhere(prefix, func(provider.Entry) bool { return true })
+}
 
-// viaDialFor is viaDial for an agent that may be signed in to an account
-// itself; that account's models are left out (see catalogFor).
-func viaDialFor(prefix, self string) []Option {
+// viaDialWhere is viaDial restricted to the catalog entries keep accepts.
+func viaDialWhere(prefix string, keep func(provider.Entry) bool) []Option {
 	var out []Option
-	for _, e := range catalogFor(self) {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: who(e.Provider) + " · via dial",
+	for _, e := range provider.Catalog() {
+		if !keep(e) {
+			continue
+		}
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Label() + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
-}
-
-// catalogFor is the dial catalog as the agent named self should see it. An
-// agent's own sign-in is left out: sending its models back through dial would
-// only come around to where it started. self is "" for no exclusion.
-func catalogFor(self string) []provider.Entry {
-	var out []provider.Entry
-	for _, e := range provider.Catalog() {
-		if self != "" && e.Provider.Account != nil && e.Provider.Account.Agent == self {
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
-}
-
-// who names a provider in a picker: the signed-in user for an account, else
-// the provider's name.
-func who(p provider.Provider) string {
-	if p.Account != nil && p.Account.User != "" {
-		return p.Account.User
-	}
-	return p.Name
 }
 
 // isDial reports whether a model value is a catalog reference.
@@ -62,13 +43,18 @@ func isDial(v string) bool {
 
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-func dialModels() []catalog.Model { return dialModelsFor("") }
+func dialModels() []catalog.Model {
+	return dialModelsWhere(func(provider.Entry) bool { return true })
+}
 
-// dialModelsFor is dialModels as seen by the agent named self (see catalogFor).
-func dialModelsFor(self string) []catalog.Model {
+// dialModelsWhere is dialModels restricted to the entries keep accepts.
+func dialModelsWhere(keep func(provider.Entry) bool) []catalog.Model {
 	var out []catalog.Model
-	for _, e := range catalogFor(self) {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + who(e.Provider), Provider: e.Provider.Catalog, Efforts: e.Efforts})
+	for _, e := range provider.Catalog() {
+		if !keep(e) {
+			continue
+		}
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Label(), Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }

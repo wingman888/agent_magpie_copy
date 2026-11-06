@@ -30,68 +30,47 @@ func (p Provider) Test(ctx context.Context) []Result {
 	} else if ms := p.Available(); len(ms) > 0 {
 		model = ms[0].ID
 	}
-	if p.Account != nil {
-		return []Result{p.probeAccount(ctx, model)}
-	}
 	var out []Result
 	for _, proto := range p.Speaks() {
-		var url, body string
-		headers := map[string]string{"Authorization": "Bearer " + p.Key}
+		var path, body string
 		switch proto {
 		case Chat:
-			url = p.Chat + "/chat/completions"
+			path = "/chat/completions"
 			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 		case Responses:
-			url = p.Responses + "/responses"
+			path = "/responses"
 			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
 		case Anthropic:
-			url = p.Anthropic + "/v1/messages"
+			path = "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
+		}
+		if p.Account != nil {
+			// The login's own base and signature; the body is shaped the way
+			// the backend requires, exactly as a real request would be.
+			base, err := AccountBase(ctx, p)
+			if err != nil {
+				out = append(out, Result{Protocol: proto, Model: model, Error: err.Error()})
+				continue
+			}
+			sent := p.Prepare([]byte(body))
+			out = append(out, probe(ctx, proto, base+path, string(sent), model, func(req *http.Request) error {
+				return p.Sign(ctx, req, proto, sent)
+			}))
+			continue
+		}
+		headers := map[string]string{"Authorization": "Bearer " + p.Key}
+		if proto == Anthropic {
 			headers = AuthHeaders(p, Anthropic)
 		}
-		out = append(out, probe(ctx, proto, url, body, model, headers))
+		sign := func(req *http.Request) error {
+			for k, v := range headers {
+				req.Header.Set(k, v)
+			}
+			return nil
+		}
+		out = append(out, probe(ctx, proto, p.Base(proto)+path, body, model, sign))
 	}
 	return out
-}
-
-// probeAccount sends the smallest request the account's upstream takes. It is
-// signed and prepared the same way dial signs real traffic.
-func (p Provider) probeAccount(ctx context.Context, model string) Result {
-	proto := Chat
-	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
-	if p.Account.Agent == "codex" {
-		proto = Responses
-		body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
-	}
-	r := Result{Protocol: proto, Model: model}
-	if model == "" {
-		r.Error = "no model to try: expose one, or refresh the model list"
-		return r
-	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	req := (&http.Request{Method: http.MethodPost, Header: http.Header{}}).WithContext(ctx)
-	req.Header.Set("Accept", "text/event-stream, application/json")
-	if err := p.Sign(ctx, req, proto, p.Prepare([]byte(body))); err != nil {
-		r.Error = err.Error()
-		return r
-	}
-	start := time.Now()
-	res, err := http.DefaultClient.Do(req)
-	r.Millis = time.Since(start).Milliseconds()
-	if err != nil {
-		r.Error = err.Error()
-		return r
-	}
-	defer res.Body.Close()
-	r.Status = res.StatusCode
-	if res.StatusCode >= 200 && res.StatusCode < 300 {
-		r.OK = true
-		return r
-	}
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-	r.Error = APIError(b, res.Status)
-	return r
 }
 
 // AuthHeaders is how a request to the vendor proves who it is. Anthropic's
@@ -109,7 +88,9 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
-func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string) Result {
+// probe posts body to url. sign attaches whatever the provider needs to the
+// request before it is sent; it may also change the URL for account logins.
+func probe(ctx context.Context, proto Protocol, url, body, model string, sign func(*http.Request) error) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -124,8 +105,9 @@ func probe(ctx context.Context, proto Protocol, url, body, model string, headers
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	for k, v := range headers {
-		req.Header.Set(k, v)
+	if err := sign(req); err != nil {
+		r.Error = err.Error()
+		return r
 	}
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)

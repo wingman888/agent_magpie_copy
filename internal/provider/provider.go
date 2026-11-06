@@ -37,10 +37,6 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// Account is set for providers that are a sign-in inside another agent
-	// (codex, copilot). It holds no tokens; they are read on every use.
-	Account *Account `json:"Account,omitempty"`
-
 	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -55,6 +51,11 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// Account is set on providers that borrow a login the agent already
+	// holds (see accounts.go). Such a provider has no key and no tokens of
+	// its own: the agent's credential file is read each time it is used.
+	Account *Account `json:"account,omitempty"`
 }
 
 type file struct {
@@ -78,12 +79,26 @@ func load() file {
 	return f
 }
 
+// storedFile is the on-disk shape. Ordinary providers are written as they
+// are; an agent login's model choice is written as its id and models only.
+type storedFile struct {
+	Providers []any `json:"providers"`
+}
+
 func store(f file) error {
 	p := Path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
+	var sf storedFile
+	for _, pr := range f.Providers {
+		if isSelection(pr) {
+			sf.Providers = append(sf.Providers, selectionRecord{ID: pr.ID, Models: pr.Models})
+		} else {
+			sf.Providers = append(sf.Providers, pr)
+		}
+	}
+	b, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -93,46 +108,29 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added, with the
-// signed-in agent accounts folded in (see merge).
+// All lists the configured providers in the order they were added, followed
+// by the signed-in agent logins that are not shadowed by a provider of the
+// user's own (see Accounts). A stored model choice for a login that is no
+// longer signed in produces no provider at all.
 func All() []Provider {
-	return merge(load().Providers, Accounts())
-}
-
-// merge lays the stored providers over the live agent accounts. A stored entry
-// under an account's id only records which models were chosen: it is used when
-// that sign-in exists and ignored otherwise, so a sign-out never leaves a
-// half-made provider behind. A provider the user built under the same id, with
-// an address, wins, and the account is not added.
-func merge(stored, live []Provider) []Provider {
-	own := map[string]bool{}
-	for i := range stored {
-		stored[i] = normalize(stored[i])
-		if !isAccountRecord(stored[i]) {
-			own[stored[i].ID] = true
-		}
-	}
-	accounts := map[string]Provider{}
-	for _, a := range live {
-		accounts[a.ID] = a
-	}
+	f := load()
+	accts := accountsIn(f)
 	var out []Provider
-	added := map[string]bool{}
-	for _, p := range stored {
-		if !isAccountRecord(p) {
-			out = append(out, p)
+	used := map[string]bool{}
+	for _, p := range f.Providers {
+		if isSelection(p) {
+			for _, a := range accts {
+				if a.ID == p.ID && !used[a.ID] {
+					out = append(out, a)
+					used[a.ID] = true
+				}
+			}
 			continue
 		}
-		a, ok := accounts[p.ID]
-		if !ok || own[p.ID] || added[p.ID] {
-			continue
-		}
-		added[p.ID] = true
-		a.Models = p.Models
-		out = append(out, a)
+		out = append(out, normalize(p))
 	}
-	for _, a := range live {
-		if !added[a.ID] && !own[a.ID] {
+	for _, a := range accts {
+		if !used[a.ID] {
 			out = append(out, a)
 		}
 	}
@@ -157,7 +155,8 @@ func Slug(name string) string {
 	return strings.Trim(idRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-// Save adds or replaces a provider.
+// Save adds or replaces a provider. For a signed-in agent login only the
+// chosen models are kept; any address or key passed in is ignored.
 func Save(p Provider) error {
 	p = normalize(p)
 	if p.ID == "" {
@@ -166,14 +165,15 @@ func Save(p Provider) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
-	if isAccountID(p.ID) && !ownStored(load(), p.ID) {
-		// Only a user-built provider under this id (stored, with an address)
-		// takes the normal path; otherwise the id is the account's and only the
-		// model choice is kept.
-		return saveAccount(p)
-	}
 	if p.ID == "dial" {
 		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
+	}
+	f := load()
+	if p.Account != nil || accountOpen(f, p.ID) {
+		if hasOwnProvider(f.Providers, p.ID) {
+			return fmt.Errorf("%s: your own provider with this id takes precedence over the sign-in", p.ID)
+		}
+		return saveSelection(f, p.ID, p.Models)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
@@ -184,7 +184,6 @@ func Save(p Provider) error {
 	if p.Key == "" && !keyOptional(p) {
 		return fmt.Errorf("%s needs an API key", p.Name)
 	}
-	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
@@ -195,14 +194,19 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider. For a signed-in account it only clears the model
-// choice: the provider stays, since signing out is the agent's business.
+// Delete removes a provider. For a signed-in agent login it only clears the
+// model choice; the provider itself stays, since signing out is up to the agent.
 func Delete(id string) error {
 	f := load()
-	if isAccountID(id) && !ownStored(f, id) {
-		if _, ok := liveAccount(id); ok {
-			return clearAccount(f, id)
+	if accountOpen(f, id) || (accountAgents[id] && !hasOwnProvider(f.Providers, id) && hasSelection(f.Providers, id)) {
+		keep := f.Providers[:0]
+		for _, p := range f.Providers {
+			if !(p.ID == id && isSelection(p)) {
+				keep = append(keep, p)
+			}
 		}
+		f.Providers = keep
+		return store(f)
 	}
 	keep := f.Providers[:0]
 	found := false
@@ -227,27 +231,6 @@ func keyOptional(p Provider) bool {
 	}
 	h := p.Host()
 	return strings.HasPrefix(h, "localhost") || strings.HasPrefix(h, "127.0.0.1") || strings.HasPrefix(h, "0.0.0.0")
-}
-
-// hasBase reports whether the provider was given an address of its own.
-func hasBase(p Provider) bool {
-	return p.Chat != "" || p.Responses != "" || p.Anthropic != ""
-}
-
-// isAccountRecord reports whether a stored entry is the model choice for a
-// signed-in account rather than a provider the user built.
-func isAccountRecord(p Provider) bool {
-	return isAccountID(p.ID) && !hasBase(p)
-}
-
-// ownStored reports whether the user built a provider with this id.
-func ownStored(f file, id string) bool {
-	for _, p := range f.Providers {
-		if p.ID == id && !isAccountRecord(normalize(p)) {
-			return true
-		}
-	}
-	return false
 }
 
 func normalize(p Provider) Provider {
@@ -312,6 +295,9 @@ func (p Provider) Base(proto Protocol) string {
 
 // Speaks lists the protocols the vendor serves natively, preferred first.
 func (p Provider) Speaks() []Protocol {
+	if p.Account != nil {
+		return accountProtocols(p.Account.Agent)
+	}
 	var out []Protocol
 	for _, pr := range Protocols {
 		if p.Base(pr) != "" {
@@ -352,9 +338,13 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool {
-	if p.Account != nil {
-		return true // the agent's sign-in is the credential
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+
+// Label is the name a model is shown under beside its id: the signed-in user
+// for an account provider, else the provider's name.
+func (p Provider) Label() string {
+	if p.Account != nil && p.Account.User != "" {
+		return p.Account.User
 	}
-	return p.Key != "" || keyOptional(p)
+	return p.Name
 }

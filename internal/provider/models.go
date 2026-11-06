@@ -19,7 +19,12 @@ const manyModels = 24
 // when fetched (see Fetch), else the models.dev catalog for the vendor.
 func (p Provider) Available() []catalog.Model {
 	if p.Account != nil {
-		return accountModels(p)
+		switch p.Account.Agent {
+		case "copilot":
+			return copilotAvailable()
+		case "codex":
+			return codexModels()
+		}
 	}
 	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
@@ -34,19 +39,9 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
-// accountModels is the model list of a signed-in agent account. Codex uses the
-// built-in list; Copilot uses the last refreshed list, else the built-in one.
-func accountModels(p Provider) []catalog.Model {
-	if p.Account == nil {
-		return nil
-	}
-	switch p.Account.Agent {
-	case "codex":
-		return append([]catalog.Model(nil), catalog.Builtin("codex")...)
-	case "copilot":
-		return copilotModels()
-	}
-	return nil
+// codexModels is the built-in Codex list. Refreshing it asks nobody.
+func codexModels() []catalog.Model {
+	return append([]catalog.Model(nil), catalog.Builtin("codex")...)
 }
 
 // Fetched reports when the vendor's own list was last fetched.
@@ -60,11 +55,10 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	if p.Account != nil {
 		switch p.Account.Agent {
 		case "copilot":
-			return RefreshCopilot(ctx)
+			return refreshCopilot(ctx)
 		case "codex":
-			return accountModels(p), nil // built in; nothing to ask over the network
+			return codexModels(), nil
 		}
-		return nil, errorf("%s has no model list to fetch", p.Name)
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
@@ -115,11 +109,6 @@ func (p Provider) Exposed() []catalog.Model {
 		if len(have) > 0 {
 			return pick(have)
 		}
-	}
-	if p.Account != nil {
-		// A signed-in account's own list is offered in full; the "too many
-		// to expose" cut-off is for vendors whose catalogs are large.
-		return avail
 	}
 	if len(avail) <= manyModels {
 		return avail

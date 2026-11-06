@@ -33,19 +33,26 @@ const providerUsage = `usage:
 // providers: `dial providers`
 func providers() error {
 	all := provider.All()
-	excluded := provider.Excluded()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		showExcluded(excluded)
-		return nil
+	} else {
+		printProviderRows(all)
 	}
+	for _, x := range provider.Excluded() {
+		fmt.Printf("%s is signed in but not offered: %s\n", agentLabel(x.Agent), x.Why)
+	}
+	return nil
+}
+
+// printProviderRows prints the table behind `dial providers`.
+func printProviderRows(all []provider.Provider) {
 	uses := usesByProvider()
 	type row struct{ name, id, host, key, models, uses string }
 	var rows []row
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" && p.Account == nil {
+		if p.Account == nil && p.Preset == "" {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
@@ -75,13 +82,11 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	showExcluded(excluded)
-	return nil
 }
 
-// agentLabel is the name an agent goes by in dial's messages.
-func agentLabel(id string) string {
-	switch id {
+// agentLabel is how an agent is named to people.
+func agentLabel(a string) string {
+	switch a {
 	case "claude":
 		return "Claude Code"
 	case "codex":
@@ -89,15 +94,7 @@ func agentLabel(id string) string {
 	case "copilot":
 		return "Copilot"
 	}
-	return id
-}
-
-// showExcluded closes the provider list with one line per sign-in dial sees
-// but does not offer, saying why.
-func showExcluded(xs []provider.Exclusion) {
-	for _, x := range xs {
-		fmt.Println(muted.Render(agentLabel(x.Agent) + " is signed in but not offered: " + x.Why))
-	}
+	return a
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -192,7 +189,7 @@ func providerCmd(args []string) error {
 			return err
 		}
 		if p.Account != nil {
-			return fmt.Errorf("%s signs in through %s itself; dial keeps no key for it", p.Name, p.Account.Agent)
+			return fmt.Errorf("%s is a sign-in from %s; it has no key to change", p.Name, agentLabel(p.Account.Agent))
 		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
@@ -210,6 +207,10 @@ func providerCmd(args []string) error {
 		}
 		if err := provider.Delete(p.ID); err != nil {
 			return err
+		}
+		if p.Account != nil {
+			fmt.Println(green.Render("✓"), "cleared the models chosen for", p.Name, muted.Render("· still signed in with "+agentLabel(p.Account.Agent)))
+			return nil
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil
@@ -328,35 +329,42 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" && p.Account == nil {
+	if p.Account == nil && p.Preset == "" {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
-	if a := p.Account; a != nil {
-		who := a.User
-		if a.Plan != "" {
-			who += " (" + a.Plan + ")"
-		}
-		kv("account", who+" via "+a.Agent)
-	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
-	switch {
-	case p.Key != "":
-		kv("key", muted.Render(provider.Mask(p.Key)))
-	case p.Ready():
-		kv("key", muted.Render("none needed"))
-	default:
-		kv("key", amber.Render("not set")+muted.Render("  dial provider key "+p.ID+" …"))
+	if a := p.Account; a != nil {
+		who := a.User
+		if a.Plan != "" {
+			who += " · " + a.Plan
+		}
+		kv("account", who+muted.Render(" from "+agentLabel(a.Agent)))
+	} else {
+		switch {
+		case p.Key != "":
+			kv("key", muted.Render(provider.Mask(p.Key)))
+		case p.Ready():
+			kv("key", muted.Render("none needed"))
+		default:
+			kv("key", amber.Render("not set")+muted.Render("  dial provider key "+p.ID+" …"))
+		}
 	}
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
 	ms := p.Exposed()
 	src := "models.dev"
+	if p.Account != nil {
+		src = agentLabel(p.Account.Agent) + " login"
+	}
 	if t, ok := p.Fetched(); ok {
 		src = p.Host() + " · fetched " + ago(t)
+		if p.Account != nil {
+			src = agentLabel(p.Account.Agent) + " · fetched " + ago(t)
+		}
 	}
 	kv("models", fmt.Sprintf("%d exposed of %d %s", len(ms), len(p.Available()), muted.Render("from "+src)))
 	for i, m := range ms {

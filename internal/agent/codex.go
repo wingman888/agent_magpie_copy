@@ -9,6 +9,7 @@ import (
 	"github.com/yetone/dial/internal/catalog"
 	"github.com/yetone/dial/internal/edit"
 	"github.com/yetone/dial/internal/gateway"
+	"github.com/yetone/dial/internal/provider"
 )
 
 // Codex talks the OpenAI Responses API to whichever provider config.toml
@@ -23,6 +24,18 @@ import (
 //go:embed codex_prompt.md
 var codexPrompt string
 
+// codexDialModels is the dial catalog as Codex's own picker gets it. The
+// Codex login is left out: Codex already has it, and routing it back through
+// dial would only loop.
+func codexDialModels() []catalog.Model {
+	return dialModelsWhere(notCodexLogin)
+}
+
+// notCodexLogin keeps every catalog entry except the Codex login's own models.
+func notCodexLogin(e provider.Entry) bool {
+	return e.Provider.Account == nil || e.Provider.Account.Agent != "codex"
+}
+
 func codex(home string) *Agent {
 	dir := filepath.Join(home, ".codex")
 	path := filepath.Join(dir, "config.toml")
@@ -31,7 +44,7 @@ func codex(home string) *Agent {
 	routed := func() bool { return get("model_provider") == dialID }
 	models := func() []catalog.Model {
 		if routed() {
-			return dialModelsFor("codex")
+			return codexDialModels()
 		}
 		return catalog.Codex()
 	}
@@ -70,7 +83,7 @@ func codex(home string) *Agent {
 			); err != nil {
 				return err
 			}
-			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModelsFor("codex"))); err != nil {
+			if err := edit.WriteAtomic(catalogPath, codexCatalog(codexDialModels())); err != nil {
 				return err
 			}
 			if err := edit.SetTOMLTop(path,
@@ -130,7 +143,7 @@ func codex(home string) *Agent {
 					if p := get("model_provider"); p != "" && p != dialID {
 						own = group(p, own)
 					}
-					return append(own, viaDialFor("", "codex")...)
+					return append(own, viaDialWhere("", notCodexLogin)...)
 				},
 			},
 			{
