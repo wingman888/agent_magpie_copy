@@ -34,9 +34,9 @@ var CopilotTokenURL = "https://api.github.com/copilot_internal/v2/token"
 // Account describes the login behind an account provider. It carries no
 // credentials.
 type Account struct {
-	Agent string `json:"agent"` // "codex" or "copilot"
-	User  string `json:"user"`  // who is signed in, for display
-	Plan  string `json:"plan"`  // subscription tier, when the login says
+	Agent string `json:"agent"`          // "codex" or "copilot"
+	User  string `json:"user"`           // who is signed in, for display
+	Plan  string `json:"plan,omitempty"` // subscription tier, when the login says
 }
 
 // Exclusion is a login dial recognises but does not offer as a provider.
@@ -48,11 +48,18 @@ type Exclusion struct {
 const claudeExclusionWhy = "Anthropic's terms only allow a Claude subscription to be used by Claude Code itself, " +
 	"so dial does not offer it. Add an Anthropic API key as a provider instead."
 
+// accountAgents are the provider ids a signed-in agent login is offered under.
+var accountAgents = map[string]bool{"codex": true, "copilot": true}
+
 // Accounts lists the signed-in agent logins that dial offers as providers.
 // A user's own provider with the same id (one that has an address) wins, and
 // the account version is left out.
-func Accounts() []Provider {
-	own := load().Providers
+func Accounts() []Provider { return accountsIn(load()) }
+
+// accountsIn is Accounts for a configuration already read. Each account
+// carries the model choice stored for it, if any.
+func accountsIn(f file) []Provider {
+	own := f.Providers
 	var out []Provider
 	if a, ok := readCodex(); ok && !hasOwnProvider(own, "codex") {
 		email, plan := codexClaims(a.Tokens.IDToken)
@@ -61,6 +68,7 @@ func Accounts() []Provider {
 		}
 		out = append(out, Provider{
 			ID: "codex", Name: "Codex", Icon: "openai",
+			Models:  selectionOf(own, "codex"),
 			Account: &Account{Agent: "codex", User: email, Plan: plan},
 		})
 	}
@@ -71,10 +79,62 @@ func Accounts() []Provider {
 		}
 		out = append(out, Provider{
 			ID: "copilot", Name: "Copilot",
+			Models:  selectionOf(own, "copilot"),
 			Account: &Account{Agent: "copilot", User: user},
 		})
 	}
 	return out
+}
+
+// isSelection reports whether a stored entry is only the model choice for an
+// agent login: an account id with no address and no account of its own.
+func isSelection(p Provider) bool {
+	return accountAgents[p.ID] && p.Account == nil && p.Chat == "" && p.Responses == "" && p.Anthropic == ""
+}
+
+func selectionOf(ps []Provider, id string) []string {
+	for _, p := range ps {
+		if p.ID == id && isSelection(p) {
+			return cleanList(p.Models)
+		}
+	}
+	return nil
+}
+
+func hasSelection(ps []Provider, id string) bool {
+	for _, p := range ps {
+		if p.ID == id && isSelection(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// accountOpen reports whether id names a signed-in login that is offered
+// (no user provider takes its place), so writes to it only touch the choice.
+func accountOpen(f file, id string) bool {
+	if !accountAgents[id] {
+		return false
+	}
+	for _, a := range accountsIn(f) {
+		if a.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// saveSelection stores only the chosen models for an agent login.
+func saveSelection(f file, id string, models []string) error {
+	rec := Provider{ID: id, Models: cleanList(models)}
+	for i := range f.Providers {
+		if f.Providers[i].ID == id && isSelection(f.Providers[i]) {
+			f.Providers[i] = rec
+			return store(f)
+		}
+	}
+	f.Providers = append(f.Providers, rec)
+	return store(f)
 }
 
 // hasOwnProvider reports whether the user configured a provider with this id

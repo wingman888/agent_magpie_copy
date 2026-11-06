@@ -18,8 +18,13 @@ const manyModels = 24
 // Available lists every model the vendor is known to serve: its own list
 // when fetched (see Fetch), else the models.dev catalog for the vendor.
 func (p Provider) Available() []catalog.Model {
-	if p.Account != nil && p.Account.Agent == "copilot" {
-		return copilotAvailable()
+	if p.Account != nil {
+		switch p.Account.Agent {
+		case "copilot":
+			return copilotAvailable()
+		case "codex":
+			return codexModels()
+		}
 	}
 	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
@@ -34,6 +39,11 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
+// codexModels is the built-in Codex list. Refreshing it asks nobody.
+func codexModels() []catalog.Model {
+	return append([]catalog.Model(nil), catalog.Builtin("codex")...)
+}
+
 // Fetched reports when the vendor's own list was last fetched.
 func (p Provider) Fetched() (time.Time, bool) {
 	_, t, ok := catalog.Live(p.ID)
@@ -42,8 +52,13 @@ func (p Provider) Fetched() (time.Time, bool) {
 
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
-	if p.Account != nil && p.Account.Agent == "copilot" {
-		return refreshCopilot(ctx)
+	if p.Account != nil {
+		switch p.Account.Agent {
+		case "copilot":
+			return refreshCopilot(ctx)
+		case "codex":
+			return codexModels(), nil
+		}
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
