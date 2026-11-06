@@ -78,19 +78,42 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key.
-func (a *Agent) Field(key string) *Field {
+// FieldKey looks a field up by its exact key only.
+func (a *Agent) FieldKey(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
 			return &a.Fields[i]
 		}
 	}
+	return nil
+}
+
+// Field looks a field up by key, or failing that by its display label
+// (case-insensitive, surrounding space ignored). A key always wins.
+func (a *Agent) Field(name string) *Field {
+	if f := a.FieldKey(name); f != nil {
+		return f
+	}
+	want := normFieldName(name)
+	if want == "" {
+		return nil
+	}
 	for i := range a.Fields {
-		if a.Fields[i].Label == key { // `dial gemini auth …`: the label as shown
+		if normFieldName(a.Fields[i].Label) == want {
 			return &a.Fields[i]
 		}
 	}
 	return nil
+}
+
+// FieldNamed is an alias of Field: lookup by key, then by display label.
+func (a *Agent) FieldNamed(name string) *Field {
+	return a.Field(name)
+}
+
+// normFieldName folds a field name for label matching.
+func normFieldName(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // Values reads every field.
