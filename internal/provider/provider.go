@@ -23,7 +23,6 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -36,10 +35,6 @@ type Provider struct {
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
-
-	// Account is set for providers that are a sign-in inside another agent
-	// (codex, copilot). It holds no tokens; they are read on every use.
-	Account *Account `json:"Account,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -93,48 +88,11 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added, with the
-// signed-in agent accounts folded in (see merge).
+// All lists the configured providers in the order they were added.
 func All() []Provider {
-	return merge(load().Providers, Accounts())
-}
-
-// merge lays the stored providers over the live agent accounts. A stored entry
-// under an account's id only records which models were chosen: it is used when
-// that sign-in exists and ignored otherwise, so a sign-out never leaves a
-// half-made provider behind. A provider the user built under the same id, with
-// an address, wins, and the account is not added.
-func merge(stored, live []Provider) []Provider {
-	own := map[string]bool{}
-	for i := range stored {
-		stored[i] = normalize(stored[i])
-		if !isAccountRecord(stored[i]) {
-			own[stored[i].ID] = true
-		}
-	}
-	accounts := map[string]Provider{}
-	for _, a := range live {
-		accounts[a.ID] = a
-	}
-	var out []Provider
-	added := map[string]bool{}
-	for _, p := range stored {
-		if !isAccountRecord(p) {
-			out = append(out, p)
-			continue
-		}
-		a, ok := accounts[p.ID]
-		if !ok || own[p.ID] || added[p.ID] {
-			continue
-		}
-		added[p.ID] = true
-		a.Models = p.Models
-		out = append(out, a)
-	}
-	for _, a := range live {
-		if !added[a.ID] && !own[a.ID] {
-			out = append(out, a)
-		}
+	out := load().Providers
+	for i := range out {
+		out[i] = normalize(out[i])
 	}
 	return out
 }
@@ -166,12 +124,6 @@ func Save(p Provider) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
-	if isAccountID(p.ID) && !ownStored(load(), p.ID) {
-		// Only a user-built provider under this id (stored, with an address)
-		// takes the normal path; otherwise the id is the account's and only the
-		// model choice is kept.
-		return saveAccount(p)
-	}
 	if p.ID == "dial" {
 		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
 	}
@@ -195,15 +147,9 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider. For a signed-in account it only clears the model
-// choice: the provider stays, since signing out is the agent's business.
+// Delete removes a provider.
 func Delete(id string) error {
 	f := load()
-	if isAccountID(id) && !ownStored(f, id) {
-		if _, ok := liveAccount(id); ok {
-			return clearAccount(f, id)
-		}
-	}
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -227,27 +173,6 @@ func keyOptional(p Provider) bool {
 	}
 	h := p.Host()
 	return strings.HasPrefix(h, "localhost") || strings.HasPrefix(h, "127.0.0.1") || strings.HasPrefix(h, "0.0.0.0")
-}
-
-// hasBase reports whether the provider was given an address of its own.
-func hasBase(p Provider) bool {
-	return p.Chat != "" || p.Responses != "" || p.Anthropic != ""
-}
-
-// isAccountRecord reports whether a stored entry is the model choice for a
-// signed-in account rather than a provider the user built.
-func isAccountRecord(p Provider) bool {
-	return isAccountID(p.ID) && !hasBase(p)
-}
-
-// ownStored reports whether the user built a provider with this id.
-func ownStored(f file, id string) bool {
-	for _, p := range f.Providers {
-		if p.ID == id && !isAccountRecord(normalize(p)) {
-			return true
-		}
-	}
-	return false
 }
 
 func normalize(p Provider) Provider {
@@ -352,9 +277,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool {
-	if p.Account != nil {
-		return true // the agent's sign-in is the credential
-	}
-	return p.Key != "" || keyOptional(p)
-}
+func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
