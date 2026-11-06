@@ -40,11 +40,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
-  magpie backup [--no-keys] [file]  save everything to one passphrase-sealed file
-                                  (magpie.magpie-backup); --no-keys leaves out API keys
-  magpie restore [--no-agents] <file>  restore a backup on this machine; --no-agents
-                                  leaves the agents' models alone
-
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
@@ -133,10 +128,6 @@ func run(args []string) error {
 		return nil
 	case "save", "use", "rm", "profiles":
 		return profiles(args)
-	case "backup":
-		return backupCmd(args)
-	case "restore":
-		return restoreCmd(args)
 	case "import":
 		return importCmd(args[1:])
 	case "providers":
