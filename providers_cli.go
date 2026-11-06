@@ -27,8 +27,8 @@ const providerUsage = `usage:
   magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
+  magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
-  magpie provider fallback <id> [<provider/model>… | none]   models to try, in order, when this one cannot answer
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
@@ -44,7 +44,7 @@ func providers() error {
 		return nil
 	}
 	uses := usesByProvider()
-	type row struct{ name, id, host, key, models, uses, chain string }
+	type row struct{ name, id, host, key, models, uses string }
 	var rows []row
 	w := [5]int{}
 	for _, p := range all {
@@ -71,18 +71,16 @@ func providers() error {
 		if u := uses[p.ID]; len(u) > 0 {
 			r.uses = green.Render("← " + strings.Join(u, ", "))
 		}
-		r.chain = fallbackChain(p)
+		if len(p.Fallback) > 0 {
+			r.uses += muted.Render("  ⤷ " + strings.Join(p.Fallback, " → "))
+		}
 		for i, s := range []string{r.name, r.id, r.host, r.key, r.models} {
 			w[i] = max(w[i], lipgloss.Width(s))
 		}
 		rows = append(rows, r)
 	}
 	for _, r := range rows {
-		line := fmt.Sprintf("  %s  %s  %s  %s  %s  %s", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
-		if r.chain != "" {
-			line += "  " + muted.Render(r.chain)
-		}
-		fmt.Println(line)
+		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
 	for _, x := range provider.Excluded() {
 		name := x.Agent
@@ -190,7 +188,17 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		p.Key = rest[1]
+		newKey := strings.TrimSpace(rest[1])
+		if newKey != p.Key {
+			// a new key is a new account: it must not inherit the old name
+			for _, k := range p.Keys {
+				if strings.TrimSpace(k.Key) == newKey {
+					return fmt.Errorf("这个 key (%s) 已经是该供应商的另一个账号,不能重复添加", provider.Mask(newKey))
+				}
+			}
+			p.KeyName = ""
+		}
+		p.Key = newKey
 		if err := provider.Save(*p); err != nil {
 			return err
 		}
@@ -220,7 +228,39 @@ func providerCmd(args []string) error {
 		fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(p.Icon))
 		return nil
 	case "fallback":
-		return fallbackCmd(rest)
+		// where requests go when this provider is out of quota, rate
+		// limited or down; "none" clears the list
+		if len(rest) < 1 {
+			return fmt.Errorf("magpie provider fallback <id> [provider/model… | none]")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if len(rest) > 1 {
+			p.Fallback = nil
+			if !(len(rest) == 2 && rest[1] == "none") {
+				for _, id := range rest[1:] {
+					if _, _, ok := provider.Resolve(id); !ok {
+						return fmt.Errorf("magpie knows no model %q (magpie models lists them)", id)
+					}
+					p.Fallback = append(p.Fallback, id)
+				}
+			}
+			if err := provider.Save(*p); err != nil {
+				return err
+			}
+			if p, err = provider.Find(p.ID); err != nil {
+				return err
+			}
+		}
+		if len(p.Fallback) == 0 {
+			fmt.Println(p.Name, muted.Render("has no fallback · magpie provider fallback "+p.ID+" <provider/model>…"))
+			return nil
+		}
+		fmt.Println(green.Render("✓"), p.Name, "falls back to", strings.Join(p.Fallback, muted.Render(" → ")),
+			muted.Render("· when out of quota, rate limited or down"))
+		return nil
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -348,82 +388,6 @@ func saveNew(p provider.Provider) error {
 	return nil
 }
 
-const fallbackUsage = `usage:
-  magpie provider fallback <id>                       show the models tried when this provider cannot answer
-  magpie provider fallback <id> <provider/model>…     set them, in order (see magpie models)
-  magpie provider fallback <id> none                  clear them`
-
-// fallbackCmd: `magpie provider fallback <id> [<provider/model>… | none]`
-func fallbackCmd(rest []string) error {
-	if len(rest) == 0 {
-		return fmt.Errorf("%s", fallbackUsage)
-	}
-	p, err := provider.Find(rest[0])
-	if err != nil {
-		return err
-	}
-	items := rest[1:]
-	switch {
-	case len(items) == 0:
-		if len(p.Fallback) == 0 {
-			fmt.Println(muted.Render(p.Name+":"), "没有 fallback")
-			fmt.Println(muted.Render(fallbackUsage))
-			return nil
-		}
-		fmt.Println(bold.Render(p.Name), "fallback", fallbackChain(*p))
-		return nil
-	case slices.Contains(items, "none"):
-		if len(items) != 1 {
-			return fmt.Errorf("none stands alone: magpie provider fallback %s none\n\n%s", p.ID, fallbackUsage)
-		}
-		p.Fallback = nil
-		if err := provider.Save(*p); err != nil {
-			return err
-		}
-		fmt.Println(green.Render("✓"), p.Name, "fallback cleared")
-		return nil
-	}
-	// validate every entry before saving any of them
-	var chain []string
-	for _, raw := range items {
-		pid, model, ok := strings.Cut(strings.TrimSpace(raw), "/")
-		pid, model = strings.TrimSpace(pid), strings.TrimSpace(model)
-		if !ok || pid == "" || model == "" {
-			return fmt.Errorf("%q is not provider/model\n\n%s", raw, fallbackUsage)
-		}
-		unknown := fmt.Errorf("magpie doesn't know the model %q · magpie models lists them", pid+"/"+model)
-		owner, err := provider.Find(pid)
-		if err != nil || !owner.Ready() {
-			return unknown
-		}
-		// same resolution agents use: a provider's model, exposed or not
-		target, _, ok := provider.Resolve(owner.ID + "/" + model)
-		if !ok || target.ID != owner.ID {
-			return unknown
-		}
-		chain = append(chain, owner.ID+"/"+model)
-	}
-	p.Fallback = chain
-	if err := provider.Save(*p); err != nil {
-		return err
-	}
-	saved, err := provider.Find(p.ID)
-	if err != nil {
-		return err
-	}
-	fmt.Println(green.Render("✓"), saved.Name, "fallback", fallbackChain(*saved))
-	return nil
-}
-
-// fallbackChain renders a provider and its fallbacks as "a → b → c", or ""
-// when it has none.
-func fallbackChain(p provider.Provider) string {
-	if len(p.Fallback) == 0 {
-		return ""
-	}
-	return strings.Join(append([]string{p.ID}, p.Fallback...), " → ")
-}
-
 func showProvider(p provider.Provider) error {
 	kv := func(k, v string) {
 		if v != "" {
@@ -458,7 +422,6 @@ func showProvider(p provider.Provider) error {
 	for _, k := range slices.Sorted(maps.Keys(p.Headers)) {
 		kv("header", k+": "+muted.Render(p.Headers[k]))
 	}
-	kv("fallback", fallbackChain(p))
 	ms := p.Exposed()
 	src := "models.dev"
 	if t, ok := p.Fetched(); ok {
