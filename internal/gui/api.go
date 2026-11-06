@@ -5,11 +5,9 @@
 package gui
 
 import (
-	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
-	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -171,26 +169,12 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		writeJSON(rw, settingsState())
 	})
 	mux.HandleFunc("POST /api/settings", func(rw http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
+		// Start from what is saved: a post that names only theme or lang keeps
+		// the other fields (tray, proxy) as they are.
+		in := settings.Load()
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return
-		}
-		var in settings.Settings
-		if err := json.NewDecoder(bytes.NewReader(body)).Decode(&in); err != nil {
-			fail(rw, err)
-			return
-		}
-		// tray and proxy came later than the rest: a post that does not name
-		// them keeps the saved values instead of resetting them
-		var named map[string]json.RawMessage
-		_ = json.Unmarshal(body, &named)
-		saved := settings.Load()
-		if _, ok := named["tray"]; !ok {
-			in.Tray = saved.Tray
-		}
-		if _, ok := named["proxy"]; !ok {
-			in.Proxy = saved.Proxy
 		}
 		if err := settings.Save(in); err != nil {
 			fail(rw, err)
