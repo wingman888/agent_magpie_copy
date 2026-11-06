@@ -91,6 +91,9 @@ func store(f file) error {
 		return err
 	}
 	var sf storedFile
+	if f.Providers != nil {
+		sf.Providers = make([]any, 0, len(f.Providers))
+	}
 	for _, pr := range f.Providers {
 		if isSelection(pr) {
 			sf.Providers = append(sf.Providers, selectionRecord{ID: pr.ID, Models: pr.Models})

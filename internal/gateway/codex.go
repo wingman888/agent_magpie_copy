@@ -44,7 +44,10 @@ func (s *Server) codexResponses(w http.ResponseWriter, r *http.Request, p provid
 	req.Header.Set("User-Agent", "dial/"+Version)
 	if err := p.Sign(r.Context(), req, provider.Responses, up); err != nil {
 		msg := err.Error()
-		return writeError(w, provider.Responses, 401, msg), msg
+		if errors.Is(err, provider.ErrCodexSignedOut) {
+			return writeError(w, provider.Responses, 401, provider.ErrCodexSignedOut.Error()), provider.ErrCodexSignedOut.Error()
+		}
+		return writeError(w, provider.Responses, 502, p.Name+": "+msg), msg
 	}
 	res, err := s.client.Do(req)
 	if err != nil {

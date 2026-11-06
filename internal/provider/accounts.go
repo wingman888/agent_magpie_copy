@@ -321,10 +321,9 @@ func copilotDir() string {
 	return filepath.Join(home, ".config", "github-copilot")
 }
 
-// readCopilot finds the github.com entry in apps.json or hosts.json. An entry
-// that carries an OAuth token is preferred.
+// readCopilot finds the github.com entry in apps.json or hosts.json that
+// carries an OAuth token. An entry without one is not a sign-in.
 func readCopilot() (copilotEntry, bool) {
-	var first *copilotEntry
 	for _, name := range []string{"apps.json", "hosts.json"} {
 		b, err := os.ReadFile(filepath.Join(copilotDir(), name))
 		if err != nil {
@@ -350,13 +349,7 @@ func readCopilot() (copilotEntry, bool) {
 			if e.OAuthToken != "" {
 				return e, true
 			}
-			if first == nil {
-				first = &e
-			}
 		}
-	}
-	if first != nil {
-		return *first, true
 	}
 	return copilotEntry{}, false
 }

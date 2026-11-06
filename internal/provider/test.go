@@ -32,17 +32,22 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
-		var path, body string
+		var url, body, path string
+		headers := map[string]string{"Authorization": "Bearer " + p.Key}
 		switch proto {
 		case Chat:
 			path = "/chat/completions"
+			url = p.Chat + path
 			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 		case Responses:
 			path = "/responses"
+			url = p.Responses + path
 			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
 		case Anthropic:
 			path = "/v1/messages"
+			url = p.Anthropic + path
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
+			headers = AuthHeaders(p, Anthropic)
 		}
 		if p.Account != nil {
 			// The login's own base and signature; the body is shaped the way
@@ -53,22 +58,12 @@ func (p Provider) Test(ctx context.Context) []Result {
 				continue
 			}
 			sent := p.Prepare([]byte(body))
-			out = append(out, probe(ctx, proto, base+path, string(sent), model, func(req *http.Request) error {
+			out = append(out, probeWith(ctx, proto, base+path, string(sent), model, func(req *http.Request) error {
 				return p.Sign(ctx, req, proto, sent)
 			}))
 			continue
 		}
-		headers := map[string]string{"Authorization": "Bearer " + p.Key}
-		if proto == Anthropic {
-			headers = AuthHeaders(p, Anthropic)
-		}
-		sign := func(req *http.Request) error {
-			for k, v := range headers {
-				req.Header.Set(k, v)
-			}
-			return nil
-		}
-		out = append(out, probe(ctx, proto, p.Base(proto)+path, body, model, sign))
+		out = append(out, probe(ctx, proto, url, body, model, headers))
 	}
 	return out
 }
@@ -88,9 +83,18 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
-// probe posts body to url. sign attaches whatever the provider needs to the
-// request before it is sent; it may also change the URL for account logins.
-func probe(ctx context.Context, proto Protocol, url, body, model string, sign func(*http.Request) error) Result {
+func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string) Result {
+	return probeWith(ctx, proto, url, body, model, func(req *http.Request) error {
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		return nil
+	})
+}
+
+// probeWith posts body to url, with sign attaching whatever the provider
+// needs to the request before it is sent.
+func probeWith(ctx context.Context, proto Protocol, url, body, model string, sign func(*http.Request) error) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"

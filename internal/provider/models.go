@@ -110,7 +110,7 @@ func (p Provider) Exposed() []catalog.Model {
 			return pick(have)
 		}
 	}
-	if len(avail) <= manyModels {
+	if len(avail) <= manyModels || p.Account != nil {
 		return avail
 	}
 	return nil

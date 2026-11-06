@@ -445,21 +445,28 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(to)
-	// A backend may send no Content-Type (the ChatGPT backend does); then the
-	// reply is an event stream when its first bytes look like one.
-	br := bufio.NewReaderSize(res.Body, 32<<10)
+	var rd io.Reader = res.Body
 	ct := res.Header.Get("Content-Type")
-	if !strings.HasPrefix(ct, "text/event-stream") && !(ct == "" && looksLikeEventStream(br)) {
+	if p.Account != nil && ct == "" {
+		// The ChatGPT backend sends no Content-Type: an account login's reply
+		// is an event stream when its first bytes look like one.
+		br := bufio.NewReaderSize(res.Body, 32<<10)
+		if looksLikeEventStream(br) {
+			ct = "text/event-stream"
+		}
+		rd = br
+	}
+	if !strings.HasPrefix(ct, "text/event-stream") {
 		// the provider ignored stream:true; read the whole reply as one
 		// event stream would be wrong, so give up cleanly
-		b, _ := io.ReadAll(io.LimitReader(br, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), req.Model)
 		var failed string
-		readSSE(br, func(_, data string) error {
+		readSSE(rd, func(_, data string) error {
 			return dec(data, func(ev Event) {
 				switch ev.Kind {
 				case KError:
@@ -474,7 +481,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return 200, failed
 	}
 	var col collector
-	readSSE(br, func(_, data string) error {
+	readSSE(rd, func(_, data string) error {
 		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {
