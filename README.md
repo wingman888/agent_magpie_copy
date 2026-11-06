@@ -287,6 +287,66 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
+## Import links
+
+A provider can be shared as a single link. Opening it (or running
+`magpie import '<link>'`, or passing it as the first argument to `magpie`)
+shows what would be added and waits for your confirmation; the link itself
+never saves anything.
+
+```
+magpie://import?preset=deepseek&key=sk-…
+magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&anthropic=https://api.acme.example&key=sk-…&models=gpt-5.5,claude-sonnet-5
+```
+
+The equivalent spellings `magpie:import?…`, `magpie:///import?…` and
+`MAGPIE://import/?…` are accepted too (the scheme is case-insensitive and a
+trailing slash after `import` is allowed). All values must be URL-encoded.
+
+| Parameter   | Meaning |
+| ----------- | ------- |
+| `preset`    | A preset id (see `magpie presets`); its endpoints are used. |
+| `region`    | Picks one of the preset's regions when it has several. An unknown region is an error. |
+| `name`      | Provider name. Required without `preset`; with `preset` it overrides the preset's name. Names longer than 80 characters are truncated. |
+| `id`        | Provider id. Defaults to a slug of the name (or the preset id for preset links). |
+| `key`       | API key. Without it, you add the key later. |
+| `chat`      | OpenAI Chat Completions base URL (`…/v1`). |
+| `responses` | OpenAI Responses base URL (`…/v1`). |
+| `anthropic` | Anthropic Messages base URL (root, without `/v1`). |
+| `models`    | Comma-separated model ids to expose. Empty items and surrounding spaces are ignored; at most 200. |
+| `catalog`   | A models.dev provider id, used for model names and reasoning efforts. Invalid values are ignored. |
+| `website`   | The vendor's website. Only `https` is accepted; other values are ignored. |
+| `keys`      | The page where API keys are issued. Only `https` is accepted; other values are ignored. |
+
+With `preset`, the endpoints come from the preset (and the chosen region), and
+`chat`, `responses`, `anthropic`, `catalog`, `website` and `keys` have no
+effect. Without `preset`, give at least one of `chat`, `responses` or
+`anthropic`.
+
+Base URLs must be `https`. Plain `http` is allowed only for local or LAN
+hosts (`localhost`, loopback addresses, private IP ranges and `.local`
+names). Base URLs must not contain a username, password, query or fragment,
+and must not use any other scheme such as `file:`. A trailing `/` is removed.
+Links that break these rules, or that give an empty id, the reserved id
+`magpie`, or a key containing control characters or longer than 4096
+characters, are rejected with an error; nothing is saved.
+
+**Confirmation.** The summary lists the provider, its id, every host that
+will receive your prompts and key, and the models. It then asks
+`Add it? [y/N]`; only `y` or `yes` saves. If the id matches a provider you
+already have, the summary also warns that the import will replace it. If the
+link has no key and the provider is not yet usable, magpie tells you to run
+`magpie provider key <id> <key>`.
+
+- `magpie import -y '<link>'` skips the question (for scripts).
+- When standard input is not a terminal, `magpie import` refuses unless `-y`
+  is given.
+
+**Sharing from a web page.** Put the same parameters after the `#` of
+`https://usemagpie.ai/import#<same parameters>`, for example
+`https://usemagpie.ai/import#preset=deepseek`. Browsers do not send the
+fragment to the server, so the key stays out of web server logs.
+
 ## Files
 
 - `~/.config/magpie/profiles.json` — saved profiles
