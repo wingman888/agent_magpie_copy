@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/yetone/dial/internal/catalog"
 	"github.com/yetone/dial/internal/edit"
@@ -131,14 +130,7 @@ func codex(home string) *Agent {
 					if p := get("model_provider"); p != "" && p != dialID {
 						own = group(p, own)
 					}
-					// Codex's own account models would only go round through dial.
-					var via []Option
-					for _, o := range viaDial("") {
-						if !strings.HasPrefix(o.Value, "codex/") {
-							via = append(via, o)
-						}
-					}
-					return append(own, via...)
+					return append(own, viaDial("")...)
 				},
 			},
 			{

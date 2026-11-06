@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -146,18 +145,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /messages", s.handle(provider.Anthropic))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
-	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
-	mux.HandleFunc("POST "+geminiPrefix, s.geminiModel)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and the Gemini API under /v1beta/models/{model}:generateContent")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses and /v1/messages")
 	})
 	return mux
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages",
-			"/v1beta/models", "/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:streamGenerateContent", "/v1beta/models/{model}:countTokens"}})
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"}})
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -250,21 +246,7 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			return
 		}
 		call.Provider = p.ID
-		if p.IsAccount() {
-			ap, err := provider.Prepare(r.Context(), p)
-			if err != nil {
-				call.Status, call.Error = writeError(w, from, accountStatus(err), err.Error()), err.Error()
-				call.Millis = time.Since(start).Milliseconds()
-				s.record(call)
-				return
-			}
-			p = ap
-		}
-		if p.ID == "codex" && from == provider.Responses {
-			// the Codex backend is spoken to directly, with its own body rules
-			call.To = from
-			call.Status, call.Error = s.codexResponses(w, r, p, model, body, &call.Usage)
-		} else if p.Base(from) != "" {
+		if p.Base(from) != "" {
 			call.To = from
 			call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
 		} else {
@@ -301,40 +283,10 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	for k, v := range provider.RequestHeaders(p, to, body) {
+	for k, v := range provider.AuthHeaders(p, to) {
 		req.Header.Set(k, v)
 	}
 	return s.client.Do(req)
-}
-
-// upstream sends a request in a provider's own protocol. The Codex backend
-// has its own body rules and is called through provider.CodexCall.
-func (s *Server) upstream(ctx context.Context, p provider.Provider, to provider.Protocol, body []byte, in http.Header) (*http.Response, error) {
-	if p.ID == "codex" {
-		return provider.CodexCall(ctx, p, body)
-	}
-	return s.forward(ctx, p, to, pathOf(to), body, in)
-}
-
-// eventBody is the reply body and whether it is an event stream. The Codex
-// backend sometimes sends no Content-Type, so for it the first bytes decide.
-func eventBody(p provider.Provider, res *http.Response) (io.Reader, bool) {
-	ct := res.Header.Get("Content-Type")
-	if p.ID != "codex" {
-		return res.Body, strings.HasPrefix(ct, "text/event-stream")
-	}
-	br := bufio.NewReader(res.Body)
-	var head []byte
-	if ct == "" {
-		for n := 1; n <= 32; n++ {
-			b, err := br.Peek(n)
-			head = b
-			if err != nil || len(bytes.TrimLeft(b, " \t\r\n\ufeff")) >= 6 {
-				break
-			}
-		}
-	}
-	return br, provider.IsEventStream(ct, head)
 }
 
 // passthrough relays a request the provider understands as-is, with the
@@ -394,7 +346,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	stream := req.Stream
 	req.Stream = true
-	res, err := s.upstream(r.Context(), p, to, build(to, req, model, p.Host()), r.Header)
+	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
 	if err != nil {
 		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
 	}
@@ -405,18 +357,17 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(to)
-	src, isStream := eventBody(p, res)
-	if !isStream {
+	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
 		// the provider ignored stream:true; read the whole reply as one
 		// event stream would be wrong, so give up cleanly
-		b, _ := io.ReadAll(io.LimitReader(src, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), req.Model)
 		var failed string
-		readSSE(src, func(_, data string) error {
+		readSSE(res.Body, func(_, data string) error {
 			return dec(data, func(ev Event) {
 				switch ev.Kind {
 				case KError:
@@ -431,7 +382,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return 200, failed
 	}
 	var col collector
-	readSSE(src, func(_, data string) error {
+	readSSE(res.Body, func(_, data string) error {
 		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {

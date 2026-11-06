@@ -50,11 +50,6 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
-
-	// auth is set only on account providers (codex, copilot) by Prepare:
-	// the headers for one upstream call, read from the agent's own login.
-	// It is never written to dial's config file.
-	auth *authState
 }
 
 type file struct {
@@ -78,29 +73,12 @@ func load() file {
 	return f
 }
 
-// accountRecord is what the config keeps of an account provider: only the
-// id and the models the user picked. The login itself lives in the agent.
-type accountRecord struct {
-	ID     string   `json:"id"`
-	Models []string `json:"models,omitempty"`
-}
-
 func store(f file) error {
 	p := Path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	out := struct {
-		Providers []any `json:"providers"`
-	}{}
-	for _, pr := range f.Providers {
-		if AccountID(pr.ID) {
-			out.Providers = append(out.Providers, accountRecord{ID: pr.ID, Models: pr.Models})
-		} else {
-			out.Providers = append(out.Providers, pr)
-		}
-	}
-	b, err := json.MarshalIndent(out, "", "  ")
+	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -110,34 +88,11 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added, then
-// the account providers (codex, copilot) whose agent is signed in. A
-// configured account provider that is not signed in is left out; its
-// saved model picks wait for the next sign-in.
+// All lists the configured providers in the order they were added.
 func All() []Provider {
-	var out []Provider
-	seen := map[string]bool{}
-	for _, p := range load().Providers {
-		p = normalize(p)
-		if AccountID(p.ID) {
-			ap, ok := accountProvider(p.ID)
-			if !ok {
-				continue
-			}
-			ap.Models = p.Models
-			out = append(out, ap)
-		} else {
-			out = append(out, p)
-		}
-		seen[p.ID] = true
-	}
-	for _, id := range accountIDs {
-		if seen[id] {
-			continue
-		}
-		if ap, ok := accountProvider(id); ok {
-			out = append(out, ap)
-		}
+	out := load().Providers
+	for i := range out {
+		out[i] = normalize(out[i])
 	}
 	return out
 }
@@ -165,9 +120,6 @@ func Save(p Provider) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
-	}
-	if AccountID(p.ID) {
-		return saveAccount(p)
 	}
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
@@ -197,9 +149,6 @@ func Save(p Provider) error {
 
 // Delete removes a provider.
 func Delete(id string) error {
-	if AccountID(id) {
-		return deleteAccount(id)
-	}
 	f := load()
 	keep := f.Providers[:0]
 	found := false
@@ -328,9 +277,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool {
-	if p.IsAccount() {
-		return true // signed in is all an account provider needs
-	}
-	return p.Key != "" || keyOptional(p)
-}
+func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }

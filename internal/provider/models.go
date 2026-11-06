@@ -22,17 +22,6 @@ func (p Provider) Available() []catalog.Model {
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
 	}
-	if p.IsAccount() {
-		// the built-in lists are a stand-in until a refresh; "auto" is
-		// Copilot's own router, not a model a client may pick by name.
-		var out []catalog.Model
-		for _, m := range known {
-			if m.ID != "auto" {
-				out = append(out, m)
-			}
-		}
-		return out
-	}
 	var out []catalog.Model
 	for _, m := range known {
 		if !strings.Contains(m.ID, "-exp") && !strings.Contains(m.ID, "preview") {
@@ -50,12 +39,6 @@ func (p Provider) Fetched() (time.Time, bool) {
 
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
-	switch p.ID {
-	case "codex":
-		return nil, errorf("Codex has no model list to fetch; dial uses its built-in list")
-	case "copilot":
-		return refreshCopilot(ctx)
-	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
 		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key)

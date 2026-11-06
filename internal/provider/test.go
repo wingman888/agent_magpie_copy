@@ -54,13 +54,6 @@ func (p Provider) Test(ctx context.Context) []Result {
 // AuthHeaders is how a request to the vendor proves who it is. Anthropic's
 // own API wants x-api-key alone; compatible vendors take either, so both.
 func AuthHeaders(p Provider, proto Protocol) map[string]string {
-	if p.auth != nil {
-		out := make(map[string]string, len(p.auth.headers))
-		for k, v := range p.auth.headers {
-			out[k] = v
-		}
-		return out
-	}
 	if p.Key == "" {
 		return map[string]string{}
 	}
