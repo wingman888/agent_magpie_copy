@@ -171,7 +171,7 @@ func TestCodexStreamingResponsesRelayed(t *testing.T) {
 }
 
 func TestCodexTokenRefreshedAndWrittenBack(t *testing.T) {
-	newAccess := codexJWT(time.Now().Add(time.Hour).Unix())
+	newAccess := codexJWT(time.Now().Add(time.Hour).Unix(), "")
 	refreshed := 0
 	ref := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		refreshed++
