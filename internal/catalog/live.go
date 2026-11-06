@@ -9,12 +9,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
-// models.dev lags and keeps legacy names around. dial asks the vendor when
+// models.dev lags and keeps legacy names around. magpie asks the vendor when
 // it has a key, remembers the answer next to the models.dev cache, and lets
 // the catalog fill in display names and reasoning levels.
 
@@ -61,8 +62,17 @@ func SaveLive(provider, base string, models []Model) error {
 
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
-// around it. The result keeps the server's order.
-func Fetch(ctx context.Context, base, key string) ([]Model, error) {
+// around it. The result keeps the server's order. anthropic sends the
+// Anthropic version header, which the official API requires but which a
+// dual-protocol relay like OpenRouter reads as a request for its
+// Anthropic-flavoured catalog — namespaced, differently named ids.
+func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, nil)
+}
+
+// FetchWith is Fetch with extra request headers, sent after the usual ones
+// and under the names given (see ApplyHeaders).
+func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -89,7 +99,7 @@ func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -106,7 +116,7 @@ func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -114,12 +124,15 @@ func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "dial")
+	req.Header.Set("User-Agent", "magpie")
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("x-api-key", key)
+	}
+	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
+	ApplyHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -158,6 +171,33 @@ func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
 	return out, nil
 }
 
+// ApplyHeaders sets extra headers on h exactly as named: the name keeps the
+// case it was given on the wire, and it replaces any header of the same
+// name (in any case) that is already set, so it can override a default.
+//
+// One exception: net/http only lets a User-Agent set under its canonical
+// spelling suppress its own default, so that name is always written as
+// "User-Agent" (otherwise two User-Agent lines would go out).
+func ApplyHeaders(h http.Header, extra map[string]string) {
+	names := make([]string, 0, len(extra))
+	for n := range extra {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		key := n
+		if strings.EqualFold(n, "User-Agent") {
+			key = "User-Agent"
+		}
+		for k := range h {
+			if _, own := extra[k]; !own && strings.EqualFold(k, key) {
+				delete(h, k)
+			}
+		}
+		h[key] = []string{extra[n]}
+	}
+}
+
 type liveModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -178,6 +218,9 @@ func Decorate(live []Model, known []Model) []Model {
 				m.Name = k.Name
 			}
 			m.Efforts, m.Released, m.Provider = k.Efforts, k.Released, k.Provider
+			if k.Temperature != nil {
+				m.Temperature = k.Temperature
+			}
 		}
 		out = append(out, m)
 	}
