@@ -183,15 +183,15 @@ func Slug(name string) string {
 func Save(p Provider) error {
 	p = normalize(p)
 	// An account provider (as Find returns it) saves its picks only: its address
-	// and key are ignored. A bare record under an agent's id is picks too, and so
-	// is anything saved under an agent's id when the user has no provider of their
-	// own there: the address and key are never written for an account id, signed
-	// in or not. A user's own addressed provider under the same id is an ordinary
-	// edit (see ownProvider).
+	// and key are ignored. A bare record under an agent's id (no address) is picks
+	// too. An addressed save under an agent's id that is not signed in, and has no
+	// own provider there, is also picks only: no address or key reaches the config.
+	// When the agent is signed in, an addressed save is the user's own provider
+	// and is an ordinary edit (TestOwnProviderWinsOverAccount).
 	if p.ID == "" && p.Account != nil {
 		p.ID = p.Account.Agent
 	}
-	if p.Account != nil || isPick(p) || (accountID(p.ID) && !ownProvider(p.ID)) {
+	if p.Account != nil || isPick(p) || (accountID(p.ID) && !ownProvider(p.ID) && !signedIn(p.ID)) {
 		return savePicks(p.ID, p.Models)
 	}
 	if p.ID == "" {

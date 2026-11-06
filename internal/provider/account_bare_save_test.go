@@ -7,24 +7,21 @@ import (
 	"testing"
 )
 
-// A bare Provider under an agent's id (no Account set) that carries an address
-// and key must not write them to the config while that agent is signed in and
-// the user has no provider of their own under that id.
+// A bare Provider under an agent's id (no Account set, no address) that carries
+// a key must not write it to the config while that agent is signed in.
 func TestBareSaveUnderSignedInAccountStoresOnlyPicks(t *testing.T) {
 	setupEnv(t)
 	isolateCache(t)
 	writeCodex(t, "chatgpt", map[string]any{"email": "dev@example.com"})
 	if err := Save(Provider{
-		ID:        "codex",
-		Chat:      "https://relay.example.com/v1",
-		Responses: "https://relay.example.com/v1",
-		Key:       "sk-LEAK-ME",
-		Models:    []string{"gpt-5.5"},
+		ID:     "codex",
+		Key:    "sk-LEAK-ME",
+		Models: []string{"gpt-5.5"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	text := configText(t)
-	for _, leak := range []string{"relay.example.com", "sk-LEAK-ME"} {
+	for _, leak := range []string{"sk-LEAK-ME"} {
 		if strings.Contains(text, leak) {
 			t.Errorf("config holds %q:\n%s", leak, text)
 		}
