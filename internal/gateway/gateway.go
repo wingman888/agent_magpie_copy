@@ -147,9 +147,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
 	mux.HandleFunc("GET /v1beta/models/{id...}", s.geminiModel)
-	mux.HandleFunc("POST /v1beta/models/{rest...}", s.gemini)
+	mux.HandleFunc("POST /v1beta/models/{rest...}", s.geminiAPI)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and the Gemini API at /v1beta/models")
+		writeError(w, provider.Chat, http.StatusNotFound, "dial serves /v1/chat/completions, /v1/responses, /v1/messages and the Gemini API at /v1beta/models (generateContent, streamGenerateContent, countTokens)")
 	})
 	return mux
 }
@@ -234,18 +234,18 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			writeError(w, from, 400, err.Error())
 			return
 		}
-		s.serve(w, r, from, body, modelOf(body), nil)
+		s.serve(w, r, from, body, modelOf(body), "")
 	}
 }
 
-// serve answers one model call, whichever client API it came in. model is
-// the id the client asked for. pre is the request already parsed, for the
-// APIs that keep the model and the stream flag outside the body (Gemini);
-// it is nil for the others, which are parsed from body when translated.
-func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte, model string, pre *Request) {
+// serve is the request path every client API shares: resolve the model,
+// pass the request through or translate it, then record the call. model is
+// the name the client asked for. method is the Gemini method (its model and
+// stream flag come from the URL); other APIs leave it empty.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte, model, method string) {
 	start := time.Now()
 	call := Call{Time: start, From: from, Model: model, Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
-	p, model, ok := provider.Resolve(call.Model)
+	p, vendorModel, ok := provider.Resolve(call.Model)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		s.record(call)
@@ -253,9 +253,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	if p.Base(from) != "" {
+	if from != geminiProto && p.Base(from) != "" {
 		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+		call.Status, call.Error = s.passthrough(w, r, p, from, vendorModel, body, &call.Usage)
 	} else {
 		to := p.Speaks()
 		if len(to) == 0 {
@@ -263,18 +263,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			return
 		}
 		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, pre, &call.Usage)
+		call.Status, call.Error = s.translateClient(w, r, p, from, to[0], vendorModel, call.Model, method, body, &call.Usage)
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: vendorModel,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
-// unknownModel is the message for an id dial cannot route.
-func unknownModel(id string) string {
-	msg := fmt.Sprintf("dial knows no model %q", id)
+// unknownModel is the 404 message for a model dial does not know.
+func unknownModel(model string) string {
+	msg := fmt.Sprintf("dial knows no model %q", model)
 	if ids := provider.IDs(); len(ids) > 0 {
 		msg += "; it has " + strings.Join(ids, ", ")
 	} else {
@@ -356,15 +356,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, pre *Request, u *Usage) (int, string) {
-	req := pre
-	if req == nil {
-		var err error
-		req, err = parse(from, body)
-		if err != nil {
-			return writeError(w, from, 400, err.Error()), err.Error()
-		}
-	}
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, req *Request, u *Usage) (int, string) {
 	stream := req.Stream
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
@@ -418,6 +410,16 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	return 200, col.err
 }
 
+// translateClient parses a client request in its own API and translates it.
+// A parse failure is the client's error, answered in the client's shape.
+func (s *Server) translateClient(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model, clientModel, method string, body []byte, u *Usage) (int, string) {
+	req, err := parseClient(from, body, clientModel, method)
+	if err != nil {
+		return writeError(w, from, 400, err.Error()), err.Error()
+	}
+	return s.translate(w, r, p, from, to, model, req, u)
+}
+
 // ---- protocol tables --------------------------------------------------------
 
 func pathOf(proto provider.Protocol) string {
@@ -436,12 +438,23 @@ func parse(proto provider.Protocol, body []byte) (*Request, error) {
 		return parseChat(body)
 	case provider.Responses:
 		return parseResponses(body)
-	case provider.Gemini:
-		// the model and stream flag come from the URL, so the Gemini
-		// handler parses these itself and hands the result to translate
-		return nil, fmt.Errorf("gemini requests are parsed from their URL path")
 	}
 	return parseAnthropic(body)
+}
+
+// parseClient reads a request in the client's own API. A Gemini body has
+// neither the model nor the stream flag: both come from the URL.
+func parseClient(proto provider.Protocol, body []byte, model, method string) (*Request, error) {
+	if proto != geminiProto {
+		return parse(proto, body)
+	}
+	req, err := parseGemini(body)
+	if err != nil {
+		return nil, err
+	}
+	req.Model = model
+	req.Stream = method == "streamGenerateContent"
+	return req, nil
 }
 
 func build(proto provider.Protocol, r *Request, model, host string) []byte {
@@ -477,8 +490,8 @@ func encoder(proto provider.Protocol, w *sseWriter, model string) streamEncoder 
 		return &chatEncoder{w: w, model: model}
 	case provider.Responses:
 		return &responsesEncoder{w: w, model: model}
-	case provider.Gemini:
-		return newGeminiEncoder(w, model)
+	case geminiProto:
+		return &geminiEncoder{w: w, model: model}
 	}
 	return &anthropicEncoder{w: w, model: model}
 }
@@ -489,7 +502,7 @@ func render(proto provider.Protocol, res Result, model string) []byte {
 		return renderChat(res, model)
 	case provider.Responses:
 		return renderResponses(res, model)
-	case provider.Gemini:
+	case geminiProto:
 		return renderGemini(res, model)
 	}
 	return renderAnthropic(res, model)
@@ -529,8 +542,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // writeError answers in the client's own error shape.
 func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg string) int {
-	if proto == provider.Gemini {
-		return writeGeminiError(w, status, msg)
+	if proto == geminiProto {
+		return geminiWriteError(w, status, msg)
 	}
 	typ := "api_error"
 	switch {

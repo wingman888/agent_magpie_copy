@@ -88,20 +88,6 @@ func (a *Agent) Field(key string) *Field {
 	return nil
 }
 
-// Lookup finds a field by key, or failing that by its display label
-// ("auth" for the field keyed "provider"). Keys win over labels.
-func (a *Agent) Lookup(name string) *Field {
-	if f := a.Field(name); f != nil {
-		return f
-	}
-	for i := range a.Fields {
-		if strings.EqualFold(a.Fields[i].Label, name) {
-			return &a.Fields[i]
-		}
-	}
-	return nil
-}
-
 // Values reads every field.
 func (a *Agent) Values() map[string]string {
 	m := make(map[string]string, len(a.Fields))

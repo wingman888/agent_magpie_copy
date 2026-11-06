@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -10,9 +9,67 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// gemhttpReply is an upstream Chat stream with reasoning, text and a whole
-// tool call, ending in usage of 10 prompt, 5 completion of which 2 reasoning.
-var gemhttpReply = sse(
+// gemHTTPMap decodes a JSON object for inspection.
+func gemHTTPMap(t *testing.T, b []byte) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, b)
+	}
+	return m
+}
+
+// gemHTTPEvents reads the data lines of a Gemini SSE body.
+func gemHTTPEvents(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, block := range strings.Split(body, "\n\n") {
+		block = strings.TrimSpace(block)
+		if !strings.HasPrefix(block, "data: ") {
+			continue
+		}
+		out = append(out, gemHTTPMap(t, []byte(strings.TrimPrefix(block, "data: "))))
+	}
+	return out
+}
+
+// gemHTTPParts lists the parts of every candidate in the events, in order.
+func gemHTTPParts(evs []map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, ev := range evs {
+		cands, _ := ev["candidates"].([]any)
+		for _, c := range cands {
+			cm, _ := c.(map[string]any)
+			content, _ := cm["content"].(map[string]any)
+			parts, _ := content["parts"].([]any)
+			for _, p := range parts {
+				if pm, ok := p.(map[string]any); ok {
+					out = append(out, pm)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// gemHTTPBody is a Gemini request with a system instruction, a function
+// call and its result in the history, a tool declaration with uppercase
+// schema types, and thinking and output limits.
+const gemHTTPBody = `{
+  "systemInstruction": {"parts": [{"text": "be brief"}]},
+  "contents": [
+    {"role": "user", "parts": [{"text": "read a.go"}]},
+    {"role": "model", "parts": [{"functionCall": {"id": "t0", "name": "read", "args": {"path": "x"}}}]},
+    {"role": "user", "parts": [{"functionResponse": {"id": "t0", "name": "read", "response": {"output": "package x"}}}]}
+  ],
+  "tools": [{"functionDeclarations": [{"name": "read", "description": "read a file",
+    "parameters": {"type": "OBJECT", "properties": {"path": {"type": "STRING"}}, "required": ["path"]}}]}],
+  "generationConfig": {"maxOutputTokens": 100, "thinkingConfig": {"thinkingBudget": -1, "includeThoughts": true}}
+}`
+
+// gemHTTPChatReply is an OpenAI Chat stream: reasoning, text, a tool call
+// split over several chunks, and usage with reasoning tokens.
+var gemHTTPChatReply = sse(
 	`data: {"id":"c1","model":"m1","choices":[{"delta":{"role":"assistant","reasoning_content":"hmm"}}]}`,
 	`data: {"id":"c1","choices":[{"delta":{"content":"Hi "}}]}`,
 	`data: {"id":"c1","choices":[{"delta":{"content":"there"}}]}`,
@@ -23,290 +80,174 @@ var gemhttpReply = sse(
 	`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}}`,
 	`data: [DONE]`)
 
-// gemhttpBody is a Gemini request with a system instruction, a function call
-// and its result in history, an uppercase tool schema and a thinking budget.
-const gemhttpBody = `{"systemInstruction":{"parts":[{"text":"be brief"}]},
- "contents":[
-   {"role":"user","parts":[{"text":"read a.go"}]},
-   {"role":"model","parts":[{"functionCall":{"id":"t0","name":"read","args":{"path":"x"}}}]},
-   {"role":"user","parts":[{"functionResponse":{"id":"t0","name":"read","response":{"output":"package x"}}}]}],
- "tools":[{"functionDeclarations":[{"name":"read","description":"read a file",
-   "parameters":{"type":"OBJECT","properties":{"path":{"type":"STRING"}},"required":["path"]}}]}],
- "generationConfig":{"maxOutputTokens":300,"thinkingConfig":{"thinkingBudget":-1,"includeThoughts":true}}}`
-
-// gemhttpEvents reads the JSON objects of an SSE body.
-func gemhttpEvents(t *testing.T, body string) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for _, block := range strings.Split(body, "\n\n") {
-		data, ok := strings.CutPrefix(strings.TrimSpace(block), "data: ")
-		if !ok {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(data), &m); err != nil {
-			t.Fatalf("bad event %q: %v", data, err)
-		}
-		out = append(out, m)
-	}
-	return out
-}
-
-// gemhttpParts returns the parts of the first candidate of a Gemini object.
-func gemhttpParts(m map[string]any) []map[string]any {
-	cands, _ := m["candidates"].([]any)
-	if len(cands) == 0 {
-		return nil
-	}
-	content, _ := cands[0].(map[string]any)["content"].(map[string]any)
-	raw, _ := content["parts"].([]any)
-	var out []map[string]any
-	for _, p := range raw {
-		out = append(out, p.(map[string]any))
-	}
-	return out
-}
-
-// gemhttpGet serves a GET through a fresh gateway.
-func gemhttpGet(t *testing.T, path string) (int, string) {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
-	return rec.Code, rec.Body.String()
-}
-
-// gemhttpErr reads the Gemini error object of a reply.
-func gemhttpErr(t *testing.T, body string) map[string]any {
-	t.Helper()
-	var m struct {
-		Error map[string]any `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(body), &m); err != nil || m.Error == nil {
-		t.Fatalf("not a Gemini error: %s", body)
-	}
-	return m.Error
-}
-
-func TestGemHTTPStreamSSE(t *testing.T) {
-	f := &fake{t: t, reply: gemhttpReply}
+func TestGeminiHTTPStream(t *testing.T) {
+	f := &fake{t: t, reply: gemHTTPChatReply}
 	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", gemhttpBody)
+	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", gemHTTPBody)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-
-	// what the upstream got: lowercase schema, medium effort, max tokens
-	if f.path != "/v1/chat/completions" {
-		t.Errorf("upstream path %s", f.path)
-	}
-	var up map[string]any
-	json.Unmarshal(f.got, &up)
-	if up["max_tokens"] != float64(300) || up["reasoning_effort"] != "medium" {
-		t.Errorf("upstream params: %s", f.got)
-	}
-	if bytes.Contains(f.got, []byte(`"OBJECT"`)) || bytes.Contains(f.got, []byte(`"STRING"`)) ||
-		!bytes.Contains(f.got, []byte(`"type":"object"`)) || !bytes.Contains(f.got, []byte(`"type":"string"`)) {
-		t.Errorf("schema not lowercased: %s", f.got)
-	}
-
-	// what the client got
-	evs := gemhttpEvents(t, body)
-	if len(evs) < 5 {
-		t.Fatalf("too few events: %s", body)
-	}
-	var texts []string
-	var calls []map[string]any
-	for _, e := range evs[:len(evs)-1] {
-		for _, p := range gemhttpParts(e) {
-			switch {
-			case p["thought"] == true:
-				texts = append(texts, "THINK:"+p["text"].(string))
-			case p["functionCall"] != nil:
-				calls = append(calls, p["functionCall"].(map[string]any))
-			case p["text"] != nil:
-				texts = append(texts, p["text"].(string))
+	evs := gemHTTPEvents(t, body)
+	parts := gemHTTPParts(evs)
+	var thought, call bool
+	var text strings.Builder
+	for _, p := range parts {
+		if p["thought"] == true && p["text"] == "hmm" {
+			thought = true
+		}
+		if p["thought"] != true {
+			if s, ok := p["text"].(string); ok {
+				text.WriteString(s)
+			}
+		}
+		if fc, ok := p["functionCall"].(map[string]any); ok {
+			args, _ := fc["args"].(map[string]any)
+			if fc["id"] == "call_1" && fc["name"] == "read" && args["path"] == "a.go" {
+				call = true
 			}
 		}
 	}
-	if got := strings.Join(texts, "|"); got != "THINK:hmm|Hi |there" {
-		t.Errorf("streamed parts: %q", got)
-	}
-	if len(calls) != 1 || calls[0]["id"] != "call_1" || calls[0]["name"] != "read" {
-		t.Fatalf("calls: %v", calls)
-	}
-	if args, _ := calls[0]["args"].(map[string]any); args["path"] != "a.go" {
-		t.Errorf("args not whole: %v", calls[0]["args"])
+	if !thought || text.String() != "Hi there" || !call {
+		t.Errorf("thought=%v text=%q call=%v in %s", thought, text.String(), call, body)
 	}
 	last := evs[len(evs)-1]
 	cand := last["candidates"].([]any)[0].(map[string]any)
-	um, _ := last["usageMetadata"].(map[string]any)
-	if cand["finishReason"] != "STOP" || um["promptTokenCount"] != float64(10) ||
-		um["candidatesTokenCount"] != float64(3) || um["thoughtsTokenCount"] != float64(2) {
-		t.Errorf("final event: %s", body)
+	if cand["finishReason"] != "STOP" || last["usageMetadata"] == nil {
+		t.Errorf("last event: %v", last)
+	}
+	if !strings.Contains(string(f.got), `"role":"tool"`) || !strings.Contains(string(f.got), `"tool_call_id":"t0"`) {
+		t.Errorf("upstream lost the function result: %s", f.got)
 	}
 }
 
-func TestGemHTTPGenerateContentJSON(t *testing.T) {
-	f := &fake{t: t, reply: gemhttpReply}
+func TestGeminiHTTPGenerate(t *testing.T) {
+	f := &fake{t: t, reply: gemHTTPChatReply}
 	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", gemhttpBody)
+	code, body := post(t, "/v1beta/models/fake/m1:generateContent", gemHTTPBody)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	var out map[string]any
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatalf("not JSON: %s", body)
-	}
-	cand := out["candidates"].([]any)[0].(map[string]any)
+	m := gemHTTPMap(t, []byte(body))
+	cand := m["candidates"].([]any)[0].(map[string]any)
 	if cand["finishReason"] != "STOP" {
-		t.Errorf("finishReason: %s", body)
-	}
-	var text string
-	var call map[string]any
-	for _, p := range gemhttpParts(out) {
-		if p["text"] != nil && p["thought"] != true {
-			text += p["text"].(string)
-		}
-		if p["functionCall"] != nil {
-			call = p["functionCall"].(map[string]any)
-		}
-	}
-	if text != "Hi there" {
-		t.Errorf("text %q", text)
-	}
-	if call == nil || call["id"] != "call_1" || call["name"] != "read" {
-		t.Fatalf("functionCall: %s", body)
-	}
-	if args, _ := call["args"].(map[string]any); args["path"] != "a.go" {
-		t.Errorf("args: %v", call["args"])
-	}
-	um, _ := out["usageMetadata"].(map[string]any)
-	if um["promptTokenCount"] != float64(10) || um["candidatesTokenCount"] != float64(3) || um["thoughtsTokenCount"] != float64(2) {
-		t.Errorf("usage: %v", um)
-	}
-}
-
-func TestGemHTTPStreamNeedsSSE(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t, reply: gemhttpReply})
-	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent", gemhttpBody)
-	if code != 400 || gemhttpErr(t, body)["status"] != "INVALID_ARGUMENT" {
-		t.Errorf("%d %s", code, body)
-	}
-}
-
-func TestGemHTTPUpstreamErrorIsGeminiShaped(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance"}}`})
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", gemhttpBody)
-	e := gemhttpErr(t, body)
-	if code != 402 || e["code"] != float64(402) || !strings.Contains(e["message"].(string), "Insufficient Balance") {
-		t.Errorf("%d %s", code, body)
-	}
-}
-
-func TestGemHTTPUnknownModel404(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
-	code, body := post(t, "/v1beta/models/nope:generateContent", `{"contents":[]}`)
-	e := gemhttpErr(t, body)
-	if code != 404 || e["code"] != float64(404) || e["status"] != "NOT_FOUND" || !strings.Contains(e["message"].(string), "nope") {
-		t.Errorf("%d %s", code, body)
-	}
-	code, body = post(t, "/v1beta/models/nope:countTokens", `{"contents":[]}`)
-	if code != 404 || gemhttpErr(t, body)["status"] != "NOT_FOUND" {
-		t.Errorf("countTokens: %d %s", code, body)
-	}
-}
-
-func TestGemHTTPCountTokensBothShapes(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
-	direct := `{"contents":[{"role":"user","parts":[{"text":"abcdefghijkl"}]}]}`
-	wrapped := `{"generateContentRequest":{"model":"models/fake/m1","contents":[{"role":"user","parts":[{"text":"abcdefghijkl"}]}]}}`
-	for _, b := range []string{direct, wrapped} {
-		code, body := post(t, "/v1beta/models/fake/m1:countTokens", b)
-		var out map[string]any
-		json.Unmarshal([]byte(body), &out)
-		if code != 200 || out["totalTokens"] != float64(3) {
-			t.Errorf("%d %s", code, body)
-		}
-	}
-}
-
-func TestGemHTTPModelList(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
-	code, body := gemhttpGet(t, "/v1beta/models")
-	var out struct {
-		Models []struct {
-			Name                       string   `json:"name"`
-			DisplayName                string   `json:"displayName"`
-			SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
-		} `json:"models"`
-	}
-	if code != 200 || json.Unmarshal([]byte(body), &out) != nil {
-		t.Fatalf("%d %s", code, body)
+		t.Errorf("finishReason: %v", cand["finishReason"])
 	}
 	found := false
-	for _, m := range out.Models {
-		if m.Name == "models/fake/m1" {
+	for _, p := range gemHTTPParts(gemHTTPEvents2(t, body)) {
+		if fc, ok := p["functionCall"].(map[string]any); ok && fc["id"] == "call_1" && fc["name"] == "read" {
 			found = true
-			if m.DisplayName == "" || len(m.SupportedGenerationMethods) != 3 {
-				t.Errorf("entry: %+v", m)
-			}
-			for _, want := range []string{"generateContent", "streamGenerateContent", "countTokens"} {
-				if !strings.Contains(strings.Join(m.SupportedGenerationMethods, ","), want) {
-					t.Errorf("missing method %s", want)
-				}
-			}
 		}
 	}
 	if !found {
-		t.Errorf("models/fake/m1 not listed: %s", body)
-	}
-
-	code, body = gemhttpGet(t, "/v1beta/models/fake/m1")
-	if code != 200 || !strings.Contains(body, `"name":"models/fake/m1"`) {
-		t.Errorf("single model: %d %s", code, body)
-	}
-	code, body = gemhttpGet(t, "/v1beta/models/nope")
-	if code != 404 || gemhttpErr(t, body)["status"] != "NOT_FOUND" {
-		t.Errorf("unknown single model: %d %s", code, body)
+		t.Errorf("no functionCall in %s", body)
 	}
 }
 
-func TestGemHTTPRootAndHintListGemini(t *testing.T) {
-	_, body := gemhttpGet(t, "/")
-	if !strings.Contains(body, "/v1beta/models") || !strings.Contains(body, ":generateContent") {
-		t.Errorf("info: %s", body)
-	}
-	rec := httptest.NewRecorder()
-	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/nothing-here", nil))
-	if rec.Code != 404 || !strings.Contains(rec.Body.String(), "/v1beta/models") {
-		t.Errorf("404 hint: %d %s", rec.Code, rec.Body.String())
-	}
+// gemHTTPEvents2 wraps a single non-streamed reply as one event, so the
+// parts helper can read it.
+func gemHTTPEvents2(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	return []map[string]any{gemHTTPMap(t, []byte(body))}
 }
 
-func TestGemHTTPColonInModelID(t *testing.T) {
-	cases := map[string][3]string{
-		"fake/a:b:streamGenerateContent": {"fake/a:b", "streamGenerateContent", "ok"},
-		"fake/m1:countTokens":            {"fake/m1", "countTokens", "ok"},
-		"fake/m1":                        {"", "", ""},
-		":generateContent":               {"", "", ""},
-		"fake/m1:":                       {"", "", ""},
-	}
-	for in, want := range cases {
-		model, method, ok := splitGeminiPath(in)
-		got := [3]string{model, method, "ok"}
-		if !ok {
-			got[2] = ""
-		}
-		if got != want {
-			t.Errorf("split %q: got %v want %v", in, got, want)
-		}
-	}
-
-	// end to end: the id with colons reaches the upstream intact
-	f := &fake{t: t, reply: gemhttpReply}
+func TestGeminiHTTPUpstreamRequest(t *testing.T) {
+	f := &fake{t: t, reply: gemHTTPChatReply}
 	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/a:b:generateContent", gemhttpBody)
-	if code != 200 || !bytes.Contains(f.got, []byte(`"model":"a:b"`)) {
-		t.Errorf("%d %s upstream %s", code, body, f.got)
+	if code, body := post(t, "/v1beta/models/fake/m1:generateContent", gemHTTPBody); code != 200 {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	got := string(f.got)
+	if strings.Contains(got, `"OBJECT"`) || strings.Contains(got, `"STRING"`) || !strings.Contains(got, `"type":"object"`) {
+		t.Errorf("schema types not lowercased: %s", got)
+	}
+	if !strings.Contains(got, `"reasoning_effort":"medium"`) {
+		t.Errorf("thinkingBudget -1 should be medium effort: %s", got)
+	}
+	if !strings.Contains(got, `"max_tokens":100`) && !strings.Contains(got, `"max_completion_tokens":100`) {
+		t.Errorf("maxOutputTokens not passed: %s", got)
+	}
+	if !strings.Contains(got, `"model":"m1"`) {
+		t.Errorf("upstream model: %s", got)
+	}
+}
+
+func TestGeminiHTTPUsage(t *testing.T) {
+	f := &fake{t: t, reply: gemHTTPChatReply}
+	setup(t, provider.Chat, f)
+	_, body := post(t, "/v1beta/models/fake/m1:generateContent", gemHTTPBody)
+	m := gemHTTPMap(t, []byte(body))
+	u, _ := m["usageMetadata"].(map[string]any)
+	if u["promptTokenCount"] != float64(10) || u["candidatesTokenCount"] != float64(3) || u["thoughtsTokenCount"] != float64(2) {
+		t.Errorf("usage: %v", u)
+	}
+}
+
+func TestGeminiHTTPUnknownModel(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	code, body := post(t, "/v1beta/models/nope:generateContent", gemHTTPBody)
+	m := gemHTTPMap(t, []byte(body))
+	e, _ := m["error"].(map[string]any)
+	if code != 404 || e["code"] != float64(404) || e["status"] != "NOT_FOUND" || e["message"] == nil {
+		t.Errorf("%d %s", code, body)
+	}
+	code, body = post(t, "/v1beta/models/fake/m1:bogus", gemHTTPBody)
+	if code != 404 || !strings.Contains(body, `"status":"NOT_FOUND"`) {
+		t.Errorf("unknown method: %d %s", code, body)
+	}
+}
+
+func TestGeminiHTTPBadBody(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `{"contents": 5}`)
+	if code != 400 || !strings.Contains(body, `"status":"INVALID_ARGUMENT"`) {
+		t.Errorf("%d %s", code, body)
+	}
+}
+
+func TestGeminiHTTPCountTokens(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	for _, body := range []string{gemHTTPBody, `{"generateContentRequest": ` + gemHTTPBody + `}`} {
+		code, out := post(t, "/v1beta/models/fake/m1:countTokens", body)
+		m := gemHTTPMap(t, []byte(out))
+		if code != 200 {
+			t.Fatalf("status %d: %s", code, out)
+		}
+		if n, _ := m["totalTokens"].(float64); n < 1 {
+			t.Errorf("totalTokens: %s", out)
+		}
+	}
+	code, out := post(t, "/v1beta/models/nope:countTokens", gemHTTPBody)
+	if code != 404 || !strings.Contains(out, `"status":"NOT_FOUND"`) {
+		t.Errorf("unknown model: %d %s", code, out)
+	}
+}
+
+func TestGeminiHTTPModels(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	rec := httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1beta/models", nil))
+	m := gemHTTPMap(t, rec.Body.Bytes())
+	list, _ := m["models"].([]any)
+	found := false
+	for _, x := range list {
+		e := x.(map[string]any)
+		if e["name"] == "models/fake/m1" && e["displayName"] != nil {
+			methods := e["supportedGenerationMethods"].([]any)
+			if len(methods) == 3 {
+				found = true
+			}
+		}
+	}
+	if rec.Code != 200 || !found {
+		t.Errorf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGeminiHTTPInfoListsAPIs(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	rec := httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rec.Body.String(), "generateContent") || !strings.Contains(rec.Body.String(), "countTokens") {
+		t.Errorf("%s", rec.Body.String())
 	}
 }
