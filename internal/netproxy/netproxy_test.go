@@ -269,3 +269,23 @@ func TestInvalidEnvNotEchoed(t *testing.T) {
 		t.Fatalf("credentials in error: %v", err)
 	}
 }
+
+func TestBypassTrailingWildcard(t *testing.T) {
+	cases := []struct {
+		host string
+		list []string
+		want bool
+	}{
+		{"192.168.1.5", []string{"192.168.*"}, true},
+		{"192.168.1.5", []string{"10.*", "192.168.*"}, true},
+		{"8.8.8.8", []string{"192.168.*"}, false},
+		{"intranet.example.com", []string{"intranet.*"}, true},
+		{"example.com", []string{"intranet.*"}, false},
+		{"localhost", []string{"*.local"}, false},
+	}
+	for _, c := range cases {
+		if got := bypassed(c.host, c.list); got != c.want {
+			t.Errorf("bypassed(%q, %v) = %v, want %v", c.host, c.list, got, c.want)
+		}
+	}
+}

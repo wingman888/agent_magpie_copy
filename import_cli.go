@@ -44,10 +44,18 @@ func importCmd(args []string) error {
 		return fmt.Errorf("invalid import link: %w", err)
 	}
 
-	current := providerByID(p.ID)
-	if current != nil && current.Account != nil {
+	// An id that belongs to a signed-in agent (or a removed one, which All()
+	// does not list) cannot be saved as a plain provider: provider.save hands
+	// such an id to the account branch and drops the link's content. Refuse
+	// before anything is written.
+	if removed, ok := accountIDState(p.ID); ok {
+		if removed {
+			return fmt.Errorf("id belongs to a removed account; choose another id or run magpie provider rm/add")
+		}
 		return fmt.Errorf("%s is a signed-in agent, not a provider; use id=… to pick another id", p.ID)
 	}
+
+	current := providerByID(p.ID)
 
 	if !yes && !stdinIsTerminal() {
 		return errors.New("not an interactive terminal: pass -y to add the provider without asking")
@@ -148,6 +156,23 @@ func providerByID(id string) *provider.Provider {
 		}
 	}
 	return nil
+}
+
+// accountIDState reports whether id belongs to a signed-in agent account, and
+// if so whether the user removed it. Removed accounts are missing from All(),
+// so they are looked up in Accounts() and Excluded() as well.
+func accountIDState(id string) (removed, isAccount bool) {
+	for _, e := range provider.Excluded() {
+		if e.Provider == id {
+			return true, true
+		}
+	}
+	for _, a := range provider.Accounts() {
+		if a.ID == id {
+			return false, true
+		}
+	}
+	return false, false
 }
 
 // stdinIsTerminal reports whether standard input is an interactive terminal.

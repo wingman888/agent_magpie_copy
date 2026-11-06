@@ -61,7 +61,9 @@ func OpenCodeSession(in http.Header, body []byte) string {
 
 // firstUserText returns the text of the first user message in a Chat,
 // Responses or Anthropic request body. The body's "messages" array and
-// Responses' "input" (a string or an array) are both accepted.
+// Responses' "input" (a string or an array) are both accepted. When that
+// message has no text (an image alone, say), the message's raw JSON is
+// returned instead, so different conversations still get different ids.
 func firstUserText(body []byte) string {
 	var v struct {
 		Messages json.RawMessage `json:"messages"`
@@ -75,18 +77,22 @@ func firstUserText(body []byte) string {
 		return s
 	}
 	for _, raw := range []json.RawMessage{v.Messages, v.Input} {
-		var items []struct {
-			Type    string          `json:"type"`
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		}
+		var items []json.RawMessage
 		if json.Unmarshal(raw, &items) != nil {
 			continue
 		}
-		for _, it := range items {
-			if it.Role == "user" {
-				return contentText(it.Content)
+		for _, item := range items {
+			var it struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
 			}
+			if json.Unmarshal(item, &it) != nil || it.Role != "user" {
+				continue
+			}
+			if text := contentText(it.Content); text != "" {
+				return text
+			}
+			return string(item)
 		}
 	}
 	return ""

@@ -169,6 +169,11 @@ func bypassed(host string, list []string) bool {
 			if strings.HasSuffix(h, e) {
 				return true
 			}
+		case strings.HasSuffix(e, "*"):
+			// Windows writes "192.168.*": a prefix match on what precedes the *
+			if strings.HasPrefix(h, strings.TrimSuffix(e, "*")) {
+				return true
+			}
 		default:
 			if h == e || strings.HasSuffix(h, "."+e) {
 				return true

@@ -74,8 +74,13 @@ func main() {
 }
 
 func run(args []string) error {
-	settings.Migrate()
-	agent.RenameLegacy()
+	// An import only writes after the user confirms, so it must not touch
+	// anything else on the way in: the migrations below write files.
+	isImport := len(args) > 0 && (args[0] == "import" || strings.HasPrefix(strings.ToLower(args[0]), "magpie:"))
+	if !isImport {
+		settings.Migrate()
+		agent.RenameLegacy()
+	}
 	if len(args) == 0 {
 		if hasGUI {
 			return runGUI(true)
