@@ -285,10 +285,10 @@ func TestGeminiSystemToolChoiceAndJSON(t *testing.T) {
 	}
 
 	for mode, want := range map[string]string{
-		`{"mode":"NONE"}`:                                  "none",
-		`{"mode":"AUTO"}`:                                  "auto",
-		`{"mode":"ANY"}`:                                   "required",
-		`{"mode":"ANY","allowedFunctionNames":["a","b"]}`:  "required",
+		`{"mode":"NONE"}`: "none",
+		`{"mode":"AUTO"}`: "auto",
+		`{"mode":"ANY"}`:  "required",
+		`{"mode":"ANY","allowedFunctionNames":["a","b"]}`: "required",
 	} {
 		r, err := parseGemini([]byte(`{"contents":[],"toolConfig":{"functionCallingConfig":` + mode + `}}`))
 		if err != nil {
