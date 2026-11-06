@@ -42,7 +42,7 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 	}
 	var ready, resting []candidate
 	for _, c := range out {
-		if s.providerResting(c.p) {
+		if s.resting(c.p.ID) {
 			resting = append(resting, c)
 		} else {
 			ready = append(ready, c)
