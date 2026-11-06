@@ -49,12 +49,18 @@ func TestGroupAffinityIsNotInherited(t *testing.T) {
 	}
 }
 
-// For the request's protocol the key that names it is the pool, whatever
-// the model's name says; unnamed keys come after it, marked aside.
+// A model whose name says its family is judged by that family first, even
+// when the request came in another protocol (kept for TestKeysMadeForOneProtocol).
+// A model with no family is judged by the request's protocol: the key that
+// names it is the pool, unnamed keys come after it, marked aside.
 func TestKeyTierFollowsRequestProtocol(t *testing.T) {
 	p := keyTierProvider("tier-req")
 	cs, _ := perKeyOf(p, "claude-opus-5-5", provider.Chat)
-	if got := keyNames(p, cs); got != "kc k1* k2*" {
+	if got := keyNames(p, cs); got != "k1 k2 kc*" {
 		t.Fatalf("claude from chat: %s", got)
+	}
+	cs, _ = perKeyOf(p, "m", provider.Chat)
+	if got := keyNames(p, cs); got != "kc k1* k2*" {
+		t.Fatalf("familyless model from chat: %s", got)
 	}
 }
