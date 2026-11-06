@@ -56,6 +56,8 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
+	// after the auth headers, so a custom header may override them
+	catalog.ApplyHeaders(req.Header, p.customHeaders())
 	return nil
 }
 

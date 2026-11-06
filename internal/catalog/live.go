@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -66,6 +67,12 @@ func SaveLive(provider, base string, models []Model) error {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, nil)
+}
+
+// FetchWith is Fetch with extra request headers, sent after the usual ones
+// and under the names given (see ApplyHeaders).
+func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -92,7 +99,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -109,7 +116,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -125,6 +132,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, er
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
+	ApplyHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -161,6 +169,25 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, er
 		out = append(out, Model{ID: id, Name: name})
 	}
 	return out, nil
+}
+
+// ApplyHeaders sets extra headers on h exactly as named: the name keeps the
+// case it was given on the wire, and it replaces any header of the same
+// name (in any case) that is already set, so it can override a default.
+func ApplyHeaders(h http.Header, extra map[string]string) {
+	names := make([]string, 0, len(extra))
+	for n := range extra {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		for k := range h {
+			if _, own := extra[k]; !own && strings.EqualFold(k, n) {
+				delete(h, k)
+			}
+		}
+		h[n] = []string{extra[n]}
+	}
 }
 
 type liveModel struct {
