@@ -52,7 +52,7 @@ func TestZZProbe(t *testing.T) {
 // quotes and backslashes removed so the remote log keeps each chunk whole.
 func zzEmit(t *testing.T, s string) {
 	s = strings.NewReplacer("\"", "'", "\\", "/", "\n", " | ", "\t", " ").Replace(s)
-	const max = 1800
+	const max = 800
 	for n := 0; len(s) > 0; n++ {
 		c := s
 		if len(c) > max {
