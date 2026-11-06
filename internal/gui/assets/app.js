@@ -1559,10 +1559,24 @@ $("#addProvider").onclick = () => { adding = true; editing = null; draft = null;
 
 const PERIODS = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All"]];
 
+// The subscriptions' quotas come from the vendors and can take a while (or
+// never come without a proxy), so they load on their own and the local log
+// never waits for them. They don't depend on the period either.
+let quotas = null;
 async function loadUsage() {
   renderUsageLoading();
+  loadQuotas();
   usage = await api("usage?period=" + period);
   renderUsage();
+}
+
+let quotasLoading = null;
+function loadQuotas() {
+  if (quotasLoading) return quotasLoading;
+  quotasLoading = api("usage/quotas")
+    .then((q) => { quotas = q || []; }, () => { quotas = quotas || []; })
+    .finally(() => { quotasLoading = null; renderQuotas(); });
+  return quotasLoading;
 }
 
 function renderUsageLoading() {
@@ -1578,14 +1592,7 @@ function renderUsageLoading() {
   }
   slide(seg, "period");
   $("#usageCost").replaceChildren(el("span", "skeleton sk-cost"));
-  const subscriptions = $("#subscriptionUsage");
-  subscriptions.hidden = false;
-  subscriptions.replaceChildren();
-  for (let i = 0; i < 2; i++) {
-    const card = el("div", "subscription-card skeleton-card");
-    card.append(el("span", "skeleton sk-title"), el("span", "skeleton sk-line"), el("span", "skeleton sk-line short"));
-    subscriptions.append(card);
-  }
+  renderQuotas();
   const stats = $("#stats");
   stats.classList.remove("empty");
   stats.replaceChildren();
@@ -1616,33 +1623,20 @@ function fmtCost(t) {
 }
 const tokensOf = (t) => t.input + t.output;
 
-function renderUsage() {
-  const u = usage;
-  const view = $("#view-usage");
-  view.classList.remove("loading");
-  view.removeAttribute("aria-busy");
-  const seg = $("#period");
-  seg.replaceChildren();
-  for (const [id, name] of PERIODS) {
-    const b = el("button", "opt" + (id === period ? " on" : ""), t(name));
-    b.onclick = () => { for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b); slide(seg, "period"); period = id; loadUsage().catch((e) => status(e.message, "err")); };
-    seg.append(b);
-  }
-  slide(seg, "period");
-  const cost = $("#usageCost");
-  cost.replaceChildren();
-  const c = fmtCost(u);
-  if (c) {
-    cost.append(el("b", "", "≈" + c), el("span", "", t("list price")));
-    cost.title = u.unpriced ? t(u.unpriced === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n: u.unpriced }) : t("At each model's list price on models.dev");
-  } else if (u.calls) {
-    cost.append(el("span", "", t("no price for these models")));
-  }
-
+function renderQuotas() {
   const subscriptions = $("#subscriptionUsage");
   subscriptions.replaceChildren();
-  subscriptions.hidden = !u.subscriptions?.length;
-  for (const sub of u.subscriptions || []) {
+  if (!quotas) {
+    subscriptions.hidden = false;
+    for (let i = 0; i < 2; i++) {
+      const card = el("div", "subscription-card skeleton-card");
+      card.append(el("span", "skeleton sk-title"), el("span", "skeleton sk-line"), el("span", "skeleton sk-line short"));
+      subscriptions.append(card);
+    }
+    return;
+  }
+  subscriptions.hidden = !quotas.length;
+  for (const sub of quotas) {
     const card = el("div", "subscription-card");
     const head = el("div", "subscription-head");
     head.append(icon(sub.icon), el("b", "", sub.name));
@@ -1668,6 +1662,30 @@ function renderUsage() {
       card.append(windows);
     }
     subscriptions.append(card);
+  }
+}
+
+function renderUsage() {
+  const u = usage;
+  const view = $("#view-usage");
+  view.classList.remove("loading");
+  view.removeAttribute("aria-busy");
+  const seg = $("#period");
+  seg.replaceChildren();
+  for (const [id, name] of PERIODS) {
+    const b = el("button", "opt" + (id === period ? " on" : ""), t(name));
+    b.onclick = () => { for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b); slide(seg, "period"); period = id; loadUsage().catch((e) => status(e.message, "err")); };
+    seg.append(b);
+  }
+  slide(seg, "period");
+  const cost = $("#usageCost");
+  cost.replaceChildren();
+  const c = fmtCost(u);
+  if (c) {
+    cost.append(el("b", "", "≈" + c), el("span", "", t("list price")));
+    cost.title = u.unpriced ? t(u.unpriced === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n: u.unpriced }) : t("At each model's list price on models.dev");
+  } else if (u.calls) {
+    cost.append(el("span", "", t("no price for these models")));
   }
 
   const stats = $("#stats");
@@ -1797,10 +1815,11 @@ async function loadSettings() {
 
 function renderSettings() {
   const s = prefs;
-  const keep = { theme: s.theme, lang: s.lang, tray: s.tray };
+  const keep = { theme: s.theme, lang: s.lang, tray: s.tray, proxy: s.proxy || "" };
   $("#themeSegs").replaceChildren(segs(THEMES.map(([id, name]) => [id, t(name)]), s.theme, (theme) => savePrefs({ ...keep, theme })));
   $("#langSegs").replaceChildren(segs(LOCALES.map(([id, name]) => [id, t(name)]), s.lang, (lang) => savePrefs({ ...keep, lang })));
   $("#traySegs").replaceChildren(segs(TRAYS.map(([id, name]) => [id, t(name)]), s.tray || "panel", (tray) => savePrefs({ ...keep, tray })));
+  renderProxy(s, keep);
 
   const about = $("#about");
   about.replaceChildren();
@@ -1820,6 +1839,45 @@ function renderSettings() {
   open.onclick = () => api("open", { url: "file://" + s.path });
   row(t("Config folder"), t("providers, profiles and these settings"), s.dir, copyBtn(s.dir, t("Path")), open);
   row(t("Gateway URL"), t("the address every agent is pointed at"), s.gateway, copyBtn(s.gateway, t("Gateway URL")));
+}
+
+// renderProxy: magpie's own requests to vendors follow the system proxy on
+// their own; this row says which one, and lets it be turned off or set.
+let proxyCustom = false; // Custom picked, nothing typed yet
+function renderProxy(s, keep) {
+  const cur = !s.proxy ? "auto" : s.proxy === "direct" ? "off" : "custom";
+  const mode = proxyCustom ? "custom" : cur;
+  const sub = $("#proxySub");
+  sub.textContent = {
+    settings: t("Requests to vendors go through {proxy}", { proxy: s.proxyNow }),
+    system: t("Following the system proxy, {proxy}", { proxy: s.proxyNow }),
+    environment: t("Following HTTPS_PROXY, {proxy}", { proxy: s.proxyNow }),
+    off: t("Off: requests to vendors go direct"),
+    none: t("No system proxy found; requests to vendors go direct"),
+  }[s.proxySource] || "";
+  const box = $("#proxySegs");
+  box.replaceChildren();
+  const pick = (id) => {
+    proxyCustom = id === "custom";
+    if (id === "auto") savePrefs({ ...keep, proxy: "" });
+    else if (id === "off") savePrefs({ ...keep, proxy: "direct" });
+    else renderProxy(s, keep);
+  };
+  if (mode === "custom") {
+    const i = input(cur === "custom" ? s.proxy : "", "http://127.0.0.1:7890");
+    i.className = "proxy";
+    const save = () => {
+      const v = i.value.trim();
+      if (!v || v === s.proxy) return;
+      proxyCustom = false;
+      savePrefs({ ...keep, proxy: v });
+    };
+    i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") save(); else if (e.key === "Escape") { proxyCustom = false; renderProxy(s, keep); } };
+    i.onblur = save;
+    box.append(i);
+    if (proxyCustom) queueMicrotask(() => i.focus());
+  }
+  box.append(segs([["auto", t("Auto")], ["off", t("Off")], ["custom", t("Custom")]], mode, pick));
 }
 
 // renderUpdate fills in the version row: whether a newer magpie is out.
