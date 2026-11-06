@@ -44,6 +44,14 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
+	// Headers are extra HTTP request headers sent to the vendor, exactly as
+	// the user typed them. They ride on every request magpie makes to a plain
+	// key+URL provider — forwarded calls, connectivity tests, and model-list
+	// fetches — applied after the auth headers, so the user can override those
+	// when a gateway insists on a private scheme. Signed-in agent accounts
+	// ignore them: their auth is the agent's own.
+	Headers map[string]string `json:"headers,omitempty"`
+
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
@@ -60,9 +68,10 @@ type Provider struct {
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
 
-	// Headers are extra HTTP headers sent with every request to a custom
-	// provider, header name → value. Names keep the case the user typed.
-	Headers map[string]string `json:"headers,omitempty"`
+	// Fallback lists the provider/model ids magpie tries, in order, when this
+	// provider cannot take a request (quota spent, rate limited, overloaded).
+	// Entries are as Agents spell models: "provider/model".
+	Fallback []string `json:"fallback,omitempty"`
 }
 
 type file struct {
@@ -98,6 +107,7 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
+	pruneIcons(f)
 	return os.Chmod(p, 0o600)
 }
 
@@ -121,6 +131,7 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -184,7 +195,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -197,11 +208,11 @@ func Save(p Provider) error {
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			return storeAndPrune(f)
+			return store(f)
 		}
 	}
 	f.Providers = append(f.Providers, p)
-	return storeAndPrune(f)
+	return store(f)
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -212,11 +223,11 @@ func Delete(id string) error {
 		for i := range f.Providers {
 			if f.Providers[i].ID == id {
 				f.Providers[i].Hidden = true
-				return storeAndPrune(f)
+				return store(f)
 			}
 		}
 		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
-		return storeAndPrune(f)
+		return store(f)
 	}
 	f := load()
 	keep := f.Providers[:0]
@@ -232,7 +243,7 @@ func Delete(id string) error {
 		return fmt.Errorf("no provider %q", id)
 	}
 	f.Providers = keep
-	return storeAndPrune(f)
+	return store(f)
 }
 
 // keyOptional is true for local servers, which usually have no key.
@@ -255,6 +266,13 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
+	p.Headers = cleanHeaders(p.Headers)
+	if p.Preset != "" {
+		// Presets own their request shape; custom headers are supported only
+		// for user-defined providers.
+		p.Headers = nil
+	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -268,9 +286,6 @@ func normalize(p Provider) Provider {
 		if p.KeysURL == "" {
 			p.KeysURL = pr.KeysURL
 		}
-		p.Headers = nil // presets send only the headers they define
-	} else {
-		p.Headers = cleanHeaders(p.Headers)
 	}
 	return p
 }
@@ -285,20 +300,17 @@ func cleanList(xs []string) []string {
 	return out
 }
 
-// cleanHeaders trims header names and values and drops entries with an
-// empty name. It returns nil when nothing is left, so the field is not
-// written out.
+// cleanHeaders trims header names and values and drops entries with an empty
+// name, returning nil when nothing is left so the field stays out of the JSON.
 func cleanHeaders(h map[string]string) map[string]string {
-	var out map[string]string
+	out := make(map[string]string, len(h))
 	for k, v := range h {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" {
-			continue
+		if k = strings.TrimSpace(k); k != "" {
+			out[k] = strings.TrimSpace(v)
 		}
-		if out == nil {
-			out = map[string]string{}
-		}
-		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

@@ -1,133 +1,217 @@
 package main
 
 import (
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-func TestApplyPairsHeaders(t *testing.T) {
-	var p provider.Provider
-	err := applyPairs(&p, []string{
-		"HEADER.X-ORG-id =  padded  ",
-		"header.X-Org-Id=acme",
-		"Header. =dropped",
-		"header.Authorization=Bearer user",
+// isolateConfig points magpie at an empty home with one custom provider
+// "relay" that exposes m1 and m2.
+func isolateConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if err := provider.Save(provider.Provider{
+		ID: "relay", Name: "Relay", Chat: "https://relay.example.com/v1", Key: "sk-test",
+		Models: []string{"m1", "m2"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fallbackOf reads the saved fallback list of a provider.
+func fallbackOf(t *testing.T, id string) []string {
+	t.Helper()
+	p, err := provider.Find(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.Fallback
+}
+
+// captureStdout runs f and returns what it printed.
+func captureStdout(t *testing.T, f func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	done := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	ferr := f()
+	os.Stdout = old
+	w.Close()
+	return <-done, ferr
+}
+
+func TestFallbackCLISetReplaceAndClear(t *testing.T) {
+	isolateConfig(t)
+
+	if _, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay", "relay/m2", "relay/m1", " relay/m2 "})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fallbackOf(t, "relay"), []string{"relay/m2", "relay/m1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("set: got %q, want %q", got, want)
+	}
+
+	// a second call replaces the whole list, in the order given
+	out, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay", "relay/m1"})
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{
-		"X-ORG-id":      "padded",
-		"X-Org-Id":      "acme",
-		"Authorization": "Bearer user",
+	if got, want := fallbackOf(t, "relay"), []string{"relay/m1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("replace: got %q, want %q", got, want)
 	}
-	if len(p.Headers) != len(want) {
-		t.Fatalf("headers = %v, want %v", p.Headers, want)
+	if !strings.Contains(out, "relay → relay/m1") {
+		t.Fatalf("confirmation lacks the chain: %q", out)
 	}
-	for k, v := range want {
-		if p.Headers[k] != v {
-			t.Errorf("header %q = %q, want %q", k, p.Headers[k], v)
-		}
-	}
-}
 
-func TestApplyPairsEmptyIcon(t *testing.T) {
-	p := provider.Provider{Icon: "deepseek-color"}
-	if err := applyPairs(&p, []string{"icon=  "}); err != nil {
+	if _, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay", "none"})
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if p.Icon != "" {
-		t.Errorf("icon = %q, want empty (default)", p.Icon)
+	if got := fallbackOf(t, "relay"); len(got) != 0 {
+		t.Fatalf("none did not clear: %q", got)
 	}
 }
 
-func TestApplyPairsMissingIconPathFails(t *testing.T) {
-	var p provider.Provider
-	err := applyPairs(&p, []string{"icon=./no-such-dir/logo.png"})
-	if err == nil {
-		t.Fatal("expected an error for a missing icon file")
+func TestFallbackCLIUnknownModelSavesNothing(t *testing.T) {
+	isolateConfig(t)
+	if _, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay", "relay/m1"})
+	}); err != nil {
+		t.Fatal(err)
 	}
-}
 
-func TestSetIconRejectsPresetAndAccount(t *testing.T) {
-	cases := map[string]provider.Provider{
-		"preset":  {ID: "deepseek", Preset: "deepseek", Icon: "deepseek-color"},
-		"account": {ID: "claude", Account: &provider.Account{User: "someone"}},
-	}
-	for name, p := range cases {
-		err := setIcon(&p, "generic")
+	for _, args := range [][]string{
+		{"provider", "fallback", "relay", "nowhere/x"},
+		{"provider", "fallback", "relay", "relay/m2", "nowhere/x"},
+		{"provider", "fallback", "relay", "m2"},
+		{"provider", "fallback", "relay", "relay/"},
+	} {
+		_, err := captureStdout(t, func() error { return providerCmd(args) })
 		if err == nil {
-			t.Fatalf("%s: expected error", name)
+			t.Fatalf("%v: no error", args)
 		}
-		if !strings.Contains(err.Error(), "custom") {
-			t.Errorf("%s: error %q should mention custom", name, err)
+		if got, want := fallbackOf(t, "relay"), []string{"relay/m1"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("%v changed the saved list to %q", args, got)
 		}
+	}
+	_, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay", "nowhere/x"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "nowhere/x") || !strings.Contains(err.Error(), "magpie models") {
+		t.Fatalf("error should name the model and point at magpie models: %v", err)
 	}
 }
 
-func TestSetIconBuiltinAndDefault(t *testing.T) {
-	p := provider.Provider{ID: "relay", Name: "Relay"}
-	if err := setIcon(&p, "deepseek-color"); err != nil {
+func TestFallbackCLIShowAndUsage(t *testing.T) {
+	isolateConfig(t)
+
+	out, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay"})
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Icon != "deepseek-color" {
-		t.Errorf("icon = %q, want deepseek-color", p.Icon)
+	if !strings.Contains(out, "没有 fallback") || !strings.Contains(out, "magpie provider fallback") {
+		t.Fatalf("empty show: %q", out)
 	}
-	if err := setIcon(&p, ""); err != nil {
+
+	if _, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay", "relay/m2"})
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if p.Icon != "" {
-		t.Errorf("icon = %q, want empty after reset", p.Icon)
+	out, err = captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "relay → relay/m2") {
+		t.Fatalf("show: %q", out)
+	}
+	if got := fallbackOf(t, "relay"); !reflect.DeepEqual(got, []string{"relay/m2"}) {
+		t.Fatalf("show changed the list: %q", got)
+	}
+
+	if _, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback"})
+	}); err == nil {
+		t.Fatal("missing id: no error")
+	}
+	if _, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "ghost", "relay/m1"})
+	}); err == nil {
+		t.Fatal("unknown id: no error")
+	}
+	if _, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay", "none", "relay/m1"})
+	}); err == nil {
+		t.Fatal("none mixed with a model: no error")
+	}
+	if got := fallbackOf(t, "relay"); !reflect.DeepEqual(got, []string{"relay/m2"}) {
+		t.Fatalf("rejected commands changed the list: %q", got)
 	}
 }
 
-func TestApplyPairsMissingImageNameFails(t *testing.T) {
-	p := provider.Provider{ID: "relay", Icon: "deepseek-color"}
-	err := applyPairs(&p, []string{"icon=missing.png"})
-	if err == nil {
-		t.Fatal("expected an error for a missing image file name")
+func TestFallbackChain(t *testing.T) {
+	if got := fallbackChain(provider.Provider{ID: "a"}); got != "" {
+		t.Fatalf("no fallback: %q", got)
 	}
-	if !strings.Contains(err.Error(), "icon file not found") {
-		t.Errorf("error %q should say icon file not found", err)
-	}
-	if p.Icon != "deepseek-color" {
-		t.Errorf("icon = %q, want unchanged deepseek-color", p.Icon)
+	if got := fallbackChain(provider.Provider{ID: "a", Fallback: []string{"b/x", "c/y"}}); got != "a → b/x → c/y" {
+		t.Fatalf("chain: %q", got)
 	}
 }
 
-func TestSetIconMissingImageNameKeepsIcon(t *testing.T) {
-	for _, name := range []string{"missing.PNG", "logo.svg", "pic.jpeg"} {
-		p := provider.Provider{ID: "relay", Icon: "deepseek-color"}
-		if err := setIcon(&p, name); err == nil {
-			t.Fatalf("%s: expected error", name)
-		}
-		if p.Icon != "deepseek-color" {
-			t.Errorf("%s: icon = %q, want unchanged", name, p.Icon)
+func TestProvidersListShowsChain(t *testing.T) {
+	isolateConfig(t)
+	if err := provider.Save(provider.Provider{
+		ID: "plain", Name: "Plain", Chat: "https://plain.example.com/v1", Key: "sk-plain", Models: []string{"p1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return providerCmd([]string{"provider", "fallback", "relay", "plain/p1"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureStdout(t, providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var relayLine, plainLine string
+	for _, l := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(l, "relay.example.com"):
+			relayLine = l
+		case strings.Contains(l, "plain.example.com"):
+			plainLine = l
 		}
 	}
-}
-
-func TestSetIconDirectoryFails(t *testing.T) {
-	dir := t.TempDir()
-	p := provider.Provider{ID: "relay", Icon: "deepseek-color"}
-	if err := setIcon(&p, dir); err == nil {
-		t.Fatal("expected an error for a directory")
+	if !strings.Contains(relayLine, "relay → plain/p1") {
+		t.Fatalf("configured row lacks the chain: %q", relayLine)
 	}
-	if p.Icon != "deepseek-color" {
-		t.Errorf("icon = %q, want unchanged", p.Icon)
-	}
-}
-
-func TestSetIconBuiltinNamesNotAffected(t *testing.T) {
-	for _, name := range []string{"deepseek-color", "generic"} {
-		p := provider.Provider{ID: "relay"}
-		if err := setIcon(&p, name); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if p.Icon != name {
-			t.Errorf("icon = %q, want %q", p.Icon, name)
-		}
+	if strings.Contains(plainLine, "→") {
+		t.Fatalf("unconfigured row shows a chain: %q", plainLine)
 	}
 }
