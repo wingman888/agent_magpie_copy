@@ -69,8 +69,14 @@ func Transport() *http.Transport {
 	return t
 }
 
-// Client is the client for magpie's requests to providers and vendors.
-var Client = &http.Client{Transport: Transport()}
+// init sends http.DefaultTransport through For as well, so the requests that
+// use http.DefaultClient (providers, vendors, the model catalog) follow the
+// same proxy rules as the gateway.
+func init() {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		t.Proxy = ProxyFunc
+	}
+}
 
 // envProxy returns the first proxy variable set, in HTTPS, HTTP, ALL order
 // (the same preference as the system proxy), with the NO_PROXY list.

@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // Result is what a probe of one endpoint came back with.
@@ -90,7 +88,7 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 		req.Header.Set(OpenCodeSessionHeader, OpenCodeSession(nil, body))
 	}
 	start := time.Now()
-	res, err := netproxy.Client.Do(req)
+	res, err := http.DefaultClient.Do(req)
 	r.Millis = time.Since(start).Milliseconds()
 	if err != nil {
 		r.Error = strings.TrimPrefix(err.Error(), "Post \""+url+"\": ")

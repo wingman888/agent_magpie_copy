@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
@@ -127,7 +125,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, er
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	res, err := netproxy.Client.Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
