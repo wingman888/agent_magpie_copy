@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yetone/dial/internal/agent"
-	stats "github.com/yetone/dial/internal/usage"
+	"github.com/yetone/magpie/internal/agent"
+	stats "github.com/yetone/magpie/internal/usage"
 )
 
-// usageCmd: `dial usage [today|7d|30d|all]` — tokens and cost per agent and model
+// usageCmd: `magpie usage [today|7d|30d|all]` — tokens and cost per agent and model
 func usageCmd(args []string) error {
 	period := stats.Month
 	if len(args) > 1 {
@@ -22,13 +22,13 @@ func usageCmd(args []string) error {
 		case "all":
 			period = stats.All
 		default:
-			return fmt.Errorf("usage: dial usage [today|7d|30d|all]")
+			return fmt.Errorf("usage: magpie usage [today|7d|30d|all]")
 		}
 	}
 	s := stats.Summarize(period)
 	title := map[stats.Period]string{stats.Today: "today", stats.Week: "last 7 days", stats.Month: "last 30 days", stats.All: "all time"}[s.Period]
 	if s.Calls == 0 {
-		fmt.Println(muted.Render("no calls "+title+" ·"), "route an agent through dial and its usage shows up here")
+		fmt.Println(muted.Render("no calls "+title+" ·"), "route an agent through magpie and its usage shows up here")
 		fmt.Println(faint.Render("  " + stats.Path()))
 		return nil
 	}

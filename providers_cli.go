@@ -2,40 +2,45 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/yetone/dial/internal/agent"
-	"github.com/yetone/dial/internal/gateway"
-	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 var amber = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#F2B544"})
 
 const providerUsage = `usage:
-  dial providers                        list providers, keys and who uses them
-  dial presets                          list the vendors dial knows out of the box
-  dial provider <id>                    show one provider and its models
-  dial provider add <preset> <key>      add a preset vendor   e.g. dial provider add deepseek sk-…
-  dial provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog
-  dial provider key <id> <key>          change the API key
-  dial provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
-  dial provider test <id>               send a tiny request through each endpoint
-  dial provider rm <id>                 remove a provider
+  magpie providers                        list providers, keys and who uses them
+  magpie presets                          list the vendors magpie knows out of the box
+  magpie provider <id>                    show one provider and its models
+  magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.<Name>
+  magpie provider key <id> <key>          change the API key
+  magpie provider icon <id> <file|name|"">  set a custom vendor's icon: a picture file or a built-in name; "" restores the default
+  magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
+  magpie provider test <id>               send a tiny request through each endpoint
+  magpie provider rm <id>                 remove a provider
 
-  e.g. dial provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
-       dial provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
+  e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
+       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
+       magpie provider add "Acme Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme`
 
-// providers: `dial providers`
+// providers: `magpie providers`
 func providers() error {
 	all := provider.All()
-	if len(all) == 0 {
-		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		printNotices()
+	if len(all) == 0 && len(provider.Excluded()) == 0 {
+		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
 		return nil
 	}
 	uses := usesByProvider()
@@ -44,12 +49,12 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" && p.Account == "" {
+		if p.Preset == "" && p.Account == nil {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
-		case p.Account != "":
-			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.User)
+		case p.Account != nil:
+			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -74,15 +79,19 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	printNotices()
-	return nil
-}
-
-// printNotices says what dial leaves out on purpose, e.g. a signed-in Claude Code.
-func printNotices() {
-	for _, n := range provider.Notices() {
-		fmt.Println(amber.Render("!"), n.Text)
+	for _, x := range provider.Excluded() {
+		name := x.Agent
+		if a, err := agent.Find(x.Agent); err == nil {
+			name = a.Name
+		}
+		fmt.Println()
+		back := ""
+		if x.Provider != "" {
+			back = " · magpie provider add " + x.Provider + " brings it back"
+		}
+		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why+back))
 	}
+	return nil
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -93,7 +102,7 @@ func usesByProvider() map[string][]string {
 			continue
 		}
 		v := a.Fields[0].Get()
-		v = strings.TrimPrefix(v, "dial/")
+		v = strings.TrimPrefix(v, "magpie/")
 		if pid, _, ok := strings.Cut(v, "/"); ok {
 			out[pid] = append(out[pid], a.Name)
 		}
@@ -101,7 +110,7 @@ func usesByProvider() map[string][]string {
 	return out
 }
 
-// presets: `dial presets`
+// presets: `magpie presets`
 func presets() error {
 	have := map[string]bool{}
 	for _, p := range provider.All() {
@@ -117,9 +126,9 @@ func presets() error {
 		if pr.Sponsored {
 			name += " " + faint.Render("sponsored")
 		}
-		state := muted.Render("dial provider add " + pr.ID + " <key>")
+		state := muted.Render("magpie provider add " + pr.ID + " <key>")
 		if pr.NoKey {
-			state = muted.Render("dial provider add " + pr.ID)
+			state = muted.Render("magpie provider add " + pr.ID)
 		}
 		if have[pr.ID] {
 			state = green.Render("✓ added")
@@ -129,11 +138,11 @@ func presets() error {
 	return nil
 }
 
-// models: `dial models` — the catalog every agent sees
+// models: `magpie models` — the catalog every agent sees
 func models() error {
 	entries := provider.Catalog()
 	if len(entries) == 0 {
-		fmt.Println(muted.Render("no models yet · add a provider first:"), "dial provider add deepseek sk-…")
+		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
 	}
 	w := 0
@@ -159,7 +168,7 @@ func models() error {
 	return nil
 }
 
-// providerCmd: `dial provider <verb> …`
+// providerCmd: `magpie provider <verb> …`
 func providerCmd(args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("%s", providerUsage)
@@ -170,14 +179,11 @@ func providerCmd(args []string) error {
 		return addProvider(rest)
 	case "key":
 		if len(rest) != 2 {
-			return fmt.Errorf("dial provider key <id> <key>")
+			return fmt.Errorf("magpie provider key <id> <key>")
 		}
 		p, err := provider.Find(rest[0])
 		if err != nil {
 			return err
-		}
-		if p.Account != "" {
-			return fmt.Errorf("%s signs in through %s itself; there is no key to set", p.Name, p.Source)
 		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
@@ -185,9 +191,34 @@ func providerCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), p.Name, "key", muted.Render(provider.Mask(p.Key)))
 		return nil
+	case "icon":
+		if len(rest) != 2 {
+			return fmt.Errorf("magpie provider icon <id> <image file | built-in name | \"\">")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if p.Preset != "" || p.Account != nil {
+			return fmt.Errorf("%s: 仅自定义供应商可设置图标 (only custom providers can set an icon)", p.Name)
+		}
+		icon, err := iconValue(rest[1])
+		if err != nil {
+			return err
+		}
+		p.Icon = icon
+		if err := provider.Save(*p); err != nil {
+			return err
+		}
+		if icon == "" {
+			fmt.Println(green.Render("✓"), p.Name, "uses the default icon")
+		} else {
+			fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(icon))
+		}
+		return nil
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
-			return fmt.Errorf("dial provider rm <id>")
+			return fmt.Errorf("magpie provider rm <id>")
 		}
 		p, err := provider.Find(rest[0])
 		if err != nil {
@@ -200,7 +231,7 @@ func providerCmd(args []string) error {
 		return nil
 	case "test":
 		if len(rest) != 1 {
-			return fmt.Errorf("dial provider test <id>")
+			return fmt.Errorf("magpie provider test <id>")
 		}
 		p, err := provider.Find(rest[0])
 		if err != nil {
@@ -227,7 +258,7 @@ func providerCmd(args []string) error {
 		return nil
 	case "models":
 		if len(rest) < 1 {
-			return fmt.Errorf("dial provider models <id> [model ids to expose…]")
+			return fmt.Errorf("magpie provider models <id> [model ids to expose…]")
 		}
 		p, err := provider.Find(rest[0])
 		if err != nil {
@@ -252,7 +283,7 @@ func providerCmd(args []string) error {
 		fmt.Println(green.Render("✓"), len(ms), "models from", p.Host())
 		return showProvider(*p)
 	}
-	// `dial provider <id>`
+	// `magpie provider <id>`
 	p, err := provider.Find(verb)
 	if err != nil {
 		return err
@@ -260,10 +291,10 @@ func providerCmd(args []string) error {
 	return showProvider(*p)
 }
 
-// addProvider: `dial provider add <preset> [key]` or `dial provider add <name> k=v…`
+// addProvider: `magpie provider add <preset> [key]` or `magpie provider add <name> k=v…`
 func addProvider(rest []string) error {
 	if len(rest) == 0 {
-		return fmt.Errorf("dial provider add <preset> <key>   or   dial provider add <name> k=v…\n\n%s", providerUsage)
+		return fmt.Errorf("magpie provider add <preset> <key>   or   magpie provider add <name> k=v…\n\n%s", providerUsage)
 	}
 	var p provider.Provider
 	if pr, err := provider.FromPreset(strings.ToLower(rest[0])); err == nil {
@@ -281,6 +312,12 @@ func addProvider(rest []string) error {
 	if err := applyPairs(&p, rest); err != nil {
 		return err
 	}
+	return saveNew(p)
+}
+
+// saveNew saves a provider the user just added, then asks the vendor for
+// its models.
+func saveNew(p provider.Provider) error {
 	if err := provider.Save(p); err != nil {
 		return err
 	}
@@ -299,9 +336,9 @@ func addProvider(rest []string) error {
 	}
 	n := len(saved.Exposed())
 	if n == 0 {
-		fmt.Println(amber.Render("!"), "no models exposed yet ·", "dial provider models", saved.ID, "<ids…>")
+		fmt.Println(amber.Render("!"), "no models exposed yet ·", "magpie provider models", saved.ID, "<ids…>")
 	} else {
-		fmt.Printf("  %d models in the catalog · %s\n", n, muted.Render("dial models"))
+		fmt.Printf("  %d models in the catalog · %s\n", n, muted.Render("magpie models"))
 	}
 	return nil
 }
@@ -313,33 +350,41 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" && p.Account == "" {
+	if p.Preset == "" && p.Account == nil {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
-	if p.Account != "" {
-		acct := p.User
-		if p.Plan != "" {
-			acct += " · " + p.Plan + " plan"
-		}
-		kv("account", acct+muted.Render(" · signed in via "+p.Source))
-	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
 	switch {
-	case p.Account != "":
-		// the sign-in is the key; nothing to show
+	case p.Account != nil:
+		who := p.Account.User
+		if p.Account.Plan != "" {
+			who += muted.Render("  " + p.Account.Plan)
+		}
+		kv("account", who+muted.Render("  from "+p.Account.Agent+"'s own sign-in"))
 	case p.Key != "":
 		kv("key", muted.Render(provider.Mask(p.Key)))
 	case p.Ready():
 		kv("key", muted.Render("none needed"))
 	default:
-		kv("key", amber.Render("not set")+muted.Render("  dial provider key "+p.ID+" …"))
+		kv("key", amber.Render("not set")+muted.Render("  magpie provider key "+p.ID+" …"))
 	}
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
+	if p.Preset == "" && p.Account == nil {
+		kv("icon", p.Icon)
+		names := make([]string, 0, len(p.Headers))
+		for n := range p.Headers {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			kv("header", n+": "+p.Headers[n])
+		}
+	}
 	ms := p.Exposed()
 	src := "models.dev"
 	if t, ok := p.Fetched(); ok {
@@ -391,12 +436,69 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "keys":
 			p.KeysURL = v
 		case "icon":
-			p.Icon = v
+			if p.Preset != "" || p.Account != nil {
+				return fmt.Errorf("%s: 仅自定义供应商可设置图标 (only custom providers can set an icon)", p.Name)
+			}
+			icon, err := iconValue(v)
+			if err != nil {
+				return err
+			}
+			p.Icon = icon
 		default:
-			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
+			name, ok := headerName(k)
+			if !ok {
+				return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
+			}
+			if p.Headers == nil {
+				p.Headers = map[string]string{}
+			}
+			p.Headers[name] = v
 		}
 	}
 	return nil
+}
+
+// headerName reads the name out of a header.<Name> field; the prefix is
+// matched without regard to case, the name keeps the case the user typed.
+func headerName(k string) (string, bool) {
+	if len(k) <= len("header.") || !strings.EqualFold(k[:len("header.")], "header.") {
+		return "", false
+	}
+	return strings.TrimSpace(k[len("header."):]), true
+}
+
+// iconValue turns what the user typed as an icon into the value to store: a
+// picture file is kept in magpie's icons folder, anything else is taken as a
+// built-in name or an existing reference, and "" restores the default.
+func iconValue(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.HasPrefix(v, "file:") {
+		return v, nil
+	}
+	st, err := os.Stat(v)
+	if err == nil {
+		if st.IsDir() {
+			return "", fmt.Errorf("%s is a folder, not an image", v)
+		}
+		f, err := os.Open(v)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, provider.MaxIcon+1))
+		if err != nil {
+			return "", err
+		}
+		return provider.StoreIcon(data)
+	}
+	switch strings.ToLower(filepath.Ext(v)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg":
+		return "", fmt.Errorf("no image at %s", v)
+	}
+	if strings.ContainsAny(v, `/\`) {
+		return "", fmt.Errorf("no image at %s", v)
+	}
+	return v, nil
 }
 
 func ago(t time.Time) string {
@@ -413,7 +515,7 @@ func ago(t time.Time) string {
 	}
 }
 
-// refreshLive re-fetches the model list of every ready provider; `dial sync`
+// refreshLive re-fetches the model list of every ready provider; `magpie sync`
 // calls it after the catalog download.
 func refreshLive(ctx context.Context) {
 	var names []string
@@ -433,18 +535,61 @@ func refreshLive(ctx context.Context) {
 	}
 }
 
-// serve: `dial serve` — the gateway alone, in the foreground.
+// serve: `magpie serve` — the gateway alone, in the foreground.
 func serve() error {
 	s := gateway.New()
-	fmt.Println(green.Render("●"), "dial gateway on", bold.Render(gateway.URL()))
+	fmt.Println(green.Render("●"), "magpie gateway on", bold.Render(gateway.URL()))
 	fmt.Println(muted.Render("  OpenAI  "), gateway.URL()+"/v1/chat/completions", muted.Render("·"), gateway.URL()+"/v1/responses")
 	fmt.Println(muted.Render("  Anthropic"), gateway.URL()+"/v1/messages")
 	fmt.Println(muted.Render("  key     "), gateway.Token, muted.Render("(anything works; the gateway only listens on localhost)"))
 	n := len(provider.Catalog())
 	if n == 0 {
-		fmt.Println(amber.Render("!"), "no models yet ·", "dial provider add deepseek sk-…")
+		fmt.Println(amber.Render("!"), "no models yet ·", "magpie provider add deepseek sk-…")
 	} else {
-		fmt.Printf("  %d models · %s\n", n, muted.Render("dial models"))
+		fmt.Printf("  %d models · %s\n", n, muted.Render("magpie models"))
 	}
 	return s.ListenAndServe(context.Background())
+}
+
+// importCmd adds the provider a magpie://import link describes, after
+// showing it: magpie import [-y] <link>.
+func importCmd(args []string) error {
+	yes := false
+	var link string
+	for _, a := range args {
+		switch a {
+		case "-y", "--yes":
+			yes = true
+		default:
+			link = a
+		}
+	}
+	if link == "" {
+		return errors.New("magpie import [-y] 'magpie://import?…'")
+	}
+	p, err := provider.ParseImport(link)
+	if err != nil {
+		return err
+	}
+	if err := showProvider(p); err != nil {
+		return err
+	}
+	if old, err := provider.Find(p.ID); err == nil {
+		fmt.Println(amber.Render("!"), "replaces your", old.Name)
+	}
+	if !yes {
+		if st, err := os.Stdin.Stat(); err != nil || st.Mode()&os.ModeCharDevice == 0 {
+			return errors.New("not a terminal: add -y to import without asking")
+		}
+		fmt.Print("Add it? [y/N] ")
+		var answer string
+		_, _ = fmt.Scanln(&answer)
+		if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+			return errors.New("nothing added")
+		}
+	}
+	if p.Key == "" && !p.Ready() {
+		fmt.Println(amber.Render("!"), "the link has no key · magpie provider key", p.ID, "<key>")
+	}
+	return saveNew(p)
 }
