@@ -271,3 +271,52 @@ func RenameKey(id, keyRef, name string) error {
 	}
 	return Save(*p)
 }
+
+// How well a key suits a request's protocol, best first: a key made for
+// exactly that protocol, one that names none, one made for another.
+const (
+	FitExact = iota
+	FitAny
+	FitOther
+)
+
+// KeyFit is how well one key suits a request for reqProto.
+func KeyFit(k KeyAccount, reqProto Protocol) int {
+	switch {
+	case k.Protocol == "":
+		return FitAny
+	case k.Protocol == reqProto:
+		return FitExact
+	}
+	return FitOther
+}
+
+// RankKeysByProtocol splits keys by how well each suits a request for
+// reqProto: the ones made for that protocol, the ones naming none, and the
+// ones made for another, each in the order given. A key's protocol is its
+// Protocol; the caller fills in the provider's KeyProtocol for the first key
+// (see KeysByProtocol).
+func RankKeysByProtocol(keys []KeyAccount, reqProto Protocol) (primary, unspecified, other []KeyAccount) {
+	for _, k := range keys {
+		switch KeyFit(k, reqProto) {
+		case FitExact:
+			primary = append(primary, k)
+		case FitAny:
+			unspecified = append(unspecified, k)
+		default:
+			other = append(other, k)
+		}
+	}
+	return primary, unspecified, other
+}
+
+// KeysByProtocol is the keys in use (KeysOn) split by how well each suits a
+// request for reqProto, as RankKeysByProtocol. The first key's protocol is
+// the provider's KeyProtocol when it has none of its own.
+func (p Provider) KeysByProtocol(reqProto Protocol) (primary, unspecified, other []KeyAccount) {
+	keys := p.KeysOn()
+	if len(keys) > 0 && keys[0].Protocol == "" {
+		keys[0].Protocol = p.KeyProtocol
+	}
+	return RankKeysByProtocol(keys, reqProto)
+}

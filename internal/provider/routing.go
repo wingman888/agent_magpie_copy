@@ -21,6 +21,19 @@ const (
 	LeastUsed = "least-used"
 )
 
+// NormalizeRouting returns s as a routing is stored: one of the routings
+// above, or "" (smart) for anything else. "usage", what least-used was
+// called before, is read as LeastUsed so saved settings keep working.
+func NormalizeRouting(s string) string {
+	switch s {
+	case Ordered, Rotate, LeastUsed:
+		return s
+	case "usage":
+		return LeastUsed
+	}
+	return ""
+}
+
 // SetRouting changes how a provider's requests spread over its keys or
 // accounts.
 func SetRouting(id, routing string) error {

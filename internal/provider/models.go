@@ -237,27 +237,28 @@ type Entry struct {
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`
-	// Group is the id of the routing group this entry is, "" for a model
-	// of a provider (see groups.go); a group's Provider is empty.
-	Group string `json:"group,omitempty"`
-	// Icons are the icons of the providers a group's members come from, each
-	// provider once; empty for a model of a provider.
-	Icons []string `json:"-"`
+	// Kind is "" for a provider's model, KindGroup for a routing group; a
+	// group has no Provider or Model, and lists its Members ("provider/model").
+	Kind    string   `json:"kind,omitempty"`
+	Members []string `json:"members,omitempty"`
+	Auto    bool     `json:"auto,omitempty"` // a group magpie discovered
 }
 
 // Catalog lists every exposed model of every ready provider, then the
-// routing groups (see groups.go).
+// routing groups (see group.go).
 func Catalog() []Entry {
 	var out []Entry
+	var ready []Provider
 	for _, p := range All() {
 		if !p.Ready() {
 			continue
 		}
+		ready = append(ready, p)
 		for _, m := range p.Exposed() {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
 		}
 	}
-	return append(out, groupEntries()...)
+	return append(out, groupEntries(ready)...)
 }
 
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
@@ -265,15 +266,15 @@ func Catalog() []Entry {
 // and the bare model id when exactly one provider serves it.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
-	// a routing group answers as its first usable member does
-	if strings.HasPrefix(id, groupPrefix) {
-		if _, ms, ok := FindGroup(id); ok && len(ms) > 0 {
-			return ms[0].Provider, ms[0].Model, true
+	// routing groups are resolved by the gateway (FindGroup), not here
+	var entries []Entry
+	for _, e := range Catalog() {
+		if e.Kind != KindGroup {
+			entries = append(entries, e)
 		}
 	}
-	entries := Catalog()
 	for _, e := range entries {
-		if e.Group == "" && e.ID == id {
+		if e.ID == id {
 			return e.Provider, e.Model, true
 		}
 	}
@@ -284,7 +285,7 @@ func Resolve(id string) (Provider, string, bool) {
 	}
 	var hits []Entry
 	for _, e := range entries {
-		if e.Group == "" && e.Model == id {
+		if e.Model == id {
 			hits = append(hits, e)
 		}
 	}

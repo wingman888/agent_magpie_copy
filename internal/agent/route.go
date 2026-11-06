@@ -17,19 +17,23 @@ import (
 // magpieID is the provider id agents know the gateway by.
 const magpieID = "magpie"
 
-// viaMagpie lists the catalog for a picker, one group per provider, with
-// the routing groups first in a section of their own.
+// groupGroup is the picker section of the routing groups.
+const groupGroup = "Routing groups"
+
+// viaMagpie lists the catalog for a picker: the routing groups first, in a
+// section of their own, then one group per provider.
 func viaMagpie(prefix string) []Option {
-	var out []Option
-	cat := provider.Catalog()
-	for _, e := range cat {
-		if e.Group != "" {
-			out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
-				Group: "Routing groups", Icons: e.Icons, Ref: e.ID})
-		}
-	}
-	for _, e := range cat {
-		if e.Group != "" {
+	return pickerOptions(provider.Catalog(), prefix, providerIcons())
+}
+
+// pickerOptions is viaMagpie over given catalog entries; icon finds a
+// provider's icon by its id.
+func pickerOptions(entries []provider.Entry, prefix string, icon func(pid string) string) []Option {
+	var groups, out []Option
+	for _, e := range entries {
+		if e.Kind == provider.KindGroup {
+			groups = append(groups, Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
+				Group: groupGroup, Ref: e.ID, Icons: memberIcons(e.Members, icon)})
 			continue
 		}
 		note := e.Provider.Name + " · via magpie"
@@ -38,6 +42,32 @@ func viaMagpie(prefix string) []Option {
 		}
 		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
 			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
+	}
+	return append(groups, out...)
+}
+
+// providerIcons finds a provider's icon by id, among all providers.
+func providerIcons() func(string) string {
+	icons := map[string]string{}
+	for _, p := range provider.All() {
+		icons[p.ID] = p.Icon
+	}
+	return func(pid string) string { return icons[pid] }
+}
+
+// memberIcons are the icons of the providers a group's members belong to,
+// each once, in member order.
+func memberIcons(members []string, icon func(pid string) string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range members {
+		pid, _, _ := strings.Cut(m, "/")
+		ic := icon(pid)
+		if ic == "" || seen[ic] {
+			continue
+		}
+		seen[ic] = true
+		out = append(out, ic)
 	}
 	return out
 }
@@ -56,6 +86,14 @@ func viaMagpieFor(agentID, prefix string) []Option {
 
 // isMagpie reports whether a model value is a catalog reference.
 func isMagpie(v string) bool {
+	if strings.HasPrefix(v, provider.GroupPrefix+"/") {
+		for _, e := range provider.Catalog() {
+			if e.ID == v && e.Kind == provider.KindGroup {
+				return true
+			}
+		}
+		return false
+	}
 	_, _, ok := provider.Resolve(v)
 	return ok && strings.Contains(v, "/")
 }
@@ -72,7 +110,11 @@ func firstOf(xs []string) string {
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
+		name := e.Name + " · " + e.Provider.Name
+		if e.Kind == provider.KindGroup {
+			name = e.Name + " · routing group"
+		}
+		out = append(out, catalog.Model{ID: e.ID, Name: name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
 	}
 	return out
 }
