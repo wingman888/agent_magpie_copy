@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -109,6 +110,53 @@ func parseChat(body []byte) (*Request, error) {
 		}
 	}
 	return r, nil
+}
+
+// developerAsSystem rewrites the "developer" role to "system" in a Chat
+// Completions request body, for backends that only know "system". Every other
+// field is kept as it was, and a body without developer messages is returned
+// unchanged.
+func developerAsSystem(body []byte) []byte {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(body, &top) != nil {
+		return body
+	}
+	var msgs []map[string]json.RawMessage
+	if json.Unmarshal(top["messages"], &msgs) != nil {
+		return body
+	}
+	changed := false
+	for _, m := range msgs {
+		var role string
+		if json.Unmarshal(m["role"], &role) == nil && role == "developer" {
+			m["role"] = json.RawMessage(`"system"`)
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	var err error
+	if top["messages"], err = marshalNoHTML(msgs); err != nil {
+		return body
+	}
+	out, err := marshalNoHTML(top)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// marshalNoHTML is json.Marshal without escaping <, > and &, and without the
+// trailing newline an Encoder adds.
+func marshalNoHTML(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // chatParts reads a message's content: a string, or an array of parts.
@@ -347,12 +395,7 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStart, MsgID: ch.ID, Model: ch.Model})
 	}
 	for _, c := range ch.Choices {
-		// Some relays send the same thought under both names; one is enough.
-		t := c.Delta.ReasoningContent
-		if t == "" {
-			t = c.Delta.Reasoning
-		}
-		if t != "" {
+		if t := c.Delta.ReasoningContent + c.Delta.Reasoning; t != "" {
 			emit(Event{Kind: KThink, Text: t})
 		}
 		if c.Delta.Content != nil && *c.Delta.Content != "" {
