@@ -1,202 +1,207 @@
 package gateway
 
-// Fallback: a provider can name models to use when it can't take a request
-// — a coding plan out of quota, a rate limit, an overloaded or failing
-// vendor. The request goes to the next one only while none of the reply has
-// been sent, so an agent sees one clean answer from whoever gave it, never a
-// half from each. A provider that just failed that way waits at the back of
-// the line for a minute, rather than costing every request a doomed try.
-
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
+// fallbackCooldown is how long a provider that just failed with a retryable
+// error is moved behind the other candidates. It lives in memory only.
 const fallbackCooldown = time.Minute
 
-type candidate struct {
-	p     provider.Provider
-	model string
-	// keyed is set when p is one account of a provider that has several
-	// enabled keys: p.Key is that one key, and it rests on its own.
-	keyed bool
+// quotaWords mark a 400, 401 or 403 as a quota, rate or overload problem
+// rather than a bad request. Matching ignores case.
+var quotaWords = []string{
+	"quota", "insufficient", "balance", "credit", "billing", "exceeded",
+	"rate limit", "usage limit", "too many requests", "overloaded",
+	"余额", "额度", "欠费", "限流", "频率", "套餐", "用量", "上限",
 }
 
-// candidates is the primary and then its fallbacks, those resting after a
-// recent failure moved behind the rest.
-func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := []candidate{{p: p, model: model}}
-	seen := map[string]bool{p.ID + "/" + model: true}
-	for _, id := range p.Fallback {
-		fp, fm, ok := provider.Resolve(id)
-		if !ok || seen[fp.ID+"/"+fm] {
-			continue
-		}
-		seen[fp.ID+"/"+fm] = true
-		out = append(out, candidate{p: fp, model: fm})
+// upstreamErr carries the raw error body an upstream sent for one attempt,
+// so retryable can judge what the provider said rather than the gateway's
+// own wrapping of it.
+type upstreamErr struct {
+	body []byte
+}
+
+type upstreamErrKey struct{}
+
+// withUpstreamErr returns r carrying a fresh holder for the attempt's raw
+// upstream error body, and the holder itself.
+func withUpstreamErr(r *http.Request) (*http.Request, *upstreamErr) {
+	up := &upstreamErr{}
+	return r.WithContext(context.WithValue(r.Context(), upstreamErrKey{}, up)), up
+}
+
+// noteUpstreamErr records the raw body of an upstream error reply, if the
+// request carries a holder.
+func noteUpstreamErr(r *http.Request, body []byte) {
+	if up, ok := r.Context().Value(upstreamErrKey{}).(*upstreamErr); ok {
+		up.body = append([]byte(nil), body...)
 	}
-	if len(out) == 1 {
-		return out
-	}
-	var ready, resting []candidate
-	for _, c := range out {
-		if s.resting(c.p.ID) {
-			resting = append(resting, c)
-		} else {
-			ready = append(ready, c)
-		}
-	}
-	return append(ready, resting...)
 }
 
-var restingUntil = struct {
-	sync.Mutex
-	m map[string]time.Time
-}{m: map[string]time.Time{}}
-
-func (s *Server) resting(id string) bool {
-	restingUntil.Lock()
-	defer restingUntil.Unlock()
-	return time.Now().Before(restingUntil.m[id])
-}
-
-func (s *Server) rest(id string) {
-	restingUntil.Lock()
-	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
-	restingUntil.Unlock()
-}
-
-// keyCandidates turns each provider that has several enabled keys into one
-// candidate per key that is ready, in the order KeysOn gives them. A key
-// that failed within the last minute is not tried at all, and an off key is
-// never listed. A provider whose keys are all resting is skipped as a whole,
-// so the request goes on to its fallbacks. A provider with one enabled key
-// that is ready stays a single candidate, as it always was.
-func keyCandidates(cands []candidate) []candidate {
-	var out []candidate
-	for _, c := range cands {
-		on := c.p.KeysOn()
-		// no key at all (a keyless endpoint), or one ready key: as before
-		if len(on) == 0 || (len(on) == 1 && !provider.KeyResting(c.p.ID, provider.KeyRef(on[0].Key))) {
-			out = append(out, c)
-			continue
-		}
-		for _, k := range on {
-			if provider.KeyResting(c.p.ID, provider.KeyRef(k.Key)) {
-				continue
-			}
-			kp := c.p
-			kp.Key, kp.KeyName, kp.Keys = k.Key, k.Name, nil
-			out = append(out, candidate{p: kp, model: c.model, keyed: true})
-		}
-	}
-	return out
-}
-
-// accountLabel names the account a candidate used, for the call record: the
-// provider and the key's name, or its masked key when it has no name. The
-// full key never appears.
-func accountLabel(p provider.Provider) string {
-	if p.KeyName != "" {
-		return p.ID + "(" + p.KeyName + ")"
-	}
-	return p.ID + "(" + provider.Mask(p.Key) + ")"
-}
-
-// hideKey replaces the full key in a message, should an upstream echo it.
-func hideKey(msg, key string) string {
-	if key == "" {
-		return msg
-	}
-	return strings.ReplaceAll(msg, key, provider.Mask(key))
-}
-
-// quotaWords are how vendors say "out of quota" or "slow down" when their
-// status code doesn't: some answer 400 or 403 with it.
-var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
-
-// retryable says whether another provider may do better with a request
-// that failed this way.
+// retryable reports whether an error reply means this provider cannot take
+// the request now, so the next candidate may. body is the provider's own
+// error body, not the gateway's wording of it.
 func retryable(status int, body []byte) bool {
 	switch {
 	case status == 402, status == 408, status == 429, status >= 500:
 		return true
 	case status == 400, status == 401, status == 403:
-		return quotaWords.Match(body)
+		msg := strings.ToLower(string(body))
+		for _, w := range quotaWords {
+			if strings.Contains(msg, w) {
+				return true
+			}
+		}
 	}
 	return false
 }
 
-// holdWriter keeps an error reply back while another provider may still
-// answer: headers and body wait until release, or are dropped for the next
-// try. Anything else goes straight through.
-type holdWriter struct {
-	w       http.ResponseWriter
-	hold    bool
-	header  http.Header
-	status  int
-	passing bool
-	held    bytes.Buffer
+// candidate is one provider and model a request may be sent to.
+type candidate struct {
+	p     provider.Provider
+	model string
 }
 
-func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
-	return &holdWriter{w: w, hold: hold, header: http.Header{}}
+// candidates lists what a request tries, in order: the chosen model, then the
+// provider's own fallback list. Only the provider's own list is used, never
+// the fallbacks' lists. Entries that do not resolve and repeats are skipped.
+// Providers that failed within the cooldown move behind the rest.
+func (s *Server) candidates(p provider.Provider, model string) []candidate {
+	out := []candidate{{p, model}}
+	seen := map[string]bool{p.ID + "\x00" + model: true}
+	for _, id := range p.Fallback {
+		fp, fm, ok := provider.Resolve(id)
+		if !ok {
+			continue
+		}
+		// the entry must name the provider it resolves to, so a bare or
+		// mismatched name never sends the request to another provider
+		if pid, _, _ := strings.Cut(strings.TrimSpace(id), "/"); fp.ID != pid {
+			continue
+		}
+		key := fp.ID + "\x00" + fm
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, candidate{fp, fm})
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	var fresh, cooling []candidate
+	for _, c := range out {
+		if until, ok := s.cooling[c.p.ID]; ok && now.Before(until) {
+			cooling = append(cooling, c)
+		} else {
+			fresh = append(fresh, c)
+		}
+	}
+	return append(fresh, cooling...)
 }
 
-func (h *holdWriter) Header() http.Header { return h.header }
+// cool starts the cooldown of a provider that just failed retryably.
+func (s *Server) cool(providerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cooling == nil {
+		s.cooling = make(map[string]time.Time)
+	}
+	s.cooling[providerID] = time.Now().Add(fallbackCooldown)
+}
 
-func (h *holdWriter) WriteHeader(code int) {
-	if h.status != 0 {
+// failure words one failed attempt for the call record, as "HTTP 429: msg".
+func failure(status int, msg, name string) string {
+	return fmt.Sprintf("HTTP %d: %s", status, strings.TrimPrefix(msg, name+": "))
+}
+
+// pendingReply holds one candidate's reply until it is known to be final. A
+// success, or any error that is not retryable, goes to the client as it
+// happens. A retryable error is kept back, so it can be dropped unseen when
+// the next candidate is tried. Once any success status is sent, the reply
+// is committed and cannot be switched.
+type pendingReply struct {
+	dst       http.ResponseWriter
+	hdr       http.Header
+	status    int
+	held      bytes.Buffer
+	committed bool
+}
+
+func newPendingReply(dst http.ResponseWriter) *pendingReply {
+	return &pendingReply{dst: dst, hdr: http.Header{}}
+}
+
+func (a *pendingReply) Header() http.Header {
+	if a.committed {
+		return a.dst.Header()
+	}
+	return a.hdr
+}
+
+func (a *pendingReply) WriteHeader(code int) {
+	if a.status != 0 {
 		return
 	}
-	h.status = code
-	if h.hold && code >= 400 {
+	a.status = code
+	if code < 400 {
+		a.commit()
+	}
+}
+
+func (a *pendingReply) Write(p []byte) (int, error) {
+	if a.status == 0 {
+		a.WriteHeader(http.StatusOK)
+	}
+	if a.committed {
+		return a.dst.Write(p)
+	}
+	return a.held.Write(p)
+}
+
+// Flush passes flushes through once the reply is going to the client.
+func (a *pendingReply) Flush() {
+	if !a.committed {
 		return
 	}
-	h.pass()
-}
-
-func (h *holdWriter) pass() {
-	dst := h.w.Header()
-	for k, v := range h.header {
-		dst[k] = v
-	}
-	h.w.WriteHeader(h.status)
-	h.passing = true
-}
-
-func (h *holdWriter) Write(b []byte) (int, error) {
-	if h.status == 0 {
-		h.WriteHeader(http.StatusOK)
-	}
-	if !h.passing {
-		return h.held.Write(b)
-	}
-	return h.w.Write(b)
-}
-
-func (h *holdWriter) Flush() {
-	if f, ok := h.w.(http.Flusher); ok && h.passing {
+	if f, ok := a.dst.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// failed reports a held error another provider could answer instead.
-func (h *holdWriter) failed() bool {
-	return !h.passing && h.status >= 400 && retryable(h.status, h.held.Bytes())
-}
-
-// release sends a held reply after all: nobody else is left to try.
-func (h *holdWriter) release() {
-	if h.passing || h.status == 0 {
+// commit sends the status, headers and any held body to the client.
+func (a *pendingReply) commit() {
+	if a.committed {
 		return
 	}
-	h.pass()
-	h.w.Write(h.held.Bytes())
+	a.committed = true
+	h := a.dst.Header()
+	for k, v := range a.hdr {
+		h[k] = v
+	}
+	a.dst.WriteHeader(a.status)
+	if a.held.Len() > 0 {
+		a.dst.Write(a.held.Bytes())
+	}
+	a.held.Reset()
+}
+
+// release sends the reply as it stands, for when no candidate follows.
+func (a *pendingReply) release() {
+	if a.committed {
+		return
+	}
+	if a.status == 0 {
+		a.status = http.StatusOK
+	}
+	a.commit()
 }
