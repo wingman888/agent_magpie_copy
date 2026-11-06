@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/yetone/magpie/internal/catalog"
 )
 
 // Result is what a probe of one endpoint came back with.
@@ -24,105 +22,32 @@ type Result struct {
 }
 
 // Test sends the smallest possible request to each endpoint the vendor
-// serves, signed with a key made for it and asking for a model that key
-// sees, and reports what came back.
+// serves, with the first exposed model, and reports what came back.
 func (p Provider) Test(ctx context.Context) []Result {
 	p.Fetch(ctx)
+	model := ""
+	if ms := p.Exposed(); len(ms) > 0 {
+		model = ms[0].ID
+	} else if ms := p.Available(); len(ms) > 0 {
+		model = ms[0].ID
+	}
 	var out []Result
 	for _, proto := range p.Speaks() {
-		q, ok := p.keyFor(proto)
-		model := p.testModel(q, proto)
-		if !ok {
-			out = append(out, Result{Protocol: proto, Model: model, Error: "no key is on for this endpoint"})
-			continue
-		}
 		var url, body string
 		switch proto {
 		case Chat:
-			url = q.Chat + "/chat/completions"
+			url = p.Chat + "/chat/completions"
 			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 		case Responses:
-			url = q.Responses + "/responses"
+			url = p.Responses + "/responses"
 			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
 		case Anthropic:
-			url = q.Anthropic + "/v1/messages"
+			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		}
-		out = append(out, probe(ctx, q, proto, url, q.Prepare([]byte(body)), model))
+		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
 	}
 	return out
-}
-
-// keyFor is p using the first key on that works with proto: one made for
-// it, else one made for any. A provider without keys is left as it is.
-func (p Provider) keyFor(proto Protocol) (Provider, bool) {
-	keys := p.KeysOn()
-	if len(keys) == 0 {
-		return p, true
-	}
-	for _, want := range []Protocol{proto, ""} {
-		for _, k := range keys {
-			if k.Protocol == want {
-				return p.WithKey(k), true
-			}
-		}
-	}
-	return p, false
-}
-
-// testModel is the model a probe of proto's endpoint asks for: the first
-// exposed one q's key sees, else the first it sees at all — preferring a
-// Claude model on the Anthropic endpoint.
-func (p Provider) testModel(q Provider, proto Protocol) string {
-	k := q.first()
-	var pools [][]catalog.Model
-	if ms := p.Exposed(); len(ms) > 0 {
-		pools = append(pools, ms)
-	}
-	pools = append(pools, p.Available())
-	// A model the vendor's list says is served over proto comes first.
-	wants := []func(string) bool{
-		func(id string) bool { return p.declares(id, proto) && (proto != Anthropic || isClaude(id)) },
-		func(id string) bool { return p.declares(id, proto) },
-	}
-	// Once the list declares endpoints for any model, only declared models are
-	// probed; the undeclared fallbacks apply only when the list says nothing.
-	if !listsAPIs(p, pools) {
-		wants = append(wants,
-			func(id string) bool { return proto != Anthropic || isClaude(id) },
-			func(string) bool { return true })
-	}
-	for _, want := range wants {
-		for _, pool := range pools {
-			for _, m := range pool {
-				if want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
-					return m.ID
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// listsAPIs reports whether the vendor's list declares endpoints for any of
-// the models in pools.
-func listsAPIs(p Provider, pools [][]catalog.Model) bool {
-	for _, pool := range pools {
-		for _, m := range pool {
-			if p.APIs(m.ID) != nil {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isClaude(id string) bool {
-	id = strings.ToLower(id)
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		id = id[i+1:]
-	}
-	return strings.HasPrefix(id, "claude")
 }
 
 // AuthHeaders is how a request to the vendor proves who it is. Anthropic's
@@ -155,12 +80,12 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	if p.IsOpenCode() {
-		req.Header.Set("x-opencode-session", "magpie-test-"+randomUUID())
-	}
 	if err := p.Sign(ctx, req, proto, body); err != nil {
 		r.Error = err.Error()
 		return r
+	}
+	if p.IsOpenCode() {
+		req.Header.Set(OpenCodeSessionHeader, OpenCodeSession(nil, body))
 	}
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
