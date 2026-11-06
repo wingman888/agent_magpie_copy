@@ -67,14 +67,12 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
+	Fallback          string            `json:"fallback,omitempty"` // providers that failed first, and why
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
-	// Fallback lists the providers that failed before this one answered,
-	// as "<providerId>: <reason>" joined by "; ". Empty when nothing switched.
-	Fallback string `json:"fallback,omitempty"`
 }
 
 // Server is the gateway.
@@ -87,8 +85,6 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	// cooling maps a provider id to when its fallback cooldown ends. Guarded by mu.
-	cooling map[string]time.Time
 }
 
 // New makes a gateway.
@@ -353,90 +349,69 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.record(call)
 		return
 	}
-	// Try the chosen model, then the provider's fallbacks in order. Every
-	// candidate but the last writes into an attempt, which holds back a
-	// retryable error so the next candidate can answer instead.
-	cands := s.candidates(p, model)
-	var failed []string
-	var final attemptResult
-	var answer candidate
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
+	cands := keyCandidates(s.candidates(p, model))
+	var skipped []string
 	for i, c := range cands {
-		var out http.ResponseWriter = w
-		var att *pendingReply
-		if i < len(cands)-1 {
-			att = newPendingReply(w)
-			out = att
+		last := i == len(cands)-1 || r.Context().Err() != nil
+		hw := newHoldWriter(w, !last)
+		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+		if c.keyed {
+			call.Error = hideKey(call.Error, c.p.Key)
 		}
-		final = s.dispatch(out, r, from, c.p, c.model, body)
-		answer = c
-		if att == nil {
-			break
-		}
-		if !att.committed && retryable(final.status, att.held.Bytes()) && r.Context().Err() == nil {
-			s.cool(c.p.ID)
-			failed = append(failed, c.p.ID+": "+failure(final.status, final.msg, c.p.Name))
+		if !last && hw.failed() {
+			if c.keyed {
+				provider.MarkKeyFailed(c.p.ID, provider.KeyRef(c.p.Key))
+				skipped = append(skipped, accountLabel(c.p)+": "+call.Error)
+			} else {
+				s.rest(c.p.ID)
+				skipped = append(skipped, c.p.ID+": "+call.Error)
+			}
 			continue
 		}
-		att.release()
+		hw.release()
+		model = c.model
 		break
 	}
-	call.Provider = answer.p.ID
-	if len(failed) > 0 {
-		call.Model = answer.p.ID + "/" + answer.model
-		call.Fallback = strings.Join(failed, "; ")
+	if len(skipped) > 0 {
+		call.Fallback = strings.Join(skipped, "; ")
 	}
-	call.To = final.to
-	call.Status, call.Error = final.status, final.msg
-	call.Usage = final.usage
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	if final.noUsage {
-		return
+	if call.To != "" {
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 	}
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: answer.p.ID, Model: answer.model,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
-// attemptResult is what one provider's attempt produced.
-type attemptResult struct {
-	to      provider.Protocol
-	status  int
-	msg     string
-	usage   Usage
-	noUsage bool // the attempt failed before reaching any provider, so it is not counted
-}
-
-// dispatch sends the request to one provider and model, answering on w.
-func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte) attemptResult {
-	var res attemptResult
+// attempt sends a request to one provider. call.To stays empty when the
+// provider has no endpoint to send it to.
+func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
 	// A Claude Code subscription must run through the genuine binary. Direct
 	// OAuth HTTP requests are content-classified as third-party traffic when
 	// they carry another agent's harness (Pi, OpenCode, and others).
 	if p.Account != nil && p.Account.Agent == "claude" {
-		res.to = provider.Anthropic
-		res.status, res.msg = s.serveClaudeSubscription(w, r, from, model, body, &res.usage)
-		return res
+		call.To = provider.Anthropic
+		return s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
 	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
 	if relay {
-		res.to = from
-		res.status, res.msg = s.passthrough(w, r, p, from, model, body, &res.usage)
-		return res
+		call.To = from
+		return s.passthrough(w, r, p, from, model, body, &call.Usage)
 	}
 	to := p.Speaks()
 	if len(to) == 0 {
-		res.status, res.msg = 502, p.Name+" has no endpoint configured"
-		writeError(w, from, res.status, res.msg)
-		res.noUsage = true
-		return res
+		msg := p.Name + " has no endpoint configured"
+		return writeError(w, from, 502, msg), msg
 	}
-	res.to = to[0]
-	res.status, res.msg = s.translate(w, r, p, from, to[0], model, body, &res.usage)
-	return res
+	call.To = to[0]
+	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 }
 
 // forward sends a request to the provider.
