@@ -235,23 +235,26 @@ type left struct {
 }
 
 // weigh orders one provider's candidates as its routing says, and tells
-// what it went by. Keys set aside for another protocol keep their place
-// behind the pool, whatever the routing.
+// what it went by.
 func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
-	var pool, aside []candidate
+	var main, aside []candidate
 	for _, c := range cs {
 		if c.aside {
 			aside = append(aside, c)
 		} else {
-			pool = append(pool, c)
+			main = append(main, c)
 		}
 	}
-	out, wg := weighPool(p, pool, model, from)
-	return append(out, aside...), wg
+	if len(main) == 0 {
+		return cs, weighing{}
+	}
+	main, wg := weighMain(p, main, model, from)
+	return append(main, aside...), wg
 }
 
-// weighPool is weigh for the candidates in the pool.
-func weighPool(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
+// weighMain is weigh for the candidates that are not aside: those are routed
+// among themselves, the aside ones stay behind them.
+func weighMain(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
