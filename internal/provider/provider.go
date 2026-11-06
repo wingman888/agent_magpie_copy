@@ -44,6 +44,12 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
+	// Fallback is where a request goes when this provider can't take it —
+	// out of quota, rate limited, overloaded or down — before any of the
+	// reply has been sent: models as agents pick them (provider/model),
+	// tried in order.
+	Fallback []string `json:"fallback,omitempty"`
+
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
 	// key+URL provider — forwarded calls, connectivity tests, and model-list
@@ -68,10 +74,18 @@ type Provider struct {
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
 
-	// Fallback lists the provider/model ids magpie tries, in order, when this
-	// provider cannot take a request (quota spent, rate limited, overloaded).
-	// Entries are as Agents spell models: "provider/model".
-	Fallback []string `json:"fallback,omitempty"`
+	// KeyName names Key, when the user gave it one. Keys holds the other
+	// keys in the order they are tried; see keys.go.
+	KeyName string     `json:"keyName,omitempty"`
+	Keys    []ExtraKey `json:"keys,omitempty"`
+}
+
+// ExtraKey is a key after the first one of a provider. Off keeps it on file
+// without ever sending it upstream.
+type ExtraKey struct {
+	Name string `json:"name,omitempty"`
+	Key  string `json:"key"`
+	Off  bool   `json:"off,omitempty"`
 }
 
 type file struct {
@@ -130,8 +144,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
+		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -207,7 +220,7 @@ func Save(p Provider) error {
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
-			f.Providers[i] = p
+			f.Providers[i] = keepKeys(f.Providers[i], p)
 			return store(f)
 		}
 	}
@@ -267,6 +280,7 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
 		// Presets own their request shape; custom headers are supported only
@@ -288,6 +302,13 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
+}
+
+// Catalogs are the models.dev ids the provider's models are looked up in,
+// first match wins: a gateway that resells several vendors names them all
+// ("openai, deepseek").
+func (p Provider) Catalogs() []string {
+	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
 }
 
 func cleanList(xs []string) []string {
