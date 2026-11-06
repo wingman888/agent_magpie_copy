@@ -191,7 +191,8 @@ func TestGemrouteRemovesWhatWasAbsent(t *testing.T) {
 	if err := gemrouteFieldSet(t, a, "model", "fake/m1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := gemrouteFieldSet(t, a, "model", "default"); err != nil {
+	// main.go turns the word "default" into the empty value before Set
+	if err := gemrouteFieldSet(t, a, "model", ""); err != nil {
 		t.Fatal(err)
 	}
 	s := gemrouteRead(t, dir)
