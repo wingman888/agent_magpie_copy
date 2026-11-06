@@ -1,17 +1,20 @@
-// Package netproxy decides which proxy magpie's own requests to vendors go
-// through. An app started from the Dock or the Start menu has no
-// HTTPS_PROXY in its environment, so without this every call to a vendor
-// that is only reachable through a proxy hangs until the agent gives up.
+// Package netproxy decides which proxy magpie uses for its own outbound
+// requests to model vendors. The order, from the top:
 //
-// In order: the proxy set in magpie's settings (or "direct" for none), the
-// usual *_PROXY variables, then the system's proxy (macOS network
-// settings, Windows Internet Options). Loopback is never proxied.
+//  1. loopback hosts never use a proxy;
+//  2. the proxy in the settings file ("direct" turns proxies off);
+//  3. the environment (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY and NO_PROXY);
+//  4. the operating system's proxy settings (macOS and Windows only);
+//  5. no proxy.
 package netproxy
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -19,121 +22,259 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// Install routes http.DefaultTransport (and so http.DefaultClient) through
-// Func.
+// sysProxy is what the operating system says: a proxy URL ("" for none) and
+// the exception list that goes with it.
+type sysProxy struct {
+	URL    string
+	Except []string
+}
+
+// readSystemProxy reads the OS proxy settings. It is a variable so tests can
+// replace it. Each platform file defines readSystem.
+var readSystemProxy = readSystem
+
+// sysTTL is how long a reading of the OS settings is kept. Changes made by the
+// user show up within this time.
+const sysTTL = 10 * time.Second
+
+var (
+	sysMu  sync.Mutex
+	sysVal sysProxy
+	sysAt  time.Time
+)
+
+// systemProxy returns the OS proxy reading, cached for sysTTL.
+func systemProxy() sysProxy {
+	sysMu.Lock()
+	defer sysMu.Unlock()
+	if !sysAt.IsZero() && time.Since(sysAt) < sysTTL {
+		return sysVal
+	}
+	sysVal = readSystemProxy()
+	sysAt = time.Now()
+	return sysVal
+}
+
+// Install makes http.DefaultTransport follow For. Call it once at start-up.
+// If DefaultTransport is not an *http.Transport, it does nothing.
 func Install() {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		t.Proxy = Func
+		t.Proxy = func(r *http.Request) (*url.URL, error) {
+			return For(r.URL)
+		}
 	}
 }
 
-// Func is an http.Transport Proxy function.
-func Func(req *http.Request) (*url.URL, error) {
-	if loopback(req.URL.Hostname()) {
-		return nil, nil
-	}
-	return For(req.URL)
-}
-
-// For is the proxy a request to u goes through; nil means direct.
+// For returns the proxy to use when reaching u, or nil to connect directly.
+// An error means the settings or the environment hold a value that cannot be
+// used; the request must fail rather than quietly go direct.
 func For(u *url.URL) (*url.URL, error) {
-	switch s := strings.TrimSpace(settings.Load().Proxy); s {
-	case "direct":
-		return nil, nil
-	case "":
-	default:
-		return Parse(s)
+	if u == nil {
+		return nil, errors.New("netproxy: nil URL")
 	}
-	if p, err := fromEnv(u); p != nil || err != nil {
-		return p, err
-	}
-	sys := System()
-	if sys.URL == "" || bypassed(u.Hostname(), sys.Bypass) {
+	host := u.Hostname()
+	if isLoopback(host) {
 		return nil, nil
 	}
-	return Parse(sys.URL)
-}
-
-// Parse reads a proxy address; a bare host:port is an HTTP proxy.
-func Parse(s string) (*url.URL, error) {
-	s = strings.TrimSpace(s)
-	if !strings.Contains(s, "://") {
-		s = "http://" + s
+	if raw := strings.TrimSpace(settings.Load().Proxy); raw != "" {
+		if strings.EqualFold(raw, "direct") {
+			return nil, nil
+		}
+		p, err := settings.ParseProxyAddr(raw)
+		if err != nil {
+			return nil, fmt.Errorf("netproxy: settings proxy: %w", err)
+		}
+		return p, nil
 	}
-	return url.Parse(s)
+	// An environment variable takes over only when one applies to this
+	// scheme. If it does not, the request falls through to the system proxy.
+	if raw := envProxy(u.Scheme); raw != "" {
+		return envFor(u, raw)
+	}
+	sys := systemURL()
+	if sys == nil || matchBypass(host, systemExcept()) {
+		return nil, nil
+	}
+	return sys, nil
 }
 
-// Describe says, for the settings page, what a request to u would use.
+// Describe reports the proxy that outbound requests (to vendors, which are
+// https) use right now, and where it comes from: "settings", "off" (settings
+// say direct), "environment", "system" or "none". The proxy is "" for "off"
+// and "none", and is always the canonical URL string that For returns. The
+// target host is not considered.
 func Describe() (proxy, source string) {
-	switch s := strings.TrimSpace(settings.Load().Proxy); s {
-	case "direct":
+	s := strings.TrimSpace(settings.Load().Proxy)
+	if strings.EqualFold(s, "direct") {
 		return "", "off"
-	case "":
-	default:
-		return s, "settings"
 	}
-	u, _ := url.Parse("https://chatgpt.com")
-	if p, _ := fromEnv(u); p != nil {
-		return p.String(), "environment"
+	if s != "" {
+		return canonicalSettings(s), "settings"
 	}
-	if sys := System(); sys.URL != "" {
-		return sys.URL, "system"
+	if raw := envProxy("https"); raw != "" {
+		return canonicalEnv(raw), "environment"
+	}
+	if p := systemURL(); p != nil {
+		return p.String(), "system"
 	}
 	return "", "none"
 }
 
-func fromEnv(u *url.URL) (*url.URL, error) { return http.ProxyFromEnvironment(&http.Request{URL: u}) }
-
-// Proxy is the system's proxy: one address, and the hosts that skip it.
-type Proxy struct {
-	URL    string
-	Bypass []string
-}
-
-var sysCache struct {
-	sync.Mutex
-	at time.Time
-	p  Proxy
-}
-
-// System reads the system proxy, at most every 15 seconds.
-func System() Proxy {
-	sysCache.Lock()
-	defer sysCache.Unlock()
-	if time.Since(sysCache.at) > 15*time.Second {
-		sysCache.p, sysCache.at = system(), time.Now()
+// systemURL returns the OS proxy as a URL, or nil when there is none or it
+// cannot be parsed. Reading the OS settings never fails a request.
+func systemURL() *url.URL {
+	s := systemProxy().URL
+	if s == "" {
+		return nil
 	}
-	return sysCache.p
+	p, err := url.Parse(s)
+	if err != nil || p.Host == "" {
+		return nil
+	}
+	return p
 }
 
-func loopback(host string) bool {
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+// systemExcept returns the OS exception list.
+func systemExcept() []string {
+	return systemProxy().Except
+}
+
+// canonicalSettings returns the canonical string of a settings proxy value,
+// or the value unchanged if it cannot be parsed (For reports that error).
+func canonicalSettings(v string) string {
+	p, err := settings.ParseProxyAddr(v)
+	if err != nil {
+		return v
+	}
+	return p.String()
+}
+
+// canonicalEnv returns the canonical string of an environment proxy value,
+// or the value unchanged if it cannot be parsed.
+func canonicalEnv(v string) string {
+	p, err := parseEnvProxy(v)
+	if err != nil {
+		return v
+	}
+	return p.String()
+}
+
+// isLoopback reports whether host is localhost, *.localhost or a loopback IP.
+func isLoopback(host string) bool {
+	h := strings.ToLower(strings.Trim(host, "[]"))
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
 		return true
 	}
-	ip := net.ParseIP(host)
+	ip := net.ParseIP(h)
 	return ip != nil && ip.IsLoopback()
 }
 
-// bypassed matches the system's exception list: exact hosts, "*.example.com"
-// or ".example.com" suffixes, and "<local>" for dotless names.
-func bypassed(host string, list []string) bool {
-	host = strings.ToLower(host)
-	for _, b := range list {
-		b = strings.ToLower(strings.TrimSpace(b))
-		switch {
-		case b == "":
-		case b == "<local>":
-			if !strings.Contains(host, ".") {
+// envProxy returns the environment proxy variable that applies to a request
+// with the given scheme, or "" if none does, the way net/http's
+// ProxyFromEnvironment chooses: HTTPS_PROXY for https, HTTP_PROXY for http,
+// and ALL_PROXY as the fallback for either. A variable for the other scheme
+// does not apply.
+func envProxy(scheme string) string {
+	var raw string
+	switch scheme {
+	case "https":
+		raw = getEnvAny("HTTPS_PROXY", "https_proxy")
+	case "http":
+		raw = getEnvAny("HTTP_PROXY", "http_proxy")
+	}
+	if raw == "" {
+		raw = getEnvAny("ALL_PROXY", "all_proxy")
+	}
+	return raw
+}
+
+// envFor returns the proxy from the environment value raw for u. NO_PROXY
+// excludes hosts and sends them direct, as it does in net/http.
+func envFor(u *url.URL, raw string) (*url.URL, error) {
+	if noProxyMatch(u, getEnvAny("NO_PROXY", "no_proxy")) {
+		return nil, nil
+	}
+	p, err := parseEnvProxy(raw)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// parseEnvProxy parses a proxy value from the environment. A value without a
+// scheme is an HTTP proxy.
+func parseEnvProxy(raw string) (*url.URL, error) {
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	p, err := url.Parse(raw)
+	if err != nil || p.Host == "" {
+		return nil, fmt.Errorf("netproxy: environment proxy %q is not a valid URL", raw)
+	}
+	return p, nil
+}
+
+// noProxyMatch reports whether NO_PROXY list excludes u. The list is comma
+// separated. Each entry can be "*", an IP, a CIDR, a domain (with or without a
+// leading dot or "*."), or any of these followed by ":port".
+func noProxyMatch(u *url.URL, list string) bool {
+	host := strings.ToLower(u.Hostname())
+	if isLoopback(host) {
+		return true
+	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	ip := net.ParseIP(host)
+	for _, e := range strings.Split(list, ",") {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if e == "*" {
+			return true
+		}
+		if _, n, err := net.ParseCIDR(e); err == nil {
+			if ip != nil && n.Contains(ip) {
 				return true
 			}
-		case strings.HasPrefix(b, "*."), strings.HasPrefix(b, "."):
-			suf := strings.TrimPrefix(b, "*")
-			if strings.HasSuffix(host, suf) || host == suf[1:] {
+			continue
+		}
+		eh, ep := e, ""
+		if h, p, err := net.SplitHostPort(e); err == nil {
+			eh, ep = h, p
+		}
+		if ep != "" && ep != port {
+			continue
+		}
+		eh = strings.TrimPrefix(strings.TrimPrefix(eh, "*"), ".")
+		if eh == "" {
+			continue
+		}
+		if ip != nil {
+			if eh == host {
 				return true
 			}
-		case host == b:
+			continue
+		}
+		if host == eh || strings.HasSuffix(host, "."+eh) {
 			return true
 		}
 	}
 	return false
+}
+
+// getEnvAny returns the first non-empty value among the named variables.
+func getEnvAny(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
 }
