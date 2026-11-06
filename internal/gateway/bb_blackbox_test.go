@@ -587,6 +587,41 @@ func TestBB_CodexStreamingPassesThroughWithoutContentType(t *testing.T) {
 	}
 }
 
+// The Chat and Anthropic client APIs reach codex/<model> through translation.
+func TestBB_CodexThroughChatAndAnthropicClients(t *testing.T) {
+	home := bb_env(t)
+	bb_codexLogin(t, home, time.Now().Add(time.Hour))
+	up := &bb_up{reply: bb_sse(bb_codexReply, bb_codexCompleted())}
+	bb_codexBackend(t, up)
+
+	rec := bb_serve(t, "POST", "/v1/chat/completions",
+		`{"model":"codex/gpt-5.5","max_tokens":16,"temperature":0.3,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Hi") {
+		t.Fatalf("chat client via codex: %d %s", rec.Code, rec.Body.String())
+	}
+	sent := bb_sent(t, up)
+	for _, k := range []string{"max_output_tokens", "temperature"} {
+		if _, ok := sent[k]; ok {
+			t.Errorf("chat client: upstream body has %s", k)
+		}
+	}
+
+	rec = bb_serve(t, "POST", "/v1/messages",
+		`{"model":"codex/gpt-5.5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Hi") {
+		t.Fatalf("anthropic client via codex: %d %s", rec.Code, rec.Body.String())
+	}
+	sent = bb_sent(t, up)
+	for _, k := range []string{"max_output_tokens", "temperature"} {
+		if _, ok := sent[k]; ok {
+			t.Errorf("anthropic client: upstream body has %s", k)
+		}
+	}
+	if up.path != "/backend-api/codex/responses" {
+		t.Errorf("upstream path %q", up.path)
+	}
+}
+
 func TestBB_CodexThroughGeminiAndModelLists(t *testing.T) {
 	home := bb_env(t)
 	bb_codexLogin(t, home, time.Now().Add(time.Hour))
