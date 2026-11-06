@@ -21,7 +21,7 @@ const dialID = "dial"
 func viaDial(prefix string) []Option {
 	var out []Option
 	for _, e := range provider.Catalog() {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Label() + " · via dial",
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
 			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
@@ -36,17 +36,9 @@ func isDial(v string) bool {
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
 func dialModels() []catalog.Model {
-	return dialModelsWhere(func(provider.Entry) bool { return true })
-}
-
-// dialModelsWhere is dialModels restricted to the entries keep accepts.
-func dialModelsWhere(keep func(provider.Entry) bool) []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		if !keep(e) {
-			continue
-		}
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Label(), Provider: e.Provider.Catalog, Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }
