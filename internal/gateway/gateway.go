@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -303,6 +302,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
 	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
+		if msg, gone := provider.SignedOutMessage(accountIDOf(call.Model)); gone {
+			call.Status, call.Error = 401, msg
+			s.record(call)
+			writeError(w, from, 401, msg)
+			return
+		}
 		call.Status, call.Error = 404, "unknown model"
 		s.record(call)
 		msg := fmt.Sprintf("dial knows no model %q", call.Model)
@@ -315,22 +320,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	if p.Account != nil && p.Account.Agent == "codex" && from == provider.Responses {
-		call.To = from
-		call.Status, call.Error = s.codexResponses(w, r, p, model, body, &call.Usage)
-	} else if p.Account != nil {
-		// an agent account speaks one protocol (Responses for Codex, Chat
-		// Completions for Copilot); other clients' requests are translated to it
-		to := provider.Chat
-		if p.Account.Agent == "codex" {
-			to = provider.Responses
-		}
-		call.To = to
-		if from == to {
-			call.Status, call.Error = s.passthrough(w, r, p, to, model, body, &call.Usage)
-		} else {
-			call.Status, call.Error = s.translate(w, r, p, from, to, model, body, &call.Usage)
-		}
+	if p.Account != nil {
+		s.account(w, r, p, from, model, body, &call)
 	} else if p.Base(from) != "" {
 		call.To = from
 		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
@@ -353,7 +344,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
 	if p.Account != nil {
-		body = p.Prepare(body) // the agent's backend has its own rules for the body
+		return s.forwardAccount(ctx, p, to, body)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
@@ -370,15 +361,8 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
-	if p.Account != nil {
-		// an agent account signs (and may re-address) the request itself
-		if err := p.Sign(ctx, req, to, body); err != nil {
-			return nil, err
-		}
-	} else {
-		for k, v := range provider.AuthHeaders(p, to) {
-			req.Header.Set(k, v)
-		}
+	for k, v := range provider.AuthHeaders(p, to) {
+		req.Header.Set(k, v)
 	}
 	return s.client.Do(req)
 }
@@ -449,18 +433,6 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, from, res.StatusCode, msg), msg
-	}
-	if p.Account != nil && res.Header.Get("Content-Type") == "" {
-		// an agent backend may leave out Content-Type; a reply that opens with
-		// data: or event: is a stream all the same
-		br := bufio.NewReaderSize(res.Body, 32<<10)
-		br.Peek(1)
-		head, _ := br.Peek(br.Buffered())
-		head = bytes.TrimLeft(head, " \t\r\n")
-		if bytes.HasPrefix(head, []byte("data:")) || bytes.HasPrefix(head, []byte("event:")) {
-			res.Header.Set("Content-Type", "text/event-stream")
-			res.Body = io.NopCloser(br)
-		}
 	}
 	dec := decoder(to)
 	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
