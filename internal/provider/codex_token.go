@@ -43,8 +43,13 @@ type codexTokens struct {
 }
 
 // codexAuthPath is the file the Codex CLI keeps its sign-in in.
+// It is "" when there is no home directory, so nothing is read relative to
+// the working directory.
 func codexAuthPath() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
 	return filepath.Join(home, ".codex", "auth.json")
 }
 

@@ -306,7 +306,11 @@ func TestCopilotRefreshSignAndFilter(t *testing.T) {
 	}
 
 	// builtin list before refresh: no auto
-	os.RemoveAll(filepath.Join(os.Getenv("XDG_CACHE_HOME"), "dial", "models"))
+	// Only ever remove inside this test's own cache dir: an empty
+	// XDG_CACHE_HOME would make the path relative to the package directory.
+	if cache := os.Getenv("XDG_CACHE_HOME"); cache != "" {
+		os.RemoveAll(filepath.Join(cache, "dial", "models"))
+	}
 	for _, m := range p.Available() {
 		if m.ID == "auto" {
 			t.Fatal("builtin copilot list must not include auto")

@@ -140,7 +140,11 @@ type copilotLogin struct {
 // readCopilot reads the GitHub OAuth entry the editor plugins keep under
 // $XDG_CONFIG_HOME/github-copilot (apps.json first, then hosts.json).
 func readCopilot() (copilotLogin, bool) {
-	dir := filepath.Join(xdgConfigHome(), "github-copilot")
+	base := xdgConfigHome()
+	if base == "" {
+		return copilotLogin{}, false
+	}
+	dir := filepath.Join(base, "github-copilot")
 	for _, name := range []string{"apps.json", "hosts.json"} {
 		b, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
@@ -176,11 +180,16 @@ func readCopilot() (copilotLogin, bool) {
 	return copilotLogin{}, false
 }
 
+// xdgConfigHome is "" when there is neither XDG_CONFIG_HOME nor a home
+// directory, so nothing is read from a path relative to the working directory.
 func xdgConfigHome() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
 		return x
 	}
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
 	return filepath.Join(home, ".config")
 }
 
@@ -189,11 +198,14 @@ func xdgConfigHome() string {
 func claudeSignedIn() bool {
 	dir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if dir == "" {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".claude")
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			dir = filepath.Join(home, ".claude")
+		}
 	}
-	if st, err := os.Stat(filepath.Join(dir, ".credentials.json")); err == nil && !st.IsDir() {
-		return true
+	if dir != "" {
+		if st, err := os.Stat(filepath.Join(dir, ".credentials.json")); err == nil && !st.IsDir() {
+			return true
+		}
 	}
 	return claudeKeychain()
 }

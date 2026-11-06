@@ -17,6 +17,9 @@ import (
 // selection: Codex's built-in list, and for Copilot the list it last
 // reported (see refreshCopilot), else the built-in list without "auto".
 func (p Provider) accountModels() []catalog.Model {
+	if p.Account == nil {
+		return nil
+	}
 	switch p.Account.Agent {
 	case codexID:
 		return append([]catalog.Model(nil), catalog.Builtin(codexID)...)
@@ -38,6 +41,9 @@ func (p Provider) accountModels() []catalog.Model {
 // fetchAccount refreshes an account's model list. Codex's list is built in and
 // nothing is asked of the backend; Copilot is asked and the answer remembered.
 func (p Provider) fetchAccount(ctx context.Context) ([]catalog.Model, error) {
+	if p.Account == nil {
+		return nil, fmt.Errorf("%s is not an account provider", p.ID)
+	}
 	if p.Account.Agent != copilotID {
 		return p.accountModels(), nil
 	}
