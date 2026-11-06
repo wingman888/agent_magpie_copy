@@ -28,7 +28,8 @@ func (k *keyLog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	var m struct {
-		Model string `json:"model"`
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
 	}
 	json.Unmarshal(body, &m)
 	k.mu.Lock()
@@ -36,12 +37,21 @@ func (k *keyLog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	k.models = append(k.models, m.Model)
 	limited := k.limited[key]
 	k.mu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
 	if limited {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(429)
 		io.WriteString(w, `{"error":{"message":"rate limited"}}`)
 		return
 	}
+	if m.Stream {
+		// a stream, as a translated request asks for: one Chat chunk, then done
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"from-`+key+`"},"finish_reason":null}]}`+"\n\n")
+		io.WriteString(w, `data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	io.WriteString(w, `{"id":"from-`+key+`","choices":[]}`)
 }
 
@@ -362,15 +372,18 @@ func TestGroupCapabilityIsItsFirstMember(t *testing.T) {
 func TestAsideKeyAnswersWhenPoolFails(t *testing.T) {
 	up, base := grpSetup(t)
 	up.limited["k1"], up.limited["k2"] = true, true
-	if err := provider.Save(provider.Provider{ID: "pool", Name: "Pool", Chat: base, Key: "k1",
-		Keys: []provider.KeyAccount{{Key: "k2"}, {Key: "kc", Protocol: provider.Anthropic}}}); err != nil {
+	// the unspecified keys speak Anthropic natively; kc is a Chat key, so an
+	// Anthropic request reaches it translated
+	if err := provider.Save(provider.Provider{ID: "pool", Name: "Pool", Chat: base, Anthropic: strings.TrimSuffix(base, "/v1"), Key: "k1",
+		Keys: []provider.KeyAccount{{Key: "k2"}, {Key: "kc", Protocol: provider.Chat}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.SetRouting("pool", provider.Rotate); err != nil {
 		t.Fatal(err)
 	}
 	s := New()
-	code, body := grpSend(s, "/v1/chat/completions", grpBody("pool/m1", grpUser), nil)
+	anthropic := `{"model":"pool/m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	code, body := grpSend(s, "/v1/messages", anthropic, nil)
 	if code != 200 || !strings.Contains(body, "from-kc") {
 		t.Fatalf("%d %s", code, body)
 	}
