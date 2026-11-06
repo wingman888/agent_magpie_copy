@@ -472,6 +472,6 @@ func renderGemini(res Result, model string) []byte {
 
 // geminiModels is GET /v1beta/models: the catalog in Google's shape.
 func geminiModel(id, name string) map[string]any {
-	return map[string]any{"name": "models/" + id, "displayName": name, "description": name + " via magpie",
+	return map[string]any{"name": "models/" + id, "displayName": name, "description": name + " via dial",
 		"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent", "countTokens"}}
 }

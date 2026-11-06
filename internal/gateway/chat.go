@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -112,54 +111,6 @@ func parseChat(body []byte) (*Request, error) {
 	return r, nil
 }
 
-// developerAsSystem renames the "developer" role to "system" in the messages of
-// a Chat Completions body, leaving everything else as it was. A body with no
-// developer message comes back unchanged.
-func developerAsSystem(body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"developer"`)) {
-		return body
-	}
-	var top map[string]json.RawMessage
-	if json.Unmarshal(body, &top) != nil {
-		return body
-	}
-	var msgs []json.RawMessage
-	if json.Unmarshal(top["messages"], &msgs) != nil {
-		return body
-	}
-	changed := false
-	for i, raw := range msgs {
-		var m struct {
-			Role string `json:"role"`
-		}
-		if json.Unmarshal(raw, &m) != nil || m.Role != "developer" {
-			continue
-		}
-		var fields map[string]json.RawMessage
-		if json.Unmarshal(raw, &fields) != nil {
-			continue
-		}
-		fields["role"] = json.RawMessage(`"system"`)
-		if b, err := json.Marshal(fields); err == nil {
-			msgs[i] = b
-			changed = true
-		}
-	}
-	if !changed {
-		return body
-	}
-	mb, err := json.Marshal(msgs)
-	if err != nil {
-		return body
-	}
-	top["messages"] = mb
-	out, err := json.Marshal(top)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
 // chatParts reads a message's content: a string, or an array of parts.
 func chatParts(raw json.RawMessage) []Part {
 	var s string
@@ -207,8 +158,19 @@ func dataURL(p Part) string {
 	return "data:" + p.MediaType + ";base64," + p.Data
 }
 
+// reasoningModel is a model that rejects temperature and top_p.
+func reasoningModel(model string) bool {
+	m := strings.ToLower(model)
+	for _, pre := range []string{"gpt-5", "o1", "o3", "o4", "codex"} {
+		if strings.HasPrefix(m, pre) || strings.Contains(m, "/"+pre) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildChat renders a request for a Chat Completions upstream.
-func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
+func buildChat(r *Request, model, host string) []byte {
 	var msgs []map[string]any
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
@@ -287,7 +249,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			out["max_tokens"] = r.MaxTokens
 		}
 	}
-	if !rejectTemp {
+	if !reasoningModel(model) {
 		if r.Temp != nil {
 			out["temperature"] = *r.Temp
 		}
