@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -55,14 +54,58 @@ func OpenCodeSession(rawURL string, in http.Header, body []byte) (string, bool) 
 			return v, true
 		}
 	}
+	// The first user message stays the same for every turn of a conversation,
+	// so hashing it keeps the id stable. Its text is preferred; a message with
+	// no text (an image, say) is hashed as it was sent.
 	if text := firstUserText(body); text != "" {
-		sum := sha256.Sum256([]byte(text))
-		return "magpie-" + hex.EncodeToString(sum[:])[:32], true
+		return hashID([]byte(text)), true
 	}
-	// no user text to anchor on: the id cannot be stable, so make it unique
-	var buf [16]byte
-	rand.Read(buf[:])
-	return "magpie-" + hex.EncodeToString(buf[:]), true
+	if raw := firstMessage(body, false); len(raw) > 0 {
+		return hashID(raw), true
+	}
+	// no user message at all: whatever opens the request is the best anchor
+	if raw := firstMessage(body, true); len(raw) > 0 {
+		return hashID(raw), true
+	}
+	return hashID(body), true
+}
+
+// hashID is the magpie- session id for some stable bytes of a conversation.
+func hashID(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "magpie-" + hex.EncodeToString(sum[:])[:32]
+}
+
+// firstMessage returns the raw JSON of the first user message (Chat or
+// Anthropic messages, or Responses input). With anyRole it returns the first
+// message of any role instead. A Responses input given as a string is a user
+// message.
+func firstMessage(body []byte, anyRole bool) []byte {
+	var v struct {
+		Messages []json.RawMessage `json:"messages"`
+		Input    json.RawMessage   `json:"input"`
+	}
+	if json.Unmarshal(body, &v) != nil {
+		return nil
+	}
+	items := v.Messages
+	if len(items) == 0 && len(v.Input) > 0 {
+		var s string
+		if json.Unmarshal(v.Input, &s) == nil {
+			return v.Input
+		}
+		json.Unmarshal(v.Input, &items)
+	}
+	for _, raw := range items {
+		var m struct {
+			Role string `json:"role"`
+		}
+		json.Unmarshal(raw, &m)
+		if anyRole || m.Role == "user" {
+			return raw
+		}
+	}
+	return nil
 }
 
 // firstUserText reads the first user message of a Chat (messages), Anthropic

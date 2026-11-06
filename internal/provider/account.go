@@ -338,6 +338,9 @@ func refreshClaudeStatus() {
 	claudeStatusAt = time.Now()
 	in, email, plan, ok := parseClaudeStatus(claudeStatusOutput())
 	if !ok {
+		// nothing usable from Claude Code: fall back to magpie's own view of
+		// the credential, not to whatever was reported last time
+		claudeStatusKnown, claudeStatusIn = false, false
 		return
 	}
 	claudeStatusKnown, claudeStatusIn = true, in

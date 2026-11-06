@@ -50,6 +50,47 @@ func TestClaudeSignedInStatusNamesTheAccount(t *testing.T) {
 	}
 }
 
+func TestClaudeUnreadableStatusAfterSignedOutFallsBackToOwnView(t *testing.T) {
+	home := claudeHome(t)
+	claudeSignIn(t, home, time.Now().Add(time.Hour))
+	forgetClaudeCredential()
+
+	fakeClaudeStatus(t, `{"loggedIn": false}`)
+	if _, ok := find(All(), "claude"); ok {
+		t.Fatal("claude listed although Claude Code reports signed out")
+	}
+	// the last answer must not stick once Claude Code stops giving a usable one
+	for _, out := range []string{"not json", `{"email": "x"}`} {
+		claudeStatusMu.Lock()
+		claudeStatusAt = time.Time{}
+		claudeStatusMu.Unlock()
+		claudeStatusOutput = func() []byte { return []byte(out) }
+		if _, ok := find(All(), "claude"); !ok {
+			t.Fatalf("claude still hidden after unreadable status %q", out)
+		}
+	}
+}
+
+func TestRemovedAccountIsHiddenFromUsageGate(t *testing.T) {
+	home := claudeHome(t)
+	claudeSignIn(t, home, time.Now().Add(time.Hour))
+	forgetClaudeCredential()
+	fakeClaudeStatus(t, `{"loggedIn": true, "email": "me@example.com"}`)
+
+	if hidden("claude") {
+		t.Fatal("claude hidden before it was removed")
+	}
+	if err := Delete("claude"); err != nil {
+		t.Fatal(err)
+	}
+	if !hidden("claude") {
+		t.Fatal("removed claude not reported as hidden")
+	}
+	if _, ok := find(All(), "claude"); ok {
+		t.Fatal("removed claude still listed")
+	}
+}
+
 func TestClaudeUnreadableStatusKeepsOwnView(t *testing.T) {
 	home := claudeHome(t)
 	claudeSignIn(t, home, time.Now().Add(time.Hour))

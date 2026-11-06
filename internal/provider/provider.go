@@ -153,6 +153,16 @@ func Slug(name string) string {
 	return strings.Trim(idRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
+// hidden is true when the user removed the account with this id (see Delete).
+func hidden(id string) bool {
+	for _, p := range load().Providers {
+		if p.ID == id && p.Removed {
+			return true
+		}
+	}
+	return false
+}
+
 // Save adds or replaces a provider.
 func Save(p Provider) error { return save(p, true) }
 

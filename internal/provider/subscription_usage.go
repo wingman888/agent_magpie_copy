@@ -51,18 +51,19 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		return append([]SubscriptionQuota(nil), subscriptionUsageCache.data...)
 	}
 	var out []SubscriptionQuota
-	if _, _, ok := claudeCredential(); ok {
+	// accounts the user removed from magpie are not counted either
+	if _, _, ok := claudeCredential(); ok && !hidden("claude") && !claudeSignedOut() {
 		out = append(out, claudeSubscriptionUsage(ctx))
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if _, ok := codexAccount(home); ok {
+		if _, ok := codexAccount(home); ok && !hidden("codex") {
 			out = append(out, codexSubscriptionUsage(ctx, filepath.Join(home, ".codex", "auth.json")))
 		}
 		cfg := os.Getenv("XDG_CONFIG_HOME")
 		if cfg == "" {
 			cfg = filepath.Join(home, ".config")
 		}
-		if app, ok := copilotLogin(cfg); ok {
+		if app, ok := copilotLogin(cfg); ok && !hidden("copilot") {
 			out = append(out, copilotSubscriptionUsage(ctx, app.Token))
 		}
 	}

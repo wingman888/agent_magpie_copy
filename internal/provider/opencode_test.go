@@ -104,6 +104,38 @@ func TestOpenCodeSessionDerivedIsStable(t *testing.T) {
 	}
 }
 
+func TestOpenCodeSessionStableWithoutUserText(t *testing.T) {
+	const u = "https://opencode.ai/zen/go/v1/chat/completions"
+	// the first user message has no text (an image part): still one stable id per conversation
+	img := `{"model":"m1","messages":[{"role":"system","content":"sys"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]},{"role":"assistant","content":"ok"},{"role":"user","content":"more"}]}`
+	imgLater := `{"model":"m1","messages":[{"role":"system","content":"sys"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]},{"role":"assistant","content":"ok"},{"role":"user","content":"more"},{"role":"assistant","content":"x"},{"role":"user","content":"again"}]}`
+	a, ok := OpenCodeSession(u, nil, []byte(img))
+	if !ok || !strings.HasPrefix(a, "magpie-") {
+		t.Fatalf("image-first: %q %v", a, ok)
+	}
+	b, _ := OpenCodeSession(u, nil, []byte(imgLater))
+	if a != b {
+		t.Errorf("image-first conversation changed id: %q vs %q", a, b)
+	}
+	other := `{"model":"m1","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,BBBB"}}]}]}`
+	if c, _ := OpenCodeSession(u, nil, []byte(other)); c == a {
+		t.Errorf("different image conversations share id %q", c)
+	}
+	// no user message at all: still stable and magpie- prefixed
+	sys := `{"model":"m1","messages":[{"role":"system","content":"only system"}]}`
+	s1, _ := OpenCodeSession(u, nil, []byte(sys))
+	s2, _ := OpenCodeSession(u, nil, []byte(sys))
+	if !strings.HasPrefix(s1, "magpie-") || s1 != s2 {
+		t.Errorf("no user message: %q vs %q", s1, s2)
+	}
+	// and the same without any messages, deterministic too
+	e1, _ := OpenCodeSession(u, nil, []byte(`{"model":"m1"}`))
+	e2, _ := OpenCodeSession(u, nil, []byte(`{"model":"m1"}`))
+	if !strings.HasPrefix(e1, "magpie-") || e1 != e2 {
+		t.Errorf("empty body: %q vs %q", e1, e2)
+	}
+}
+
 func TestOpenCodeSessionOnlyForOpenCode(t *testing.T) {
 	in := http.Header{}
 	in.Set("x-session-id", "agent")
