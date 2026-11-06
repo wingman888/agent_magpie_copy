@@ -144,10 +144,6 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model stri
 	cmd := exec.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
 	cmd.Env = cleanClaudeEnv(os.Environ())
-	if dir := claudeConfigDirOf(ctx); dir != "" {
-		// a remembered account runs from its own folder, not the agent's
-		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+dir)
-	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cleanup()
