@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/yetone/magpie/internal/agent"
-	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/dial/internal/agent"
+	"github.com/yetone/dial/internal/edit"
 )
 
 // Profile maps "agent.field" to a value.
@@ -20,10 +20,10 @@ type Profile map[string]string
 // Path is the profiles file.
 func Path() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "magpie", "profiles.json")
+		return filepath.Join(x, "dial", "profiles.json")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "magpie", "profiles.json")
+	return filepath.Join(home, ".config", "dial", "profiles.json")
 }
 
 // Load reads every profile.
@@ -111,21 +111,11 @@ func Apply(p Profile) (int, error) {
 	for k := range p {
 		keys = append(keys, k)
 	}
-	// providers first, then models, then everything else: switching a provider
-	// re-settles the model behind it, and per-tier choices build on the model
-	rank := func(k string) int {
-		switch {
-		case strings.HasSuffix(k, ".provider"):
-			return 0
-		case strings.HasSuffix(k, ".model"):
-			return 1
-		}
-		return 2
-	}
+	// providers first: switching one re-settles the model behind it
 	sort.Slice(keys, func(i, j int) bool {
-		ri, rj := rank(keys[i]), rank(keys[j])
-		if ri != rj {
-			return ri < rj
+		pi, pj := strings.HasSuffix(keys[i], ".provider"), strings.HasSuffix(keys[j], ".provider")
+		if pi != pj {
+			return pi
 		}
 		return keys[i] < keys[j]
 	})
@@ -147,20 +137,6 @@ func Apply(p Profile) (int, error) {
 			return changed, fmt.Errorf("%s: %w", k, err)
 		}
 		changed++
-	}
-	// an optional field the profile does not name (a Claude Code tier, say)
-	// goes back to its default, following the main model; applying this after
-	// the named values keeps every tier set above on the new main model
-	for _, a := range agent.All() {
-		for _, f := range a.Fields {
-			if _, named := p[a.ID+"."+f.Key]; named || !f.Optional || f.Get() == "" {
-				continue
-			}
-			if err := f.Set(""); err != nil {
-				return changed, fmt.Errorf("%s.%s: %w", a.ID, f.Key, err)
-			}
-			changed++
-		}
 	}
 	return changed, nil
 }

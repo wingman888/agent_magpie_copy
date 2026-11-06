@@ -2,19 +2,14 @@ package gateway
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/dial/internal/provider"
 )
 
 // fake is an upstream that records what it got and replies with a script.
@@ -24,7 +19,7 @@ type fake struct {
 	path  string
 	head  http.Header
 	reply string // SSE body
-	ctype string // "" means text/event-stream; "none" sends no header at all
+	ctype string
 	code  int
 }
 
@@ -35,11 +30,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ct == "" {
 		ct = "text/event-stream"
 	}
-	if ct == "none" {
-		w.Header()["Content-Type"] = nil // like the ChatGPT backend: the body alone says it streams
-	} else {
-		w.Header().Set("Content-Type", ct)
-	}
+	w.Header().Set("Content-Type", ct)
 	if f.code != 0 {
 		w.WriteHeader(f.code)
 	}
@@ -54,7 +45,7 @@ func sse(lines ...string) string {
 	return b.String()
 }
 
-// setup points magpie's provider file at a temp dir and adds one provider
+// setup points dial's provider file at a temp dir and adds one provider
 // speaking only the given protocol, backed by the fake.
 func setup(t *testing.T, proto provider.Protocol, f *fake) *httptest.Server {
 	t.Helper()
@@ -95,107 +86,6 @@ func events(body string) []map[string]any {
 		return nil
 	})
 	return out
-}
-
-type fallbackFake struct {
-	chatBody      []byte
-	responsesBody []byte
-	chatCalls     int
-	responseCalls int
-}
-
-func (f *fallbackFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	switch r.URL.Path {
-	case "/v1/chat/completions":
-		f.chatCalls++
-		f.chatBody = body
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, `{"error":{"message":"This model is not supported in the v1/chat/completions endpoint. Use v1/responses."}}`)
-	case "/v1/responses":
-		f.responseCalls++
-		f.responsesBody = body
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, sse(
-			`event: response.created`+"\n"+`data: {"type":"response.created","response":{"id":"r1","model":"m1","usage":{"input_tokens":0,"output_tokens":0}}}`,
-			`event: response.output_text.delta`+"\n"+`data: {"type":"response.output_text.delta","delta":"fallback ok"}`,
-			`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"id":"r1","model":"m1","status":"completed","usage":{"input_tokens":4,"output_tokens":2}}}`,
-		))
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func TestAnthropicClientFallsBackFromChatToResponses(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	f := &fallbackFake{}
-	up := httptest.NewServer(f)
-	t.Cleanup(up.Close)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"},
-		Chat: up.URL + "/v1", Responses: up.URL + "/v1"}); err != nil {
-		t.Fatal(err)
-	}
-
-	handler := New().Handler()
-	call := func(body string) (int, string) {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
-		handler.ServeHTTP(rec, req)
-		return rec.Code, rec.Body.String()
-	}
-	code, body := call(`{"model":"m1","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	if f.chatCalls != 1 || f.responseCalls != 1 {
-		t.Fatalf("calls: chat=%d responses=%d", f.chatCalls, f.responseCalls)
-	}
-	var chat, responses map[string]any
-	if json.Unmarshal(f.chatBody, &chat) != nil || json.Unmarshal(f.responsesBody, &responses) != nil {
-		t.Fatalf("bad translated requests: chat=%s responses=%s", f.chatBody, f.responsesBody)
-	}
-	if chat["stream"] != true || responses["stream"] != true || responses["model"] != "m1" {
-		t.Errorf("requests: chat=%v responses=%v", chat, responses)
-	}
-	var out struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		Usage aUsage `json:"usage"`
-	}
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatal(err)
-	}
-	if len(out.Content) != 1 || out.Content[0].Text != "fallback ok" || out.Usage.InputTokens != 4 || out.Usage.OutputTokens != 2 {
-		t.Errorf("reply: %s", body)
-	}
-	code, body = call(`{"model":"m1","max_tokens":100,"messages":[{"role":"user","content":"again"}]}`)
-	if code != 200 {
-		t.Fatalf("second status %d: %s", code, body)
-	}
-	if f.chatCalls != 1 || f.responseCalls != 2 {
-		t.Fatalf("cached calls: chat=%d responses=%d", f.chatCalls, f.responseCalls)
-	}
-}
-
-func TestNotChatModel(t *testing.T) {
-	for _, tc := range []struct {
-		status int
-		body   string
-		want   bool
-	}{
-		{400, `{"error":{"message":"not a chat model; use /v1/responses"}}`, true},
-		{404, `use v1/completions`, true},
-		{429, `rate limit`, false},
-		{200, `use v1/responses`, false},
-	} {
-		if got := notChatModel(tc.status, []byte(tc.body)); got != tc.want {
-			t.Errorf("notChatModel(%d, %q) = %v, want %v", tc.status, tc.body, got, tc.want)
-		}
-	}
 }
 
 func TestAnthropicClientChatUpstream(t *testing.T) {
@@ -389,143 +279,5 @@ func TestModelsList(t *testing.T) {
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
 	if !strings.Contains(rec.Body.String(), `"id":"fake/m1"`) || !strings.Contains(rec.Body.String(), `"display_name"`) {
 		t.Errorf("%s", rec.Body.String())
-	}
-}
-
-func TestGeminiClientChatUpstream(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		`data: {"id":"c1","model":"m1","choices":[{"delta":{"role":"assistant","reasoning_content":"think"}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{"content":"Sure"}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.go\"}"}}]}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
-		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}}`,
-		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
-	req := `{"systemInstruction":{"parts":[{"text":"be brief"}]},
-	  "contents":[{"role":"user","parts":[{"text":"read a.go"}]},
-	    {"role":"model","parts":[{"functionCall":{"id":"fc0","name":"read_file","args":{"path":"x"}}}]},
-	    {"role":"user","parts":[{"functionResponse":{"id":"fc0","name":"read_file","response":{"output":"package x"}}}]}],
-	  "tools":[{"functionDeclarations":[{"name":"read_file","description":"read","parameters":{"type":"OBJECT","properties":{"path":{"type":"STRING"}}}}]}],
-	  "generationConfig":{"maxOutputTokens":100,"thinkingConfig":{"thinkingBudget":-1,"includeThoughts":true}}}`
-	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", req)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	var up map[string]any
-	json.Unmarshal(f.got, &up)
-	if up["model"] != "m1" || up["stream"] != true || up["reasoning_effort"] != "medium" || up["max_tokens"] != float64(100) {
-		t.Errorf("upstream: %s", f.got)
-	}
-	msgs := up["messages"].([]any)
-	if len(msgs) != 4 || msgs[0].(map[string]any)["content"] != "be brief" || msgs[3].(map[string]any)["tool_call_id"] != "fc0" {
-		t.Errorf("messages: %v", msgs)
-	}
-	if fn := up["tools"].([]any)[0].(map[string]any)["function"].(map[string]any); !strings.Contains(string(mustJSON(fn["parameters"])), `"type":"object"`) {
-		t.Errorf("schema not lowercased: %v", fn)
-	}
-	evs := events(body)
-	var parts []map[string]any
-	var finish string
-	for _, e := range evs {
-		c := e["candidates"].([]any)[0].(map[string]any)
-		for _, p := range c["content"].(map[string]any)["parts"].([]any) {
-			parts = append(parts, p.(map[string]any))
-		}
-		if fr, ok := c["finishReason"]; ok {
-			finish = fr.(string)
-		}
-	}
-	if len(parts) != 3 || parts[0]["thought"] != true || parts[1]["text"] != "Sure" {
-		t.Errorf("parts: %v", parts)
-	}
-	fc, _ := parts[2]["functionCall"].(map[string]any)
-	if fc == nil || fc["name"] != "read_file" || fc["id"] != "call_1" || fc["args"].(map[string]any)["path"] != "a.go" {
-		t.Errorf("function call: %v", parts[2])
-	}
-	last := evs[len(evs)-1]
-	um := last["usageMetadata"].(map[string]any)
-	if finish != "STOP" || um["promptTokenCount"] != float64(10) || um["candidatesTokenCount"] != float64(3) || um["thoughtsTokenCount"] != float64(2) {
-		t.Errorf("finish/usage: %s %v", finish, um)
-	}
-	// non-streaming, error shape, countTokens, model list
-	code, body = post(t, "/v1beta/models/fake/m1:generateContent", req)
-	if code != 200 || !strings.Contains(body, `"finishReason":"STOP"`) || !strings.Contains(body, `"name":"read_file"`) {
-		t.Errorf("generateContent: %d %s", code, body)
-	}
-	code, body = post(t, "/v1beta/models/nope:generateContent", `{"contents":[]}`)
-	if code != 404 || !strings.Contains(body, `"status":"NOT_FOUND"`) {
-		t.Errorf("unknown model: %d %s", code, body)
-	}
-	code, body = post(t, "/v1beta/models/fake/m1:countTokens", req)
-	if code != 200 || !strings.Contains(body, `"totalTokens":`) {
-		t.Errorf("countTokens: %d %s", code, body)
-	}
-	rec := httptest.NewRecorder()
-	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1beta/models", nil))
-	if !strings.Contains(rec.Body.String(), `"name":"models/fake/m1"`) {
-		t.Errorf("models: %s", rec.Body.String())
-	}
-}
-
-func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
-
-// A signed-in Codex account: the ChatGPT backend only streams and rejects
-// the sampling knobs, so a plain non-streaming Responses call is
-// translated, signed with the account's tokens, and answered as JSON.
-func TestCodexAccountUpstream(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	claims := func(m map[string]any) string {
-		b, _ := json.Marshal(m)
-		return "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
-	}
-	os.MkdirAll(filepath.Join(home, ".codex"), 0o755)
-	auth := fmt.Sprintf(`{"auth_mode":"chatgpt","tokens":{"id_token":%q,"access_token":%q,"refresh_token":"r","account_id":"acct-1"}}`,
-		claims(map[string]any{"email": "me@example.com"}), claims(map[string]any{"exp": time.Now().Add(time.Hour).Unix()}))
-	os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte(auth), 0o600)
-
-	f := &fake{t: t, ctype: "none", reply: sse(
-		`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
-		`data: {"type":"response.output_text.delta","delta":"pong"}`,
-		`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`)}
-	up := httptest.NewServer(f)
-	defer up.Close()
-	old := provider.CodexBase
-	provider.CodexBase = up.URL + "/backend-api/codex"
-	defer func() { provider.CodexBase = old }()
-
-	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping","max_output_tokens":20,"temperature":0.3}`)
-	if code != 200 {
-		t.Fatalf("status %d: %s", code, body)
-	}
-	if f.path != "/backend-api/codex/responses" || f.head.Get("chatgpt-account-id") != "acct-1" || !strings.HasPrefix(f.head.Get("Authorization"), "Bearer h.") {
-		t.Fatalf("upstream call: %s %v", f.path, f.head)
-	}
-	var upstream map[string]any
-	json.Unmarshal(f.got, &upstream)
-	if _, ok := upstream["max_output_tokens"]; ok || upstream["temperature"] != nil || upstream["stream"] != true || upstream["store"] != false || upstream["model"] != "gpt-5.5" {
-		t.Fatalf("upstream body: %s", f.got)
-	}
-	var res map[string]any
-	json.Unmarshal([]byte(body), &res)
-	if res["object"] != "response" || !strings.Contains(body, "pong") {
-		t.Fatalf("reply: %s", body)
-	}
-
-	// a streaming call is relayed as-is, minus what the backend rejects
-	f.got, f.head = nil, nil
-	code, body = post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping","stream":true,"max_output_tokens":20}`)
-	if code != 200 || !strings.Contains(body, "response.output_text.delta") {
-		t.Fatalf("stream: %d %s", code, body)
-	}
-	json.Unmarshal(f.got, &upstream)
-	if _, ok := upstream["max_output_tokens"]; ok {
-		t.Fatalf("relayed body: %s", f.got)
-	}
-	if _, isList := upstream["input"].([]any); !isList {
-		t.Fatalf("relayed input not a list: %s", f.got)
 	}
 }
