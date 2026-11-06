@@ -69,8 +69,8 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchWith is Fetch with extra request headers (a custom provider's own),
-// written exactly as named.
+// FetchWith is Fetch with extra request headers, sent after the auth headers
+// under the names as given.
 func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
@@ -132,11 +132,6 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
 	for k, v := range headers {
-		for have := range req.Header {
-			if strings.EqualFold(have, k) {
-				delete(req.Header, have)
-			}
-		}
 		req.Header[k] = []string{v}
 	}
 	res, err := http.DefaultClient.Do(req)
@@ -184,14 +179,22 @@ type liveModel struct {
 }
 
 // Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order. A "vendor/"
-// prefixed id (a relay's "deepseek/deepseek-chat") matches by the part after
-// the last slash; an id that matches nothing is kept as it is.
+// catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
-	byID := index(known)
+	byID := make(map[string]Model, len(known))
+	for _, m := range known {
+		byID[m.ID] = m
+	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := lookupIn(byID, m.ID); ok {
+		k, ok := byID[m.ID]
+		if !ok {
+			// "vendor/model" on a relay: the catalog knows it by its last part
+			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
+				k, ok = byID[m.ID[i+1:]]
+			}
+		}
+		if ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
@@ -203,53 +206,4 @@ func Decorate(live []Model, known []Model) []Model {
 		out = append(out, m)
 	}
 	return out
-}
-
-// ProviderList is Provider over a comma-separated list of models.dev ids
-// ("openai,deepseek"), concatenated in the order given.
-func ProviderList(ids string) []Model {
-	var out []Model
-	for _, id := range strings.Split(ids, ",") {
-		if id = strings.TrimSpace(id); id != "" {
-			out = append(out, Provider(id)...)
-		}
-	}
-	return out
-}
-
-// Lookup finds a model by id across the given models.dev catalogs, in order.
-// The id is matched by the part after its last "/", so "deepseek/deepseek-chat"
-// finds "deepseek-chat"; a full id is tried too, for catalogs whose own ids
-// carry a vendor prefix. Nothing matched gives false.
-func Lookup(catalogs []string, id string) (Model, bool) {
-	var all []Model
-	for _, c := range catalogs {
-		all = append(all, Provider(strings.TrimSpace(c))...)
-	}
-	return lookupIn(index(all), id)
-}
-
-// index maps each model id to its first entry in list order.
-func index(ms []Model) map[string]Model {
-	byID := make(map[string]Model, len(ms))
-	for _, m := range ms {
-		if _, dup := byID[m.ID]; !dup {
-			byID[m.ID] = m
-		}
-	}
-	return byID
-}
-
-// lookupIn resolves an id in an index: the id as written first (as Decorate
-// always matched), then the part after the last "/".
-func lookupIn(byID map[string]Model, id string) (Model, bool) {
-	if m, ok := byID[id]; ok {
-		return m, true
-	}
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		if m, ok := byID[id[i+1:]]; ok {
-			return m, true
-		}
-	}
-	return Model{}, false
 }

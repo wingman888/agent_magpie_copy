@@ -72,12 +72,9 @@ type Call struct {
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
-	// Fallback names the keys (and providers) that failed before this call
-	// was answered; empty when the first try worked.
+	// Fallback lists the candidates that failed before the one that answered
+	// ("provider/key name (status)"); empty when the first one answered.
 	Fallback string `json:"fallback,omitempty"`
-	// Key names the API key the answering attempt was sent with: its name,
-	// or its fingerprint when it has none. Empty for signed-in accounts.
-	Key string `json:"key,omitempty"`
 }
 
 // Server is the gateway.
@@ -90,8 +87,8 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
-	// cool holds the keys that failed recently, until the time given (see keys.go).
-	cool map[string]time.Time
+	// cooldown holds, per provider key, when it may be tried again after failing.
+	cooldown map[string]time.Time
 }
 
 // New makes a gateway.
@@ -107,6 +104,7 @@ func New() *Server {
 		responseOnly: make(map[string]bool),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
+		cooldown:     make(map[string]time.Time),
 	}
 }
 
@@ -229,18 +227,25 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	// the count goes to Anthropic with a key that is not limited to OpenAI's protocols
-	if c, usable := anthropicCredential(p); ok && p.Anthropic != "" && usable {
-		p.Key = c.Key
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-		if err == nil {
-			defer res.Body.Close()
+	// Only a key that reaches Anthropic counts: a key limited to OpenAI never
+	// has an Anthropic endpoint in its candidate, so it is skipped here.
+	if ok {
+		for _, c := range s.coolingLast(p.Candidates(provider.Anthropic, model)) {
+			if c.Anthropic == "" {
+				continue
+			}
+			res, err := s.forward(r.Context(), c, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+			if err != nil {
+				continue
+			}
 			if res.StatusCode < 400 {
+				defer res.Body.Close()
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(res.StatusCode)
 				io.Copy(w, res.Body)
 				return
 			}
+			res.Body.Close()
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -359,80 +364,62 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	// The reply goes through hw: an error is held back until it is known to be
-	// the last word, so the next candidate can answer without the client
-	// having seen the failure.
-	hw := newHeldWriter(w)
+	// A Claude Code subscription must run through the genuine binary. Direct
+	// OAuth HTTP requests are content-classified as third-party traffic when
+	// they carry another agent's harness (Pi, OpenCode, and others).
+	if p.Account != nil && p.Account.Agent == "claude" {
+		call.To = provider.Anthropic
+		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+		return
+	}
+	// Each key of the provider is an attempt, tried best first, then each
+	// fallback model with its keys. A failure another attempt may get past is
+	// passed over before anything reaches the client; the last attempt's reply,
+	// or error, is final.
+	atts := s.attempts(p, from, model)
+	if len(atts) == 0 {
+		call.Status, call.Error = 502, p.Name+" has no key that reaches this API"
+		writeError(w, from, call.Status, call.Error)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		return
+	}
 	var failed []string
-	var last candidate
-	var status int
-	var msg string
-	cands := s.candidates(p, model)
-	for i, c := range cands {
-		hw.reset()
-		call.Key = ""
-		labels, st, m, retry := s.attempt(hw, r, c.p, from, c.model, body, &call)
-		failed = append(failed, labels...)
-		last, status, msg = c, st, m
-		if hw.state != stateWithheld || !retry || i == len(cands)-1 {
-			break
+	usedModel := model
+	var to provider.Protocol
+	for i, a := range atts {
+		call.Provider, usedModel = a.owner, a.model
+		var status int
+		var msg string
+		var retry bool
+		to, status, msg, retry = s.tryCandidate(w, r, a.c, from, a.model, body, &call.Usage, i == len(atts)-1)
+		if retry {
+			failed = append(failed, failedName(a.c, status))
+			s.cool(a.c)
+			continue
 		}
-		// another candidate may answer: this one rests, and its error is dropped
-		s.markProviderCooling(candKey(c.p))
-		if len(labels) == 0 {
-			failed = append(failed, c.p.ID)
-		}
+		call.Status, call.Error = status, msg
+		break
 	}
-	hw.release()
-	call.Provider = last.p.ID
-	call.Status, call.Error = status, msg
-	if len(failed) > 0 {
-		call.Fallback = strings.Join(failed, ", ")
-	}
+	call.To = to
+	call.Fallback = strings.Join(failed, "; ")
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: last.p.ID, Model: last.model,
+	if to == "" {
+		// no endpoint at all: nothing was sent, so nothing is metered
+		return
+	}
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: usedModel,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-}
-
-// attempt sends the request to one provider through hw. It returns the keys
-// that failed on the way (for keyed providers) and the final outcome, and
-// whether that outcome may move on to another candidate. An error reply is
-// still held in hw; the caller decides whether it goes to the client.
-func (s *Server) attempt(hw *heldWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, call *Call) (failed []string, status int, msg string, retry bool) {
-	switch {
-	case p.Account == nil:
-		// API keys: tried in turn, a retryable failure moves on to the next
-		failed, status, msg = s.tryKeys(hw, r, p, from, model, body, call)
-		return failed, status, msg, retryable(status, msg)
-	case p.Account.Agent == "claude":
-		// A Claude Code subscription must run through the genuine binary. Direct
-		// OAuth HTTP requests are content-classified as third-party traffic when
-		// they carry another agent's harness (Pi, OpenCode, and others).
-		call.To = provider.Anthropic
-		r = r.WithContext(withClaudeConfigDir(r.Context(), p.Account.ConfigDir()))
-		status, msg = s.serveClaudeSubscription(hw, r, from, model, body, &call.Usage)
-		// the binary reports its failures as 502; only a limit, overload or
-		// outage moves on, a rejected request stays with this account
-		return nil, status, msg, retryable(status, msg) && claudeTransient(msg)
-	case p.Base(from) != "" && (!p.Account.Stream || streamOf(body)):
-		// a backend that only streams gets a non-streaming request translated
-		// (the provider is always streamed on that path) rather than relayed
-		call.To = from
-		status, msg = s.passthrough(hw, r, p, from, model, body, &call.Usage)
-	default:
-		to := p.Speaks()
-		if len(to) == 0 {
-			status, msg = 502, p.Name+" has no endpoint configured"
-			writeError(hw, from, status, msg)
-			return nil, status, msg, false
-		}
-		call.To = to[0]
-		status, msg = s.translate(hw, r, p, from, to[0], model, body, &call.Usage)
-	}
-	return nil, status, msg, retryable(status, msg)
 }
 
 // forward sends a request to the provider.
@@ -465,14 +452,25 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	res, err := s.relaySend(r, p, proto, model, body)
+	if err != nil {
+		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
+	}
+	return s.relayReply(w, res, proto, p, u)
+}
+
+// relaySend sends a request to a provider that speaks its protocol. Nothing
+// is written to the client yet.
+func (s *Server) relaySend(r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte) (*http.Response, error) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
 	}
-	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
-	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
-	}
+	return s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
+}
+
+// relayReply writes the provider's reply to a relaySend request to the client.
+func (s *Server) relayReply(w http.ResponseWriter, res *http.Response, proto provider.Protocol, p provider.Provider, u *Usage) (int, string) {
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -615,6 +613,12 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if err != nil {
 		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
 	}
+	return s.translateReply(w, res, actual, from, p, request, stream, u)
+}
+
+// translateReply writes a translated provider reply to the client, in the
+// protocol the client asked for. actual is the protocol the provider spoke.
+func (s *Server) translateReply(w http.ResponseWriter, res *http.Response, actual, from provider.Protocol, p provider.Provider, request *Request, stream bool, u *Usage) (int, string) {
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))

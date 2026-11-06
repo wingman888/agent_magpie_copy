@@ -258,8 +258,11 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 		var pr *catalog.Price
 		for _, p := range provider.All() {
 			if p.ID == r.Provider && p.Catalog != "" {
-				if v, ok := catalog.PriceOf(p.Catalog, r.Model); ok {
-					pr = &v
+				for _, c := range strings.Split(p.Catalog, ",") {
+					if v, ok := catalog.PriceOf(strings.TrimSpace(c), r.Model); ok {
+						pr = &v
+						break
+					}
 				}
 				break
 			}
