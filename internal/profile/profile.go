@@ -129,7 +129,7 @@ func Apply(p Profile) (int, error) {
 		if a == nil {
 			continue
 		}
-		f := a.FieldKey(field)
+		f := a.Field(field)
 		if f == nil || f.Get() == p[k] {
 			continue
 		}
