@@ -80,7 +80,10 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		pools = append(pools, ms)
 	}
 	pools = append(pools, p.Available())
+	// A model the vendor's list says is served over proto comes first.
 	for _, want := range []func(string) bool{
+		func(id string) bool { return p.declares(id, proto) && (proto != Anthropic || isClaude(id)) },
+		func(id string) bool { return p.declares(id, proto) },
 		func(id string) bool { return proto != Anthropic || isClaude(id) },
 		func(string) bool { return true },
 	} {
