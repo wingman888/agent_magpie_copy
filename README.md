@@ -71,6 +71,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
+| DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
 
 Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
@@ -203,6 +204,7 @@ you press *Add*. `magpie import <link>` does the same in a terminal.
 | `models`    | model ids to expose, comma separated                               |
 | `catalog`   | models.dev provider id, for model names and reasoning levels       |
 | `website`, `keys` | the vendor's site and its API-key page (https)               |
+| `icon`      | an https picture of the vendor's own (PNG, JPEG, GIF, WebP, ICO, SVG, at most 1 MB). magpie downloads it once, after you confirm the import, into its icons folder; without one it falls back to the catalog's logo or a plain mark |
 
 Base URLs must be https (plain http only to this machine or the local
 network). Web pages and GitHub don't link custom schemes reliably, so link
@@ -322,6 +324,36 @@ Keys in the terminal version:
 
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
+
+### Backup and restore
+
+Move your setup to another machine in one encrypted file:
+
+```sh
+magpie backup                       # asks for a passphrase twice, writes magpie.magpie-backup
+magpie backup --no-keys ~/b.magpie-backup   # no API keys or credential headers inside
+magpie restore magpie.magpie-backup         # asks for the passphrase once
+magpie restore --no-agents b.magpie-backup  # providers, settings, profiles only
+echo "pw" | magpie backup           # passphrase from stdin (scripts)
+echo "pw" | magpie restore magpie.magpie-backup
+```
+
+A backup holds your providers with their keys (including several keys per
+provider and custom request headers), the icons you picked, settings, every
+saved profile and each agent's current model. It is encrypted with
+AES-256-GCM under a key derived from the passphrase with PBKDF2-SHA256, and
+the file is readable only by you. If you lose the passphrase, the file cannot
+be opened.
+
+Restoring replaces providers with the same id and adds the rest; a provider
+that comes without keys keeps this machine's own keys. Settings are replaced,
+and profiles with the same name are overwritten while others are kept. Agent
+models are set only for agents installed here; anything skipped is listed
+with the reason. Providers that end up without a key are listed so you can
+run `magpie provider key <id>`.
+
+Subscription logins (Claude Code or Codex signed in on the agent) are never
+part of a backup. Sign in again on the new machine with `magpie accounts add`.
 
 ## Files
 
