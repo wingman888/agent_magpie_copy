@@ -59,6 +59,22 @@ func SaveLive(provider, base string, models []Model) error {
 	return os.WriteFile(p, b, 0o644)
 }
 
+// SetRawHeaders adds each header to the request under exactly the name given.
+// http.Header.Set would canonicalise the name (X-ORG-id becomes X-Org-Id),
+// which some gateways match case-sensitively. Any header already present
+// whose name matches case-insensitively is replaced, so the given value is
+// the only one sent.
+func SetRawHeaders(req *http.Request, headers map[string]string) {
+	for name, value := range headers {
+		for k := range req.Header {
+			if strings.EqualFold(k, name) {
+				delete(req.Header, k)
+			}
+		}
+		req.Header[name] = []string{value}
+	}
+}
+
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
 // around it. The result keeps the server's order. anthropic sends the
@@ -66,12 +82,12 @@ func SaveLive(provider, base string, models []Model) error {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
+	return FetchWithHeaders(ctx, base, key, anthropic, nil)
 }
 
-// FetchWith is Fetch with extra request headers, sent under their own
-// spelling and overriding the defaults of the same name.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+// FetchWithHeaders is Fetch with extra request headers, sent verbatim (see
+// SetRawHeaders) after the usual ones, so they win on a name clash.
+func FetchWithHeaders(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -131,7 +147,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	setRaw(req, headers)
+	SetRawHeaders(req, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -197,19 +213,4 @@ func Decorate(live []Model, known []Model) []Model {
 		out = append(out, m)
 	}
 	return out
-}
-
-// setRaw writes headers into the request keeping their spelling, replacing
-// any header of the same name (in any case) already set.
-func setRaw(req *http.Request, headers map[string]string) {
-	for name := range headers {
-		for existing := range req.Header {
-			if strings.EqualFold(existing, name) {
-				delete(req.Header, existing)
-			}
-		}
-	}
-	for name, v := range headers {
-		req.Header[name] = []string{v}
-	}
 }

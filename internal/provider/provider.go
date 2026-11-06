@@ -49,8 +49,8 @@ type Provider struct {
 	Models []string `json:"models,omitempty"`
 
 	// Headers are extra HTTP headers sent with every request to a custom
-	// provider, under the names exactly as the user typed them. Ignored for
-	// presets and signed-in accounts (see CustomHeaders).
+	// provider, under the names the user typed. Ignored for presets and
+	// signed-in accounts (see customHeaders).
 	Headers map[string]string `json:"headers,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
@@ -99,12 +99,7 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := os.Chmod(p, 0o600); err != nil {
-		return err
-	}
-	// stored icons nothing refers to any more are dropped after each save
-	pruneIcons()
-	return nil
+	return os.Chmod(p, 0o600)
 }
 
 // All lists the configured providers in the order they were added, then
@@ -196,8 +191,7 @@ func Save(p Provider) error {
 			return errors.New("a provider needs a base URL")
 		}
 		if p.Preset != "" {
-			// a preset keeps its own headers; the user's extras are not kept
-			p.Headers = nil
+			p.Headers = nil // presets keep their own headers; the user's are for custom providers
 		}
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
@@ -291,6 +285,33 @@ func cleanList(xs []string) []string {
 		}
 	}
 	return out
+}
+
+// cleanHeaders trims header names and values and drops entries with an empty
+// name. Names keep their case: some gateways match it exactly. An empty
+// result is nil, so the field is not written out.
+func cleanHeaders(hs map[string]string) map[string]string {
+	var out map[string]string
+	for name, value := range hs {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[name] = strings.TrimSpace(value)
+	}
+	return out
+}
+
+// customHeaders are the headers to send with a request to the provider: the
+// user's, for a custom provider only. Presets and signed-in accounts get none.
+func (p Provider) customHeaders() map[string]string {
+	if p.Preset != "" || p.Account != nil {
+		return nil
+	}
+	return p.Headers
 }
 
 func contains(xs []string, x string) bool {
