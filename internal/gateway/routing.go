@@ -235,48 +235,59 @@ type left struct {
 }
 
 // weigh orders one provider's candidates as its routing says, and tells
-// what it went by. Keys set aside for another protocol keep their place
-// behind the pool, whatever the routing.
+// what it went by.
 func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
-	return weighWith(p.Routing, p.ID, cs, model, from, nil, p.Account == nil)
+	return weighCtx(p, cs, model, from, routeCtx{})
 }
 
-// weighWith is weigh for any routing and any owner of candidates: a provider,
-// or a routing group. owner names the rotation; cv, when set, is the
-// conversation the request belongs to, which turns rotation into turns. fit
-// keeps the candidates in the order of how well their keys suit the request.
-func weighWith(routing, owner string, cs []candidate, model string, from provider.Protocol, cv *convo, fit bool) ([]candidate, weighing) {
-	var pool, aside []candidate
+// weighCtx is weigh for a request within its conversation (see routeCtx).
+func weighCtx(p provider.Provider, cs []candidate, model string, from provider.Protocol, rc routeCtx) ([]candidate, weighing) {
+	var main, aside []candidate
 	for _, c := range cs {
 		if c.aside {
 			aside = append(aside, c)
 		} else {
-			pool = append(pool, c)
+			main = append(main, c)
 		}
 	}
-	out, wg := weighPool(routing, owner, pool, model, from, cv, fit)
-	return append(out, aside...), wg
+	if len(main) == 0 {
+		return cs, weighing{}
+	}
+	main, wg := weighMain(p.Routing, p.ID, main, model, from, rc)
+	return append(main, aside...), wg
 }
 
-// weighPool is weigh for the candidates in the pool.
-func weighPool(routing, owner string, cs []candidate, model string, from provider.Protocol, cv *convo, fit bool) ([]candidate, weighing) {
+// weighMain is weigh for the candidates that are not aside: those are routed
+// among themselves, the aside ones stay behind them. routing and pool say how
+// (a provider's, or a group's) and whose rotation it is; each candidate's
+// allowance is read from its own account, so a group can weigh the accounts
+// of several providers together.
+func weighMain(routing, pool string, cs []candidate, model string, from provider.Protocol, rc routeCtx) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
 	}
 	now := time.Now()
 	wg.lefts = map[string]left{}
+	known := map[string]map[string]provider.Allowance{} // agent → user → allowance, asked once per agent
 	for _, c := range cs {
 		if c.p.Account == nil {
 			continue
 		}
-		if a, ok := allowances(c.p.Account.Agent)[c.p.Account.User]; ok {
-			u, r := a.For(c.model, now)
+		agent := c.p.Account.Agent
+		a, ok := known[agent]
+		if !ok {
+			a = allowances(agent)
+			known[agent] = a
+		}
+		if x, ok := a[c.p.Account.User]; ok {
+			u, r := x.For(candModel(c, model), now)
 			wg.lefts[c.rest] = left{u, r} // one not known counts as unused
 		}
 	}
 	lefts := wg.lefts
 	shareOf := func(c candidate) float64 { return lefts[c.rest].used }
+	began := false // a rotation began a turn with the first candidate
 	switch routing {
 	case "":
 		// of those with quota to spare, the one whose allowance renews
@@ -328,8 +339,33 @@ func weighPool(routing, owner string, cs []candidate, model string, from provide
 	case provider.Ordered:
 		return cs, wg
 	case provider.Rotate:
-		n := rotateStart(owner, len(cs), cv)
-		cs = append(append([]candidate{}, cs[n:]...), cs[:n]...)
+		if rc.key == "" {
+			// one request, one turn: each request moves on to the next
+			routed.Lock()
+			n := routed.turn[pool] % len(cs)
+			routed.turn[pool]++
+			routed.Unlock()
+			cs = rotated(cs, n)
+			break
+		}
+		// a request within a turn stays where the turn began; one that starts
+		// a turn moves on, counted for this pool and model alone
+		if i := rc.pinned(cs); i >= 0 {
+			cs = moveFirst(cs, i)
+			break
+		}
+		if rc.within {
+			// the turn began on a key no longer here: it keeps the order it
+			// has, and the rotation is neither moved on nor restarted
+			break
+		}
+		k := pool + "\x00" + rc.model
+		routed.Lock()
+		n := routed.turn[k] % len(cs)
+		routed.turn[k]++
+		routed.Unlock()
+		cs = rotated(cs, n)
+		began = true
 	case provider.LeastUsed:
 		// a subscription by the share of its allowance used, as the vendor
 		// says; then, and for keys, by what magpie sent it lately
@@ -360,8 +396,13 @@ func weighPool(routing, owner string, cs []candidate, model string, from provide
 	default:
 		return cs, wg
 	}
-	if fit {
-		sort.SliceStable(cs, func(i, j int) bool { return keyFit(cs[i].p, model, from) < keyFit(cs[j].p, model, from) })
+	if allKeys(cs) {
+		sort.SliceStable(cs, func(i, j int) bool {
+			return keyFit(cs[i], from) < keyFit(cs[j], from)
+		})
+	}
+	if began {
+		rc.begin(cs[0])
 	}
 	return cs, wg
 }

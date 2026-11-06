@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"slices"
@@ -107,9 +108,6 @@ func usesByProvider() map[string][]string {
 		}
 		v := a.Fields[0].Get()
 		v = strings.TrimPrefix(v, "magpie/")
-		if strings.HasPrefix(v, "group/") {
-			continue // a routing group, not a provider's model
-		}
 		if pid, _, ok := strings.Cut(v, "/"); ok {
 			out[pid] = append(out[pid], a.Name)
 		}
@@ -147,46 +145,56 @@ func presets() error {
 
 // models: `magpie models` — the catalog every agent sees
 func models() error {
-	entries := provider.Catalog()
+	return listModels(os.Stdout, provider.Catalog())
+}
+
+// listModels prints the catalog: the routing groups in a section of their
+// own, before the providers, each provider's models under its name.
+func listModels(out io.Writer, entries []provider.Entry) error {
 	if len(entries) == 0 {
-		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
+		fmt.Fprintln(out, muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
 	}
-	// routing groups first, in a section of their own, then the providers
-	slices.SortStableFunc(entries, func(a, b provider.Entry) int {
-		switch ga, gb := a.Group != "", b.Group != ""; {
-		case ga == gb:
-			return 0
-		case ga:
-			return -1
+	var groups, models []provider.Entry
+	for _, e := range entries {
+		if e.Kind == provider.KindGroup {
+			groups = append(groups, e)
+		} else {
+			models = append(models, e)
 		}
-		return 1
-	})
+	}
 	w := 0
 	for _, e := range entries {
 		w = max(w, len(e.ID))
 	}
-	last, inGroups := "", false
-	for _, e := range entries {
-		if e.Group != "" {
-			if !inGroups {
-				inGroups = true
-				fmt.Println(faint.Render("  Routing groups"))
-			}
-		} else if e.Provider.ID != last {
-			last = e.Provider.ID
-			fmt.Println(faint.Render("  " + e.Provider.Name))
-		}
-		line := "  " + pad(e.ID, w)
+	line := func(e provider.Entry) {
+		l := "  " + pad(e.ID, w)
 		if e.Name != "" && e.Name != e.Model {
-			line += "  " + muted.Render(e.Name)
+			l += "  " + muted.Render(e.Name)
 		}
 		if len(e.Efforts) > 0 {
-			line += faint.Render("  " + strings.Join(e.Efforts, "/"))
+			l += faint.Render("  " + strings.Join(e.Efforts, "/"))
 		}
-		fmt.Println(line)
+		fmt.Fprintln(out, l)
 	}
-	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
+	if len(groups) > 0 {
+		fmt.Fprintln(out, faint.Render("  Routing groups"))
+		for _, e := range groups {
+			line(e)
+		}
+		if len(models) > 0 {
+			fmt.Fprintln(out)
+		}
+	}
+	last := ""
+	for _, e := range models {
+		if e.Provider.ID != last {
+			last = e.Provider.ID
+			fmt.Fprintln(out, faint.Render("  "+e.Provider.Name))
+		}
+		line(e)
+	}
+	fmt.Fprintln(out, faint.Render("  "+gateway.URL()+"/v1"))
 	return nil
 }
 
