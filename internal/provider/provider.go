@@ -37,6 +37,15 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
+	// KeyName names the key in use, and Keys are the provider's other
+	// accounts: keys saved to switch to (see keys.go).
+	KeyName string       `json:"keyName,omitempty"`
+	Keys    []KeyAccount `json:"keys,omitempty"`
+	// KeyProtocol, when set, is the one protocol the first key is good
+	// for: a relay that hands out one key for Anthropic and another for
+	// OpenAI (see KeyAccount.Protocol).
+	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
+
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -49,6 +58,14 @@ type Provider struct {
 	// reply has been sent: models as agents pick them (provider/model),
 	// tried in order.
 	Fallback []string `json:"fallback,omitempty"`
+
+	// Routing is how requests spread over the keys or accounts it has on:
+	// "" smart, the first while it has quota to spare, then whichever has
+	// the most; "order" in order, the next one only when the one before
+	// can't take it; "rotate" each in turn; "usage" the least used first.
+	// Whichever it is, one out of credit, out of quota, rate limited or
+	// failing is passed over for as long as that lasts.
+	Routing string `json:"routing,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
@@ -66,6 +83,11 @@ type Provider struct {
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
+	// IconURL is a picture the vendor named in an import link, to be fetched
+	// once the user confirms. It is only a carrier between parsing and that
+	// fetch: Save drops it, so it never reaches providers.json.
+	IconURL string `json:"iconUrl,omitempty"`
+
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
 	Hidden bool `json:"hidden,omitempty"`
@@ -73,23 +95,6 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
-
-	// KeyName names the front key (Key). Optional; absent for a single
-	// unnamed key, so old configs read and write exactly as before.
-	KeyName string `json:"keyName,omitempty"`
-
-	// Keys are the other accounts' keys, in the order they are tried after
-	// the front one. Off keeps a key on file without ever sending it upstream.
-	// See keys.go.
-	Keys []StoredKey `json:"keys,omitempty"`
-}
-
-// StoredKey is one of the non-front API keys of a provider, as kept in the
-// config file.
-type StoredKey struct {
-	Name string `json:"name,omitempty"`
-	Key  string `json:"key"`
-	Off  bool   `json:"off,omitempty"`
 }
 
 type file struct {
@@ -148,7 +153,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
+		a.Models, a.Fallback, a.Routing = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing
 		out = append(out, a)
 	}
 	return out
@@ -197,6 +202,7 @@ func Slug(name string) string {
 // Save adds or replaces a provider.
 func Save(p Provider) error {
 	p = normalize(p)
+	p.IconURL = "" // import-only: never stored
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
@@ -212,7 +218,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -276,8 +282,6 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p.Key, p.Keys)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -286,6 +290,9 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
+	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
+		p.Routing = ""
+	}
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
