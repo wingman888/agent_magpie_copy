@@ -23,7 +23,6 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -51,21 +50,10 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
-
-	// Account is set on a provider that borrows another agent's sign-in
-	// (Codex, Copilot). Such a provider holds no credentials; see account.go.
-	Account *Account `json:"account,omitempty"`
 }
 
 type file struct {
 	Providers []Provider `json:"providers"`
-}
-
-// selection is how a stored account provider is written: only its id and the
-// models the user chose, never an address, key, or token.
-type selection struct {
-	ID     string   `json:"id"`
-	Models []string `json:"models,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -90,20 +78,7 @@ func store(f file) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	out := struct {
-		Providers []any `json:"providers"`
-	}{}
-	if f.Providers != nil {
-		out.Providers = make([]any, 0, len(f.Providers))
-	}
-	for _, q := range f.Providers {
-		if isAccountID(q.ID) && !hasAddress(q) {
-			out.Providers = append(out.Providers, selection{ID: q.ID, Models: q.Models})
-		} else {
-			out.Providers = append(out.Providers, q)
-		}
-	}
-	b, err := json.MarshalIndent(out, "", "  ")
+	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -113,19 +88,13 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added, then the
-// account providers whose sign-in is present.
+// All lists the configured providers in the order they were added.
 func All() []Provider {
-	f := load()
-	var out []Provider
-	for _, p := range f.Providers {
-		p = normalize(p)
-		if isAccountID(p.ID) && !hasAddress(p) {
-			continue // a model selection for an account; merged in below
-		}
-		out = append(out, p)
+	out := load().Providers
+	for i := range out {
+		out[i] = normalize(out[i])
 	}
-	return append(out, accountsOf(f, userBuilt(f))...)
+	return out
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -161,12 +130,6 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if isAccountID(p.ID) {
-		done, err := saveAccount(p)
-		if done || err != nil {
-			return err
-		}
-	}
 	if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 		return errors.New("a provider needs a base URL")
 	}
@@ -184,57 +147,9 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// saveAccount stores the model selection for an account provider. The
-// address, key and anything else passed in are dropped. It reports false when
-// the id belongs to the user's own provider, which is saved as usual.
-func saveAccount(p Provider) (bool, error) {
-	f := load()
-	idx := -1
-	for i, q := range f.Providers {
-		if q.ID == p.ID {
-			if hasAddress(q) {
-				return false, nil
-			}
-			idx = i
-		}
-	}
-	if !accountSignedIn(p.ID) {
-		if hasAddress(p) {
-			return false, nil
-		}
-		return true, signedOutErr(p.ID)
-	}
-	rec := Provider{ID: p.ID, Models: cleanList(p.Models)}
-	if idx >= 0 {
-		f.Providers[idx] = rec
-	} else {
-		f.Providers = append(f.Providers, rec)
-	}
-	return true, store(f)
-}
-
-// Delete removes a provider. For an account provider that only clears the
-// model selection; the provider stays, since signing out is the agent's job.
+// Delete removes a provider.
 func Delete(id string) error {
 	f := load()
-	if isAccountID(id) && !userBuilt(f)[id] {
-		var keep []Provider
-		for _, p := range f.Providers {
-			if p.ID != id {
-				keep = append(keep, p)
-			}
-		}
-		removed := len(keep) != len(f.Providers)
-		if removed {
-			f.Providers = keep
-			if err := store(f); err != nil {
-				return err
-			}
-		}
-		if removed || accountSignedIn(id) {
-			return nil
-		}
-	}
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -362,9 +277,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool {
-	if p.Account != nil {
-		return true // the agent's own sign-in is the key
-	}
-	return p.Key != "" || keyOptional(p)
-}
+func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
