@@ -86,12 +86,8 @@ func TestRefusedAPIsAreNotSentAgain(t *testing.T) {
 	}
 }
 
-// "use v1/completions" is not a refusal phrase; a 5xx naming another API is
-// never a refusal.
+// A 5xx naming another API is never a refusal.
 func TestOtherAPIPhrasesNeedARefusal(t *testing.T) {
-	if endpointRefused(400, []byte("use /v1/completions")) {
-		t.Fatal("use /v1/completions is not a refusal phrase")
-	}
 	if endpointRefused(500, []byte("use v1/responses")) {
 		t.Fatal("a 500 is never a refusal")
 	}

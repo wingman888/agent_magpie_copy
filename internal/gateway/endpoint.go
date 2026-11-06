@@ -30,6 +30,8 @@ var refusalPhrases = []string{
 	"use /v1/chat/completions",
 	"use v1/responses",
 	"use /v1/responses",
+	"use v1/completions",
+	"use /v1/completions",
 }
 
 // notAccessible matches "... is not accessible via the /chat/completions endpoint".
