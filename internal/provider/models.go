@@ -67,29 +67,11 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	if p.Account != nil && p.Account.fetch != nil {
 		return p.Account.fetch(ctx)
 	}
-	// each endpoint is asked with a key that may speak it; an endpoint no key
-	// may speak is skipped. When that skips them all, the first key goes to
-	// every endpoint, as it always did.
-	type ask struct {
-		proto Protocol
-		key   string
-	}
-	var asks []ask
-	for _, proto := range p.Speaks() {
-		if k, ok := p.keyFor(proto); ok {
-			asks = append(asks, ask{proto, k.Key})
-		}
-	}
-	if len(asks) == 0 {
-		for _, proto := range p.Speaks() {
-			asks = append(asks, ask{proto, p.Key})
-		}
-	}
 	var lastErr error
-	for _, a := range asks {
-		ms, err := catalog.Fetch(ctx, p.Base(a.proto), a.key, a.proto == Anthropic, p.Headers)
+	for _, proto := range p.Speaks() {
+		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic, p.Headers)
 		if err == nil {
-			return ms, catalog.SaveLive(p.ID, p.Base(a.proto), ms)
+			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
 		lastErr = err
 	}

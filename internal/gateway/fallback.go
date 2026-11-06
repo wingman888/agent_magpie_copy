@@ -71,7 +71,28 @@ func perKey(p provider.Provider, model string) []candidate {
 // candidates is the primary and then its fallbacks, those resting after a
 // recent failure moved behind the rest.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	return s.plan(p, model, "")
+	out := perKey(p, model)
+	seen := map[string]bool{p.ID + "/" + model: true}
+	for _, id := range p.Fallback {
+		fp, fm, ok := provider.Resolve(id)
+		if !ok || seen[fp.ID+"/"+fm] {
+			continue
+		}
+		seen[fp.ID+"/"+fm] = true
+		out = append(out, perKey(fp, fm)...)
+	}
+	if len(out) == 1 {
+		return out
+	}
+	var ready, resting []candidate
+	for _, c := range out {
+		if s.resting(c.rest) {
+			resting = append(resting, c)
+		} else {
+			ready = append(ready, c)
+		}
+	}
+	return append(ready, resting...)
 }
 
 var restingUntil = struct {
