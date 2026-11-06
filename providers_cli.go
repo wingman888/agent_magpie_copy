@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
-	"path/filepath"
-	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,16 +25,18 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.<Name>
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo, balance, balance.path
   magpie provider key <id> <key>          change the API key
-  magpie provider icon <id> <file|name|"">  set a custom vendor's icon: an image file, a built-in name, or "" for the default
-  magpie provider fallback <id> [p/m …]   show or set the models to try when this vendor cannot answer
+  magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
+  magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
-  e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme
-       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=openai,anthropic`
+  e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
+       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
+       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme
+       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… balance=https://relay.example.com/api/usage/token balance.path='$data.total_available / 500000'`
 
 // providers: `magpie providers`
 func providers() error {
@@ -70,6 +72,9 @@ func providers() error {
 		}
 		if u := uses[p.ID]; len(u) > 0 {
 			r.uses = green.Render("← " + strings.Join(u, ", "))
+		}
+		if len(p.Fallback) > 0 {
+			r.uses += muted.Render("  ⤷ " + strings.Join(p.Fallback, " → "))
 		}
 		for i, s := range []string{r.name, r.id, r.host, r.key, r.models} {
 			w[i] = max(w[i], lipgloss.Width(s))
@@ -140,31 +145,56 @@ func presets() error {
 
 // models: `magpie models` — the catalog every agent sees
 func models() error {
-	entries := provider.Catalog()
+	return listModels(os.Stdout, provider.Catalog())
+}
+
+// listModels prints the catalog: the routing groups in a section of their
+// own, before the providers, each provider's models under its name.
+func listModels(out io.Writer, entries []provider.Entry) error {
 	if len(entries) == 0 {
-		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
+		fmt.Fprintln(out, muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
+	}
+	var groups, models []provider.Entry
+	for _, e := range entries {
+		if e.Kind == provider.KindGroup {
+			groups = append(groups, e)
+		} else {
+			models = append(models, e)
+		}
 	}
 	w := 0
 	for _, e := range entries {
 		w = max(w, len(e.ID))
 	}
-	last := ""
-	for _, e := range entries {
-		if e.Provider.ID != last {
-			last = e.Provider.ID
-			fmt.Println(faint.Render("  " + e.Provider.Name))
-		}
-		line := "  " + pad(e.ID, w)
+	line := func(e provider.Entry) {
+		l := "  " + pad(e.ID, w)
 		if e.Name != "" && e.Name != e.Model {
-			line += "  " + muted.Render(e.Name)
+			l += "  " + muted.Render(e.Name)
 		}
 		if len(e.Efforts) > 0 {
-			line += faint.Render("  " + strings.Join(e.Efforts, "/"))
+			l += faint.Render("  " + strings.Join(e.Efforts, "/"))
 		}
-		fmt.Println(line)
+		fmt.Fprintln(out, l)
 	}
-	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
+	if len(groups) > 0 {
+		fmt.Fprintln(out, faint.Render("  Routing groups"))
+		for _, e := range groups {
+			line(e)
+		}
+		if len(models) > 0 {
+			fmt.Fprintln(out)
+		}
+	}
+	last := ""
+	for _, e := range models {
+		if e.Provider.ID != last {
+			last = e.Provider.ID
+			fmt.Fprintln(out, faint.Render("  "+e.Provider.Name))
+		}
+		line(e)
+	}
+	fmt.Fprintln(out, faint.Render("  "+gateway.URL()+"/v1"))
 	return nil
 }
 
@@ -192,9 +222,62 @@ func providerCmd(args []string) error {
 		fmt.Println(green.Render("✓"), p.Name, "key", muted.Render(provider.Mask(p.Key)))
 		return nil
 	case "icon":
-		return setIcon(rest)
+		if len(rest) != 2 {
+			return fmt.Errorf("magpie provider icon <id> <picture file | built-in name | \"\">")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if p.Account != nil || p.Preset != "" {
+			return fmt.Errorf("%s has its own icon; only a custom provider takes one", p.Name)
+		}
+		p.Icon = rest[1]
+		if err := applyPairs(p, []string{"icon=" + rest[1]}); err != nil {
+			return err
+		}
+		if p.Icon == "" {
+			p.Icon = "generic"
+		}
+		if err := provider.Save(*p); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(p.Icon))
+		return nil
 	case "fallback":
-		return setFallback(rest)
+		// where requests go when this provider is out of quota, rate
+		// limited or down; "none" clears the list
+		if len(rest) < 1 {
+			return fmt.Errorf("magpie provider fallback <id> [provider/model… | none]")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if len(rest) > 1 {
+			p.Fallback = nil
+			if !(len(rest) == 2 && rest[1] == "none") {
+				for _, id := range rest[1:] {
+					if _, _, ok := provider.Resolve(id); !ok {
+						return fmt.Errorf("magpie knows no model %q (magpie models lists them)", id)
+					}
+					p.Fallback = append(p.Fallback, id)
+				}
+			}
+			if err := provider.Save(*p); err != nil {
+				return err
+			}
+			if p, err = provider.Find(p.ID); err != nil {
+				return err
+			}
+		}
+		if len(p.Fallback) == 0 {
+			fmt.Println(p.Name, muted.Render("has no fallback · magpie provider fallback "+p.ID+" <provider/model>…"))
+			return nil
+		}
+		fmt.Println(green.Render("✓"), p.Name, "falls back to", strings.Join(p.Fallback, muted.Render(" → ")),
+			muted.Render("· when out of quota, rate limited or down"))
+		return nil
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -351,19 +434,24 @@ func showProvider(p provider.Provider) error {
 		kv("key", amber.Render("not set")+muted.Render("  magpie provider key "+p.ID+" …"))
 	}
 	kv("catalog", p.Catalog)
-	var names []string
-	for k := range p.Headers {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	for _, k := range names {
-		kv("header", k+": "+p.Headers[k])
-	}
-	if len(p.Fallback) > 0 {
-		kv("fallback", strings.Join(p.Fallback, " → "))
-	}
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	if amount, ok, err := provider.Balance(ctx, p); ok {
+		from := ""
+		if p.BalanceURL != "" {
+			from = muted.Render("  from " + p.BalanceURL + " " + p.BalancePath)
+		}
+		if err != nil {
+			kv("balance", amber.Render("unavailable")+muted.Render("  "+err.Error())+from)
+		} else {
+			kv("balance", bold.Render(amount)+from)
+		}
+	}
+	cancel()
+	for _, k := range slices.Sorted(maps.Keys(p.Headers)) {
+		kv("header", k+": "+muted.Render(p.Headers[k]))
+	}
 	ms := p.Exposed()
 	src := "models.dev"
 	if t, ok := p.Fetched(); ok {
@@ -387,27 +475,11 @@ func showProvider(p provider.Provider) error {
 	return nil
 }
 
-// cutHeaderKey reads "header.X-Foo" (the prefix in any case) as the header
-// name X-Foo, keeping the case the user typed.
-func cutHeaderKey(k string) (string, bool) {
-	if len(k) > len("header.") && strings.EqualFold(k[:len("header.")], "header.") {
-		return k[len("header."):], true
-	}
-	return "", false
-}
-
 func applyPairs(p *provider.Provider, pairs []string) error {
 	for _, kv := range pairs {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
 			return fmt.Errorf("expected key=value, got %q\n\n%s", kv, providerUsage)
-		}
-		if name, ok := cutHeaderKey(k); ok {
-			if p.Headers == nil {
-				p.Headers = map[string]string{}
-			}
-			p.Headers[name] = v
-			continue
 		}
 		switch strings.ToLower(k) {
 		case "id":
@@ -430,119 +502,34 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.Website = v
 		case "keys":
 			p.KeysURL = v
+		case "balance":
+			p.BalanceURL = v
+		case "balance.path":
+			p.BalancePath = v
 		case "icon":
-			if p.Preset != "" {
-				return errPresetIcon(p.Name)
+			// a picture on disk is kept by magpie; anything else is one of
+			// the built-in icons' names
+			if st, err := os.Stat(v); err == nil && !st.IsDir() {
+				icon, err := provider.StoreIconFile(v)
+				if err != nil {
+					return err
+				}
+				v = icon
 			}
-			icon, err := iconValue(v)
-			if err != nil {
-				return err
-			}
-			p.Icon = icon
+			p.Icon = v
 		default:
+			// header.X-Foo=bar sets a custom request header (name kept as typed)
+			if len(k) > len("header.") && strings.EqualFold(k[:len("header.")], "header.") {
+				name := k[len("header."):]
+				if p.Headers == nil {
+					p.Headers = map[string]string{}
+				}
+				p.Headers[name] = v
+				continue
+			}
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}
 	}
-	return nil
-}
-
-// iconName is a built-in icon name: the lowercase slug the bundled logos use.
-var iconName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
-// errPresetIcon is what a preset or a signed-in account says about its icon.
-func errPresetIcon(name string) error {
-	return fmt.Errorf("仅自定义供应商可设置图标 (only custom providers can set an icon); %s is a preset or a signed-in account", name)
-}
-
-// iconValue turns what the user typed for an icon into the stored value: a
-// picture file is copied into magpie's icons folder, a built-in name is kept
-// as it is, and "" means the default icon.
-func iconValue(v string) (string, error) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return "", nil
-	}
-	if strings.ContainsAny(v, `/\`) || filepath.Ext(v) != "" {
-		return provider.StoreIconFile(v)
-	}
-	if _, err := os.Stat(v); err == nil {
-		return provider.StoreIconFile(v)
-	}
-	if !iconName.MatchString(v) {
-		return "", fmt.Errorf("icon %q is neither an image file nor a built-in icon name", v)
-	}
-	return v, nil
-}
-
-// setIcon: `magpie provider icon <id> <file|name|"">`
-func setIcon(rest []string) error {
-	if len(rest) != 2 {
-		return fmt.Errorf(`magpie provider icon <id> <image file | built-in name | "">`)
-	}
-	p, err := provider.Find(rest[0])
-	if err != nil {
-		return err
-	}
-	if p.Preset != "" || p.Account != nil {
-		return errPresetIcon(p.Name)
-	}
-	icon, err := iconValue(rest[1])
-	if err != nil {
-		return err
-	}
-	p.Icon = icon
-	if err := provider.Save(*p); err != nil {
-		return err
-	}
-	if icon == "" {
-		fmt.Println(green.Render("✓"), p.Name, muted.Render("icon reset to the default"))
-	} else {
-		fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(icon))
-	}
-	return nil
-}
-
-// setFallback: `magpie provider fallback <id>` shows the list;
-// `magpie provider fallback <id> <provider/model>…` sets it, in order; "-" clears it.
-func setFallback(rest []string) error {
-	if len(rest) < 1 {
-		return fmt.Errorf("magpie provider fallback <id> [provider/model …]")
-	}
-	p, err := provider.Find(rest[0])
-	if err != nil {
-		return err
-	}
-	if len(rest) == 1 {
-		if len(p.Fallback) == 0 {
-			fmt.Println(muted.Render("no fallback · magpie provider fallback " + p.ID + " <provider/model> …"))
-			return nil
-		}
-		for i, f := range p.Fallback {
-			fmt.Printf("  %d. %s\n", i+1, f)
-		}
-		return nil
-	}
-	var list []string
-	for _, a := range rest[1:] {
-		if a == "-" {
-			list = nil
-			break
-		}
-		list = append(list, strings.Split(a, ",")...)
-	}
-	p.Fallback = list
-	if err := provider.Save(*p); err != nil {
-		return err
-	}
-	saved, err := provider.Find(p.ID)
-	if err != nil {
-		return err
-	}
-	if len(saved.Fallback) == 0 {
-		fmt.Println(green.Render("✓"), p.Name, muted.Render("fallback cleared"))
-		return nil
-	}
-	fmt.Println(green.Render("✓"), p.Name, "fallback", muted.Render(strings.Join(saved.Fallback, " → ")))
 	return nil
 }
 
