@@ -8,6 +8,7 @@ package settings
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -21,10 +22,50 @@ type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
 	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
-	// Proxy for magpie's own requests to vendors: "" follows the
-	// environment and then the system, "direct" uses none, anything else
-	// is the proxy (http://, https:// or socks5://; host:port means http).
-	Proxy string `json:"proxy,omitempty"`
+	Proxy string `json:"proxy,omitempty"` // "" follows env and system; "direct" turns proxies off; else a proxy address
+}
+
+// ProxyExample is the form the proxy error messages point to.
+const ProxyExample = "http://127.0.0.1:7890"
+
+// ParseProxyAddr parses a proxy address (not "" or "direct"). Supported
+// schemes are http, https, socks5 and socks5h; an address without a scheme
+// is an HTTP proxy. The host is required.
+func ParseProxyAddr(v string) (*url.URL, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil, errors.New("proxy address is empty")
+	}
+	raw := v
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("proxy %q cannot be parsed", v)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, fmt.Errorf("proxy %q has unsupported scheme %q", v, u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return nil, fmt.Errorf("proxy %q has no host", v)
+	}
+	return u, nil
+}
+
+// ValidProxy reports whether v is an acceptable value of Settings.Proxy:
+// empty, "direct", or a proxy address.
+func ValidProxy(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "direct" {
+		return nil
+	}
+	if _, err := ParseProxyAddr(v); err != nil {
+		return fmt.Errorf("%v; use direct, or a proxy address such as %s (https://, socks5:// and socks5h:// also work)", err, ProxyExample)
+	}
+	return nil
 }
 
 // Themes and Langs are the accepted values, in the order the UI offers them.
@@ -67,16 +108,8 @@ func Save(s Settings) error {
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
 	}
-	s.Proxy = strings.TrimSpace(s.Proxy)
-	if s.Proxy != "" && s.Proxy != "direct" {
-		raw := s.Proxy
-		if !strings.Contains(raw, "://") {
-			raw = "http://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
-			return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", s.Proxy)
-		}
+	if err := ValidProxy(s.Proxy); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
@@ -98,5 +131,6 @@ func (s Settings) normal() Settings {
 	if s.Tray == "" {
 		s.Tray = "panel"
 	}
+	s.Proxy = strings.TrimSpace(s.Proxy)
 	return s
 }
