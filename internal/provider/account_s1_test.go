@@ -71,7 +71,7 @@ func TestS1CodexChatGPTSignIn(t *testing.T) {
 	if p == nil {
 		t.Fatalf("codex account missing: %+v", ps)
 	}
-	if p.Account == nil || p.Account.Agent != "codex" || p.Account.User != "amy@example.com" || p.Account.Plan == nil || *p.Account.Plan != "pro" {
+	if p.Account == nil || p.Account.Agent != "codex" || p.Account.User != "amy@example.com" || p.Account.Plan != "pro" {
 		t.Fatalf("bad account: %+v", p.Account)
 	}
 	if !p.Ready() {
@@ -92,7 +92,7 @@ func TestS1CodexNoEmailFallsBackToChatGPT(t *testing.T) {
 	s1Write(t, filepath.Join(home, ".codex", "auth.json"),
 		`{"auth_mode":"chatgpt","tokens":{"id_token":"","access_token":"acc"}}`)
 	p := s1FindAccount(Accounts(), "codex")
-	if p == nil || p.Account.User != "ChatGPT" || p.Account.Plan != nil {
+	if p == nil || p.Account.User != "ChatGPT" || p.Account.Plan != "" {
 		t.Fatalf("want ChatGPT fallback, got %+v", p)
 	}
 }

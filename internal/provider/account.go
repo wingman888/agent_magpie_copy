@@ -19,17 +19,9 @@ import (
 // agent (Codex, Copilot). dial never stores its tokens: every read goes to the
 // agent's own credential file, so the agent stays the only source of truth.
 type Account struct {
-	Agent string  `json:"agent"` // "codex" or "copilot"
-	User  string  `json:"user"`  // display name: email, GitHub login, or a fallback
-	Plan  *string `json:"plan"`  // subscription tier; null when unknown
-}
-
-// planOf is the Plan of an account for a tier string: nil when it is unknown.
-func planOf(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
+	Agent string `json:"agent"` // "codex" or "copilot"
+	User  string `json:"user"`  // display name: email, GitHub login, or a fallback
+	Plan  string `json:"plan"`  // subscription tier, e.g. "pro"; "" when unknown
 }
 
 // accountIDs are the provider ids the signed-in agent accounts take.
@@ -304,7 +296,7 @@ func Accounts() []Provider {
 		out = append(out, Provider{
 			ID:      "codex",
 			Name:    "Codex",
-			Account: &Account{Agent: "codex", User: c.User, Plan: planOf(c.Plan)},
+			Account: &Account{Agent: "codex", User: c.User, Plan: c.Plan},
 		})
 	}
 	if c, ok := readCopilot(); ok {

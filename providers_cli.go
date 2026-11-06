@@ -334,8 +334,8 @@ func showProvider(p provider.Provider) error {
 	fmt.Println(" ", name)
 	if a := p.Account; a != nil {
 		who := a.User
-		if a.Plan != nil && *a.Plan != "" {
-			who += " (" + *a.Plan + ")"
+		if a.Plan != "" {
+			who += " (" + a.Plan + ")"
 		}
 		kv("account", who+" via "+a.Agent)
 	}

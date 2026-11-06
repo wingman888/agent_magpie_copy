@@ -87,7 +87,7 @@ func TestS4RecordHoldsOnlyModels(t *testing.T) {
 		}
 	}
 	p := s4Find(All(), "codex")
-	if p == nil || p.Account == nil || p.Account.User != "me@example.com" || p.Account.Plan == nil || *p.Account.Plan != "pro" {
+	if p == nil || p.Account == nil || p.Account.User != "me@example.com" || p.Account.Plan != "pro" {
 		t.Fatalf("codex account missing or wrong: %+v", p)
 	}
 	if p.Chat != "" || p.Key != "" || !p.Ready() {
