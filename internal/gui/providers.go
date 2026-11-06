@@ -41,14 +41,15 @@ type providerJSON struct {
 		Masked   string `json:"masked"`
 		Optional bool   `json:"optional"`
 	} `json:"key"`
-	Ready     bool            `json:"ready"`
-	Chosen    []string        `json:"chosen"`  // the user's explicit picks, if any
-	Models    []modelJSON     `json:"models"`  // everything the vendor lists, exposed ones flagged
-	Exposed   int             `json:"exposed"` // how many reach the agents
-	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
-	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
-	Sponsored bool            `json:"sponsored"`
-	Account   *accountJSON    `json:"account,omitempty"` // a signed-in agent, see provider.Account
+	Ready     bool              `json:"ready"`
+	Chosen    []string          `json:"chosen"`  // the user's explicit picks, if any
+	Models    []modelJSON       `json:"models"`  // everything the vendor lists, exposed ones flagged
+	Exposed   int               `json:"exposed"` // how many reach the agents
+	Fetched   string            `json:"fetched"` // "3h ago" when the list came from the vendor
+	Agents    []providerAgent   `json:"agents"`  // detected agents, current ones flagged
+	Sponsored bool              `json:"sponsored"`
+	Account   *accountJSON      `json:"account,omitempty"` // a signed-in agent, see provider.Account
+	Headers   map[string]string `json:"headers,omitempty"` // a custom provider's extra request headers, read-only here
 }
 
 type accountJSON struct {
@@ -112,6 +113,7 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
+		Headers: p.Headers,
 	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
@@ -226,6 +228,16 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			old, _ := provider.Find(in.ID)
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
+			}
+			// the editor does not send a custom provider's headers or icon;
+			// keep the saved ones rather than clearing them (CLI-only fields)
+			if old != nil && old.Account == nil && provider.Preset(old.Preset) == nil {
+				if len(in.Headers) == 0 {
+					in.Headers = old.Headers
+				}
+				if in.Icon == "" {
+					in.Icon = old.Icon
+				}
 			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
