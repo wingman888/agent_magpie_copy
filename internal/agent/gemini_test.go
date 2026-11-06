@@ -13,7 +13,7 @@ import (
 
 // geminiHome points HOME and the dial config at a fresh directory, registers
 // one catalog provider ("fake" with model m1) and returns the Gemini agent.
-func geminiHome(t *testing.T) (*Agent, string) {
+func agm_geminiHome(t *testing.T) (*Agent, string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -26,7 +26,7 @@ func geminiHome(t *testing.T) (*Agent, string) {
 	return gemini(home), home
 }
 
-func writeGeminiFiles(t *testing.T, home, settings, env string) {
+func agm_writeGeminiFiles(t *testing.T, home, settings, env string) {
 	t.Helper()
 	dir := filepath.Join(home, ".gemini")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -40,16 +40,16 @@ func writeGeminiFiles(t *testing.T, home, settings, env string) {
 	}
 }
 
-const geminiSettings = `{
+const agm_geminiSettings = `{
   "other": "keep",
   "security": {"auth": {"selectedType": "oauth-personal"}},
   "model": {"name": "gemini-2.5-pro"}
 }
 `
 
-const geminiEnv = "FOO=bar\nGOOGLE_GEMINI_BASE_URL=https://generativelanguage.googleapis.com\nGEMINI_API_KEY=AIza-real\n"
+const agm_geminiEnv = "FOO=bar\nGOOGLE_GEMINI_BASE_URL=https://generativelanguage.googleapis.com\nGEMINI_API_KEY=AIza-real\n"
 
-func geminiFileValues(t *testing.T, home string) (sel, model, other string, env map[string]string) {
+func agm_geminiFileValues(t *testing.T, home string) (sel, model, other string, env map[string]string) {
 	t.Helper()
 	s := filepath.Join(home, ".gemini", "settings.json")
 	sel, _ = edit.GetJSON(s, "security.auth.selectedType")
@@ -65,14 +65,14 @@ func geminiFileValues(t *testing.T, home string) (sel, model, other string, env 
 	return
 }
 
-func TestGeminiRoutesCatalogModel(t *testing.T) {
-	a, home := geminiHome(t)
-	writeGeminiFiles(t, home, geminiSettings, geminiEnv)
+func TestAgm_GeminiRoutesCatalogModel(t *testing.T) {
+	a, home := agm_geminiHome(t)
+	agm_writeGeminiFiles(t, home, agm_geminiSettings, agm_geminiEnv)
 
 	if err := a.Field("model").Set("fake/m1"); err != nil {
 		t.Fatal(err)
 	}
-	sel, model, other, env := geminiFileValues(t, home)
+	sel, model, other, env := agm_geminiFileValues(t, home)
 	if sel != "gemini-api-key" || model != "fake/m1" || other != "keep" {
 		t.Fatalf("settings: selectedType=%q model=%q other=%q", sel, model, other)
 	}
@@ -93,16 +93,16 @@ func TestGeminiRoutesCatalogModel(t *testing.T) {
 	}
 }
 
-func TestGeminiNativeModelRestores(t *testing.T) {
-	a, home := geminiHome(t)
-	writeGeminiFiles(t, home, geminiSettings, geminiEnv)
+func TestAgm_GeminiNativeModelRestores(t *testing.T) {
+	a, home := agm_geminiHome(t)
+	agm_writeGeminiFiles(t, home, agm_geminiSettings, agm_geminiEnv)
 	if err := a.Field("model").Set("fake/m1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Field("model").Set("gemini-2.5-flash"); err != nil {
 		t.Fatal(err)
 	}
-	sel, model, _, env := geminiFileValues(t, home)
+	sel, model, _, env := agm_geminiFileValues(t, home)
 	if sel != "oauth-personal" {
 		t.Errorf("selectedType = %q, want oauth-personal", sel)
 	}
@@ -123,17 +123,17 @@ func TestGeminiNativeModelRestores(t *testing.T) {
 	}
 }
 
-func TestGeminiDefaultRemovesWhatRoutingAdded(t *testing.T) {
-	a, home := geminiHome(t)
+func TestAgm_GeminiDefaultRemovesWhatRoutingAdded(t *testing.T) {
+	a, home := agm_geminiHome(t)
 	// no key, no base URL, no selectedType before routing
-	writeGeminiFiles(t, home, `{"other": "keep", "model": {"name": "gemini-2.5-pro"}}`, "FOO=bar\n")
+	agm_writeGeminiFiles(t, home, `{"other": "keep", "model": {"name": "gemini-2.5-pro"}}`, "FOO=bar\n")
 	if err := a.Field("model").Set("fake/m1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Field("model").Set(""); err != nil {
 		t.Fatal(err)
 	}
-	sel, model, other, env := geminiFileValues(t, home)
+	sel, model, other, env := agm_geminiFileValues(t, home)
 	if sel != "" {
 		t.Errorf("selectedType = %q, want removed", sel)
 	}
@@ -154,16 +154,16 @@ func TestGeminiDefaultRemovesWhatRoutingAdded(t *testing.T) {
 	}
 }
 
-func TestGeminiDefaultRestoresPriorValues(t *testing.T) {
-	a, home := geminiHome(t)
-	writeGeminiFiles(t, home, geminiSettings, geminiEnv)
+func TestAgm_GeminiDefaultRestoresPriorValues(t *testing.T) {
+	a, home := agm_geminiHome(t)
+	agm_writeGeminiFiles(t, home, agm_geminiSettings, agm_geminiEnv)
 	if err := a.Field("model").Set("fake/m1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Field("model").Set(""); err != nil {
 		t.Fatal(err)
 	}
-	sel, model, _, env := geminiFileValues(t, home)
+	sel, model, _, env := agm_geminiFileValues(t, home)
 	if sel != "oauth-personal" || model != "" {
 		t.Errorf("selectedType=%q model=%q, want oauth-personal and no model", sel, model)
 	}
@@ -172,9 +172,9 @@ func TestGeminiDefaultRestoresPriorValues(t *testing.T) {
 	}
 }
 
-func TestGeminiAuthGetSet(t *testing.T) {
-	a, home := geminiHome(t)
-	writeGeminiFiles(t, home, geminiSettings, geminiEnv)
+func TestAgm_GeminiAuthGetSet(t *testing.T) {
+	a, home := agm_geminiHome(t)
+	agm_writeGeminiFiles(t, home, agm_geminiSettings, agm_geminiEnv)
 	auth := a.Field("auth")
 
 	if err := auth.Set("dial"); err == nil {
@@ -193,14 +193,14 @@ func TestGeminiAuthGetSet(t *testing.T) {
 	if err := auth.Set("dial"); err != nil {
 		t.Fatalf("Set(dial) while routed: %v", err)
 	}
-	sel, model, _, env := geminiFileValues(t, home)
+	sel, model, _, env := agm_geminiFileValues(t, home)
 	if sel != "gemini-api-key" || model != "fake/m1" || env["GEMINI_API_KEY"] != gateway.Token {
 		t.Errorf("Set(dial) changed the route: selectedType=%q model=%q key=%q", sel, model, env["GEMINI_API_KEY"])
 	}
 }
 
-func TestGeminiLabelLookup(t *testing.T) {
-	a, _ := geminiHome(t)
+func TestAgm_GeminiLabelLookup(t *testing.T) {
+	a, _ := agm_geminiHome(t)
 	if f := a.Field("auth"); f == nil || f.Key != "auth" {
 		t.Fatalf("Field(auth) = %+v", f)
 	}
@@ -218,9 +218,9 @@ func TestGeminiLabelLookup(t *testing.T) {
 	}
 }
 
-func TestGeminiProviderField(t *testing.T) {
-	a, home := geminiHome(t)
-	writeGeminiFiles(t, home, geminiSettings, geminiEnv)
+func TestAgm_GeminiProviderField(t *testing.T) {
+	a, home := agm_geminiHome(t)
+	agm_writeGeminiFiles(t, home, agm_geminiSettings, agm_geminiEnv)
 	p := a.Field("provider")
 	if got := p.Get(); got != "" {
 		t.Fatalf("provider = %q before routing, want empty", got)
@@ -228,7 +228,7 @@ func TestGeminiProviderField(t *testing.T) {
 	if err := p.Set("fake"); err != nil {
 		t.Fatal(err)
 	}
-	if _, model, _, _ := geminiFileValues(t, home); model != "fake/m1" {
+	if _, model, _, _ := agm_geminiFileValues(t, home); model != "fake/m1" {
 		t.Fatalf("model = %q, want fake/m1", model)
 	}
 	if err := p.Set("nope"); err == nil {
@@ -245,9 +245,9 @@ func TestGeminiProviderField(t *testing.T) {
 	}
 }
 
-func TestGeminiModelOptionsIncludeDial(t *testing.T) {
-	a, home := geminiHome(t)
-	writeGeminiFiles(t, home, geminiSettings, geminiEnv)
+func TestAgm_GeminiModelOptionsIncludeDial(t *testing.T) {
+	a, home := agm_geminiHome(t)
+	agm_writeGeminiFiles(t, home, agm_geminiSettings, agm_geminiEnv)
 	found := false
 	for _, o := range a.Field("model").Options(nil) {
 		if o.Value == "fake/m1" {
