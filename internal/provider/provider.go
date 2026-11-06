@@ -103,10 +103,20 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
+
+	// Affinity is whether a conversation stays on the key or account that
+	// answered it last, so the vendor's prompt cache can hit: "" automatic,
+	// "session" the whole conversation, "turn" only within one user turn,
+	// "off" never (see groups.go).
+	Affinity string `json:"affinity,omitempty"`
 }
 
 type file struct {
 	Providers []Provider `json:"providers"`
+	// Groups are the routing groups the user made or changed, and
+	// HiddenGroups the automatic ones the user removed (see groups.go).
+	Groups       []Group  `json:"groups,omitempty"`
+	HiddenGroups []string `json:"hiddenGroups,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -162,6 +172,7 @@ func All() []Provider {
 			continue
 		}
 		a.Models, a.Fallback, a.Routing = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing
+		a.Affinity = picks[a.ID].Affinity
 		out = append(out, a)
 	}
 	return out
@@ -220,13 +231,16 @@ func Save(p Provider) error {
 	if p.ID == "magpie" {
 		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
+	if p.ID == "group" {
+		return errors.New(`"group" is how routing groups are named (group/<id>); pick another id`)
+	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity}
 	} else {
 		if slices.Contains(accountIDs, p.ID) && !stored(p.ID) {
 			// taken, it would hide that subscription once signed in
@@ -329,6 +343,9 @@ func normalize(p Provider) Provider {
 	p.Fallback = cleanList(p.Fallback)
 	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
 		p.Routing = ""
+	}
+	if !validAffinity(p.Affinity) {
+		p.Affinity = ""
 	}
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
