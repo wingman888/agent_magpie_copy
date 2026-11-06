@@ -19,7 +19,13 @@ const manyModels = 24
 // when fetched (see Fetch), else the models.dev catalog for the vendor.
 func (p Provider) Available() []catalog.Model {
 	if p.Account != nil {
-		return p.accountModels()
+		switch p.Account.Agent {
+		case "copilot":
+			return copilotAvailable()
+		case "codex":
+			return catalog.Builtin("codex")
+		}
+		return nil
 	}
 	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
@@ -43,7 +49,14 @@ func (p Provider) Fetched() (time.Time, bool) {
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	if p.Account != nil {
-		return p.fetchAccount(ctx)
+		switch p.Account.Agent {
+		case "copilot":
+			return RefreshModels(ctx, p)
+		case "codex":
+			// Codex's list is built in; asking the backend would tell us nothing new.
+			return catalog.Builtin("codex"), nil
+		}
+		return nil, errorf("%s has no model list to fetch", p.Name)
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
@@ -72,7 +85,8 @@ func (p Provider) Exposed() []catalog.Model {
 		for _, id := range ids {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
-			} else {
+			} else if p.Account == nil {
+				// an account only offers what its agent lists; a stale pick drops out
 				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
 			}
 		}
@@ -80,6 +94,10 @@ func (p Provider) Exposed() []catalog.Model {
 	}
 	if len(p.Models) > 0 {
 		return pick(p.Models)
+	}
+	if p.Account != nil {
+		// an account with no picks exposes everything its agent offers
+		return avail
 	}
 	if pr := Preset(p.Preset); pr != nil && len(pr.Defaults) > 0 {
 		if _, fetched := p.Fetched(); !fetched {
