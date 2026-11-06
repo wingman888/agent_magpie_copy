@@ -5,18 +5,20 @@
 package gui
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -36,14 +38,8 @@ type Windows interface {
 	Quit()
 	// OpenURL hands a link to the system browser.
 	OpenURL(url string)
-	// OpenFolder shows a folder in the system file manager.
-	OpenFolder(path string)
 	// FitPanel asks for the panel to be tall enough for its content.
-	FitPanel(height int, g Glide)
-	// TintPanel paints the panel's tint behind the page, where the system
-	// keeps up with the panel's size; false when it can't, for the page to
-	// go on painting it itself.
-	TintPanel(rgba [4]uint8, ms int) bool
+	FitPanel(height int)
 }
 
 type fieldJSON struct {
@@ -79,17 +75,12 @@ type settingsJSON struct {
 	settings.Settings
 	Version string `json:"version"`
 	Dir     string `json:"dir"`     // where magpie keeps its files, as shown
+	Path    string `json:"path"`    // the same, absolute, for opening it
 	Gateway string `json:"gateway"` // the local endpoint
-	// the proxy vendor requests go through now, and where it came from:
-	// settings, environment, system, off or none
-	ProxyNow    string `json:"proxyNow"`
-	ProxySource string `json:"proxySource"`
 }
 
 func settingsState() settingsJSON {
-	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Gateway: gateway.URL()}
-	s.ProxyNow, s.ProxySource = netproxy.Describe()
-	return s
+	return settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Path: settings.Dir(), Gateway: gateway.URL()}
 }
 
 // Handler serves the embedded UI and the JSON API.
@@ -174,28 +165,38 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		writeJSON(rw, state())
 	})
 	providerRoutes(mux, w, gw)
-	importRoutes(mux)
 	usageRoutes(mux)
 	updateRoutes(mux, w)
 	mux.HandleFunc("GET /api/settings", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, settingsState())
 	})
 	mux.HandleFunc("POST /api/settings", func(rw http.ResponseWriter, r *http.Request) {
-		var in settings.Settings
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
 			fail(rw, err)
 			return
+		}
+		var in settings.Settings
+		if err := json.NewDecoder(bytes.NewReader(body)).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		// tray and proxy came later than the rest: a post that does not name
+		// them keeps the saved values instead of resetting them
+		var named map[string]json.RawMessage
+		_ = json.Unmarshal(body, &named)
+		saved := settings.Load()
+		if _, ok := named["tray"]; !ok {
+			in.Tray = saved.Tray
+		}
+		if _, ok := named["proxy"]; !ok {
+			in.Proxy = saved.Proxy
 		}
 		if err := settings.Save(in); err != nil {
 			fail(rw, err)
 			return
 		}
 		writeJSON(rw, settingsState())
-	})
-	// the config folder only: the page names no path, so it can't open others
-	mux.HandleFunc("POST /api/settings/reveal", func(rw http.ResponseWriter, r *http.Request) {
-		w.OpenFolder(settings.Dir())
-		rw.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /api/window/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		switch r.PathValue("action") {
@@ -206,13 +207,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		case "quit":
 			w.Quit()
 		case "fit":
-			if h, g, ok := parseFit(r.URL.Query()); ok {
-				w.FitPanel(h, g)
-			}
-		case "tint":
-			if c, ms, ok := parseTint(r.URL.Query()); ok && w.TintPanel(c, ms) {
-				writeJSON(rw, map[string]bool{"ok": true})
-				return
+			if h, err := strconv.Atoi(r.URL.Query().Get("h")); err == nil {
+				w.FitPanel(h)
 			}
 		}
 		rw.WriteHeader(http.StatusNoContent)

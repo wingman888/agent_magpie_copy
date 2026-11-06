@@ -9,6 +9,7 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,10 +21,11 @@ import (
 type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
-	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
-	// Proxy for magpie's own requests to vendors: "" follows the
-	// environment and then the system, "direct" uses none, anything else
-	// is the proxy (http://, https:// or socks5://; host:port means http).
+	// Tray says what a click on the tray icon does: panel | window.
+	Tray string `json:"tray,omitempty"`
+	// Proxy is the proxy magpie uses for its own outside requests: "" follows
+	// the environment and the system, "direct" bypasses proxies, anything else
+	// is a proxy URL (http, https, socks5, socks5h; a bare host:port is http).
 	Proxy string `json:"proxy,omitempty"`
 }
 
@@ -67,17 +69,11 @@ func Save(s Settings) error {
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
 	}
-	s.Proxy = strings.TrimSpace(s.Proxy)
-	if s.Proxy != "" && s.Proxy != "direct" {
-		raw := s.Proxy
-		if !strings.Contains(raw, "://") {
-			raw = "http://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
-			return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", s.Proxy)
-		}
+	proxy, err := NormalProxy(s.Proxy)
+	if err != nil {
+		return err
 	}
+	s.Proxy = proxy
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
 	}
@@ -99,4 +95,34 @@ func (s Settings) normal() Settings {
 		s.Tray = "panel"
 	}
 	return s
+}
+
+// NormalProxy validates a proxy setting and returns its canonical form: ""
+// (follow the environment and system), "direct", or a proxy URL. A bare
+// host:port becomes http://host:port.
+func NormalProxy(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" || p == "direct" {
+		return p, nil
+	}
+	if !strings.Contains(p, "://") {
+		host, port, err := net.SplitHostPort(p)
+		if err != nil || host == "" || port == "" {
+			return "", fmt.Errorf("proxy must be direct, a URL (http, https, socks5, socks5h), or host:port, not %q", p)
+		}
+		return "http://" + net.JoinHostPort(host, port), nil
+	}
+	u, err := url.Parse(p)
+	if err != nil {
+		return "", fmt.Errorf("proxy %q: %v", p, err)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", fmt.Errorf("proxy scheme must be http, https, socks5 or socks5h, not %q", u.Scheme)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return "", fmt.Errorf("proxy %q has no host", p)
+	}
+	return p, nil
 }

@@ -65,3 +65,48 @@ func TestMigrate(t *testing.T) {
 		t.Fatal("existing folder overwritten")
 	}
 }
+
+func TestTrayAndProxy(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, tray := range []string{"panel", "window", ""} {
+		if err := Save(Settings{Tray: tray}); err != nil {
+			t.Errorf("tray %q rejected: %v", tray, err)
+		}
+	}
+	if err := Save(Settings{Tray: "menu"}); err == nil {
+		t.Error("tray menu accepted")
+	}
+	if Save(Settings{Tray: "window"}) != nil || Load().Tray != "window" {
+		t.Error("tray window not kept")
+	}
+	if Save(Settings{}) != nil || Load().Tray != "panel" {
+		t.Error("empty tray should load as panel")
+	}
+
+	for _, p := range []string{"", "direct", "socks5://127.0.0.1:1080", "socks5h://h:1080", "https://proxy.example:8443", "http://10.0.0.2:3128"} {
+		if err := Save(Settings{Proxy: p}); err != nil {
+			t.Errorf("proxy %q rejected: %v", p, err)
+		}
+	}
+	if err := Save(Settings{Proxy: "127.0.0.1:7890"}); err != nil {
+		t.Fatalf("bare host:port rejected: %v", err)
+	}
+	if got := Load().Proxy; got != "http://127.0.0.1:7890" {
+		t.Errorf("bare host:port saved as %q, want http://127.0.0.1:7890", got)
+	}
+	for _, p := range []string{"ftp://x", "x", "socks4://h:1", "http://", "127.0.0.1:"} {
+		if err := Save(Settings{Proxy: p}); err == nil {
+			t.Errorf("proxy %q accepted", p)
+		}
+	}
+	// a rejected save leaves the file as it was
+	if err := Save(Settings{Proxy: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(Settings{Proxy: "ftp://x"}); err == nil {
+		t.Fatal("ftp accepted")
+	}
+	if Load().Proxy != "direct" {
+		t.Errorf("failed save changed the file: %+v", Load())
+	}
+}
