@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,13 +17,13 @@ import (
 )
 
 // fakeJWT is an unsigned token whose payload is claims; dial reads payloads only.
-func fakeJWT(claims map[string]any) string {
+func acc_fakeJWT(claims map[string]any) string {
 	b, _ := json.Marshal(claims)
 	return "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
 // setupHome points every credential and config location at a fresh directory.
-func setupHome(t *testing.T) string {
+func acc_setupHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -32,7 +33,7 @@ func setupHome(t *testing.T) string {
 	return home
 }
 
-func writeFixture(t *testing.T, path string, v any) {
+func acc_writeFixture(t *testing.T, path string, v any) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -46,7 +47,7 @@ func writeFixture(t *testing.T, path string, v any) {
 	}
 }
 
-func readFile(t *testing.T, path string) string {
+func acc_readFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -57,11 +58,11 @@ func readFile(t *testing.T, path string) string {
 
 // signInCodex writes a ChatGPT login for ada@example.com, with an access token
 // that expires at exp. It returns the access token.
-func signInCodex(t *testing.T, home string, exp time.Time) string {
+func acc_signInCodex(t *testing.T, home string, exp time.Time) string {
 	t.Helper()
-	access := fakeJWT(map[string]any{"exp": exp.Unix(), "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"}})
-	id := fakeJWT(map[string]any{"email": "ada@example.com"})
-	writeFixture(t, filepath.Join(home, ".codex", "auth.json"), map[string]any{
+	access := acc_fakeJWT(map[string]any{"exp": exp.Unix(), "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"}})
+	id := acc_fakeJWT(map[string]any{"email": "ada@example.com"})
+	acc_writeFixture(t, filepath.Join(home, ".codex", "auth.json"), map[string]any{
 		"auth_mode":      "chatgpt",
 		"OPENAI_API_KEY": nil,
 		"other":          "keep me",
@@ -71,22 +72,22 @@ func signInCodex(t *testing.T, home string, exp time.Time) string {
 }
 
 // signInCopilot writes a GitHub login into the editor's apps.json.
-func signInCopilot(t *testing.T, home string) {
+func acc_signInCopilot(t *testing.T, home string) {
 	t.Helper()
-	writeFixture(t, filepath.Join(home, "xdg-config", "github-copilot", "apps.json"), map[string]any{
+	acc_writeFixture(t, filepath.Join(home, "xdg-config", "github-copilot", "apps.json"), map[string]any{
 		"github.com:Iv1.abc": map[string]any{"user": "octo", "oauth_token": "gho_test"},
 	})
 }
 
 // setString swaps a package variable for the test's lifetime.
-func setString(t *testing.T, dst *string, v string) {
+func acc_setString(t *testing.T, dst *string, v string) {
 	t.Helper()
 	old := *dst
 	*dst = v
 	t.Cleanup(func() { *dst = old })
 }
 
-func ids(ms []catalog.Model) []string {
+func acc_ids(ms []catalog.Model) []string {
 	out := make([]string, 0, len(ms))
 	for _, m := range ms {
 		out = append(out, m.ID)
@@ -94,7 +95,7 @@ func ids(ms []catalog.Model) []string {
 	return out
 }
 
-func sameIDs(a, b []string) bool {
+func acc_sameIDs(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -106,9 +107,9 @@ func sameIDs(a, b []string) bool {
 	return true
 }
 
-func TestCodexSignedInIsOffered(t *testing.T) {
-	home := setupHome(t)
-	signInCodex(t, home, time.Now().Add(time.Hour))
+func TestAcc_CodexSignedInIsOffered(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCodex(t, home, time.Now().Add(time.Hour))
 	p, err := Find("codex")
 	if err != nil {
 		t.Fatal(err)
@@ -127,9 +128,9 @@ func TestCodexSignedInIsOffered(t *testing.T) {
 	}
 }
 
-func TestAPIKeyLoginIsNotAnAccount(t *testing.T) {
-	home := setupHome(t)
-	writeFixture(t, filepath.Join(home, ".codex", "auth.json"), map[string]any{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-test"})
+func TestAcc_APIKeyLoginIsNotAnAccount(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_writeFixture(t, filepath.Join(home, ".codex", "auth.json"), map[string]any{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-test"})
 	if _, err := Find("codex"); err == nil {
 		t.Fatal("an API-key Codex login was offered as an account")
 	}
@@ -140,9 +141,9 @@ func TestAPIKeyLoginIsNotAnAccount(t *testing.T) {
 	}
 }
 
-func TestClaudeIsDetectedNeverOffered(t *testing.T) {
-	home := setupHome(t)
-	writeFixture(t, filepath.Join(home, "claude", ".credentials.json"), map[string]any{"claudeAiOauth": map[string]any{"accessToken": "sk-ant-secret"}})
+func TestAcc_ClaudeIsDetectedNeverOffered(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_writeFixture(t, filepath.Join(home, "claude", ".credentials.json"), map[string]any{"claudeAiOauth": map[string]any{"accessToken": "sk-ant-secret"}})
 	for _, p := range All() {
 		if p.ID == "claude" {
 			t.Fatal("claude appears in All()")
@@ -169,10 +170,10 @@ func TestClaudeIsDetectedNeverOffered(t *testing.T) {
 	}
 }
 
-func TestCodexRequestShape(t *testing.T) {
-	home := setupHome(t)
-	access := signInCodex(t, home, time.Now().Add(time.Hour))
-	setString(t, &CodexBase, "https://codex.test/backend-api/codex")
+func TestAcc_CodexRequestShape(t *testing.T) {
+	home := acc_setupHome(t)
+	access := acc_signInCodex(t, home, time.Now().Add(time.Hour))
+	acc_setString(t, &CodexBase, "https://codex.test/backend-api/codex")
 	p, err := Find("codex")
 	if err != nil {
 		t.Fatal(err)
@@ -215,10 +216,10 @@ func TestCodexRequestShape(t *testing.T) {
 	}
 }
 
-func TestCodexRenewsAndKeepsOtherFields(t *testing.T) {
-	home := setupHome(t)
-	signInCodex(t, home, time.Now().Add(time.Minute)) // inside the 5-minute window
-	newAccess := fakeJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+func TestAcc_CodexRenewsAndKeepsOtherFields(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCodex(t, home, time.Now().Add(time.Minute)) // inside the 5-minute window
+	newAccess := acc_fakeJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]string
 		json.NewDecoder(r.Body).Decode(&req)
@@ -229,7 +230,7 @@ func TestCodexRenewsAndKeepsOtherFields(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]string{"access_token": newAccess, "refresh_token": "rt-new"})
 	}))
 	t.Cleanup(srv.Close)
-	setString(t, &codexRefreshURL, srv.URL)
+	acc_setString(t, &codexRefreshURL, srv.URL)
 
 	p, err := Find("codex")
 	if err != nil {
@@ -243,7 +244,7 @@ func TestCodexRenewsAndKeepsOtherFields(t *testing.T) {
 		t.Fatalf("request did not use the renewed token: %v", up.Header)
 	}
 	var file map[string]any
-	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(home, ".codex", "auth.json"))), &file); err != nil {
+	if err := json.Unmarshal([]byte(acc_readFile(t, filepath.Join(home, ".codex", "auth.json"))), &file); err != nil {
 		t.Fatal(err)
 	}
 	tokens, _ := file["tokens"].(map[string]any)
@@ -253,14 +254,14 @@ func TestCodexRenewsAndKeepsOtherFields(t *testing.T) {
 	}
 }
 
-func TestCodexRenewalRefusedSaysLoggedOut(t *testing.T) {
-	home := setupHome(t)
-	signInCodex(t, home, time.Now().Add(time.Minute))
+func TestAcc_CodexRenewalRefusedSaysLoggedOut(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCodex(t, home, time.Now().Add(time.Minute))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 	}))
 	t.Cleanup(srv.Close)
-	setString(t, &codexRefreshURL, srv.URL)
+	acc_setString(t, &codexRefreshURL, srv.URL)
 	p, err := Find("codex")
 	if err != nil {
 		t.Fatal(err)
@@ -271,13 +272,13 @@ func TestCodexRenewalRefusedSaysLoggedOut(t *testing.T) {
 	}
 }
 
-func TestSaveWritesOnlyModelPicks(t *testing.T) {
-	home := setupHome(t)
-	signInCodex(t, home, time.Now().Add(time.Hour))
+func TestAcc_SaveWritesOnlyModelPicks(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCodex(t, home, time.Now().Add(time.Hour))
 	if err := Save(Provider{ID: "codex", Name: "Codex", Key: "secret-key", Models: []string{"gpt-5.5", "gpt-5.5"}}); err != nil {
 		t.Fatal(err)
 	}
-	raw := readFile(t, Path())
+	raw := acc_readFile(t, Path())
 	for _, bad := range []string{"secret-key", `"name"`, `"key"`, `"chat"`} {
 		if strings.Contains(raw, bad) {
 			t.Fatalf("config holds %s: %s", bad, raw)
@@ -287,14 +288,14 @@ func TestSaveWritesOnlyModelPicks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ids(p.Exposed()); !sameIDs(got, []string{"gpt-5.5"}) {
+	if got := acc_ids(p.Exposed()); !acc_sameIDs(got, []string{"gpt-5.5"}) {
 		t.Fatalf("exposed = %v", got)
 	}
 }
 
-func TestDeleteOnlyClearsPicks(t *testing.T) {
-	home := setupHome(t)
-	signInCodex(t, home, time.Now().Add(time.Hour))
+func TestAcc_DeleteOnlyClearsPicks(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCodex(t, home, time.Now().Add(time.Hour))
 	if err := Save(Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -311,14 +312,14 @@ func TestDeleteOnlyClearsPicks(t *testing.T) {
 	if n := len(p.Exposed()); n < 2 {
 		t.Fatalf("after clearing picks, exposed = %d models, want the built-in list", n)
 	}
-	if !strings.Contains(readFile(t, filepath.Join(home, ".codex", "auth.json")), "rt-old") {
+	if !strings.Contains(acc_readFile(t, filepath.Join(home, ".codex", "auth.json")), "rt-old") {
 		t.Fatal("Delete touched the Codex login")
 	}
 }
 
-func TestLoggingOutHidesTheAccount(t *testing.T) {
-	home := setupHome(t)
-	signInCodex(t, home, time.Now().Add(time.Hour))
+func TestAcc_LoggingOutHidesTheAccount(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCodex(t, home, time.Now().Add(time.Hour))
 	if err := Save(Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +339,7 @@ func TestLoggingOutHidesTheAccount(t *testing.T) {
 	}
 }
 
-func TestCopilotModelFilter(t *testing.T) {
+func TestAcc_CopilotModelFilter(t *testing.T) {
 	body := `{"data":[
 	 {"id":"gpt-4.1","name":"GPT-4.1","model_picker_enabled":true,"capabilities":{"type":"chat"},"policy":{"state":"enabled"}},
 	 {"id":"auto","name":"Auto","model_picker_enabled":true,"capabilities":{"type":"chat"}},
@@ -352,14 +353,14 @@ func TestCopilotModelFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ids(ms); !sameIDs(got, []string{"gpt-4.1", "gpt-5-mini"}) {
+	if got := acc_ids(ms); !acc_sameIDs(got, []string{"gpt-4.1", "gpt-5-mini"}) {
 		t.Fatalf("chat models = %v", got)
 	}
 }
 
-func TestCopilotBuiltinListBeforeRefresh(t *testing.T) {
-	home := setupHome(t)
-	signInCopilot(t, home)
+func TestAcc_CopilotBuiltinListBeforeRefresh(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCopilot(t, home)
 	p, err := Find("copilot")
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +368,7 @@ func TestCopilotBuiltinListBeforeRefresh(t *testing.T) {
 	if p.Login != "octo" || !p.Ready() {
 		t.Fatalf("copilot provider = %+v", *p)
 	}
-	got := ids(p.Available())
+	got := acc_ids(p.Available())
 	if len(got) == 0 {
 		t.Fatal("built-in Copilot list is empty")
 	}
@@ -381,9 +382,9 @@ func TestCopilotBuiltinListBeforeRefresh(t *testing.T) {
 	}
 }
 
-func TestCopilotRefreshAndRoute(t *testing.T) {
-	home := setupHome(t)
-	signInCopilot(t, home)
+func TestAcc_CopilotRefreshAndRoute(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCopilot(t, home)
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -401,7 +402,7 @@ func TestCopilotRefreshAndRoute(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	setString(t, &copilotTokenURL, srv.URL+"/copilot_internal/v2/token")
+	acc_setString(t, &copilotTokenURL, srv.URL+"/copilot_internal/v2/token")
 
 	p, err := Find("copilot")
 	if err != nil {
@@ -411,15 +412,15 @@ func TestCopilotRefreshAndRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameIDs(ids(ms), []string{"gpt-4.1"}) {
-		t.Fatalf("fetched = %v", ids(ms))
+	if !acc_sameIDs(acc_ids(ms), []string{"gpt-4.1"}) {
+		t.Fatalf("fetched = %v", acc_ids(ms))
 	}
 	if _, ok := p.Fetched(); !ok {
 		t.Fatal("the refreshed list was not kept")
 	}
 	p, _ = Find("copilot")
-	if !sameIDs(ids(p.Available()), []string{"gpt-4.1"}) {
-		t.Fatalf("available after refresh = %v", ids(p.Available()))
+	if !acc_sameIDs(acc_ids(p.Available()), []string{"gpt-4.1"}) {
+		t.Fatalf("available after refresh = %v", acc_ids(p.Available()))
 	}
 
 	up, err := Route(context.Background(), *p, Chat, "/chat/completions",
@@ -445,14 +446,14 @@ func TestCopilotRefreshAndRoute(t *testing.T) {
 	}
 }
 
-func TestCopilotExpiredSessionSaysSignIn(t *testing.T) {
-	home := setupHome(t)
-	signInCopilot(t, home)
+func TestAcc_CopilotExpiredSessionSaysSignIn(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCopilot(t, home)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 	}))
 	t.Cleanup(srv.Close)
-	setString(t, &copilotTokenURL, srv.URL)
+	acc_setString(t, &copilotTokenURL, srv.URL)
 	p, err := Find("copilot")
 	if err != nil {
 		t.Fatal(err)
@@ -463,7 +464,7 @@ func TestCopilotExpiredSessionSaysSignIn(t *testing.T) {
 	}
 }
 
-func TestCollectResponseFromStream(t *testing.T) {
+func TestAcc_CollectResponseFromStream(t *testing.T) {
 	raw := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r0\"}}\n\n" +
 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n" +
 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[]}}\n\n"
@@ -480,9 +481,91 @@ func TestCollectResponseFromStream(t *testing.T) {
 	}
 }
 
-func TestCollectResponseFailure(t *testing.T) {
+func TestAcc_CollectResponseFailure(t *testing.T) {
 	raw := "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"model overloaded\"}}}\n\n"
 	if _, err := CollectResponse([]byte(raw)); err == nil || !strings.Contains(err.Error(), "model overloaded") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Picks of an account provider are kept only while the account offers them.
+func TestApk_AccountPicksFollowWhatTheAccountOffers(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCopilot(t, home)
+	if err := catalog.SaveLive(copilotID, copilotDefaultAPI, []catalog.Model{
+		{ID: "gpt-4.1", Name: "GPT-4.1", Provider: "github-copilot"},
+		{ID: "gpt-5-mini", Name: "GPT-5 mini", Provider: "github-copilot"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(Provider{ID: "copilot", Models: []string{"auto", "gpt-4.1", "retired-model"}}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Find("copilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := acc_ids(p.Exposed()); !acc_sameIDs(got, []string{"gpt-4.1"}) {
+		t.Fatalf("exposed = %v, want only the picks the account offers", got)
+	}
+	for _, e := range Catalog() {
+		if e.ID == "copilot/auto" || e.ID == "copilot/retired-model" {
+			t.Fatalf("%s reached the catalog", e.ID)
+		}
+	}
+}
+
+// An account provider with no picks exposes everything it offers, uncapped.
+func TestApk_AccountWithoutPicksIsNotCapped(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCopilot(t, home)
+	var many []catalog.Model
+	for i := 0; i < manyModels+6; i++ {
+		id := fmt.Sprintf("model-%02d", i)
+		many = append(many, catalog.Model{ID: id, Name: id, Provider: "github-copilot"})
+	}
+	if err := catalog.SaveLive(copilotID, copilotDefaultAPI, many); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Find("copilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(p.Exposed()); n != len(many) {
+		t.Fatalf("exposed %d of %d models, want all of them", n, len(many))
+	}
+}
+
+// The built-in Copilot list never offers auto, even when picked.
+func TestApk_CopilotAutoNeverExposed(t *testing.T) {
+	home := acc_setupHome(t)
+	acc_signInCopilot(t, home)
+	if err := Save(Provider{ID: "copilot", Models: []string{"auto"}}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Find("copilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range p.Exposed() {
+		if m.ID == "auto" {
+			t.Fatal("auto exposed")
+		}
+	}
+}
+
+// A refused Copilot session says how to sign in again; Codex is not checked this way.
+func TestApk_RefusedCopilotSessionSaysSignIn(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		msg, ok := SessionRefused(Provider{ID: copilotID, Agent: copilotID}, status)
+		if !ok || !strings.Contains(msg, "请重新登录 Copilot") {
+			t.Fatalf("status %d: got %q, %v", status, msg, ok)
+		}
+	}
+	if _, ok := SessionRefused(Provider{ID: codexID, Agent: codexID}, http.StatusUnauthorized); ok {
+		t.Fatal("codex refusal should not be mapped")
+	}
+	if _, ok := SessionRefused(Provider{ID: copilotID, Agent: copilotID}, http.StatusOK); ok {
+		t.Fatal("200 should not be mapped")
 	}
 }

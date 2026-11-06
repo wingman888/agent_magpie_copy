@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,7 +12,7 @@ import (
 )
 
 // gpost sends a request through a server's handler.
-func gpost(t *testing.T, s *Server, path, body string) (int, string) {
+func gwg_gpost(t *testing.T, s *Server, path, body string) (int, string) {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
@@ -18,7 +20,7 @@ func gpost(t *testing.T, s *Server, path, body string) (int, string) {
 }
 
 // geminiParts is the parts of the first candidate of a Gemini reply or chunk.
-func geminiParts(t *testing.T, v map[string]any) []map[string]any {
+func gwg_geminiParts(t *testing.T, v map[string]any) []map[string]any {
 	t.Helper()
 	cs, _ := v["candidates"].([]any)
 	if len(cs) == 0 {
@@ -32,16 +34,16 @@ func geminiParts(t *testing.T, v map[string]any) []map[string]any {
 	return out
 }
 
-func TestGeminiGenerateContentText(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestGwg_GeminiGenerateContentText(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
 		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"Hello"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{"content":" world"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}}`,
 		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
+	gwg_setup(t, provider.Chat, f)
 	srv := New()
-	code, body := gpost(t, srv, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	code, body := gwg_gpost(t, srv, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
@@ -52,7 +54,7 @@ func TestGeminiGenerateContentText(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatal(err)
 	}
-	ps := geminiParts(t, out)
+	ps := gwg_geminiParts(t, out)
 	if len(ps) != 1 || ps[0]["text"] != "Hello world" {
 		t.Errorf("parts: %v", ps)
 	}
@@ -72,8 +74,8 @@ func TestGeminiGenerateContentText(t *testing.T) {
 	}
 }
 
-func TestGeminiStreamOrder(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestGwg_GeminiStreamOrder(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
 		`data: {"id":"c1","model":"m1","choices":[{"delta":{"reasoning_content":"hmm"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{"content":"Hi"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":""}}]}}]}`,
@@ -82,23 +84,23 @@ func TestGeminiStreamOrder(t *testing.T) {
 		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":6,"completion_tokens_details":{"reasoning_tokens":3}}}`,
 		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
-	code, body := gpost(t, New(), "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	evs := events(body)
+	evs := gwg_events(body)
 	if len(evs) != 3 {
 		t.Fatalf("%d events: %s", len(evs), body)
 	}
-	if p := geminiParts(t, evs[0])[0]; p["thought"] != true || p["text"] != "hmm" {
+	if p := gwg_geminiParts(t, evs[0])[0]; p["thought"] != true || p["text"] != "hmm" {
 		t.Errorf("first part: %v", p)
 	}
-	if p := geminiParts(t, evs[1])[0]; p["text"] != "Hi" || p["thought"] != nil {
+	if p := gwg_geminiParts(t, evs[1])[0]; p["text"] != "Hi" || p["thought"] != nil {
 		t.Errorf("second part: %v", p)
 	}
 	last := evs[2]
-	fc := geminiParts(t, last)[0]["functionCall"].(map[string]any)
+	fc := gwg_geminiParts(t, last)[0]["functionCall"].(map[string]any)
 	if fc["id"] != "call_1" || fc["name"] != "read" || fc["args"].(map[string]any)["path"] != "a.go" {
 		t.Errorf("function call: %v", fc)
 	}
@@ -112,20 +114,20 @@ func TestGeminiStreamOrder(t *testing.T) {
 	}
 
 	// without alt=sse the chunks come back as one JSON array
-	_, arr := gpost(t, New(), "/v1beta/models/fake/m1:streamGenerateContent", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
+	_, arr := gwg_gpost(t, New(), "/v1beta/models/fake/m1:streamGenerateContent", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
 	var chunks []map[string]any
 	if err := json.Unmarshal([]byte(arr), &chunks); err != nil || len(chunks) != 3 {
 		t.Errorf("array form: %v %s", err, arr)
 	}
 }
 
-func TestGeminiRequestTranslation(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestGwg_GeminiRequestTranslation(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
 		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"ok"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
-	code, body := gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{
 	  "systemInstruction":{"parts":[{"text":"be brief"}]},
 	  "contents":[
 	    {"role":"user","parts":[{"text":"read a.go"}]},
@@ -181,13 +183,13 @@ func TestGeminiRequestTranslation(t *testing.T) {
 	}
 }
 
-func TestGeminiJSONMode(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestGwg_GeminiJSONMode(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
 		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"{}"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
-	code, body := gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"is it?"}]}],
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"is it?"}]}],
 	  "generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"OBJECT","properties":{"ok":{"type":"BOOLEAN"}}}}}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
@@ -204,39 +206,39 @@ func TestGeminiJSONMode(t *testing.T) {
 	}
 }
 
-func TestGeminiUnknownModel(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
-	code, body := gpost(t, New(), "/v1beta/models/nope:generateContent", `{"contents":[]}`)
+func TestGwg_GeminiUnknownModel(t *testing.T) {
+	gwg_setup(t, provider.Chat, &gwg_fake{t: t})
+	code, body := gwg_gpost(t, New(), "/v1beta/models/nope:generateContent", `{"contents":[]}`)
 	if code != 404 || !strings.HasPrefix(body, `{"error":{"code":404,`) || !strings.Contains(body, `"status":"NOT_FOUND"`) {
 		t.Errorf("%d %s", code, body)
 	}
 }
 
-func TestGeminiUpstreamError(t *testing.T) {
-	f := &fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance","type":"x"}}`}
-	setup(t, provider.Chat, f)
-	code, body := gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{"contents":[]}`)
+func TestGwg_GeminiUpstreamError(t *testing.T) {
+	f := &gwg_fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance","type":"x"}}`}
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{"contents":[]}`)
 	if code != 402 || !strings.Contains(body, "Fake: Insufficient Balance") || !strings.Contains(body, `"code":402`) {
 		t.Errorf("%d %s", code, body)
 	}
 }
 
-func TestGeminiCountTokens(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
+func TestGwg_GeminiCountTokens(t *testing.T) {
+	gwg_setup(t, provider.Chat, &gwg_fake{t: t})
 	srv := New()
 	// 26 characters of text, a quarter of that
-	code, body := gpost(t, srv, "/v1beta/models/fake/m1:countTokens", `{"contents":[{"role":"user","parts":[{"text":"abcdefghijklmnopqrstuvwxyz"}]}]}`)
+	code, body := gwg_gpost(t, srv, "/v1beta/models/fake/m1:countTokens", `{"contents":[{"role":"user","parts":[{"text":"abcdefghijklmnopqrstuvwxyz"}]}]}`)
 	if code != 200 || body != `{"totalTokens":6}` {
 		t.Errorf("direct: %d %s", code, body)
 	}
-	code, body = gpost(t, srv, "/v1beta/models/fake/m1:countTokens", `{"generateContentRequest":{"contents":[{"role":"user","parts":[{"text":"abcdefghijklmnopqrstuvwxyz"}]}]}}`)
+	code, body = gwg_gpost(t, srv, "/v1beta/models/fake/m1:countTokens", `{"generateContentRequest":{"contents":[{"role":"user","parts":[{"text":"abcdefghijklmnopqrstuvwxyz"}]}]}}`)
 	if code != 200 || body != `{"totalTokens":6}` {
 		t.Errorf("wrapped: %d %s", code, body)
 	}
 }
 
-func TestGeminiModelsList(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
+func TestGwg_GeminiModelsList(t *testing.T) {
+	gwg_setup(t, provider.Chat, &gwg_fake{t: t})
 	rec := httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1beta/models", nil))
 	body := rec.Body.String()
@@ -245,7 +247,7 @@ func TestGeminiModelsList(t *testing.T) {
 	}
 }
 
-func TestGeminiRootMentionsAPI(t *testing.T) {
+func TestGwg_GeminiRootMentionsAPI(t *testing.T) {
 	rec := httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if !strings.Contains(rec.Body.String(), "v1beta") {
@@ -258,25 +260,25 @@ func TestGeminiRootMentionsAPI(t *testing.T) {
 	}
 }
 
-func TestGeminiStreamWithoutContentType(t *testing.T) {
-	f := &fake{t: t, noType: true, reply: sse(
+func TestGwg_GeminiStreamWithoutContentType(t *testing.T) {
+	f := &gwg_fake{t: t, noType: true, reply: gwg_sse(
 		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"Hi"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}`,
 		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
-	code, body := gpost(t, New(), "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	evs := events(body)
+	evs := gwg_events(body)
 	if len(evs) != 1 {
 		t.Fatalf("%d events: %s", len(evs), body)
 	}
 	// the encoder holds a part until the stream ends, so the one event
 	// carries the text together with the finish reason and usage
 	last := evs[0]
-	if p := geminiParts(t, last)[0]; p["text"] != "Hi" {
+	if p := gwg_geminiParts(t, last)[0]; p["text"] != "Hi" {
 		t.Errorf("part: %v", p)
 	}
 	cand := last["candidates"].([]any)[0].(map[string]any)
@@ -288,13 +290,13 @@ func TestGeminiStreamWithoutContentType(t *testing.T) {
 	}
 }
 
-func TestGeminiAnyMultipleNamesFiltersTools(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestGwg_GeminiAnyMultipleNamesFiltersTools(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
 		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"ok"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
-	code, body := gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{
 	  "contents":[{"role":"user","parts":[{"text":"do it"}]}],
 	  "tools":[{"functionDeclarations":[
 	    {"name":"read","parameters":{"type":"OBJECT","properties":{}}},
@@ -322,4 +324,79 @@ func TestGeminiAnyMultipleNamesFiltersTools(t *testing.T) {
 	if up["tool_choice"] != "required" {
 		t.Errorf("tool_choice: %v", up["tool_choice"])
 	}
+}
+
+// fake is an upstream that records what it got and replies with a script.
+type gwg_fake struct {
+	t     *testing.T
+	got   []byte
+	path  string
+	head  http.Header
+	reply string // SSE body
+	ctype string
+	code  int
+	// noType sends the reply without any Content-Type header
+	noType bool
+}
+
+func (f *gwg_fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.got, _ = io.ReadAll(r.Body)
+	f.path, f.head = r.URL.Path, r.Header
+	ct := f.ctype
+	if ct == "" {
+		ct = "text/event-stream"
+	}
+	if f.noType {
+		// a nil entry keeps net/http from sniffing a type into the header
+		w.Header()["Content-Type"] = nil
+	} else {
+		w.Header().Set("Content-Type", ct)
+	}
+	if f.code != 0 {
+		w.WriteHeader(f.code)
+	}
+	io.WriteString(w, f.reply)
+}
+
+func gwg_sse(lines ...string) string {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l + "\n\n")
+	}
+	return b.String()
+}
+
+// setup points dial's provider file at a temp dir and adds one provider
+// speaking only the given protocol, backed by the fake.
+func gwg_setup(t *testing.T, proto provider.Protocol, f *gwg_fake) *httptest.Server {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	up := httptest.NewServer(f)
+	t.Cleanup(up.Close)
+	p := provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}}
+	switch proto {
+	case provider.Chat:
+		p.Chat = up.URL + "/v1"
+	case provider.Responses:
+		p.Responses = up.URL + "/v1"
+	case provider.Anthropic:
+		p.Anthropic = up.URL
+	}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	return up
+}
+
+func gwg_events(body string) []map[string]any {
+	var out []map[string]any
+	readSSE(strings.NewReader(body), func(_, data string) error {
+		var m map[string]any
+		if json.Unmarshal([]byte(data), &m) == nil {
+			out = append(out, m)
+		}
+		return nil
+	})
+	return out
 }
