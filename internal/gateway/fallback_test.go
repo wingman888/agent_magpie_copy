@@ -1,285 +1,302 @@
 package gateway
 
 import (
-	"context"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// scripted is an upstream that records the model of each request and replies
-// with a fixed error, a fixed success, or a stream cut off after one chunk.
-type scripted struct {
-	mu     sync.Mutex
-	status int    // 0 means a success reply
-	errMsg string // error body, as the upstream sends it
-	ok     string // text of a success reply
-	stream bool   // send one SSE chunk, then abort the connection
-	calls  []string
-}
-
-func (s *scripted) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	s.mu.Lock()
-	s.calls = append(s.calls, modelOf(body))
-	status, errMsg, ok, stream := s.status, s.errMsg, s.ok, s.stream
-	s.mu.Unlock()
-	if stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"m1","choices":[{"index":0,"delta":{"content":"from A"},"finish_reason":null}]}`+"\n\n")
-		w.(http.Flusher).Flush()
-		panic(http.ErrAbortHandler)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	if status != 0 {
-		w.WriteHeader(status)
-		io.WriteString(w, errMsg)
-		return
-	}
-	fmt.Fprintf(w, `{"id":"c1","object":"chat.completion","model":%q,"choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
-		modelOf(body), ok)
-}
-
-func (s *scripted) seen() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.calls...)
-}
-
-// fallbackSetup saves provider a (model m1, with the given fallback list)
-// backed by upstream a, and provider b (model m2) backed by upstream b.
-func fallbackSetup(t *testing.T, a, b *scripted, fallback ...string) {
-	t.Helper()
-	fallbackSetupNamed(t, "A", a, b, fallback...)
-}
-
-// fallbackSetupNamed is fallbackSetup with a chosen display name for provider a.
-func fallbackSetupNamed(t *testing.T, name string, a, b *scripted, fallback ...string) {
+// twoProviders: "plan" (the one agents pick) falls back to "spare".
+func twoProviders(t *testing.T, plan, spare *fake) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	ua := httptest.NewServer(a)
-	t.Cleanup(ua.Close)
-	ub := httptest.NewServer(b)
-	t.Cleanup(ub.Close)
-	if err := provider.Save(provider.Provider{ID: "a", Name: name, Key: "k", Models: []string{"m1"},
-		Chat: ua.URL + "/v1", Fallback: fallback}); err != nil {
-		t.Fatal(err)
-	}
-	if err := provider.Save(provider.Provider{ID: "b", Name: "B", Key: "k", Models: []string{"m2"},
-		Chat: ub.URL + "/v1"}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// chatVia sends a Chat Completions request for model through srv.
-func chatVia(t *testing.T, srv *Server, model string, stream bool) *httptest.ResponseRecorder {
-	t.Helper()
-	body := fmt.Sprintf(`{"model":%q,"stream":%v,"messages":[{"role":"user","content":"hi"}]}`, model, stream)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
-	return rec
-}
-
-func TestFallbackSwitchesOnRetryableErrors(t *testing.T) {
-	cases := []struct {
-		name   string
-		status int
-		msg    string
-		hidden string // text of the failed reply, which must not reach the client
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.Unlock()
+	for _, x := range []struct {
+		p provider.Provider
+		f *fake
 	}{
-		{"429", 429, `{"error":{"message":"rate limited"}}`, "rate limited"},
-		{"402", 402, `{"error":{"message":"payment needed"}}`, "payment needed"},
-		{"529", 529, `{"error":{"message":"overloaded"}}`, "overloaded"},
-		{"500", 500, `{"error":{"message":"boom"}}`, "boom"},
-		{"400 quota words", 400, `{"error":{"message":"额度已用完"}}`, "额度已用完"},
-		{"403 insufficient balance", 403, `{"error":{"message":"Insufficient balance"}}`, "Insufficient balance"},
+		{provider.Provider{ID: "plan", Name: "Plan", Key: "k", Models: []string{"m1"}, Fallback: []string{"spare/m2", "nowhere/x"}}, plan},
+		{provider.Provider{ID: "spare", Name: "Spare", Key: "k", Models: []string{"m2"}}, spare},
+	} {
+		up := httptest.NewServer(x.f)
+		t.Cleanup(up.Close)
+		x.p.Chat = up.URL + "/v1"
+		if err := provider.Save(x.p); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			a := &scripted{status: c.status, errMsg: c.msg}
-			b := &scripted{ok: "from B"}
-			fallbackSetup(t, a, b, "b/m2")
-			srv := New()
-			rec := chatVia(t, srv, "a/m1", false)
-			if rec.Code != 200 {
-				t.Fatalf("status %d, want 200: %s", rec.Code, rec.Body.String())
+}
+
+const chatReq = `{"model":"plan/m1","messages":[{"role":"user","content":"hi"}]}`
+
+func TestFallbackWhenOutOfQuota(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		msg  string
+	}{
+		{"rate limit", 429, "slow down"},
+		{"no balance", 402, "Insufficient Balance"},
+		{"overloaded", 529, "overloaded"},
+		{"quota as 403", 403, "您的套餐额度已用完"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := &fake{t: t, ctype: "application/json", code: tc.code, reply: `{"error":{"message":"` + tc.msg + `"}}`}
+			spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
+			twoProviders(t, plan, spare)
+			code, body := post(t, "/v1/chat/completions", chatReq)
+			if code != 200 || !strings.Contains(body, "from-spare") || strings.Contains(body, tc.msg) {
+				t.Fatalf("%d %s", code, body)
 			}
-			if !strings.Contains(rec.Body.String(), "from B") || strings.Contains(rec.Body.String(), c.hidden) {
-				t.Fatalf("client got %s", rec.Body.String())
-			}
-			if got := a.seen(); len(got) != 1 || got[0] != "m1" {
-				t.Fatalf("A saw %q", got)
-			}
-			if got := b.seen(); len(got) != 1 || got[0] != "m2" {
-				t.Fatalf("B saw %q, want its own model name m2", got)
-			}
-			last := srv.Recent()[0]
-			if last.Provider != "b" || !strings.HasPrefix(last.Fallback, "a: ") {
-				t.Fatalf("record provider %q fallback %q", last.Provider, last.Fallback)
+			if !bytes.Contains(spare.got, []byte(`"model":"m2"`)) {
+				t.Fatalf("spare got %s", spare.got)
 			}
 		})
 	}
 }
 
-// The retry decision reads the provider's own error body, not the gateway's
-// wrapping, so a quota error type with an unrelated message still switches.
-func TestFallbackJudgesProviderErrorBody(t *testing.T) {
-	a := &scripted{status: 400, errMsg: `{"error":{"type":"insufficient_quota","message":"request failed"}}`}
-	b := &scripted{ok: "from B"}
-	fallbackSetup(t, a, b, "b/m2")
-	rec := chatVia(t, New(), "a/m1", false)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "from B") {
-		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+func TestFallbackRestsTheFailedProvider(t *testing.T) {
+	plan := &fake{t: t, ctype: "application/json", code: 429, reply: `{"error":{"message":"rate limited"}}`}
+	spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
+	twoProviders(t, plan, spare)
+	s := New()
+	send := func() (int, string) {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatReq)))
+		return rec.Code, rec.Body.String()
 	}
-	if got := b.seen(); len(got) != 1 {
-		t.Fatalf("B saw %q, want one request", got)
+	send()
+	if c := s.Recent()[0]; c.Provider != "spare" || !strings.Contains(c.Fallback, "plan: ") {
+		t.Fatalf("recorded %+v", c)
 	}
-}
-
-// A provider name containing a quota word must not make a plain 400 switch.
-func TestFallbackIgnoresProviderNameInJudgement(t *testing.T) {
-	a := &scripted{status: 400, errMsg: `{"error":{"message":"messages: field required"}}`}
-	b := &scripted{ok: "from B"}
-	fallbackSetupNamed(t, "Credit Relay", a, b, "b/m2")
-	rec := chatVia(t, New(), "a/m1", false)
-	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "messages: field required") {
-		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+	plan.got = nil
+	if code, body := send(); code != 200 || !strings.Contains(body, "from-spare") {
+		t.Fatalf("%d %s", code, body)
 	}
-	if got := b.seen(); len(got) != 0 {
-		t.Fatalf("B was contacted for a plain 400: %q", got)
+	if plan.got != nil {
+		t.Fatal("a resting provider was tried first")
 	}
 }
 
-// A fallback entry must name the provider it resolves to. A bare model name
-// resolves to provider b, but must not send the request there.
-func TestFallbackSkipsEntryResolvingToOtherProvider(t *testing.T) {
-	a := &scripted{status: 429, errMsg: `{"error":{"message":"rate limited"}}`}
-	b := &scripted{ok: "from B"}
-	fallbackSetup(t, a, b, "m2")
-	rec := chatVia(t, New(), "a/m1", false)
-	if rec.Code != 429 {
-		t.Fatalf("got %d %s, want the 429 of A", rec.Code, rec.Body.String())
-	}
-	if got := b.seen(); len(got) != 0 {
-		t.Fatalf("B was contacted through a mismatched entry: %q", got)
+func TestNoFallbackForOtherErrors(t *testing.T) {
+	plan := &fake{t: t, ctype: "application/json", code: 400, reply: `{"error":{"message":"messages: field required"}}`}
+	spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
+	twoProviders(t, plan, spare)
+	code, body := post(t, "/v1/chat/completions", chatReq)
+	if code != 400 || !strings.Contains(body, "field required") || spare.got != nil {
+		t.Fatalf("%d %s (spare got %s)", code, body, spare.got)
 	}
 }
 
-func TestFallbackCooldownSkipsFailedProvider(t *testing.T) {
-	a := &scripted{status: 429, errMsg: `{"error":{"message":"rate limited"}}`}
-	b := &scripted{ok: "from B"}
-	fallbackSetup(t, a, b, "b/m2")
-	srv := New()
-	if rec := chatVia(t, srv, "a/m1", false); rec.Code != 200 {
-		t.Fatalf("first request: %d %s", rec.Code, rec.Body.String())
-	}
-	rec := chatVia(t, srv, "a/m1", false)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "from B") {
-		t.Fatalf("second request: %d %s", rec.Code, rec.Body.String())
-	}
-	if got := a.seen(); len(got) != 1 {
-		t.Fatalf("A was contacted again during cooldown: %q", got)
-	}
-	if got := b.seen(); len(got) != 2 {
-		t.Fatalf("B saw %q", got)
+func TestLastFallbackErrorReachesTheAgent(t *testing.T) {
+	plan := &fake{t: t, ctype: "application/json", code: 429, reply: `{"error":{"message":"plan limit"}}`}
+	spare := &fake{t: t, ctype: "application/json", code: 503, reply: `{"error":{"message":"spare down"}}`}
+	twoProviders(t, plan, spare)
+	code, body := post(t, "/v1/chat/completions", chatReq)
+	if code != 503 || !strings.Contains(body, "spare down") {
+		t.Fatalf("%d %s", code, body)
 	}
 }
 
-func TestFallbackDoesNotSwitchOnBadRequest(t *testing.T) {
-	a := &scripted{status: 400, errMsg: `{"error":{"message":"messages: field required"}}`}
-	b := &scripted{ok: "from B"}
-	fallbackSetup(t, a, b, "b/m2")
-	rec := chatVia(t, New(), "a/m1", false)
-	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "messages: field required") {
-		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+// byKey answers per API key: a key named in limited is out of quota.
+type byKey struct {
+	limited map[string]bool
+	seen    []string
+}
+
+func (b *byKey) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	b.seen = append(b.seen, key)
+	w.Header().Set("Content-Type", "application/json")
+	if b.limited[key] {
+		w.WriteHeader(429)
+		io.WriteString(w, `{"error":{"message":"rate limited"}}`)
+		return
 	}
-	if got := b.seen(); len(got) != 0 {
-		t.Fatalf("B was contacted: %q", got)
+	io.WriteString(w, `{"id":"from-`+key+`","choices":[]}`)
+}
+
+func TestSeveralKeysOnTakeOverFromEachOther(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.Unlock()
+	up := &byKey{limited: map[string]bool{"k-personal": true}}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	p := provider.Provider{ID: "plan", Name: "Plan", Chat: srv.URL + "/v1", Models: []string{"m1"},
+		Key: "k-personal", KeyName: "Personal",
+		Keys: []provider.KeyAccount{{Name: "Idle", Key: "k-idle", Off: true}, {Name: "Team", Key: "k-team"}}}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	send := func() string {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatReq)))
+		return rec.Body.String()
+	}
+	if body := send(); !strings.Contains(body, "from-k-team") {
+		t.Fatalf("body %s", body)
+	}
+	if c := s.Recent()[0]; c.Provider != "plan" || !strings.Contains(c.Fallback, "plan (Personal): ") {
+		t.Fatalf("recorded %+v", c)
+	}
+	// the limited key rests; the one that's off is never tried
+	up.seen = nil
+	if body := send(); !strings.Contains(body, "from-k-team") || strings.Join(up.seen, ",") != "k-team" {
+		t.Fatalf("body %s, tried %v", body, up.seen)
 	}
 }
 
-func TestFallbackAllFailReturnsLastError(t *testing.T) {
-	a := &scripted{status: 429, errMsg: `{"error":{"message":"slow down"}}`}
-	b := &scripted{status: 503, errMsg: `{"error":{"message":"upstream down"}}`}
-	fallbackSetup(t, a, b, "b/m2")
-	srv := New()
-	rec := chatVia(t, srv, "a/m1", false)
-	if rec.Code != 503 || !strings.Contains(rec.Body.String(), "upstream down") || strings.Contains(rec.Body.String(), "slow down") {
-		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+// Two ChatGPT accounts ticked: the one Codex is signed in to is out of
+// quota, so the request goes to the saved one, signed with its own tokens.
+func TestSubscriptionAccountsTakeOver(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.Unlock()
+	claims := func(m map[string]any) string {
+		b, _ := json.Marshal(m)
+		return "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
 	}
-	if last := srv.Recent()[0]; last.Provider != "b" || !strings.HasPrefix(last.Fallback, "a: ") {
-		t.Fatalf("record provider %q fallback %q", last.Provider, last.Fallback)
+	auth := func(email, acct string) map[string]any {
+		return map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{
+			"id_token":      claims(map[string]any{"email": email}),
+			"access_token":  claims(map[string]any{"exp": time.Now().Add(time.Hour).Unix(), "who": acct}),
+			"refresh_token": "r-" + acct, "account_id": acct}}
+	}
+	os.MkdirAll(filepath.Join(home, ".codex"), 0o755)
+	os.WriteFile(filepath.Join(home, ".codex", "auth.json"), mustJSON(auth("me@example.com", "acct-1")), 0o600)
+	os.MkdirAll(filepath.Dir(provider.Path()), 0o755)
+	os.WriteFile(filepath.Join(filepath.Dir(provider.Path()), "logins.json"), mustJSON([]map[string]any{
+		{"agent": "codex", "user": "spare@example.com", "on": true, "seen": time.Now(), "auth": auth("spare@example.com", "acct-2")},
+	}), 0o600)
+
+	var tried []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		tried = append(tried, r.Header.Get("chatgpt-account-id"))
+		if r.Header.Get("chatgpt-account-id") == "acct-1" {
+			w.WriteHeader(429)
+			io.WriteString(w, `{"error":{"message":"You've hit your usage limit"}}`)
+			return
+		}
+		io.WriteString(w, sse(
+			`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
+			`data: {"type":"response.output_text.delta","delta":"pong"}`,
+			`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`))
+	}))
+	defer up.Close()
+	old := provider.CodexBase
+	provider.CodexBase = up.URL + "/backend-api/codex"
+	defer func() { provider.CodexBase = old }()
+
+	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping"}`)
+	if code != 200 || !strings.Contains(body, "pong") {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	if strings.Join(tried, ",") != "acct-1,acct-2" {
+		t.Fatalf("tried %v", tried)
+	}
+	// the first sits out a minute; the next request goes straight on
+	tried = nil
+	post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"ping"}`)
+	if strings.Join(tried, ",") != "acct-2" {
+		t.Fatalf("second request tried %v", tried)
 	}
 }
 
-func TestFallbackSkipsUnknownAndRepeatedEntries(t *testing.T) {
-	a := &scripted{status: 429, errMsg: `{"error":{"message":"rate limited"}}`}
-	b := &scripted{ok: "from B"}
-	fallbackSetup(t, a, b, "nowhere/x", "b/m2", "b/m2", "a/m1")
-	rec := chatVia(t, New(), "a/m1", false)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "from B") {
-		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+// A relay that hands out one key for Anthropic and another for OpenAI:
+// each key is used on its own endpoint only, and the one that suits the
+// model goes first whatever the order.
+func TestKeysMadeForOneProtocol(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.Unlock()
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		key := r.Header.Get("x-api-key")
+		if key == "" {
+			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
+		seen = append(seen, r.URL.Path+" "+key)
+		if (r.URL.Path == "/v1/messages") != (key == "k-ant") {
+			w.WriteHeader(401)
+			io.WriteString(w, `{"error":{"message":"this key is for another protocol"}}`)
+			return
+		}
+		if bytes.Contains(b, []byte(`"stream":true`)) && r.URL.Path == "/v1/messages" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, sse(
+				`event: message_start`+"\n"+`data: {"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","model":"x","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`,
+				`event: content_block_start`+"\n"+`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`event: content_block_delta`+"\n"+`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+				`event: content_block_stop`+"\n"+`data: {"type":"content_block_stop","index":0}`,
+				`event: message_delta`+"\n"+`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
+				`event: message_stop`+"\n"+`data: {"type":"message_stop"}`))
+			return
+		}
+		if bytes.Contains(b, []byte(`"stream":true`)) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, sse(
+				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}`,
+				`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+				`data: [DONE]`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/messages" {
+			io.WriteString(w, `{"id":"m1","type":"message","role":"assistant","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+			return
+		}
+		io.WriteString(w, `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer srv.Close()
+	p := provider.Provider{ID: "relay", Name: "Relay", Chat: srv.URL + "/v1", Anthropic: srv.URL,
+		Key: "k-oai", KeyProtocol: provider.Chat, Models: []string{"claude-opus-4-8", "gpt-5.5"},
+		Keys: []provider.KeyAccount{{Key: "k-ant", Protocol: provider.Anthropic}}}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
 	}
-	if got := b.seen(); len(got) != 1 {
-		t.Fatalf("B saw %q, want exactly one request", got)
+	for _, x := range []struct{ path, body, want string }{
+		// Claude Code asking for Claude: the Anthropic key, relayed as-is
+		{"/v1/messages", `{"model":"relay/claude-opus-4-8","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
+		// an OpenAI agent asking for Claude: translated, to the Anthropic key
+		{"/v1/chat/completions", `{"model":"relay/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
+		// Claude Code asking for GPT: translated, to the OpenAI key
+		{"/v1/messages", `{"model":"relay/gpt-5.5","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
+	} {
+		seen = nil
+		code, body := post(t, x.path, x.body)
+		if code != 200 || len(seen) != 1 || seen[0] != x.want {
+			t.Fatalf("%s %s: %d %s, upstream saw %v", x.path, x.body, code, body, seen)
+		}
 	}
-}
-
-func TestFallbackNotAfterStreamStarted(t *testing.T) {
-	a := &scripted{stream: true}
-	b := &scripted{ok: "from B"}
-	fallbackSetup(t, a, b, "b/m2")
-	rec := chatVia(t, New(), "a/m1", true)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "from A") || strings.Contains(rec.Body.String(), "from B") {
-		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+	if got := modelFamily("openrouter/openai/o3-mini"); got != provider.Chat {
+		t.Errorf("o3: %q", got)
 	}
-	if got := b.seen(); len(got) != 0 {
-		t.Fatalf("B was contacted after A streamed: %q", got)
-	}
-}
-
-func TestFallbackStopsWhenClientGone(t *testing.T) {
-	a := &scripted{status: 429, errMsg: `{"error":{"message":"rate limited"}}`}
-	b := &scripted{ok: "from B"}
-	fallbackSetup(t, a, b, "b/m2")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	body := `{"model":"a/m1","messages":[{"role":"user","content":"hi"}]}`
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
-	New().Handler().ServeHTTP(rec, req)
-	if got := b.seen(); len(got) != 0 {
-		t.Fatalf("B was contacted for a gone client: %q", got)
-	}
-}
-
-func TestNoFallbackKeepsErrorAndRecord(t *testing.T) {
-	a := &scripted{status: 429, errMsg: `{"error":{"message":"rate limited"}}`}
-	b := &scripted{ok: "from B"}
-	fallbackSetup(t, a, b)
-	srv := New()
-	rec := chatVia(t, srv, "a/m1", false)
-	if rec.Code != 429 || !strings.Contains(rec.Body.String(), "rate limited") {
-		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
-	}
-	if got := b.seen(); len(got) != 0 {
-		t.Fatalf("B was contacted without a fallback: %q", got)
-	}
-	last := srv.Recent()[0]
-	if last.Fallback != "" {
-		t.Fatalf("fallback set without a switch: %q", last.Fallback)
-	}
-	raw, _ := json.Marshal(last)
-	if strings.Contains(string(raw), `"fallback"`) {
-		t.Fatalf("fallback key present in record: %s", raw)
+	if got := modelFamily("deepseek-chat"); got != "" {
+		t.Errorf("deepseek: %q", got)
 	}
 }
