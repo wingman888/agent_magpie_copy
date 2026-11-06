@@ -213,7 +213,7 @@ func TestGeminiJSONModeAndUsageLog(t *testing.T) {
 	if strings.Contains(string(f.got), "response_format") {
 		t.Errorf("upstream got a JSON-mode field: %s", f.got)
 	}
-	if !strings.Contains(string(f.got), "只输出符合以下 schema 的 JSON") || !strings.Contains(string(f.got), `"type":"object"`) {
+	if !strings.Contains(string(f.got), "只输出符合以下 schema 的 JSON") || !strings.Contains(string(f.got), `type\":\"object`) {
 		t.Errorf("JSON instruction missing: %s", f.got)
 	}
 	recs := usage.Load(time.Now().Add(-time.Hour))
