@@ -2,5 +2,5 @@
 
 package netproxy
 
-// loadSystem has nothing beyond the environment to say on Linux and others.
-func loadSystem() systemProxy { return systemProxy{} }
+// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
+func system() Proxy { return Proxy{} }
