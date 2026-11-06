@@ -107,6 +107,9 @@ func usesByProvider() map[string][]string {
 		}
 		v := a.Fields[0].Get()
 		v = strings.TrimPrefix(v, "magpie/")
+		if strings.HasPrefix(v, "group/") {
+			continue // a routing group, not a provider's model
+		}
 		if pid, _, ok := strings.Cut(v, "/"); ok {
 			out[pid] = append(out[pid], a.Name)
 		}
@@ -149,13 +152,28 @@ func models() error {
 		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
 	}
+	// routing groups first, in a section of their own, then the providers
+	slices.SortStableFunc(entries, func(a, b provider.Entry) int {
+		switch ga, gb := a.Group != "", b.Group != ""; {
+		case ga == gb:
+			return 0
+		case ga:
+			return -1
+		}
+		return 1
+	})
 	w := 0
 	for _, e := range entries {
 		w = max(w, len(e.ID))
 	}
-	last := ""
+	last, inGroups := "", false
 	for _, e := range entries {
-		if e.Provider.ID != last {
+		if e.Group != "" {
+			if !inGroups {
+				inGroups = true
+				fmt.Println(faint.Render("  Routing groups"))
+			}
+		} else if e.Provider.ID != last {
 			last = e.Provider.ID
 			fmt.Println(faint.Render("  " + e.Provider.Name))
 		}

@@ -10,76 +10,91 @@ import (
 	"time"
 )
 
-// The client version a Codex models list is asked with is the newest of:
-// the Codex CLI installed here (`codex --version`), the one Codex CLI's cache
-// records, and codexClientVersion built in. Newer models are listed only to
-// a newer client, so the newest of the three is the one to ask with.
-
-// codexVersionCommand runs `codex --version`. A variable, so a test can stand
-// in for the CLI.
-var codexVersionCommand = func(ctx context.Context) ([]byte, error) {
-	return exec.CommandContext(ctx, "codex", "--version").Output()
+// codexCLIVersion is the version of Codex CLI installed here, as
+// `codex --version` reports it, or "" when there is no Codex CLI. A variable
+// so tests can stand in for the machine.
+var codexCLIVersion = func() string {
+	path, err := exec.LookPath("codex")
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
-// codexVersionTTL is how long the version asked with is kept.
+// codexVersionTTL is how long the client version asked for is kept.
 const codexVersionTTL = 10 * time.Minute
 
-var codexVersionCache struct {
+var codexVersionAskedCache struct {
 	sync.Mutex
 	v  string
 	at time.Time
 }
 
-var versionNumRe = regexp.MustCompile(`\d+(\.\d+)*`)
-
-// codexRequestVersion is the client version to ask the models list with,
-// kept for codexVersionTTL.
-func codexRequestVersion(ctx context.Context) string {
-	c := &codexVersionCache
+// codexVersionAsked is the client version the Codex models list is asked
+// with: the newest of Codex CLI's installed version, the one Codex CLI's
+// cache records, and the built-in default. Kept for a few minutes.
+func codexVersionAsked() string {
+	c := &codexVersionAskedCache
 	c.Lock()
 	defer c.Unlock()
 	if c.v != "" && time.Since(c.at) < codexVersionTTL {
 		return c.v
 	}
-	v := codexCacheVersion()
-	if cli := codexCLIVersion(ctx); cli != "" {
-		v = newerVersion(v, cli)
+	v := latestVersion(codexCLIVersion(), codexCacheVersion(), codexClientVersion)
+	if v == "" {
+		v = codexClientVersion
 	}
 	c.v, c.at = v, time.Now()
 	return v
 }
 
-// codexCLIVersion is the version of the Codex CLI installed, "" when there is
-// no CLI or its version can't be read.
-func codexCLIVersion(ctx context.Context) string {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	out, err := codexVersionCommand(ctx)
-	if err != nil {
-		return ""
-	}
-	return versionNumRe.FindString(string(out))
-}
+// versionNumber finds the dotted version number in s, such as 0.155.1 in
+// "codex-cli 0.155.1"; "" when there is none.
+var versionNumber = regexp.MustCompile(`\d+(?:\.\d+)+`)
 
-// newerVersion is the later of two dotted version numbers; a string that
-// isn't one is older than any that is.
-func newerVersion(a, b string) string {
-	if compareVersions(b, a) > 0 {
-		return b
-	}
-	return a
-}
-
-// compareVersions is -1, 0 or 1 as a is before, the same as, or after b.
-func compareVersions(a, b string) int {
-	pa, pb := versionFields(a), versionFields(b)
-	for i := 0; i < max(len(pa), len(pb)); i++ {
-		var x, y int
-		if i < len(pa) {
-			x = pa[i]
+// latestVersion is the newest of the versions given, compared number by
+// number (0.155.1 is newer than 0.154.0), as the number it was written as.
+// Empty or unreadable ones are skipped; "" when none is readable.
+func latestVersion(vs ...string) string {
+	best, bestParts := "", []int(nil)
+	for _, v := range vs {
+		num := versionNumber.FindString(v)
+		if num == "" {
+			continue
 		}
-		if i < len(pb) {
-			y = pb[i]
+		parts := versionParts(num)
+		if bestParts == nil || compareVersions(parts, bestParts) > 0 {
+			best, bestParts = num, parts
+		}
+	}
+	return best
+}
+
+func versionParts(num string) []int {
+	var out []int
+	for _, p := range strings.Split(num, ".") {
+		n, _ := strconv.Atoi(p)
+		out = append(out, n)
+	}
+	return out
+}
+
+// compareVersions is -1, 0 or 1 as a is older than, the same as, or newer
+// than b; a missing number counts as 0.
+func compareVersions(a, b []int) int {
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var x, y int
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
 		}
 		if x != y {
 			if x < y {
@@ -89,18 +104,4 @@ func compareVersions(a, b string) int {
 		}
 	}
 	return 0
-}
-
-// versionFields reads the numbers of a dotted version, "0.155.1" as 0, 155, 1.
-func versionFields(s string) []int {
-	m := versionNumRe.FindString(strings.TrimSpace(s))
-	if m == "" {
-		return nil
-	}
-	var out []int
-	for _, f := range strings.Split(m, ".") {
-		n, _ := strconv.Atoi(f)
-		out = append(out, n)
-	}
-	return out
 }
