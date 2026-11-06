@@ -100,7 +100,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra http
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOneWith(ctx, u, key, anthropic, extra)
+		ms, err := fetchOneWithL3x(ctx, u, key, anthropic, extra)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -117,7 +117,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra http
 	return nil, lastErr
 }
 
-func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra http.Header) ([]Model, error) {
+func fetchOneWithL3x(ctx context.Context, url, key string, anthropic bool, extra http.Header) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

@@ -4,16 +4,16 @@ import (
 	"os/exec"
 )
 
-const internetSettings = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+const internetSettingsL3x = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
-func readOS() sysProxy {
+func readOSL3x() sysProxyL3x {
 	query := func(name string) string {
-		out, err := exec.Command("reg", "query", internetSettings, "/v", name).Output()
+		out, err := exec.Command("reg", "query", internetSettingsL3x, "/v", name).Output()
 		if err != nil {
 			return ""
 		}
-		_, v, _ := regValue(string(out), name)
+		_, v, _ := regValueL3x(string(out), name)
 		return v
 	}
-	return parseWindows(query("ProxyEnable"), query("ProxyServer"), query("ProxyOverride"))
+	return parseWindowsL3x(query("ProxyEnable"), query("ProxyServer"), query("ProxyOverride"))
 }

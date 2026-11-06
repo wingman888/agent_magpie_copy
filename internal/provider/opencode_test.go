@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestIsOpenCode(t *testing.T) {
+func TestIsOpenCodeL3x(t *testing.T) {
 	cases := []struct {
 		p    Provider
 		want bool
@@ -27,7 +27,7 @@ func TestIsOpenCode(t *testing.T) {
 	}
 }
 
-func TestOpenCodeSessionAgentHeaderWins(t *testing.T) {
+func TestOpenCodeSessionAgentHeaderWinsL3x(t *testing.T) {
 	order := []string{"x-opencode-session", "x-session-affinity", "x-session-id", "session_id", "session-id", "x-claude-code-session-id"}
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 	h := http.Header{}
@@ -48,7 +48,7 @@ func TestOpenCodeSessionAgentHeaderWins(t *testing.T) {
 	}
 }
 
-func TestOpenCodeSessionFallbackStablePerConversation(t *testing.T) {
+func TestOpenCodeSessionFallbackStablePerConversationL3x(t *testing.T) {
 	turn1 := []byte(`{"model":"m","messages":[{"role":"system","content":"s"},{"role":"user","content":"fix the bug"}]}`)
 	turn2 := []byte(`{"model":"m","messages":[{"role":"system","content":"s"},{"role":"user","content":"fix the bug"},{"role":"assistant","content":"ok"},{"role":"user","content":"thanks"}]}`)
 	other := []byte(`{"model":"m","messages":[{"role":"user","content":"write a poem"}]}`)
@@ -64,7 +64,7 @@ func TestOpenCodeSessionFallbackStablePerConversation(t *testing.T) {
 	}
 }
 
-func TestOpenCodeSessionResponsesAndContentParts(t *testing.T) {
+func TestOpenCodeSessionResponsesAndContentPartsL3x(t *testing.T) {
 	str := []byte(`{"model":"m","input":"first question"}`)
 	arr := []byte(`{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"first question"}]},{"role":"assistant","content":"x"},{"role":"user","content":"second"}]}`)
 	parts := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"first question"}]}]}`)
@@ -81,7 +81,7 @@ func TestOpenCodeSessionResponsesAndContentParts(t *testing.T) {
 	}
 }
 
-func TestOpenCodePresets(t *testing.T) {
+func TestOpenCodePresetsL3x(t *testing.T) {
 	cases := map[string]PresetDef{
 		"opencode-go": {Name: "OpenCode Go", Chat: "https://opencode.ai/zen/go/v1", Responses: "https://opencode.ai/zen/go/v1",
 			Anthropic: "https://opencode.ai/zen/go", Website: "https://opencode.ai/docs/go", KeysURL: "https://opencode.ai/auth"},

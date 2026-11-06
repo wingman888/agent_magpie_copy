@@ -90,11 +90,11 @@ func run(args []string) error {
 	// The OS hands a magpie:// link over as the first argument; it is handled
 	// like `magpie import <link>` (the CLI confirmation flow).
 	if strings.HasPrefix(strings.ToLower(args[0]), "magpie:") {
-		return importCmd(args)
+		return importCmdL3x(args)
 	}
 	switch args[0] {
 	case "import":
-		return importCmd(args[1:])
+		return importCmdL3x(args[1:])
 	case "tui":
 		return tui.Run()
 	case "app", "gui":

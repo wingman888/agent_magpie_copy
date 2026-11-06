@@ -19,12 +19,12 @@ import (
 // A tier follows the main model until it is set on its own; from then on its
 // env var keeps that model when the main model changes.
 
-// claudeTier is one model slot Claude Code reads.
-type claudeTier struct{ key, env string }
+// claudeTierL3x is one model slot Claude Code reads.
+type claudeTierL3x struct{ key, env string }
 
-// claudeTiers, in the order magpie lists them. haiku also serves as Claude
+// claudeTiersL3x, in the order magpie lists them. haiku also serves as Claude
 // Code's small, fast model.
-var claudeTiers = []claudeTier{
+var claudeTiersL3x = []claudeTierL3x{
 	{"opus", "ANTHROPIC_DEFAULT_OPUS_MODEL"},
 	{"sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL"},
 	{"haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL"},
@@ -57,7 +57,7 @@ func claude(home string) *Agent {
 
 	// pinned is the model a tier was set to on its own, "" while it follows
 	// the main model.
-	pinned := func(t claudeTier) string {
+	pinned := func(t claudeTierL3x) string {
 		if !routed() {
 			return ""
 		}
@@ -71,10 +71,10 @@ func claude(home string) *Agent {
 	// writeTiers stores every tier for the main model. pick gives each tier's
 	// own model, "" to follow main. The one subagent model is set only while
 	// every tier is main; otherwise subagents follow their own tier.
-	writeTiers := func(main string, pick func(claudeTier) string) error {
+	writeTiers := func(main string, pick func(claudeTierL3x) string) error {
 		var kvs []edit.KV
 		small, uniform := main, true
-		for _, t := range claudeTiers {
+		for _, t := range claudeTiersL3x {
 			v := pick(t)
 			if v == "" {
 				v = main
@@ -141,7 +141,7 @@ func claude(home string) *Agent {
 			}
 			picks := map[string]string{}
 			if wasRouted {
-				for _, t := range claudeTiers {
+				for _, t := range claudeTiersL3x {
 					if cur := env(t.env); cur != old {
 						picks[t.key] = cur
 					}
@@ -155,7 +155,7 @@ func claude(home string) *Agent {
 			); err != nil {
 				return err
 			}
-			return writeTiers(v, func(t claudeTier) string { return picks[t.key] })
+			return writeTiers(v, func(t claudeTierL3x) string { return picks[t.key] })
 		}
 		if routed() {
 			keys := make([]string, len(claudeEnv))
@@ -184,7 +184,7 @@ func claude(home string) *Agent {
 
 	// tier is one slot: `magpie claude haiku <provider/model>` pins it, and
 	// `magpie claude haiku ""` puts it back to following the main model.
-	tier := func(t claudeTier) Field {
+	tier := func(t claudeTierL3x) Field {
 		return Field{
 			Key: t.key, Label: t.key, Named: true,
 			Get: func() string { return pinned(t) },
@@ -199,7 +199,7 @@ func claude(home string) *Agent {
 				if v != "" && !isMagpie(v) {
 					return fmt.Errorf("%q is not a model magpie provides; use provider/model", v)
 				}
-				return writeTiers(main, func(x claudeTier) string {
+				return writeTiers(main, func(x claudeTierL3x) string {
 					if x.key == t.key {
 						return v
 					}
@@ -211,7 +211,7 @@ func claude(home string) *Agent {
 	}
 
 	fields := []Field{{Key: "model", Label: "model", Get: get, Set: set, Options: modelOptions}}
-	for _, t := range claudeTiers {
+	for _, t := range claudeTiersL3x {
 		fields = append(fields, tier(t))
 	}
 	return &Agent{

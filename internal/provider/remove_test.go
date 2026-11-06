@@ -9,29 +9,29 @@ import (
 	"time"
 )
 
-// resetClaudeStatus forgets the cached `claude auth status` answer.
-func resetClaudeStatus(t *testing.T) {
+// resetClaudeStatusL3x forgets the cached `claude auth status` answer.
+func resetClaudeStatusL3x(t *testing.T) {
 	t.Helper()
 	claudeStatusMu.Lock()
 	claudeStatusAt = time.Time{}
-	claudeStatusOut = false
+	claudeStatusOutL3x = false
 	claudeStatusUser, claudeStatusPlan = "", ""
 	claudeStatusMu.Unlock()
 }
 
-// stubClaudeStatus stands in for `claude auth status --json` for one test.
-func stubClaudeStatus(t *testing.T, out string, err error) {
+// stubClaudeStatusL3x stands in for `claude auth status --json` for one test.
+func stubClaudeStatusL3x(t *testing.T, out string, err error) {
 	t.Helper()
-	old := claudeAuthStatus
-	claudeAuthStatus = func() ([]byte, error) { return []byte(out), err }
-	resetClaudeStatus(t)
+	old := claudeAuthStatusL3x
+	claudeAuthStatusL3x = func() ([]byte, error) { return []byte(out), err }
+	resetClaudeStatusL3x(t)
 	t.Cleanup(func() {
-		claudeAuthStatus = old
-		resetClaudeStatus(t)
+		claudeAuthStatusL3x = old
+		resetClaudeStatusL3x(t)
 	})
 }
 
-func TestRemoveHidesAccountAndAddBringsItBack(t *testing.T) {
+func TestRemoveHidesAccountAndAddBringsItBackL3x(t *testing.T) {
 	home := signIn(t)
 
 	if err := Save(Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
@@ -79,7 +79,7 @@ func TestRemoveHidesAccountAndAddBringsItBack(t *testing.T) {
 	}
 }
 
-func TestRemoveOfPlainProviderDeletes(t *testing.T) {
+func TestRemoveOfPlainProviderDeletesL3x(t *testing.T) {
 	signIn(t)
 	if err := Save(Provider{ID: "relay", Name: "Relay", Chat: "https://relay.example.com/v1", Key: "k"}); err != nil {
 		t.Fatal(err)
@@ -95,46 +95,46 @@ func TestRemoveOfPlainProviderDeletes(t *testing.T) {
 	}
 }
 
-func TestClaudeSignedOutIsNotProvider(t *testing.T) {
+func TestClaudeSignedOutIsNotProviderL3x(t *testing.T) {
 	home := claudeHome(t)
 	claudeSignIn(t, home, time.Now().Add(time.Hour))
 
-	stubClaudeStatus(t, `{"loggedIn": true, "email": "me@example.com", "subscriptionType": "max"}`, nil)
+	stubClaudeStatusL3x(t, `{"loggedIn": true, "email": "me@example.com", "subscriptionType": "max"}`, nil)
 	if p, ok := find(All(), "claude"); !ok || p.Account == nil || p.Account.User != "me@example.com" {
 		t.Fatalf("signed in: %+v %v", p, ok)
 	}
 
 	// signed out, though the credentials are still on disk: not a provider,
 	// even when the command exits non-zero
-	stubClaudeStatus(t, `{"loggedIn": false}`, errors.New("exit status 1"))
+	stubClaudeStatusL3x(t, `{"loggedIn": false}`, errors.New("exit status 1"))
 	if _, ok := find(All(), "claude"); ok {
 		t.Fatal("signed-out Claude Code listed")
 	}
 
 	// an answer magpie cannot read leaves the judgment to the credentials
-	stubClaudeStatus(t, `not json`, nil)
+	stubClaudeStatusL3x(t, `not json`, nil)
 	if _, ok := find(All(), "claude"); !ok {
 		t.Fatal("unreadable status dropped a signed-in Claude Code")
 	}
 
 	// so does a missing command
-	stubClaudeStatus(t, "", errors.New("claude is not installed"))
+	stubClaudeStatusL3x(t, "", errors.New("claude is not installed"))
 	if _, ok := find(All(), "claude"); !ok {
 		t.Fatal("a missing claude command dropped a signed-in Claude Code")
 	}
 
 	// signed in again, seen on the next check
-	stubClaudeStatus(t, `{"loggedIn": false}`, errors.New("exit status 1"))
+	stubClaudeStatusL3x(t, `{"loggedIn": false}`, errors.New("exit status 1"))
 	if _, ok := find(All(), "claude"); ok {
 		t.Fatal("signed-out Claude Code listed again")
 	}
-	stubClaudeStatus(t, `{"loggedIn": true, "email": "me@example.com"}`, nil)
+	stubClaudeStatusL3x(t, `{"loggedIn": true, "email": "me@example.com"}`, nil)
 	if _, ok := find(All(), "claude"); !ok {
 		t.Fatal("signed back in, but not listed")
 	}
 }
 
-func TestParseClaudeAuthStatus(t *testing.T) {
+func TestParseClaudeAuthStatusL3x(t *testing.T) {
 	cases := []struct {
 		out      string
 		ok, look bool
@@ -146,7 +146,7 @@ func TestParseClaudeAuthStatus(t *testing.T) {
 		{``, false, false},
 	}
 	for _, c := range cases {
-		st, ok := parseClaudeAuthStatus([]byte(c.out))
+		st, ok := parseClaudeAuthStatusL3x([]byte(c.out))
 		if ok != c.ok || (ok && *st.LoggedIn != c.look) {
 			t.Fatalf("%q: ok=%v", c.out, ok)
 		}

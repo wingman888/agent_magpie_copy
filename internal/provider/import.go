@@ -19,14 +19,14 @@ import (
 // result and asks the user first.
 
 const (
-	maxImportModels = 200
-	maxImportKey    = 4096
-	maxImportName   = 80
+	maxImportModelsL3x = 200
+	maxImportKeyL3x    = 4096
+	maxImportNameL3x   = 80
 )
 
-// errBadLink is the only error text a bad link produces. Parser errors
+// errBadLinkL3x is the only error text a bad link produces. Parser errors
 // quote the link, and the link carries the key, so none of them are passed on.
-var errBadLink = errors.New("not a valid magpie import link")
+var errBadLinkL3x = errors.New("not a valid magpie import link")
 
 // ParseImport parses a magpie://import link into a provider. Any violation
 // rejects the whole link: nothing is partly imported, and nothing is saved.
@@ -35,7 +35,7 @@ func ParseImport(link string) (Provider, error) {
 	link = strings.TrimSpace(link)
 	u, err := url.Parse(link)
 	if err != nil {
-		return Provider{}, errBadLink
+		return Provider{}, errBadLinkL3x
 	}
 	if u.Scheme != "magpie" { // url.Parse lowercases the scheme
 		return Provider{}, errors.New("not a magpie link")
@@ -57,7 +57,7 @@ func ParseImport(link string) (Provider, error) {
 
 	vals, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
-		return Provider{}, errBadLink
+		return Provider{}, errBadLinkL3x
 	}
 	params := map[string]string{}
 	for k, v := range vals {
@@ -110,7 +110,7 @@ func ParseImport(link string) (Provider, error) {
 		if strings.IndexFunc(name, unicode.IsControl) >= 0 {
 			return Provider{}, errors.New("name contains a control character")
 		}
-		p.Name = truncateRunes(name, maxImportName)
+		p.Name = truncateRunesL3x(name, maxImportNameL3x)
 	} else if p.Preset == "" {
 		return Provider{}, errors.New("a link without a preset needs name=…")
 	}
@@ -120,7 +120,7 @@ func ParseImport(link string) (Provider, error) {
 		dst   *string
 	}{{"chat", &p.Chat}, {"responses", &p.Responses}, {"anthropic", &p.Anthropic}} {
 		if raw := get(b.param); raw != "" {
-			v, err := importBase(raw)
+			v, err := importBaseL3x(raw)
 			if err != nil {
 				return Provider{}, fmt.Errorf("%s: %w", b.param, err)
 			}
@@ -154,8 +154,8 @@ func ParseImport(link string) (Provider, error) {
 	}
 
 	models := cleanList(strings.Split(params["models"], ","))
-	if len(models) > maxImportModels {
-		return Provider{}, fmt.Errorf("at most %d models", maxImportModels)
+	if len(models) > maxImportModelsL3x {
+		return Provider{}, fmt.Errorf("at most %d models", maxImportModelsL3x)
 	}
 	p.Models = models
 
@@ -164,8 +164,8 @@ func ParseImport(link string) (Provider, error) {
 			return Provider{}, errors.New("key contains a control character")
 		}
 		key = strings.TrimSpace(key)
-		if utf8.RuneCountInString(key) > maxImportKey {
-			return Provider{}, fmt.Errorf("key is longer than %d characters", maxImportKey)
+		if utf8.RuneCountInString(key) > maxImportKeyL3x {
+			return Provider{}, fmt.Errorf("key is longer than %d characters", maxImportKeyL3x)
 		}
 		p.Key = key
 	}
@@ -173,17 +173,17 @@ func ParseImport(link string) (Provider, error) {
 	if c := get("catalog"); c != "" {
 		p.Catalog = c
 	}
-	if w := httpsLink(get("website")); w != "" {
+	if w := httpsLinkL3x(get("website")); w != "" {
 		p.Website = w
 	}
-	if k := httpsLink(get("keys")); k != "" {
+	if k := httpsLinkL3x(get("keys")); k != "" {
 		p.KeysURL = k
 	}
 	return p, nil
 }
 
-// importBase checks one base URL and returns it without a trailing slash.
-func importBase(raw string) (string, error) {
+// importBaseL3x checks one base URL and returns it without a trailing slash.
+func importBaseL3x(raw string) (string, error) {
 	raw = strings.TrimRight(raw, "/")
 	if strings.ContainsAny(raw, "?#") {
 		return "", errors.New("must not contain a query or fragment")
@@ -196,7 +196,7 @@ func importBase(raw string) (string, error) {
 	switch scheme {
 	case "https":
 	case "http":
-		if !localHost(u.Hostname()) {
+		if !localHostL3x(u.Hostname()) {
 			return "", errors.New("http is only allowed for local or private hosts")
 		}
 	default:
@@ -211,9 +211,9 @@ func importBase(raw string) (string, error) {
 	return scheme + "://" + u.Host + u.EscapedPath(), nil
 }
 
-// localHost is true for hosts an http base may use: this machine, loopback,
+// localHostL3x is true for hosts an http base may use: this machine, loopback,
 // private networks, localhost and .local names.
-func localHost(host string) bool {
+func localHostL3x(host string) bool {
 	h := strings.ToLower(host)
 	if h == "localhost" || strings.HasSuffix(h, ".local") {
 		return true
@@ -222,8 +222,8 @@ func localHost(host string) bool {
 	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified())
 }
 
-// httpsLink returns a website or keys page when it is an https URL, else "".
-func httpsLink(raw string) string {
+// httpsLinkL3x returns a website or keys page when it is an https URL, else "".
+func httpsLinkL3x(raw string) string {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
 	if err != nil || strings.ToLower(u.Scheme) != "https" || u.Host == "" {
@@ -232,7 +232,7 @@ func httpsLink(raw string) string {
 	return raw
 }
 
-func truncateRunes(s string, n int) string {
+func truncateRunesL3x(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}

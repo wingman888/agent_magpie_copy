@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// parseScutil reads the output of `scutil --proxy` (macOS).
-func parseScutil(out string) sysProxy {
-	var sp sysProxy
+// parseScutilL3x reads the output of `scutil --proxy` (macOS).
+func parseScutilL3x(out string) sysProxyL3x {
+	var sp sysProxyL3x
 	kv := map[string]string{}
 	inExceptions := false
 	sc := bufio.NewScanner(strings.NewReader(out))
@@ -46,27 +46,27 @@ func parseScutil(out string) sysProxy {
 	return sp
 }
 
-var regLine = regexp.MustCompile(`^(REG_\w+)\s+(.*)$`)
+var regLineL3x = regexp.MustCompile(`^(REG_\w+)\s+(.*)$`)
 
-// regValue finds `name` in the output of `reg query` and returns its type and data.
-func regValue(out, name string) (string, string, bool) {
+// regValueL3x finds `name` in the output of `reg query` and returns its type and data.
+func regValueL3x(out, name string) (string, string, bool) {
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 2 || !strings.EqualFold(f[0], name) {
 			continue
 		}
 		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), f[0]))
-		if m := regLine.FindStringSubmatch(rest); m != nil {
+		if m := regLineL3x.FindStringSubmatch(rest); m != nil {
 			return m[1], strings.TrimSpace(m[2]), true
 		}
 	}
 	return "", "", false
 }
 
-// parseWindows turns the Internet Options registry values into a sysProxy.
+// parseWindowsL3x turns the Internet Options registry values into a sysProxyL3x.
 // enable is ProxyEnable (DWORD), server is ProxyServer, override is ProxyOverride.
-func parseWindows(enable, server, override string) sysProxy {
-	var sp sysProxy
+func parseWindowsL3x(enable, server, override string) sysProxyL3x {
+	var sp sysProxyL3x
 	if enable != "0x1" && enable != "1" {
 		return sp
 	}
@@ -78,16 +78,16 @@ func parseWindows(enable, server, override string) sysProxy {
 			}
 			switch strings.ToLower(k) {
 			case "https":
-				sp.HTTPS = withScheme(v, "http")
+				sp.HTTPS = withSchemeL3x(v, "http")
 			case "http":
-				sp.HTTP = withScheme(v, "http")
+				sp.HTTP = withSchemeL3x(v, "http")
 			case "socks":
-				sp.SOCKS = withScheme(v, "socks5")
+				sp.SOCKS = withSchemeL3x(v, "socks5")
 			}
 		}
 	} else if server = strings.TrimSpace(server); server != "" {
 		// one address for every protocol
-		sp.HTTP = withScheme(server, "http")
+		sp.HTTP = withSchemeL3x(server, "http")
 		sp.HTTPS = sp.HTTP
 	}
 	for _, e := range strings.Split(override, ";") {
@@ -98,7 +98,7 @@ func parseWindows(enable, server, override string) sysProxy {
 	return sp
 }
 
-func withScheme(v, scheme string) string {
+func withSchemeL3x(v, scheme string) string {
 	if strings.Contains(v, "://") {
 		return v
 	}

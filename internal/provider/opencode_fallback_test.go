@@ -7,7 +7,7 @@ import (
 
 // A first user message with no text (an image alone) must still tell
 // conversations apart, and stay the same across the turns of one conversation.
-func TestOpenCodeSessionImageOnlyFirstMessage(t *testing.T) {
+func TestOpenCodeSessionImageOnlyFirstMessageL3x(t *testing.T) {
 	imgA := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`)
 	imgB := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,BBBB"}}]}]}`)
 	imgAFollow := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]},{"role":"assistant","content":"ok"},{"role":"user","content":"what is it"}]}`)
@@ -30,7 +30,7 @@ func TestOpenCodeSessionImageOnlyFirstMessage(t *testing.T) {
 	}
 	// text-bearing messages keep the text-based id
 	txt := []byte(`{"model":"m","messages":[{"role":"user","content":"fix the bug"}]}`)
-	if got := firstUserText(txt); got != "fix the bug" {
-		t.Errorf("firstUserText text case = %q", got)
+	if got := firstUserTextL3x(txt); got != "fix the bug" {
+		t.Errorf("firstUserTextL3x text case = %q", got)
 	}
 }

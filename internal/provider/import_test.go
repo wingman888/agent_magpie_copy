@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestParseImportPreset(t *testing.T) {
+func TestParseImportPresetL3x(t *testing.T) {
 	p, err := ParseImport("magpie://import?preset=deepseek&key=sk-test")
 	if err != nil {
 		t.Fatal(err)
@@ -22,7 +22,7 @@ func TestParseImportPreset(t *testing.T) {
 	}
 }
 
-func TestParseImportPresetRegion(t *testing.T) {
+func TestParseImportPresetRegionL3x(t *testing.T) {
 	p, err := ParseImport("magpie://import?preset=yylx&region=cn&key=k")
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestParseImportPresetRegion(t *testing.T) {
 	}
 }
 
-func TestParseImportPresetNameAndID(t *testing.T) {
+func TestParseImportPresetNameAndIDL3x(t *testing.T) {
 	p, err := ParseImport("magpie://import?preset=deepseek&name=My%20DS&id=my-ds")
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +53,7 @@ func TestParseImportPresetNameAndID(t *testing.T) {
 	}
 }
 
-func TestParseImportCustom(t *testing.T) {
+func TestParseImportCustomL3x(t *testing.T) {
 	p, err := ParseImport("magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1/&key=sk-x&models=a,%20b,,%20,c,a&catalog=openai")
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +72,7 @@ func TestParseImportCustom(t *testing.T) {
 	}
 }
 
-func TestParseImportEquivalentSchemes(t *testing.T) {
+func TestParseImportEquivalentSchemesL3x(t *testing.T) {
 	links := []string{
 		"magpie://import?name=X&chat=https://a.example/v1",
 		"magpie:import?name=X&chat=https://a.example/v1",
@@ -93,7 +93,7 @@ func TestParseImportEquivalentSchemes(t *testing.T) {
 	}
 }
 
-func TestParseImportRejects(t *testing.T) {
+func TestParseImportRejectsL3x(t *testing.T) {
 	cases := map[string]string{
 		"not magpie":          "https://import?name=A&chat=https://x.example/v1",
 		"file scheme":         "file://import?name=A&chat=https://x.example/v1",
@@ -117,7 +117,7 @@ func TestParseImportRejects(t *testing.T) {
 		"unknown region":      "magpie://import?preset=yylx&region=mars&key=k",
 		"region without pres": "magpie://import?name=A&region=cn&chat=https://x.example/v1",
 		"region on plain":     "magpie://import?preset=deepseek&region=cn",
-		"too many models":     "magpie://import?name=A&chat=https://x.example/v1&models=" + manyNames(201),
+		"too many models":     "magpie://import?name=A&chat=https://x.example/v1&models=" + manyNamesL3x(201),
 		"duplicate param":     "magpie://import?name=A&name=B&chat=https://x.example/v1",
 		"bad base scheme":     "magpie://import?name=A&chat=ftp://x.example/v1",
 	}
@@ -128,7 +128,7 @@ func TestParseImportRejects(t *testing.T) {
 	}
 }
 
-func TestParseImportErrorsHideKey(t *testing.T) {
+func TestParseImportErrorsHideKeyL3x(t *testing.T) {
 	const secret = "sk-supersecret123"
 	bad := []string{
 		"magpie://import?name=A&chat=https://x.example/v1&key=" + secret + "%0A",
@@ -149,7 +149,7 @@ func TestParseImportErrorsHideKey(t *testing.T) {
 	}
 }
 
-func TestParseImportLocalHTTPAccepted(t *testing.T) {
+func TestParseImportLocalHTTPAcceptedL3x(t *testing.T) {
 	for _, base := range []string{
 		"http://127.0.0.1:8080/v1",
 		"http://localhost:1234/v1",
@@ -169,7 +169,7 @@ func TestParseImportLocalHTTPAccepted(t *testing.T) {
 	}
 }
 
-func TestParseImportNonHTTPSLinksIgnored(t *testing.T) {
+func TestParseImportNonHTTPSLinksIgnoredL3x(t *testing.T) {
 	p, err := ParseImport("magpie://import?name=A&chat=https://x.example/v1&website=http://x.example&keys=file:///tmp/k")
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +186,7 @@ func TestParseImportNonHTTPSLinksIgnored(t *testing.T) {
 	}
 }
 
-func TestParseImportTruncatesName(t *testing.T) {
+func TestParseImportTruncatesNameL3x(t *testing.T) {
 	p, err := ParseImport("magpie://import?name=" + strings.Repeat("a", 100) + "&chat=https://x.example/v1")
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +196,7 @@ func TestParseImportTruncatesName(t *testing.T) {
 	}
 }
 
-func manyNames(n int) string {
+func manyNamesL3x(n int) string {
 	names := make([]string, n)
 	for i := range names {
 		names[i] = "m" + strconv.Itoa(i)

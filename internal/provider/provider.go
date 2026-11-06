@@ -133,8 +133,8 @@ func find(ps []Provider, id string) (Provider, bool) {
 	return Provider{}, false
 }
 
-// storedEntry returns what the providers file holds under id, as written.
-func storedEntry(id string) (Provider, bool) {
+// storedEntryL3x returns what the providers file holds under id, as written.
+func storedEntryL3x(id string) (Provider, bool) {
 	for _, p := range load().Providers {
 		if p.ID == id {
 			return p, true
@@ -162,14 +162,14 @@ func Slug(name string) string {
 }
 
 // Save adds or replaces a provider.
-func Save(p Provider) error { return save(p, true) }
+func Save(p Provider) error { return saveL3x(p, true) }
 
 // SaveImport is Save for a provider taken from an import link, which may carry
 // no key yet: it is kept so the user can add the key later with
 // `magpie provider key`.
-func SaveImport(p Provider) error { return save(p, false) }
+func SaveImport(p Provider) error { return saveL3x(p, false) }
 
-func save(p Provider, needKey bool) error {
+func saveL3x(p Provider, needKey bool) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -188,7 +188,7 @@ func save(p Provider, needKey bool) error {
 		// agent's own sign-in. Adding back a removed account keeps the picks
 		// it had, unless new ones are given.
 		models := p.Models
-		if old, ok := storedEntry(a.ID); ok && old.Removed && len(models) == 0 {
+		if old, ok := storedEntryL3x(a.ID); ok && old.Removed && len(models) == 0 {
 			models = old.Models
 		}
 		p = Provider{ID: a.ID, Models: models}

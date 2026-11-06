@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-func TestTray(t *testing.T) {
+func TestTrayL3x(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	if s := Load(); s.Tray != "panel" {
 		t.Fatalf("default tray: %q", s.Tray)

@@ -80,7 +80,7 @@ type Exclusion struct {
 func Excluded() []Exclusion {
 	var out []Exclusion
 	for _, a := range Accounts() {
-		if e, ok := storedEntry(a.ID); ok && e.Removed {
+		if e, ok := storedEntryL3x(a.ID); ok && e.Removed {
 			out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID,
 				Why: "removed from magpie; `magpie provider add " + a.ID + "` brings it back with its model picks"})
 		}
@@ -117,11 +117,11 @@ var claudeKeychain = runtime.GOOS == "darwin"
 var (
 	claudeMu sync.Mutex // serializes refresh; a rotated token is written back once
 
-	claudeStatusMu   sync.Mutex
-	claudeStatusAt   time.Time
-	claudeStatusUser string
-	claudeStatusPlan string
-	claudeStatusOut  bool // Claude Code last reported that it is signed out
+	claudeStatusMu     sync.Mutex
+	claudeStatusAt     time.Time
+	claudeStatusUser   string
+	claudeStatusPlan   string
+	claudeStatusOutL3x bool // Claude Code last reported that it is signed out
 
 	claudeCacheMu  sync.Mutex
 	claudeCacheAt  time.Time
@@ -294,14 +294,14 @@ func claudeExecutable() string {
 // `claude auth status --json` is the authoritative, non-secret view shown by the
 // CLI. Cache it briefly because the providers screen refreshes often.
 func claudeIdentity() (string, string) {
-	user, plan, _ := claudeStatus()
+	user, plan, _ := claudeStatusL3x()
 	return user, plan
 }
 
-// claudeAuthStatus runs `claude auth status --json` and returns its stdout. The
+// claudeAuthStatusL3x runs `claude auth status --json` and returns its stdout. The
 // exit status comes back as err, but the stdout is kept: Claude Code prints its
 // answer even when it exits non-zero. A var so tests can stand in for Claude Code.
-var claudeAuthStatus = func() ([]byte, error) {
+var claudeAuthStatusL3x = func() ([]byte, error) {
 	path := claudeExecutable()
 	if path == "" {
 		return nil, errors.New("claude is not installed")
@@ -311,44 +311,44 @@ var claudeAuthStatus = func() ([]byte, error) {
 	return exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
 }
 
-// claudeAuthState is what `claude auth status --json` says about the sign-in.
-type claudeAuthState struct {
+// claudeAuthStateL3x is what `claude auth status --json` says about the sign-in.
+type claudeAuthStateL3x struct {
 	LoggedIn         *bool  `json:"loggedIn"`
 	Email            string `json:"email"`
 	SubscriptionType string `json:"subscriptionType"`
 }
 
-// parseClaudeAuthStatus reads the status output; ok is false when it does not
+// parseClaudeAuthStatusL3x reads the status output; ok is false when it does not
 // say whether the user is signed in.
-func parseClaudeAuthStatus(out []byte) (claudeAuthState, bool) {
-	var st claudeAuthState
+func parseClaudeAuthStatusL3x(out []byte) (claudeAuthStateL3x, bool) {
+	var st claudeAuthStateL3x
 	if json.Unmarshal(out, &st) != nil || st.LoggedIn == nil {
-		return claudeAuthState{}, false
+		return claudeAuthStateL3x{}, false
 	}
 	return st, true
 }
 
-// claudeStatus reports the active Claude account, and whether Claude Code says
+// claudeStatusL3x reports the active Claude account, and whether Claude Code says
 // it is signed out. When the command is missing or its output is unreadable,
 // Claude Code has given no answer, so the credentials decide as they always did.
-func claudeStatus() (user, plan string, signedOut bool) {
+func claudeStatusL3x() (user, plan string, signedOut bool) {
 	claudeStatusMu.Lock()
 	defer claudeStatusMu.Unlock()
 	if time.Since(claudeStatusAt) < 30*time.Second {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return claudeStatusUser, claudeStatusPlan, claudeStatusOutL3x
 	}
 	claudeStatusAt = time.Now()
-	out, _ := claudeAuthStatus()
-	st, ok := parseClaudeAuthStatus(out)
+	out, _ := claudeAuthStatusL3x()
+	st, ok := parseClaudeAuthStatusL3x(out)
 	if !ok {
-		claudeStatusOut = false
+		claudeStatusOutL3x = false
 		return claudeStatusUser, claudeStatusPlan, false
 	}
 	if !*st.LoggedIn {
-		claudeStatusUser, claudeStatusPlan, claudeStatusOut = "", "", true
+		claudeStatusUser, claudeStatusPlan, claudeStatusOutL3x = "", "", true
 		return claudeStatusUser, claudeStatusPlan, true
 	}
-	claudeStatusOut = false
+	claudeStatusOutL3x = false
 	claudeStatusUser = strings.TrimSpace(st.Email)
 	claudeStatusPlan = strings.TrimSpace(st.SubscriptionType)
 	return claudeStatusUser, claudeStatusPlan, false
@@ -359,7 +359,7 @@ func claudeAccount() (Provider, bool) {
 	if !ok {
 		return Provider{}, false
 	}
-	user, statusPlan, signedOut := claudeStatus()
+	user, statusPlan, signedOut := claudeStatusL3x()
 	if signedOut {
 		// the credentials may linger after `claude auth logout`; Claude Code
 		// is the authority on whether it is signed in

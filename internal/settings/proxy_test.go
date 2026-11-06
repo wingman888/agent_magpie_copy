@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestProxyAccepted(t *testing.T) {
+func TestProxyAcceptedL3x(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, v := range []string{"", "direct", "Direct", "http://10.0.0.1:8080", "https://proxy.example:443",
 		"socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080", "127.0.0.1:7890", "localhost:7890", " 127.0.0.1:7890 "} {
@@ -28,7 +28,7 @@ func TestProxyAccepted(t *testing.T) {
 	}
 }
 
-func TestProxyRejected(t *testing.T) {
+func TestProxyRejectedL3x(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, v := range []string{"ftp://x", "socks4://127.0.0.1:1080", "://x", "http://", "127.0.0.1:0",
 		"http://user:hunter2@", "socks://x:1080"} {
@@ -53,7 +53,7 @@ func TestProxyRejected(t *testing.T) {
 	}
 }
 
-func TestProxyURL(t *testing.T) {
+func TestProxyURLL3x(t *testing.T) {
 	u, err := ProxyURL("127.0.0.1:7890")
 	if err != nil || u.String() != "http://127.0.0.1:7890" {
 		t.Fatalf("bare host:port: %v %v", u, err)

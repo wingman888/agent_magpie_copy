@@ -9,7 +9,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-func TestClaudeTiers(t *testing.T) {
+func TestClaudeTiersL3x(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))

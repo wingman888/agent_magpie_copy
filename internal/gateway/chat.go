@@ -112,11 +112,11 @@ func parseChat(body []byte) (*Request, error) {
 	return r, nil
 }
 
-// developerAsSystem rewrites the "developer" role to "system" in a Chat
+// developerAsSystemL3x rewrites the "developer" role to "system" in a Chat
 // Completions request body, for backends that only know "system". Every other
 // field is kept as it was, and a body without developer messages is returned
 // unchanged.
-func developerAsSystem(body []byte) []byte {
+func developerAsSystemL3x(body []byte) []byte {
 	var top map[string]json.RawMessage
 	if json.Unmarshal(body, &top) != nil {
 		return body
@@ -137,19 +137,19 @@ func developerAsSystem(body []byte) []byte {
 		return body
 	}
 	var err error
-	if top["messages"], err = marshalNoHTML(msgs); err != nil {
+	if top["messages"], err = marshalNoHTMLL3x(msgs); err != nil {
 		return body
 	}
-	out, err := marshalNoHTML(top)
+	out, err := marshalNoHTMLL3x(top)
 	if err != nil {
 		return body
 	}
 	return out
 }
 
-// marshalNoHTML is json.Marshal without escaping <, > and &, and without the
+// marshalNoHTMLL3x is json.Marshal without escaping <, > and &, and without the
 // trailing newline an Encoder adds.
-func marshalNoHTML(v any) ([]byte, error) {
+func marshalNoHTMLL3x(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)

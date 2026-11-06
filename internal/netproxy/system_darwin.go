@@ -2,10 +2,10 @@ package netproxy
 
 import "os/exec"
 
-func readOS() sysProxy {
+func readOSL3x() sysProxyL3x {
 	out, err := exec.Command("scutil", "--proxy").Output()
 	if err != nil {
-		return sysProxy{}
+		return sysProxyL3x{}
 	}
-	return parseScutil(string(out))
+	return parseScutilL3x(string(out))
 }

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestPiThinkingLevelMap(t *testing.T) {
+func TestPiThinkingLevelMapL3x(t *testing.T) {
 	cases := []struct {
 		efforts []string
 		want    map[string]string
@@ -17,12 +17,12 @@ func TestPiThinkingLevelMap(t *testing.T) {
 		{[]string{"high", "xhigh", "max"}, map[string]string{"max": "max", "xhigh": "xhigh"}},
 	}
 	for _, c := range cases {
-		got := piThinkingLevelMap(c.efforts)
+		got := piThinkingLevelMapL3x(c.efforts)
 		if len(got) == 0 && len(c.want) == 0 {
 			continue
 		}
 		if !reflect.DeepEqual(got, c.want) {
-			t.Errorf("piThinkingLevelMap(%v) = %v, want %v", c.efforts, got, c.want)
+			t.Errorf("piThinkingLevelMapL3x(%v) = %v, want %v", c.efforts, got, c.want)
 		}
 	}
 }

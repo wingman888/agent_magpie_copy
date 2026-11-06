@@ -15,9 +15,9 @@ import (
 // OpenCodeSessionHeader is the request header OpenCode's gateway reads.
 const OpenCodeSessionHeader = "x-opencode-session"
 
-// openCodeSessionSources are the headers an agent may use to name its
+// openCodeSessionSourcesL3x are the headers an agent may use to name its
 // session, in priority order; the first non-empty one wins.
-var openCodeSessionSources = []string{
+var openCodeSessionSourcesL3x = []string{
 	"x-opencode-session",
 	"x-session-affinity",
 	"x-session-id",
@@ -50,21 +50,21 @@ func (p Provider) IsOpenCode() bool {
 // from the conversation's first user message, so every turn of a conversation
 // sends the same value and different conversations differ.
 func OpenCodeSession(in http.Header, body []byte) string {
-	for _, h := range openCodeSessionSources {
+	for _, h := range openCodeSessionSourcesL3x {
 		if v := strings.TrimSpace(in.Get(h)); v != "" {
 			return v
 		}
 	}
-	sum := sha256.Sum256([]byte(firstUserText(body)))
+	sum := sha256.Sum256([]byte(firstUserTextL3x(body)))
 	return "magpie-" + hex.EncodeToString(sum[:])[:24]
 }
 
-// firstUserText returns the text of the first user message in a Chat,
+// firstUserTextL3x returns the text of the first user message in a Chat,
 // Responses or Anthropic request body. The body's "messages" array and
 // Responses' "input" (a string or an array) are both accepted. When that
 // message has no text (an image alone, say), the message's raw JSON is
 // returned instead, so different conversations still get different ids.
-func firstUserText(body []byte) string {
+func firstUserTextL3x(body []byte) string {
 	var v struct {
 		Messages json.RawMessage `json:"messages"`
 		Input    json.RawMessage `json:"input"`
@@ -89,7 +89,7 @@ func firstUserText(body []byte) string {
 			if json.Unmarshal(item, &it) != nil || it.Role != "user" {
 				continue
 			}
-			if text := contentText(it.Content); text != "" {
+			if text := contentTextL3x(it.Content); text != "" {
 				return text
 			}
 			return string(item)
@@ -98,9 +98,9 @@ func firstUserText(body []byte) string {
 	return ""
 }
 
-// contentText reads message content that is either a string or a list of
+// contentTextL3x reads message content that is either a string or a list of
 // parts with a "text" field.
-func contentText(raw json.RawMessage) string {
+func contentTextL3x(raw json.RawMessage) string {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		return s

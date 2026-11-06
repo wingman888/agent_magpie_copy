@@ -166,7 +166,7 @@ func magpieProviderJSON(shape string) any {
 			entry := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
 			// Pi offers only the levels a model declares; max and xhigh are
 			// not in its defaults, so declare them under their own names
-			if tl := piThinkingLevelMap(m.Efforts); len(tl) > 0 {
+			if tl := piThinkingLevelMapL3x(m.Efforts); len(tl) > 0 {
 				entry["thinkingLevelMap"] = tl
 			}
 			ms = append(ms, entry)
@@ -179,9 +179,9 @@ func magpieProviderJSON(shape string) any {
 	return nil
 }
 
-// piThinkingLevelMap declares the extra thinking levels a model has beyond
+// piThinkingLevelMapL3x declares the extra thinking levels a model has beyond
 // Pi's own list, each mapped to itself. Models without max or xhigh get none.
-func piThinkingLevelMap(efforts []string) map[string]string {
+func piThinkingLevelMapL3x(efforts []string) map[string]string {
 	var out map[string]string
 	for _, lvl := range []string{"max", "xhigh"} {
 		if contains(efforts, lvl) {

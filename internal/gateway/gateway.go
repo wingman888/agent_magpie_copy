@@ -420,7 +420,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
 	if proto == provider.Chat {
 		// Chat Completions backends know no "developer" role; Pi sends one
-		body = developerAsSystem(body)
+		body = developerAsSystemL3x(body)
 	}
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(rewriteModel(body, model)), r.Header)
 	if err != nil {

@@ -7,9 +7,9 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-func TestDeveloperAsSystemRewritesOnlyRole(t *testing.T) {
+func TestDeveloperAsSystemRewritesOnlyRoleL3x(t *testing.T) {
 	in := `{"model":"m1","stream":true,"temperature":0.2,"messages":[{"role":"developer","content":"be <brief> & exact"},{"role":"user","content":"hi"}]}`
-	out := developerAsSystem([]byte(in))
+	out := developerAsSystemL3x([]byte(in))
 	var got map[string]any
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("not JSON: %v: %s", err, out)
@@ -27,20 +27,20 @@ func TestDeveloperAsSystemRewritesOnlyRole(t *testing.T) {
 	}
 }
 
-func TestDeveloperAsSystemNoDeveloperIsByteIdentical(t *testing.T) {
+func TestDeveloperAsSystemNoDeveloperIsByteIdenticalL3x(t *testing.T) {
 	for _, in := range []string{
 		`{"model":"m1","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}]}`,
 		`{"model":"m1","messages":[]}`,
 		`{"model":"m1"}`,
 		`not json`,
 	} {
-		if out := developerAsSystem([]byte(in)); string(out) != in {
+		if out := developerAsSystemL3x([]byte(in)); string(out) != in {
 			t.Errorf("changed body without developer:\n in: %s\nout: %s", in, out)
 		}
 	}
 }
 
-func TestChatPassthroughSendsSystemNotDeveloper(t *testing.T) {
+func TestChatPassthroughSendsSystemNotDeveloperL3x(t *testing.T) {
 	f := &fake{t: t, reply: sse(
 		`data: {"id":"c1","model":"m1","choices":[{"delta":{"role":"assistant","content":"ok"}}]}`,
 		`data: [DONE]`)}
