@@ -144,10 +144,6 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model stri
 	cmd := exec.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
 	cmd.Env = cleanClaudeEnv(os.Environ())
-	// a login other than the agent's own runs on the token handed in with ctx
-	if extra, ok := ctx.Value(claudeEnvKey{}).([]string); ok {
-		cmd.Env = append(cmd.Env, extra...)
-	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cleanup()
@@ -214,16 +210,6 @@ func claudeCLIArgs(model, mcpConfig, effort string) []string {
 		args = append(args, "--effort", effort, "--thinking-display", "summarized")
 	}
 	return args
-}
-
-// claudeEnvKey carries extra environment for the Claude Code process of one request.
-type claudeEnvKey struct{}
-
-func withClaudeEnv(ctx context.Context, env []string) context.Context {
-	if len(env) == 0 {
-		return ctx
-	}
-	return context.WithValue(ctx, claudeEnvKey{}, env)
 }
 
 func cleanClaudeEnv(env []string) []string {
