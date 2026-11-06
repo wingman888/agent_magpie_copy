@@ -400,33 +400,65 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Affinity: aff, Order: pl.order, Left: pl.left})
 	var skipped []string
+search:
 	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		began := time.Now()
-		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
-		if !last && hw.failed() {
-			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
-			try.Fail, try.Rest = rest.Why, &rest
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			skipped = append(skipped, c.label()+": "+call.Error)
-			continue
-		}
-		hw.release()
-		model = c.model
-		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			if aff != nil {
-				answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
+		final := i == len(cands)-1
+		for n := 0; ; n++ {
+			// every reply is held until it is known to be the one the agent
+			// gets: a failure another candidate may answer is never sent
+			hw := newHoldWriter(w, true)
+			hw.proto = from
+			call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+			began := time.Now()
+			s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
+			call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+			if hw.streamErr != 0 {
+				call.Status, call.Error = hw.streamErr, hw.streamMsg
 			}
-		} else {
-			try.Fail = failure(call.Status, []byte(call.Error))
+			try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
+			if r.Context().Err() != nil {
+				// the agent went away: that is no fault of any candidate, so
+				// none rests and none is tried after it
+				call.Status, call.Error = 499, "canceled"
+				try.Status, try.Error, try.Fail, try.Kind = 499, "canceled", "canceled", "canceled"
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+				break search
+			}
+			if final && !hw.passing {
+				if d, ok := retryWait(hw.code(), hw.header, n, time.Now()); ok {
+					try.Kind, try.Wait, try.Fail = "retry", d.Milliseconds(), failure(hw.code(), hw.held.Bytes())
+					s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+					select {
+					case <-time.After(d):
+					case <-r.Context().Done():
+						call.Status, call.Error = 499, "canceled"
+						try.Status, try.Error, try.Fail, try.Kind = 499, "canceled", "canceled", "canceled"
+						s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+						break search
+					}
+					continue
+				}
+			}
+			if !final && hw.failed() {
+				rest := s.restAfter(c, hw.code(), hw.header, hw.held.Bytes())
+				try.Fail, try.Rest, try.Kind = rest.Why, &rest, "moved"
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+				skipped = append(skipped, c.label()+": "+call.Error)
+				break
+			}
+			hw.release()
+			model = c.model
+			if call.Status < 400 {
+				served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+				if aff != nil {
+					answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
+				}
+			} else {
+				try.Fail = failure(call.Status, []byte(call.Error))
+			}
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			break search
 		}
-		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-		break
 	}
 	if len(skipped) > 0 {
 		call.Fallback = strings.Join(skipped, "; ")
@@ -493,7 +525,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		} else {
 			status, msg = s.translate(hw, r, p, from, api, model, body, &call.Usage)
 		}
-		if !last && hw.notOnAPI() {
+		if !last && hw.notOnAPI() && r.Context().Err() == nil {
 			s.refuse(p.ID, model, api)
 			continue
 		}

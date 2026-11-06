@@ -53,6 +53,11 @@ func served(rest string, tokens int) {
 	routed.used[rest] = tokenUse{routed.used[rest].now(now) + float64(tokens), now}
 	delete(routed.failures, rest)
 	routed.Unlock()
+	// it answered, so it is no longer resting, even one that had just failed
+	restingUntil.Lock()
+	delete(restingUntil.m, rest)
+	delete(restingUntil.note, rest)
+	restingUntil.Unlock()
 }
 
 // How long a candidate sits out, by why it failed.

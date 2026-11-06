@@ -223,7 +223,9 @@ func TestServerErrorDoesNotChangeAPI(t *testing.T) {
 		t.Fatalf("a 500 switched API: %v", f.seen())
 	}
 	send(s, "/v1/chat/completions", body)
-	if f.count("/v1/chat/completions") != 2 || f.count("/v1/responses") != 0 {
+	// a 500 on the last candidate is retried twice, so each send asks chat
+	// three times; what must hold is that chat is asked again, never responses
+	if f.count("/v1/chat/completions") != 6 || f.count("/v1/responses") != 0 {
 		t.Fatalf("a 500 was remembered: %v", f.seen())
 	}
 }
