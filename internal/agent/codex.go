@@ -31,7 +31,7 @@ func codex(home string) *Agent {
 	routed := func() bool { return get("model_provider") == dialID }
 	models := func() []catalog.Model {
 		if routed() {
-			return dialModelsExcept("codex")
+			return dialModelsFor("codex")
 		}
 		return catalog.Codex()
 	}
@@ -70,7 +70,7 @@ func codex(home string) *Agent {
 			); err != nil {
 				return err
 			}
-			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModelsExcept("codex"))); err != nil {
+			if err := edit.WriteAtomic(catalogPath, codexCatalog(dialModelsFor("codex"))); err != nil {
 				return err
 			}
 			if err := edit.SetTOMLTop(path,
@@ -130,7 +130,7 @@ func codex(home string) *Agent {
 					if p := get("model_provider"); p != "" && p != dialID {
 						own = group(p, own)
 					}
-					return append(own, viaDialExcept("", "codex")...)
+					return append(own, viaDialFor("codex", "")...)
 				},
 			},
 			{
