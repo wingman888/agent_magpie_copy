@@ -188,10 +188,9 @@ func gemini(home string) *Agent {
 			return route(v)
 		}
 		if routed() {
-			// a Google model: give back the CLI's own settings, then take the pick
-			if err := unroute(); err != nil {
-				return err
-			}
+			// a Google model while routed: give back the CLI's own settings
+			// exactly as they were before routing, model.name included.
+			return unroute()
 		}
 		return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
 	}

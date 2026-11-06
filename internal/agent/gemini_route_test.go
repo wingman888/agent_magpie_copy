@@ -108,9 +108,9 @@ func TestGemRouteKeepsOwnKeyAndBaseAcrossCatalogSwitch(t *testing.T) {
 		"base": gateway.URL(), "key": gateway.Token, "auth": "gemini-api-key", "model": "fake/m2",
 	})
 
-	gemRouteSet(t, a, "model", "gemini-2.5-pro") // back to a Google model
+	gemRouteSet(t, a, "model", "gemini-2.5-pro") // back to a Google model: original values, not the pick
 	gemRouteCheck(t, gemRouteFacts(settings, envPath), map[string]string{
-		"base": "https://my.proxy.example/v1beta", "key": "own-key", "auth": "gemini-api-key", "model": "gemini-2.5-pro",
+		"base": "https://my.proxy.example/v1beta", "key": "own-key", "auth": "gemini-api-key", "model": "gemini-2.5-flash",
 	})
 	if got := a.Field("provider").Get(); got != "custom" {
 		t.Errorf("after switching back, auth shows %q, want custom", got)
@@ -172,5 +172,18 @@ func TestGemRouteOptionsGrouped(t *testing.T) {
 	}
 	if groups["fake/m1"] != "Fake" {
 		t.Errorf("catalog model group = %q", groups["fake/m1"])
+	}
+}
+
+func TestGemRouteNativePickWhileRoutedRestoresAbsent(t *testing.T) {
+	a, settings, envPath := gemRouteEnv(t, "m1")
+	gemRouteSet(t, a, "model", "fake/m1")
+	gemRouteSet(t, a, "model", "gemini-2.5-pro") // routed, Google model: nothing was set before, so all absent
+
+	gemRouteCheck(t, gemRouteFacts(settings, envPath), map[string]string{
+		"base": "", "key": "", "auth": "", "model": "",
+	})
+	if got := a.Field("provider").Get(); got != "google" {
+		t.Errorf("auth shows %q, want google", got)
 	}
 }
