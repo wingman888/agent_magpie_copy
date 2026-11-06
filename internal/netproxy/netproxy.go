@@ -1,112 +1,131 @@
-// Package netproxy decides which proxy magpie's own requests to vendors go
-// through. An app started from the Dock or the Start menu has no
-// HTTPS_PROXY in its environment, so without this every call to a vendor
-// that is only reachable through a proxy hangs until the agent gives up.
+// Package netproxy picks the proxy magpie's own outside requests go through.
 //
-// In order: the proxy set in magpie's settings (or "direct" for none), the
-// usual *_PROXY variables, then the system's proxy (macOS network
-// settings, Windows Internet Options). Loopback is never proxied.
+// The order is: the proxy in settings (proxy = "direct" means none), then
+// the environment (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY and NO_PROXY, in either
+// case), then the system proxy (macOS network settings, Windows Internet
+// options; Linux has none beyond the environment). Loopback addresses never
+// use a proxy.
 package netproxy
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// Install routes http.DefaultTransport (and so http.DefaultClient) through
-// Func.
-func Install() {
-	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		t.Proxy = Func
-	}
-}
-
-// Func is an http.Transport Proxy function.
-func Func(req *http.Request) (*url.URL, error) {
-	if loopback(req.URL.Hostname()) {
-		return nil, nil
-	}
-	return For(req.URL)
-}
-
-// For is the proxy a request to u goes through; nil means direct.
+// For returns the proxy a request to u should use, or nil to connect directly.
 func For(u *url.URL) (*url.URL, error) {
-	switch s := strings.TrimSpace(settings.Load().Proxy); s {
+	if u == nil {
+		return nil, nil
+	}
+	host := strings.ToLower(u.Hostname())
+	if isLoopback(host) {
+		return nil, nil
+	}
+	s := settings.Load()
+	mode, err := settings.NormalProxy(s.Proxy)
+	if err != nil {
+		return nil, err
+	}
+	switch mode {
 	case "direct":
 		return nil, nil
 	case "":
 	default:
-		return Parse(s)
+		return parseProxy(mode)
 	}
-	if p, err := fromEnv(u); p != nil || err != nil {
-		return p, err
+	if raw, noProxy, ok := envProxy(os.Getenv); ok {
+		if bypass(host, splitList(noProxy, ","), false) {
+			return nil, nil
+		}
+		return parseProxy(raw)
 	}
-	sys := System()
-	if sys.URL == "" || bypassed(u.Hostname(), sys.Bypass) {
+	sys := sysProxy()
+	if bypass(host, sys.Exceptions, sys.SimpleHostnames) {
 		return nil, nil
 	}
-	return Parse(sys.URL)
+	return sys.pick(), nil
 }
 
-// Parse reads a proxy address; a bare host:port is an HTTP proxy.
-func Parse(s string) (*url.URL, error) {
-	s = strings.TrimSpace(s)
-	if !strings.Contains(s, "://") {
-		s = "http://" + s
+// ProxyFunc is for http.Transport.Proxy.
+func ProxyFunc(r *http.Request) (*url.URL, error) {
+	return For(r.URL)
+}
+
+// Transport is a transport like http.DefaultTransport that takes its proxy
+// from For.
+func Transport() *http.Transport {
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t = &http.Transport{}
 	}
-	return url.Parse(s)
+	t = t.Clone()
+	t.Proxy = ProxyFunc
+	return t
 }
 
-// Describe says, for the settings page, what a request to u would use.
-func Describe() (proxy, source string) {
-	switch s := strings.TrimSpace(settings.Load().Proxy); s {
-	case "direct":
-		return "", "off"
-	case "":
-	default:
-		return s, "settings"
+// Client is the client for magpie's requests to providers and vendors.
+var Client = &http.Client{Transport: Transport()}
+
+// envProxy returns the first proxy variable set, in HTTPS, HTTP, ALL order
+// (the same preference as the system proxy), with the NO_PROXY list.
+func envProxy(getenv func(string) string) (raw, noProxy string, ok bool) {
+	get := func(names ...string) string {
+		for _, n := range names {
+			if v := strings.TrimSpace(getenv(n)); v != "" {
+				return v
+			}
+		}
+		return ""
 	}
-	u, _ := url.Parse("https://chatgpt.com")
-	if p, _ := fromEnv(u); p != nil {
-		return p.String(), "environment"
+	raw = get("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+	noProxy = get("NO_PROXY", "no_proxy")
+	return raw, noProxy, raw != ""
+}
+
+// parseProxy reads a proxy URL; a bare host:port is http.
+func parseProxy(raw string) (*url.URL, error) {
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
 	}
-	if sys := System(); sys.URL != "" {
-		return sys.URL, "system"
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("proxy %q: %v", raw, err)
 	}
-	return "", "none"
-}
-
-func fromEnv(u *url.URL) (*url.URL, error) { return http.ProxyFromEnvironment(&http.Request{URL: u}) }
-
-// Proxy is the system's proxy: one address, and the hosts that skip it.
-type Proxy struct {
-	URL    string
-	Bypass []string
-}
-
-var sysCache struct {
-	sync.Mutex
-	at time.Time
-	p  Proxy
-}
-
-// System reads the system proxy, at most every 15 seconds.
-func System() Proxy {
-	sysCache.Lock()
-	defer sysCache.Unlock()
-	if time.Since(sysCache.at) > 15*time.Second {
-		sysCache.p, sysCache.at = system(), time.Now()
+	if u.Hostname() == "" {
+		return nil, fmt.Errorf("proxy %q has no host", raw)
 	}
-	return sysCache.p
+	return u, nil
 }
 
-func loopback(host string) bool {
+// systemProxy is what the operating system says a proxy is. URLs are kept as
+// strings until pick chooses one.
+type systemProxy struct {
+	HTTPS, HTTP, SOCKS string
+	Exceptions         []string
+	SimpleHostnames    bool // "local" names (no dots) bypass the proxy
+}
+
+// pick returns HTTPS, then HTTP, then SOCKS, or nil when none is set.
+func (s systemProxy) pick() *url.URL {
+	for _, raw := range []string{s.HTTPS, s.HTTP, s.SOCKS} {
+		if raw == "" {
+			continue
+		}
+		if u, err := parseProxy(raw); err == nil {
+			return u
+		}
+	}
+	return nil
+}
+
+// isLoopback is true for localhost and loopback IPs.
+func isLoopback(host string) bool {
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return true
 	}
@@ -114,26 +133,85 @@ func loopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// bypassed matches the system's exception list: exact hosts, "*.example.com"
-// or ".example.com" suffixes, and "<local>" for dotless names.
-func bypassed(host string, list []string) bool {
-	host = strings.ToLower(host)
-	for _, b := range list {
-		b = strings.ToLower(strings.TrimSpace(b))
-		switch {
-		case b == "":
-		case b == "<local>":
-			if !strings.Contains(host, ".") {
+// bypass reports whether host matches an exception: "*" (everything), an
+// exact host or IP, a domain suffix ("example.com", ".example.com",
+// "*.example.com"), a CIDR or scutil-style prefix ("10.0.0.0/8", "169.254/16"),
+// "host:port" (port ignored), or, when simpleHostnames is set, any name
+// without a dot.
+func bypass(host string, rules []string, simpleHostnames bool) bool {
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	if host == "" {
+		return false
+	}
+	if simpleHostnames && !strings.Contains(host, ".") && net.ParseIP(host) == nil {
+		return true
+	}
+	ip := net.ParseIP(host)
+	for _, r := range rules {
+		r = strings.ToLower(strings.TrimSpace(r))
+		if r == "" {
+			continue
+		}
+		if r == "*" {
+			return true
+		}
+		if r == "<local>" {
+			if !strings.Contains(host, ".") && ip == nil {
 				return true
 			}
-		case strings.HasPrefix(b, "*."), strings.HasPrefix(b, "."):
-			suf := strings.TrimPrefix(b, "*")
-			if strings.HasSuffix(host, suf) || host == suf[1:] {
+			continue
+		}
+		if ip != nil {
+			if n := parseNet(r); n != nil && n.Contains(ip) {
 				return true
 			}
-		case host == b:
+		}
+		if h, _, err := net.SplitHostPort(r); err == nil {
+			r = h
+		}
+		if ip != nil && net.ParseIP(r) != nil && net.ParseIP(r).Equal(ip) {
+			return true
+		}
+		r = strings.TrimPrefix(r, "*")
+		r = strings.TrimPrefix(r, ".")
+		if r == "" {
+			continue
+		}
+		if host == r || strings.HasSuffix(host, "."+r) {
 			return true
 		}
 	}
 	return false
+}
+
+// parseNet reads a CIDR, or a scutil prefix such as "169.254/16" or
+// "10.1/16", which lacks trailing zero octets. It returns nil for anything
+// else.
+func parseNet(r string) *net.IPNet {
+	if _, n, err := net.ParseCIDR(r); err == nil {
+		return n
+	}
+	addr, bits, ok := strings.Cut(r, "/")
+	if !ok || strings.Count(addr, ".") > 3 {
+		return nil
+	}
+	parts := strings.Split(addr, ".")
+	for len(parts) < 4 {
+		parts = append(parts, "0")
+	}
+	if _, n, err := net.ParseCIDR(strings.Join(parts, ".") + "/" + bits); err == nil {
+		return n
+	}
+	return nil
+}
+
+// splitList splits a comma or semicolon separated list and drops blanks.
+func splitList(s, sep string) []string {
+	var out []string
+	for _, f := range strings.Split(s, sep) {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
