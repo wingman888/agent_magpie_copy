@@ -238,7 +238,10 @@ func gemini(home string) *Agent {
 					if current() == "custom" {
 						out = append(out, Option{Value: "custom", Note: hostOf(base()) + " (from .env)"})
 					}
-					out = append(out, Option{Value: geminiDial, Note: "local gateway · models of every provider in dial's catalog (chosen under model)"})
+					if current() == geminiDial {
+						// listed only while routed, so an unrouted picker matches the baseline
+						out = append(out, Option{Value: geminiDial, Note: "local gateway · models of every provider in dial's catalog (chosen under model)"})
+					}
 					return out
 				},
 			},

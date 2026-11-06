@@ -3,8 +3,10 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/yetone/dial/internal/catalog"
 	"github.com/yetone/dial/internal/edit"
 	"github.com/yetone/dial/internal/gateway"
 )
@@ -206,5 +208,63 @@ func TestGeminiDefaultModelUnroutes(t *testing.T) {
 	got := readGemini(home)
 	if got.base != "" || got.key != "mine" || got.auth != "oauth-personal" || got.model != "" {
 		t.Fatalf("default should unroute and clear dial's settings, got %+v", got)
+	}
+}
+
+func optionValues(opts []Option) []string {
+	var out []string
+	for _, o := range opts {
+		out = append(out, o.Value)
+	}
+	return out
+}
+
+func TestGeminiAuthOptionsUnroutedMatchBaseline(t *testing.T) {
+	home, a := geminiSandbox(t)
+	writeGeminiConfig(t, home, `{"security":{"auth":{"selectedType":"oauth-personal"}}}`, "")
+
+	got := optionValues(a.Field("provider").Options(nil))
+	want := []string{"google", "api-key", "vertex"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("unrouted auth options = %v, want %v", got, want)
+	}
+
+	mustSet(t, a, "model", "fake/m1")
+	got = optionValues(a.Field("provider").Options(nil))
+	if got[len(got)-1] != "dial" {
+		t.Fatalf("routed auth options = %v, want dial listed last", got)
+	}
+}
+
+func TestGeminiNativeModelOptionsKeepOrder(t *testing.T) {
+	_, a := geminiSandbox(t)
+	var native []string
+	for _, o := range a.Field("model").Options(nil) {
+		if o.Group == "Gemini CLI" {
+			native = append(native, o.Value)
+		}
+	}
+	var want []string
+	for _, m := range catalog.Provider("google") {
+		if strings.HasPrefix(m.ID, "gemini-") {
+			want = append(want, m.ID)
+		}
+	}
+	if strings.Join(native, ",") != strings.Join(want, ",") {
+		t.Fatalf("native model options = %v, want %v", native, want)
+	}
+}
+
+func TestGeminiUnknownAuthDoesNotUnroute(t *testing.T) {
+	home, a := geminiSandbox(t)
+	writeGeminiConfig(t, home, `{"security":{"auth":{"selectedType":"oauth-personal"}}}`, "GEMINI_API_KEY=mine\n")
+
+	mustSet(t, a, "model", "fake/m1")
+	before := readGemini(home)
+	if err := a.Field("provider").Set("bogus"); err == nil {
+		t.Fatal("unknown auth should be an error")
+	}
+	if after := readGemini(home); after != before {
+		t.Fatalf("unknown auth changed a routed config: %+v -> %+v", before, after)
 	}
 }
