@@ -23,14 +23,17 @@ func TestSaveAccountStoresOnlyPicks(t *testing.T) {
 	setupEnv(t)
 	isolateCache(t)
 	writeCodex(t, "chatgpt", map[string]any{"email": "dev@example.com"})
-	err := Save(Provider{
-		ID:        "codex",
-		Chat:      "https://relay.example.com/v1",
-		Responses: "https://relay.example.com/v1",
-		Key:       "sk-LEAK-ME",
-		Models:    []string{"gpt-5.5"},
-	})
-	if err != nil {
+	// What the CLI saves: the account as Find returned it, with extra fields
+	// the caller might have typed. Those must not reach the config.
+	acct := findAccount(All(), "codex")
+	if acct == nil {
+		t.Fatal("codex account not listed")
+	}
+	acct.Chat = "https://relay.example.com/v1"
+	acct.Responses = "https://relay.example.com/v1"
+	acct.Key = "sk-LEAK-ME"
+	acct.Models = []string{"gpt-5.5"}
+	if err := Save(*acct); err != nil {
 		t.Fatal(err)
 	}
 	text := configText(t)

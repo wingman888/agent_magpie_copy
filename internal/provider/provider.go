@@ -127,6 +127,16 @@ func All() []Provider {
 // accountID reports whether an id is reserved for an agent account.
 func accountID(id string) bool { return id == "codex" || id == "copilot" }
 
+// signedIn reports whether the agent behind an account id is signed in.
+func signedIn(id string) bool {
+	for _, p := range Accounts() {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // isPick is a stored record under an agent account's id that has no address of
 // its own: only the models the user chose.
 func isPick(p Provider) bool {
@@ -172,13 +182,12 @@ func Slug(name string) string {
 // Save adds or replaces a provider.
 func Save(p Provider) error {
 	p = normalize(p)
-	if p.Account != nil {
-		if p.ID == "" {
+	// An account provider (as Find returns it) saves its picks only: its address
+	// and key are ignored. A bare record under an agent's id is picks too.
+	if p.Account != nil || isPick(p) {
+		if p.ID == "" && p.Account != nil {
 			p.ID = p.Account.Agent
 		}
-		return savePicks(p.ID, p.Models)
-	}
-	if isPick(p) {
 		return savePicks(p.ID, p.Models)
 	}
 	if p.ID == "" {
@@ -236,12 +245,7 @@ func Delete(id string) error {
 // deletePicks clears the model choice of an agent account. A record left
 // behind by a sign-out is dropped entirely, so nothing half-formed remains.
 func deletePicks(f file, id string) error {
-	signedIn := false
-	for _, p := range Accounts() {
-		if p.ID == id {
-			signedIn = true
-		}
-	}
+	in := signedIn(id)
 	at := -1
 	for i := range f.Providers {
 		if f.Providers[i].ID == id {
@@ -249,10 +253,10 @@ func deletePicks(f file, id string) error {
 		}
 	}
 	switch {
-	case signedIn && at >= 0:
+	case in && at >= 0:
 		f.Providers[at].Models = nil
 		return store(f)
-	case signedIn:
+	case in:
 		return nil
 	case at >= 0:
 		f.Providers = append(f.Providers[:at], f.Providers[at+1:]...)
