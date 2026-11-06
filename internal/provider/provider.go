@@ -115,6 +115,7 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
+	rememberLogins()
 	stored := load().Providers
 	picks := map[string]Provider{}
 	var out []Provider

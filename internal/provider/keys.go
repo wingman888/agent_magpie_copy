@@ -246,7 +246,10 @@ func slotProvider(p Provider, proto Protocol) Provider {
 // the provider carrying that key. A key limited to one protocol keeps only
 // that endpoint; a key whose endpoint the provider lacks is left out.
 func (p Provider) keySlots() []Provider {
-	if p.Account != nil || (len(p.Keys) == 0 && p.KeyProtocol == "") {
+	if p.Account != nil {
+		return p.accountSlots()
+	}
+	if len(p.Keys) == 0 && p.KeyProtocol == "" {
 		return []Provider{p}
 	}
 	var out []Provider
