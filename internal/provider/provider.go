@@ -59,11 +59,6 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
-
-	// Headers are extra request headers sent to a custom provider's upstream
-	// on every request, names kept exactly as typed. Ignored for presets and
-	// signed-in accounts.
-	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type file struct {
@@ -99,11 +94,7 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := os.Chmod(p, 0o600); err != nil {
-		return err
-	}
-	pruneIcons(f) // best effort; never fails the save
-	return nil
+	return os.Chmod(p, 0o600)
 }
 
 // All lists the configured providers in the order they were added, then
@@ -260,9 +251,7 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Headers = cleanHeaders(p.Headers)
 	if pr := Preset(p.Preset); pr != nil {
-		p.Headers = nil // presets do not take user headers
 		if p.Icon == "" {
 			p.Icon = pr.Icon
 		}
@@ -287,33 +276,6 @@ func cleanList(xs []string) []string {
 		}
 	}
 	return out
-}
-
-// cleanHeaders trims header names and values, drops entries with an empty
-// name, and keeps names case-sensitively (X-ORG-id and X-Org-Id are two
-// entries). It returns nil when nothing is left, so the field is not written.
-func cleanHeaders(hs map[string]string) map[string]string {
-	var out map[string]string
-	for k, v := range hs {
-		k = strings.TrimSpace(k)
-		if k == "" {
-			continue
-		}
-		if out == nil {
-			out = map[string]string{}
-		}
-		out[k] = strings.TrimSpace(v)
-	}
-	return out
-}
-
-// customHeaders are the extra headers a request to this provider carries.
-// Only a plain custom provider has them: not a preset, not a signed-in account.
-func (p Provider) customHeaders() map[string]string {
-	if p.Account != nil || Preset(p.Preset) != nil {
-		return nil
-	}
-	return p.Headers
 }
 
 func contains(xs []string, x string) bool {
