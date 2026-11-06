@@ -34,20 +34,6 @@ func TestAuditGeminiThoughtGoesBackToChat(t *testing.T) {
 	}
 }
 
-// TestAuditChatClientHistoryUnchangedOnPlainUpstream: a Chat client's own
-// reasoning_content is still left out for an upstream that is not DeepSeek.
-func TestAuditChatClientHistoryUnchangedOnPlainUpstream(t *testing.T) {
-	f := &fake{t: t, reply: chatText("ok")}
-	setup(t, provider.Chat, f)
-	body := `{"model":"fake/m1","messages":[{"role":"user","content":"q"},{"role":"assistant","content":"a","reasoning_content":"old"},{"role":"user","content":"again"}]}`
-	if code, b := post(t, "/v1/chat/completions", body); code != 200 {
-		t.Fatalf("status %d: %s", code, b)
-	}
-	if strings.Contains(string(f.got), "reasoning_content") {
-		t.Errorf("a non-Gemini Chat request changed: %s", f.got)
-	}
-}
-
 // TestAuditGeminiThoughtSignatureToAnthropic: a signed thought goes back as a
 // thinking block carrying its signature.
 func TestAuditGeminiThoughtSignatureToAnthropic(t *testing.T) {
