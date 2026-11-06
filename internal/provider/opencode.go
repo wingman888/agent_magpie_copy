@@ -1,9 +1,7 @@
 package provider
 
-// OpenCode's gateways (Go and Zen) refuse requests that carry no session
-// identifier, so every request magpie sends to opencode.ai carries one.
-
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,12 +10,13 @@ import (
 	"strings"
 )
 
-// OpenCodeSessionHeader is the request header OpenCode's gateway reads.
+// OpenCodeSessionHeader is the header OpenCode's gateway insists on. Requests
+// without it are refused, so magpie sends one on every request to OpenCode.
 const OpenCodeSessionHeader = "x-opencode-session"
 
-// openCodeSessionSourcesL3x are the headers an agent may use to name its
-// session, in priority order; the first non-empty one wins.
-var openCodeSessionSourcesL3x = []string{
+// agentSessionHeaders are the session identifiers an agent may already send,
+// in the order they are preferred.
+var agentSessionHeaders = []string{
 	"x-opencode-session",
 	"x-session-affinity",
 	"x-session-id",
@@ -26,94 +25,106 @@ var openCodeSessionSourcesL3x = []string{
 	"x-claude-code-session-id",
 }
 
-// IsOpenCode reports whether a provider's base URL points at opencode.ai or
-// one of its subdomains.
+// IsOpenCodeHost is true for opencode.ai and its subdomains.
+func IsOpenCodeHost(host string) bool {
+	h := strings.TrimSuffix(strings.ToLower(host), ".")
+	return h == "opencode.ai" || strings.HasSuffix(h, ".opencode.ai")
+}
+
+// IsOpenCode is true when one of the provider's base URLs points at OpenCode.
 func (p Provider) IsOpenCode() bool {
-	for _, u := range []string{p.Chat, p.Responses, p.Anthropic} {
-		if u == "" {
-			continue
-		}
-		parsed, err := url.Parse(u)
-		if err != nil {
-			continue
-		}
-		h := strings.ToLower(parsed.Hostname())
-		if h == "opencode.ai" || strings.HasSuffix(h, ".opencode.ai") {
+	for _, pr := range Protocols {
+		if u, err := url.Parse(p.Base(pr)); err == nil && IsOpenCodeHost(u.Hostname()) {
 			return true
 		}
 	}
 	return false
 }
 
-// OpenCodeSession picks the session identifier for a request to OpenCode. An
-// agent's own session header is used as it is; without one, the id is derived
-// from the conversation's first user message, so every turn of a conversation
-// sends the same value and different conversations differ.
-func OpenCodeSession(in http.Header, body []byte) string {
-	for _, h := range openCodeSessionSourcesL3x {
-		if v := strings.TrimSpace(in.Get(h)); v != "" {
-			return v
+// OpenCodeSession says what x-opencode-session to send on a request to rawURL,
+// and whether to send it at all (only OpenCode hosts get it). The agent's own
+// session id wins; otherwise the value is derived from the conversation's first
+// user message, so later turns of one conversation keep the same id.
+func OpenCodeSession(rawURL string, in http.Header, body []byte) (string, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil || !IsOpenCodeHost(u.Hostname()) {
+		return "", false
+	}
+	for _, h := range agentSessionHeaders {
+		if v := in.Get(h); strings.TrimSpace(v) != "" {
+			return v, true
 		}
 	}
-	sum := sha256.Sum256([]byte(firstUserTextL3x(body)))
-	return "magpie-" + hex.EncodeToString(sum[:])[:24]
+	if text := firstUserText(body); text != "" {
+		sum := sha256.Sum256([]byte(text))
+		return "magpie-" + hex.EncodeToString(sum[:])[:32], true
+	}
+	// no user text to anchor on: the id cannot be stable, so make it unique
+	var buf [16]byte
+	rand.Read(buf[:])
+	return "magpie-" + hex.EncodeToString(buf[:]), true
 }
 
-// firstUserTextL3x returns the text of the first user message in a Chat,
-// Responses or Anthropic request body. The body's "messages" array and
-// Responses' "input" (a string or an array) are both accepted. When that
-// message has no text (an image alone, say), the message's raw JSON is
-// returned instead, so different conversations still get different ids.
-func firstUserTextL3x(body []byte) string {
+// firstUserText reads the first user message of a Chat (messages), Anthropic
+// (messages) or Responses (input, a string or items) request body.
+func firstUserText(body []byte) string {
 	var v struct {
-		Messages json.RawMessage `json:"messages"`
-		Input    json.RawMessage `json:"input"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+		Input json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &v) != nil {
+		return ""
+	}
+	for _, m := range v.Messages {
+		if m.Role == "user" {
+			if t := contentText(m.Content); t != "" {
+				return t
+			}
+		}
+	}
+	if len(v.Input) == 0 {
 		return ""
 	}
 	var s string
 	if json.Unmarshal(v.Input, &s) == nil {
 		return s
 	}
-	for _, raw := range []json.RawMessage{v.Messages, v.Input} {
-		var items []json.RawMessage
-		if json.Unmarshal(raw, &items) != nil {
-			continue
-		}
-		for _, item := range items {
-			var it struct {
-				Role    string          `json:"role"`
-				Content json.RawMessage `json:"content"`
+	var items []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	json.Unmarshal(v.Input, &items)
+	for _, it := range items {
+		if it.Role == "user" {
+			if t := contentText(it.Content); t != "" {
+				return t
 			}
-			if json.Unmarshal(item, &it) != nil || it.Role != "user" {
-				continue
-			}
-			if text := contentTextL3x(it.Content); text != "" {
-				return text
-			}
-			return string(item)
 		}
 	}
 	return ""
 }
 
-// contentTextL3x reads message content that is either a string or a list of
-// parts with a "text" field.
-func contentTextL3x(raw json.RawMessage) string {
+// contentText is the text of a message content: a string, or the text parts
+// of an array.
+func contentText(raw json.RawMessage) string {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		return s
 	}
 	var parts []struct {
-		Text string `json:"text"`
+		Text *string `json:"text"`
 	}
 	if json.Unmarshal(raw, &parts) != nil {
 		return ""
 	}
 	var b strings.Builder
 	for _, p := range parts {
-		b.WriteString(p.Text)
+		if p.Text != nil {
+			b.WriteString(*p.Text)
+		}
 	}
 	return b.String()
 }

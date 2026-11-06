@@ -31,8 +31,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie <agent>                  show one agent
   magpie <agent> <model>          set an agent's model   e.g. magpie claude deepseek/deepseek-chat
   magpie <agent> <field> <value>  set another field   e.g. magpie codex effort high
-  magpie claude <opus|sonnet|haiku|fable> <model>   pin one model tier   e.g. magpie claude haiku deepseek/flash
-  magpie claude haiku ""          the tier follows the main model again
   magpie <agent> [field] default  back to the agent's own default, magpie's wiring removed
 
   magpie save <name>              snapshot every agent's settings as a profile
@@ -45,7 +43,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
-  magpie import [-y] <link>       add a provider from a magpie://import link, after you confirm
   magpie models                   every model agents can pick, as provider/model
 
   magpie serve                    run the gateway alone (the app runs it too)
@@ -74,27 +71,15 @@ func main() {
 }
 
 func run(args []string) error {
-	// An import only writes after the user confirms, so it must not touch
-	// anything else on the way in: the migrations below write files.
-	isImport := len(args) > 0 && (args[0] == "import" || strings.HasPrefix(strings.ToLower(args[0]), "magpie:"))
-	if !isImport {
-		settings.Migrate()
-		agent.RenameLegacy()
-	}
+	settings.Migrate()
+	agent.RenameLegacy()
 	if len(args) == 0 {
 		if hasGUI {
 			return runGUI(true)
 		}
 		return tui.Run()
 	}
-	// The OS hands a magpie:// link over as the first argument; it is handled
-	// like `magpie import <link>` (the CLI confirmation flow).
-	if strings.HasPrefix(strings.ToLower(args[0]), "magpie:") {
-		return importCmdL3x(args)
-	}
 	switch args[0] {
-	case "import":
-		return importCmdL3x(args[1:])
 	case "tui":
 		return tui.Run()
 	case "app", "gui":
@@ -193,9 +178,6 @@ func set(a *agent.Agent, key, value string) error {
 func fieldForValue(a *agent.Agent, v string) *agent.Field {
 	vals := a.Values()
 	for i := 1; i < len(a.Fields); i++ {
-		if a.Fields[i].Named {
-			continue // reached by name only, so a model name stays the main model
-		}
 		for _, o := range a.Fields[i].Options(vals) {
 			if o.Value == v {
 				return &a.Fields[i]
@@ -223,9 +205,6 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
-				if f.Named && v == "" {
-					continue // a tier that follows the main model is not worth a row
-				}
 				if v == "" {
 					v = faint.Render("—")
 				}

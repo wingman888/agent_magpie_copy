@@ -67,10 +67,9 @@ else
 Type=Application
 Name=magpie
 Comment=Every agent's model. One place.
-Exec=$bin/magpie %u
+Exec=$bin/magpie app
 Icon=magpie
 Categories=Development;Utility;
-MimeType=x-scheme-handler/magpie;
 Terminal=false
 EOF
     say "installed the magpie desktop app (menu entry: magpie)"

@@ -111,7 +111,14 @@ func Apply(p Profile) (int, error) {
 	for k := range p {
 		keys = append(keys, k)
 	}
-	applyOrderL3x(keys)
+	// providers first: switching one re-settles the model behind it
+	sort.Slice(keys, func(i, j int) bool {
+		pi, pj := strings.HasSuffix(keys[i], ".provider"), strings.HasSuffix(keys[j], ".provider")
+		if pi != pj {
+			return pi
+		}
+		return keys[i] < keys[j]
+	})
 	changed := 0
 	for _, k := range keys {
 		id, field, ok := strings.Cut(k, ".")
@@ -132,29 +139,6 @@ func Apply(p Profile) (int, error) {
 		changed++
 	}
 	return changed, nil
-}
-
-// applyOrderL3x sorts profile keys into the order they are applied: providers
-// first, since switching one re-settles the model behind it; then models, so
-// that a setting such as a Claude Code tier is made on top of the new model;
-// then everything else.
-func applyOrderL3x(keys []string) {
-	rank := func(k string) int {
-		switch {
-		case strings.HasSuffix(k, ".provider"):
-			return 0
-		case strings.HasSuffix(k, ".model"):
-			return 1
-		}
-		return 2
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		ri, rj := rank(keys[i]), rank(keys[j])
-		if ri != rj {
-			return ri < rj
-		}
-		return keys[i] < keys[j]
-	})
 }
 
 // Summary renders a profile as a short one-line description.

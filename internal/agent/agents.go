@@ -162,14 +162,7 @@ func magpieProviderJSON(shape string) any {
 	case "pi":
 		var ms []map[string]any
 		for _, m := range models {
-			// reasoning lets Pi offer its thinking levels for the model
-			entry := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-			// Pi offers only the levels a model declares; max and xhigh are
-			// not in its defaults, so declare them under their own names
-			if tl := piThinkingLevelMapL3x(m.Efforts); len(tl) > 0 {
-				entry["thinkingLevelMap"] = tl
-			}
-			ms = append(ms, entry)
+			ms = append(ms, piModel(m))
 		}
 		if ms == nil {
 			ms = []map[string]any{}
@@ -179,19 +172,21 @@ func magpieProviderJSON(shape string) any {
 	return nil
 }
 
-// piThinkingLevelMapL3x declares the extra thinking levels a model has beyond
-// Pi's own list, each mapped to itself. Models without max or xhigh get none.
-func piThinkingLevelMapL3x(efforts []string) map[string]string {
-	var out map[string]string
-	for _, lvl := range []string{"max", "xhigh"} {
-		if contains(efforts, lvl) {
-			if out == nil {
-				out = map[string]string{}
-			}
-			out[lvl] = lvl
+// piModel is one model entry in Pi's models.json. reasoning lets Pi offer its
+// thinking levels; Pi only offers xhigh and max when the model declares them
+// in thinkingLevelMap, and it passes the level name through unchanged.
+func piModel(m catalog.Model) map[string]any {
+	e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
+	levels := map[string]any{}
+	for _, lv := range []string{"xhigh", "max"} {
+		if contains(m.Efforts, lv) {
+			levels[lv] = lv
 		}
 	}
-	return out
+	if len(levels) > 0 {
+		e["thinkingLevelMap"] = levels
+	}
+	return e
 }
 
 func opencode(home, cfg string) *Agent {

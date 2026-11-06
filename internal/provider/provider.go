@@ -55,10 +55,6 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
-
-	// Removed hides a signed-in account from magpie. Its model picks stay in
-	// the file, so adding the account back restores them.
-	Removed bool `json:"removed,omitempty"`
 }
 
 type file struct {
@@ -103,19 +99,17 @@ func store(f file) error {
 func All() []Provider {
 	stored := load().Providers
 	picks := map[string][]string{}
-	removed := map[string]bool{}
 	var out []Provider
 	for _, p := range stored {
 		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			picks[p.ID] = p.Models
-			removed[p.ID] = p.Removed
 			continue
 		}
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken || removed[a.ID] {
+		if _, taken := find(out, a.ID); taken {
 			continue
 		}
 		a.Models = picks[a.ID]
@@ -126,16 +120,6 @@ func All() []Provider {
 
 func find(ps []Provider, id string) (Provider, bool) {
 	for _, p := range ps {
-		if p.ID == id {
-			return p, true
-		}
-	}
-	return Provider{}, false
-}
-
-// storedEntryL3x returns what the providers file holds under id, as written.
-func storedEntryL3x(id string) (Provider, bool) {
-	for _, p := range load().Providers {
 		if p.ID == id {
 			return p, true
 		}
@@ -162,14 +146,7 @@ func Slug(name string) string {
 }
 
 // Save adds or replaces a provider.
-func Save(p Provider) error { return saveL3x(p, true) }
-
-// SaveImport is Save for a provider taken from an import link, which may carry
-// no key yet: it is kept so the user can add the key later with
-// `magpie provider key`.
-func SaveImport(p Provider) error { return saveL3x(p, false) }
-
-func saveL3x(p Provider, needKey bool) error {
+func Save(p Provider) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -185,18 +162,13 @@ func saveL3x(p Provider, needKey bool) error {
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in. Adding back a removed account keeps the picks
-		// it had, unless new ones are given.
-		models := p.Models
-		if old, ok := storedEntryL3x(a.ID); ok && old.Removed && len(models) == 0 {
-			models = old.Models
-		}
-		p = Provider{ID: a.ID, Models: models}
+		// agent's own sign-in
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
-		if needKey && p.Key == "" && !keyOptional(p) {
+		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
@@ -208,36 +180,6 @@ func saveL3x(p Provider, needKey bool) error {
 		}
 	}
 	f.Providers = append(f.Providers, p)
-	return store(f)
-}
-
-// Remove takes a provider out of magpie. A signed-in account is only hidden:
-// its model picks stay, the agent's own sign-in is untouched, and
-// `magpie provider add <id>` brings it back with those picks. Anything else is
-// deleted, as Delete does.
-func Remove(id string) error {
-	if _, ok := find(Accounts(), id); !ok {
-		return Delete(id)
-	}
-	f := load()
-	keep := f.Providers[:0]
-	hidden := false
-	for _, p := range f.Providers {
-		if p.ID != id {
-			keep = append(keep, p)
-			continue
-		}
-		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			p.Removed = true
-			hidden = true
-			keep = append(keep, p)
-		}
-		// a custom provider that took the account's id is dropped
-	}
-	if !hidden {
-		keep = append(keep, Provider{ID: id, Removed: true})
-	}
-	f.Providers = keep
 	return store(f)
 }
 

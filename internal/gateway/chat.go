@@ -112,51 +112,52 @@ func parseChat(body []byte) (*Request, error) {
 	return r, nil
 }
 
-// developerAsSystemL3x rewrites the "developer" role to "system" in a Chat
-// Completions request body, for backends that only know "system". Every other
-// field is kept as it was, and a body without developer messages is returned
-// unchanged.
-func developerAsSystemL3x(body []byte) []byte {
+// developerAsSystem renames the "developer" role to "system" in the messages of
+// a Chat Completions body, leaving everything else as it was. A body with no
+// developer message comes back unchanged.
+func developerAsSystem(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"developer"`)) {
+		return body
+	}
 	var top map[string]json.RawMessage
 	if json.Unmarshal(body, &top) != nil {
 		return body
 	}
-	var msgs []map[string]json.RawMessage
+	var msgs []json.RawMessage
 	if json.Unmarshal(top["messages"], &msgs) != nil {
 		return body
 	}
 	changed := false
-	for _, m := range msgs {
-		var role string
-		if json.Unmarshal(m["role"], &role) == nil && role == "developer" {
-			m["role"] = json.RawMessage(`"system"`)
+	for i, raw := range msgs {
+		var m struct {
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(raw, &m) != nil || m.Role != "developer" {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) != nil {
+			continue
+		}
+		fields["role"] = json.RawMessage(`"system"`)
+		if b, err := json.Marshal(fields); err == nil {
+			msgs[i] = b
 			changed = true
 		}
 	}
 	if !changed {
 		return body
 	}
-	var err error
-	if top["messages"], err = marshalNoHTMLL3x(msgs); err != nil {
+	mb, err := json.Marshal(msgs)
+	if err != nil {
 		return body
 	}
-	out, err := marshalNoHTMLL3x(top)
+	top["messages"] = mb
+	out, err := json.Marshal(top)
 	if err != nil {
 		return body
 	}
 	return out
-}
-
-// marshalNoHTMLL3x is json.Marshal without escaping <, > and &, and without the
-// trailing newline an Encoder adds.
-func marshalNoHTMLL3x(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // chatParts reads a message's content: a string, or an array of parts.

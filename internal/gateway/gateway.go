@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -88,7 +87,7 @@ type Server struct {
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 netproxy.Proxy,
+			Proxy:                 http.ProxyFromEnvironment,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,
@@ -405,11 +404,12 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 			}
 		}
 	}
+	// OpenCode's gateway refuses requests that carry no session id
+	if v, ok := provider.OpenCodeSession(req.URL.String(), in, body); ok {
+		req.Header.Set(provider.OpenCodeSessionHeader, v)
+	}
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
-	}
-	if p.IsOpenCode() {
-		req.Header.Set(provider.OpenCodeSessionHeader, provider.OpenCodeSession(in, body))
 	}
 	return s.client.Do(req)
 }
@@ -418,11 +418,12 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	out := rewriteModel(body, model)
 	if proto == provider.Chat {
-		// Chat Completions backends know no "developer" role; Pi sends one
-		body = developerAsSystemL3x(body)
+		// Chat Completions backends often reject the "developer" role
+		out = developerAsSystem(out)
 	}
-	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(rewriteModel(body, model)), r.Header)
+	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(out), r.Header)
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}

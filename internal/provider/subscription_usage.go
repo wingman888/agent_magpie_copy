@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // QuotaWindow is one rolling allowance reported by a subscription provider.
@@ -80,7 +78,7 @@ func accountJSON(ctx context.Context, url, token string, headers map[string]stri
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	res, err := netproxy.Client().Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -212,7 +210,7 @@ func copilotSubscriptionUsage(ctx context.Context, githubToken string) Subscript
 			req.Header.Set(k, v)
 		}
 		var res *http.Response
-		res, err = netproxy.Client().Do(req)
+		res, err = http.DefaultClient.Do(req)
 		if err == nil {
 			defer res.Body.Close()
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))

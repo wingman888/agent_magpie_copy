@@ -9,27 +9,21 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 )
 
 // Settings is what the user chose. "" and "system" both mean "follow the OS".
 type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
-	Tray  string `json:"tray,omitempty"`  // panel | window: what a click on the tray icon does
-	Proxy string `json:"proxy,omitempty"` // "" follow env then system; "direct"; or a proxy address
 }
 
-// Themes, Langs and Trays are the accepted values, in the order the UI offers them.
+// Themes and Langs are the accepted values, in the order the UI offers them.
 var (
 	Themes = []string{"system", "light", "dark"}
 	Langs  = []string{"system", "en", "zh"}
-	Trays  = []string{"panel", "window"}
 )
 
 // Path is the settings file.
@@ -62,12 +56,6 @@ func Save(s Settings) error {
 	if !slices.Contains(Langs, s.Lang) {
 		return fmt.Errorf("language must be one of %v, not %q", Langs, s.Lang)
 	}
-	if !slices.Contains(Trays, s.Tray) {
-		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
-	}
-	if _, err := ProxyURL(s.Proxy); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
 	}
@@ -85,69 +73,5 @@ func (s Settings) normal() Settings {
 	if s.Lang == "" {
 		s.Lang = "system"
 	}
-	if s.Tray == "" {
-		s.Tray = "panel"
-	}
-	s.Proxy = strings.TrimSpace(s.Proxy)
 	return s
-}
-
-// ProxySchemes are the proxy address schemes magpie speaks.
-var ProxySchemes = []string{"http", "https", "socks5", "socks5h"}
-
-// ProxyURL checks a proxy setting and returns it as a URL. "" and "direct"
-// are not addresses: they return nil, nil. A bare host:port is an http proxy.
-// Credentials in the address are allowed but are never echoed in errors.
-func ProxyURL(v string) (*url.URL, error) {
-	v = strings.TrimSpace(v)
-	if v == "" || strings.EqualFold(v, "direct") {
-		return nil, nil
-	}
-	raw := v
-	if !strings.Contains(v, "://") {
-		raw = "http://" + v
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("proxy %q is not a valid address; use http://, https://, socks5:// or host:port", redactL3x(v))
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if !slices.Contains(ProxySchemes, scheme) {
-		return nil, fmt.Errorf("proxy scheme %q is not supported; use http://, https://, socks5:// or host:port", scheme)
-	}
-	if u.Hostname() == "" {
-		return nil, fmt.Errorf("proxy %q has no host", redactL3x(v))
-	}
-	if !strings.Contains(v, "://") {
-		if _, _, err := net.SplitHostPort(u.Host); err != nil {
-			return nil, fmt.Errorf("proxy %q must be host:port", redactL3x(v))
-		}
-	}
-	if u.Port() != "" && !validPortL3x(u.Port()) {
-		return nil, fmt.Errorf("proxy %q has an invalid port", redactL3x(v))
-	}
-	u.Scheme = scheme
-	return u, nil
-}
-
-func validPortL3x(p string) bool {
-	n := 0
-	for _, c := range p {
-		if c < '0' || c > '9' {
-			return false
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n > 0 && n <= 65535
-}
-
-// redactL3x hides any user:password part of an address before it is shown.
-func redactL3x(v string) string {
-	if i := strings.Index(v, "://"); i >= 0 {
-		rest := v[i+3:]
-		if at := strings.LastIndex(rest, "@"); at >= 0 {
-			return v[:i+3] + "***@" + rest[at+1:]
-		}
-	}
-	return v
 }

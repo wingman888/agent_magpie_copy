@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
@@ -68,12 +66,6 @@ func SaveLive(provider, base string, models []Model) error {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with extra request headers, for vendors whose gateways
-// insist on one (OpenCode wants a session header on every request).
-func FetchWith(ctx context.Context, base, key string, anthropic bool, extra http.Header) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -100,7 +92,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra http
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOneWithL3x(ctx, u, key, anthropic, extra)
+		ms, err := fetchOne(ctx, u, key, anthropic)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -117,7 +109,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra http
 	return nil, lastErr
 }
 
-func fetchOneWithL3x(ctx context.Context, url, key string, anthropic bool, extra http.Header) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -133,12 +125,7 @@ func fetchOneWithL3x(ctx context.Context, url, key string, anthropic bool, extra
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	for k, vs := range extra {
-		for _, v := range vs {
-			req.Header.Add(k, v)
-		}
-	}
-	res, err := netproxy.Client().Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

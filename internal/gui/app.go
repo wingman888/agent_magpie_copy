@@ -15,7 +15,6 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
 )
 
@@ -196,12 +195,7 @@ func Run(version string, showMain bool) error {
 		h.tray.SetIcon(appIcon)
 	}
 	h.tray.SetMenu(menu)
-	if settings.Load().Tray == "window" {
-		// a click shows the main window instead of the panel
-		h.tray.OnClick(func() { h.ShowMain("") })
-	} else {
-		h.tray.AttachWindow(h.panel).WindowOffset(6)
-	}
+	h.tray.AttachWindow(h.panel).WindowOffset(6)
 
 	if showMain {
 		if runtime.GOOS == "windows" {
