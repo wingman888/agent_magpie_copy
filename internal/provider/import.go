@@ -58,7 +58,9 @@ func ParseImport(link string) (Provider, error) {
 		if len(xs) == 0 {
 			return "", nil
 		}
-		return strings.TrimSpace(xs[0]), nil
+		// raw value: the key is checked for control characters before any
+		// trimming, so a trailing %0A is rejected rather than silently removed
+		return xs[0], nil
 	}
 	var f struct{ preset, region, name, id, key, chat, responses, anthropic, models, catalog, website, keys string }
 	for _, kv := range []struct {
@@ -71,6 +73,9 @@ func ParseImport(link string) (Provider, error) {
 	} {
 		if *kv.dst, err = get(kv.name); err != nil {
 			return Provider{}, err
+		}
+		if kv.name != "key" {
+			*kv.dst = strings.TrimSpace(*kv.dst)
 		}
 	}
 
