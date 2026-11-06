@@ -40,8 +40,10 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
-  magpie backup [--no-keys] [file]    providers, keys, settings, profiles and agent models in one file, sealed with a passphrase
-  magpie restore [--no-agents] <file> put a backup in on this machine
+  magpie backup [--no-keys] [file]  save everything to one passphrase-sealed file
+                                  (magpie.magpie-backup); --no-keys leaves out API keys
+  magpie restore [--no-agents] <file>  restore a backup on this machine; --no-agents
+                                  leaves the agents' models alone
 
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
@@ -51,7 +53,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider fallback <id> <provider/model>…   use these when it's out of quota or down
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
-  magpie accounts [agent] [--json]  every subscription magpie knows, with each one's allowance used and when it resets
+  magpie accounts [agent]         the Claude Code and Codex subscriptions magpie remembers
   magpie accounts add <agent>     sign in to one more Claude or ChatGPT subscription
   magpie accounts switch <agent> <email>   sign the agent in to another of them
 
@@ -131,6 +133,10 @@ func run(args []string) error {
 		return nil
 	case "save", "use", "rm", "profiles":
 		return profiles(args)
+	case "backup":
+		return backupCmd(args)
+	case "restore":
+		return restoreCmd(args)
 	case "import":
 		return importCmd(args[1:])
 	case "providers":
@@ -149,10 +155,6 @@ func run(args []string) error {
 		return usageCmd(args)
 	case "update":
 		return updateCmd(args)
-	case "backup":
-		return backupCmd(args[1:])
-	case "restore":
-		return restoreCmd(args[1:])
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 		return claudebridge.RunMCP(args[1:])
 	}
