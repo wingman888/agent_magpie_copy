@@ -361,7 +361,8 @@ func TestRgxGroupCapabilityIsItsFirstMember(t *testing.T) {
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models/group%2Fcaps", nil))
 	var obj map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &obj)
-	if rec.Code != 200 || obj["id"] != "group/caps" || obj["owned_by"] != "cb" {
+	// owned_by is magpie, as the model list says: a group belongs to no provider
+	if rec.Code != 200 || obj["id"] != "group/caps" || obj["owned_by"] != "magpie" {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
 }
