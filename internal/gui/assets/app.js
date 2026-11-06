@@ -397,7 +397,7 @@ function renderGateway() {
   const who = el("div", "who");
   const name = el("div", "name", "Gateway");
   name.append(el("span", "state", g.running ? (g.mine ? "running" : "running · another dial") : "not running"));
-  who.append(name, el("div", "sub", g.running ? `${g.models} model${g.models === 1 ? "" : "s"} · OpenAI, Responses and Anthropic APIs` : "start it with dial serve, or open dial at login"));
+  who.append(name, el("div", "sub", g.running ? `${g.models} model${g.models === 1 ? "" : "s"} · OpenAI, Responses, Anthropic and Gemini APIs` : "start it with dial serve, or open dial at login"));
   const url = el("button", "url");
   url.append(el("code", "", g.url + "/v1"));
   url.title = "Copy the base URL";
