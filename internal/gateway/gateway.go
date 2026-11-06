@@ -386,7 +386,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model, route = m, p.ID
 		// the primary, then its fallbacks while it can't take the request and
 		// nothing has been sent yet
-		cands, pl = s.planRoute(p, model, from, cv)
+		cands, pl = planRoute(p, model, from, cv)
 	}
 	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: route, Order: pl.order, Left: pl.left,
 		Group: pl.group, Affinity: pl.affinity})
