@@ -63,12 +63,15 @@ func signIn(t *testing.T) string {
 // forgets anything a previous test cached.
 func isolate(t *testing.T) {
 	t.Helper()
-	oldKeychain, oldURL, oldBase := claudeKeychain, claudeTokenURL, claudeBase
+	oldKeychain, oldURL, oldBase, oldExe := claudeKeychain, claudeTokenURL, claudeBase, claudeExecutable
 	claudeKeychain = false
+	claudeExecutable = func() string { return "" }
 	forgetClaudeCredential()
+	forgetClaudeStatus()
 	t.Cleanup(func() {
-		claudeKeychain, claudeTokenURL, claudeBase = oldKeychain, oldURL, oldBase
+		claudeKeychain, claudeTokenURL, claudeBase, claudeExecutable = oldKeychain, oldURL, oldBase, oldExe
 		forgetClaudeCredential()
+		forgetClaudeStatus()
 	})
 }
 
@@ -107,11 +110,25 @@ func TestAccountsAreProviders(t *testing.T) {
 	if len(codex.Exposed()) != 1 || codex.Exposed()[0].ID != "gpt-5.5" || codex.Responses == "" {
 		t.Fatalf("picks: %+v", codex.Exposed())
 	}
+	// removing an account hides it from magpie; adding it back restores
+	// it with its picks
 	if err := Delete("codex"); err != nil {
 		t.Fatal(err)
 	}
-	if codex, _ = find(All(), "codex"); len(codex.Models) != 0 || codex.Account == nil {
-		t.Fatalf("after delete: %+v", codex)
+	if _, ok := find(All(), "codex"); ok {
+		t.Fatal("codex still listed after remove")
+	}
+	if _, _, ok := Resolve("codex/gpt-5.5"); ok {
+		t.Fatal("removed codex still resolves")
+	}
+	if x := Excluded(); len(x) != 1 || x[0].Provider != "codex" || x[0].Agent != "codex" {
+		t.Fatalf("excluded: %+v", x)
+	}
+	if err := Save(Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
+		t.Fatal(err)
+	}
+	if codex, ok = find(All(), "codex"); !ok || len(codex.Models) != 1 || codex.Account == nil || len(Excluded()) != 0 {
+		t.Fatalf("after add back: %+v", codex)
 	}
 
 	// signed out: gone, and a stale picks entry is not a provider
@@ -451,5 +468,28 @@ func TestClaudeBillingBody(t *testing.T) {
 	// a body that is not JSON is passed through
 	if out := claudeBody([]byte(`not json`)); string(out) != "not json" {
 		t.Fatalf("non-json: %s", out)
+	}
+}
+
+// Logging out of Claude Code can leave its credentials behind; what the CLI
+// says wins, so a signed-out account is not a provider.
+func TestClaudeSignedOut(t *testing.T) {
+	home := claudeHome(t)
+	claudeSignIn(t, home, time.Now().Add(time.Hour))
+	status := `{"loggedIn": true, "email": "me@example.com", "subscriptionType": "max"}`
+	exe := filepath.Join(home, "claude")
+	fake := func() {
+		os.WriteFile(exe, []byte("#!/bin/sh\ncat <<'X'\n"+status+"\nX\n"), 0o755)
+		forgetClaudeStatus()
+	}
+	claudeExecutable = func() string { return exe }
+	fake()
+	if p, ok := find(All(), "claude"); !ok || p.Account.User != "me@example.com" {
+		t.Fatalf("signed in: %+v %v", p, ok)
+	}
+	status = `{"loggedIn": false, "authMethod": "none"}`
+	fake()
+	if _, ok := find(All(), "claude"); ok {
+		t.Fatal("claude listed after sign-out")
 	}
 }

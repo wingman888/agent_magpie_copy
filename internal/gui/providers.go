@@ -227,6 +227,10 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
+			// the form does not edit custom headers yet; keep the ones saved
+			if old != nil && in.Headers == nil {
+				in.Headers = old.Headers
+			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
 				return
