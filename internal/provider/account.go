@@ -872,7 +872,14 @@ func copilotProvider(app copilotApp, plan string) Provider {
 			req.Header.Set(k, v)
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
-		copilotHeadersFor(req.Header, protoOfPath(req.URL.Path), body)
+		// a turn the user typed is billed as one; a tool's reply is not
+		req.Header.Set("X-Initiator", "agent")
+		if userTurn(body) {
+			req.Header.Set("X-Initiator", "user")
+		}
+		if bytes.Contains(body, []byte(`"image_url"`)) || hasImage(body) {
+			req.Header.Set("Copilot-Vision-Request", "true")
+		}
 		return nil
 	}
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
@@ -885,17 +892,120 @@ func copilotProvider(app copilotApp, plan string) Provider {
 	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
 }
 
-// lastRole is the role of the last message in a chat request.
-func lastRole(body []byte) string {
+// copilotAPIs maps a model's supported_endpoints to the wire APIs magpie
+// speaks, each once. Other endpoints (websocket, embeddings) are ignored;
+// nil when none of ours is listed or the field was absent.
+func copilotAPIs(endpoints []string) []string {
+	var out []string
+	for _, e := range endpoints {
+		var api string
+		switch e {
+		case "/chat/completions":
+			api = "chat"
+		case "/responses":
+			api = "responses"
+		case "/v1/messages":
+			api = "anthropic"
+		default:
+			continue
+		}
+		if !contains(out, api) {
+			out = append(out, api)
+		}
+	}
+	return out
+}
+
+// userTurn reports whether the last turn of a Chat, Anthropic, or Responses
+// request was typed by the user, as Copilot bills it. A turn that only
+// carries tool results was the agent's doing, so it is not one. Responses
+// bodies are told apart by their input field; a string input is the user's.
+func userTurn(body []byte) bool {
 	var v struct {
+		Input    json.RawMessage `json:"input"`
 		Messages []struct {
-			Role string `json:"role"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
-	if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
-		return ""
+	if json.Unmarshal(body, &v) != nil {
+		return false
 	}
-	return v.Messages[len(v.Messages)-1].Role
+	if len(v.Input) > 0 {
+		return responsesUserTurn(v.Input)
+	}
+	if len(v.Messages) == 0 {
+		return false
+	}
+	last := v.Messages[len(v.Messages)-1]
+	if last.Role != "user" {
+		return false
+	}
+	// Anthropic: a user message whose content blocks are all tool_result is
+	// the agent's reply to a tool call; mixed with text it is the user's.
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(last.Content, &blocks) != nil || len(blocks) == 0 {
+		return true
+	}
+	for _, b := range blocks {
+		if b.Type != "tool_result" {
+			return true
+		}
+	}
+	return false
+}
+
+// responsesUserTurn is userTurn for a Responses input: a bare string, or a
+// list whose last item is a message from the user. A function call output
+// is the agent's.
+func responsesUserTurn(input json.RawMessage) bool {
+	var s string
+	if json.Unmarshal(input, &s) == nil {
+		return true
+	}
+	var items []struct {
+		Type string `json:"type"`
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(input, &items) != nil || len(items) == 0 {
+		return false
+	}
+	last := items[len(items)-1]
+	return last.Type != "function_call_output" && last.Role == "user"
+}
+
+// hasImage reports whether a request carries an image anywhere: a Chat
+// image_url part, a Responses input_image, or an Anthropic image block.
+// It walks the JSON, so the words inside text do not count.
+func hasImage(body []byte) bool {
+	var v any
+	if json.Unmarshal(body, &v) != nil {
+		return false
+	}
+	var walk func(x any) bool
+	walk = func(x any) bool {
+		switch t := x.(type) {
+		case map[string]any:
+			if s, _ := t["type"].(string); s == "image_url" || s == "input_image" || s == "image" {
+				return true
+			}
+			for _, c := range t {
+				if walk(c) {
+					return true
+				}
+			}
+		case []any:
+			for _, c := range t {
+				if walk(c) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(v)
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {

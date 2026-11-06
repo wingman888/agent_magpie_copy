@@ -53,6 +53,11 @@ func served(rest string, tokens int) {
 	routed.used[rest] = tokenUse{routed.used[rest].now(now) + float64(tokens), now}
 	delete(routed.failures, rest)
 	routed.Unlock()
+	// it answered, so it is no longer resting, even one that had just failed
+	restingUntil.Lock()
+	delete(restingUntil.m, rest)
+	delete(restingUntil.note, rest)
+	restingUntil.Unlock()
 }
 
 // How long a candidate sits out, by why it failed.
@@ -74,21 +79,11 @@ var (
 
 // Why a candidate failed, as rest tells it.
 const (
-	failCredit   = "credit"
-	failQuota    = "quota"
-	failRate     = "rate"
-	failOther    = "other"
-	failCanceled = "canceled" // the agent went away: no provider is to blame
+	failCredit = "credit"
+	failQuota  = "quota"
+	failRate   = "rate"
+	failOther  = "other"
 )
-
-// unrest lifts a candidate's rest once it has answered, whatever it said
-// before: a retry that succeeds clears the failure that preceded it.
-func unrest(rest string) {
-	restingUntil.Lock()
-	defer restingUntil.Unlock()
-	delete(restingUntil.m, rest)
-	delete(restingUntil.note, rest)
-}
 
 // failure says why a reply failed.
 func failure(status int, body []byte) string {
