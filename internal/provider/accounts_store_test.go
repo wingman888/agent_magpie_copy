@@ -123,7 +123,7 @@ func TestCodexSavedAccountsSwitchAndForget(t *testing.T) {
 
 	codexLoginAs(t, home, "a@example.com", "rA", extra)
 	All() // remembers the account the agent is signed in to
-	if list := listSaved(t, "codex"); len(list) != 1 || !list[0].Current || list[0].On {
+	if list := listSaved(t, "codex"); len(list) != 1 || !list[0].Current || !list[0].On {
 		t.Fatalf("first sign-in: got %+v", list)
 	}
 
