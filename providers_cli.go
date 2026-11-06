@@ -33,10 +33,8 @@ const providerUsage = `usage:
 // providers: `dial providers`
 func providers() error {
 	all := provider.All()
-	excluded := provider.Excluded()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		showExcluded(excluded)
 		return nil
 	}
 	uses := usesByProvider()
@@ -45,12 +43,10 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" && p.Account == nil {
+		if p.Preset == "" {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
-		case p.Account != nil:
-			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -75,29 +71,7 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	showExcluded(excluded)
 	return nil
-}
-
-// agentLabel is the name an agent goes by in dial's messages.
-func agentLabel(id string) string {
-	switch id {
-	case "claude":
-		return "Claude Code"
-	case "codex":
-		return "Codex"
-	case "copilot":
-		return "Copilot"
-	}
-	return id
-}
-
-// showExcluded closes the provider list with one line per sign-in dial sees
-// but does not offer, saying why.
-func showExcluded(xs []provider.Exclusion) {
-	for _, x := range xs {
-		fmt.Println(muted.Render(agentLabel(x.Agent) + " is signed in but not offered: " + x.Why))
-	}
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -190,9 +164,6 @@ func providerCmd(args []string) error {
 		p, err := provider.Find(rest[0])
 		if err != nil {
 			return err
-		}
-		if p.Account != nil {
-			return fmt.Errorf("%s signs in through %s itself; dial keeps no key for it", p.Name, p.Account.Agent)
 		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
@@ -328,17 +299,10 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" && p.Account == nil {
+	if p.Preset == "" {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
-	if a := p.Account; a != nil {
-		who := a.User
-		if a.Plan != "" {
-			who += " (" + a.Plan + ")"
-		}
-		kv("account", who+" via "+a.Agent)
-	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)

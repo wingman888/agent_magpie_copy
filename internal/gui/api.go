@@ -82,7 +82,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, err)
 			return
 		}
-		f := a.Field(in.Field)
+		f := a.FieldKey(in.Field)
 		if f == nil {
 			http.Error(rw, "unknown field", http.StatusBadRequest)
 			return
