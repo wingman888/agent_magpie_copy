@@ -29,9 +29,6 @@ type Model struct {
 	// Keys, for a vendor whose keys each see models of their own, are the
 	// keys (by fingerprint) whose list has this one; empty is every key.
 	Keys []string `json:",omitempty"`
-	// APIs are the wire APIs the vendor says serve this model: "chat",
-	// "responses", "anthropic". Empty means unknown.
-	APIs []string `json:"apis,omitempty"`
 }
 
 // Price is what a model costs, in USD per million tokens.
