@@ -699,16 +699,16 @@ func (s *Server) geminiTranslate(w http.ResponseWriter, r *http.Request, p provi
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeGeminiError(w, res.StatusCode, msg), msg
 	}
-	body, isStream := eventStreamBody(res)
+	rd, isStream := eventStreamBody(res)
 	if !isStream {
-		b, _ := io.ReadAll(io.LimitReader(body, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeGeminiError(w, 502, msg), msg
 	}
 	dec := decoder(to)
 	if !stream {
 		var col collector
-		readSSE(body, func(_, data string) error {
+		readSSE(rd, func(_, data string) error {
 			return dec(data, col.add)
 		})
 		if col.err != "" && len(col.res.Parts) == 0 {
@@ -737,7 +737,7 @@ func (s *Server) geminiTranslate(w http.ResponseWriter, r *http.Request, p provi
 		}
 	}}
 	var failed string
-	readSSE(body, func(_, data string) error {
+	readSSE(rd, func(_, data string) error {
 		return dec(data, func(ev Event) {
 			switch ev.Kind {
 			case KError:
