@@ -53,17 +53,14 @@ func TestDiffChild(t *testing.T) {
 
 func TestDiffAgainstStdlib(t *testing.T) {
 	total := 0
-	var bad []string
 	for i, env := range diffEnvs {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestDiffChild$", "-test.v=false")
+		cmd := exec.Command(os.Args[0], "-test.run=^TestDiffChild$")
 		cmd.Env = []string{"DIFF_CHILD=1", "XDG_CONFIG_HOME=" + t.TempDir(), "HOME=" + t.TempDir()}
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Logf("env %d child error: %v\n%s", i, err, out)
-		}
+		out, _ := cmd.CombinedOutput()
+		var items []string
 		for _, line := range strings.Split(string(out), "\n") {
 			if !strings.HasPrefix(line, "RES ") {
 				continue
@@ -72,16 +69,17 @@ func TestDiffAgainstStdlib(t *testing.T) {
 			if len(parts) < 3 {
 				continue
 			}
+			total++
 			std := strings.TrimPrefix(parts[1], "std=")
 			ours := strings.TrimPrefix(parts[2], "ours=")
-			total++
 			if std != ours {
-				bad = append(bad, fmt.Sprintf("DIFFBAD env%02d %v :: %s", i, env, line))
+				u := strings.TrimPrefix(parts[0], "RES ")
+				items = append(items, u+"["+std+"|"+ours+"]")
 			}
 		}
+		if len(items) > 0 {
+			t.Errorf("DIFF E%02d %v: %s", i, env, strings.Join(items, " ; "))
+		}
 	}
-	t.Errorf("DIFFSUMMARY total=%d mismatches=%d", total, len(bad))
-	for _, b := range bad {
-		t.Errorf("%s", b)
-	}
+	t.Errorf("DIFFSUMMARY total=%d", total)
 }
