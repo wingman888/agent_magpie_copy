@@ -99,7 +99,12 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	return os.Chmod(p, 0o600)
+	if err := os.Chmod(p, 0o600); err != nil {
+		return err
+	}
+	// stored icons nothing refers to any more are dropped after each save
+	pruneIcons()
+	return nil
 }
 
 // All lists the configured providers in the order they were added, then
