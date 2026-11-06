@@ -27,8 +27,8 @@ import (
 
 // Account says whose subscription an account provider uses.
 type Account struct {
-	Agent string `json:"agent"` // "codex" or "copilot"
-	User  string `json:"user"`  // account name shown to the user
+	Agent string `json:"agent"`          // "codex" or "copilot"
+	User  string `json:"user"`           // account name shown to the user
 	Plan  string `json:"plan,omitempty"` // subscription tier, when the agent says (may be empty)
 }
 
