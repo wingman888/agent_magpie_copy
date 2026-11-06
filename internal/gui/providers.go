@@ -274,6 +274,8 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 				in.Keys = old.Keys
 				if in.Key == old.Key {
 					in.KeyName = old.KeyName
+					// the limit belongs to this key; the form doesn't carry it
+					in.KeyProtocol = old.KeyProtocol
 				}
 			}
 			if in.Icon == "" && old != nil && in.Preset == "" {

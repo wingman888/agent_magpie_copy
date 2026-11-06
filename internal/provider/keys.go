@@ -83,6 +83,21 @@ func (p Provider) KeysOn() []KeyAccount {
 	return out
 }
 
+// keyFor is the key to send to proto's endpoint: the first key in use that
+// may speak proto. ok is false when none may. A provider with no key at all
+// keeps the old behaviour: its empty first key goes everywhere.
+func (p Provider) keyFor(proto Protocol) (KeyAccount, bool) {
+	if p.Key == "" {
+		return KeyAccount{Key: p.Key, Protocol: p.KeyProtocol}, true
+	}
+	for _, k := range p.KeysOn() {
+		if k.Protocol == "" || k.Protocol == proto {
+			return k, true
+		}
+	}
+	return KeyAccount{}, false
+}
+
 // WithKey is the provider as it is when k is the key in use. A key limited
 // to one protocol keeps only that protocol's endpoint; an unlimited one
 // keeps them all.
