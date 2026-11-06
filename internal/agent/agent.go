@@ -29,6 +29,9 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
+	// Named fields are set by name only (`magpie claude haiku …`): a bare value
+	// never routes to them, and they are listed only while they hold a value.
+	Named bool
 }
 
 // Agent is one supported coding agent.

@@ -33,8 +33,11 @@ const providerUsage = `usage:
 // providers: `magpie providers`
 func providers() error {
 	all := provider.All()
+	excluded := provider.Excluded()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
+	}
+	if len(all) == 0 && len(excluded) == 0 {
 		return nil
 	}
 	uses := usesByProvider()
@@ -73,7 +76,7 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	for _, x := range provider.Excluded() {
+	for _, x := range excluded {
 		name := x.Agent
 		if a, err := agent.Find(x.Agent); err == nil {
 			name = a.Name
@@ -189,8 +192,13 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := provider.Delete(p.ID); err != nil {
+		if err := provider.Remove(p.ID); err != nil {
 			return err
+		}
+		if p.Account != nil {
+			// a signed-in agent is only hidden: its sign-in and model picks stay
+			fmt.Println(green.Render("✓"), "removed", p.Name, muted.Render("from magpie · still signed in to "+p.Account.Agent+" · magpie provider add "+p.ID+" brings it back"))
+			return nil
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil

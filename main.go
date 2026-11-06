@@ -31,6 +31,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie <agent>                  show one agent
   magpie <agent> <model>          set an agent's model   e.g. magpie claude deepseek/deepseek-chat
   magpie <agent> <field> <value>  set another field   e.g. magpie codex effort high
+  magpie claude <opus|sonnet|haiku|fable> <model>   pin one model tier   e.g. magpie claude haiku deepseek/flash
+  magpie claude haiku ""          the tier follows the main model again
   magpie <agent> [field] default  back to the agent's own default, magpie's wiring removed
 
   magpie save <name>              snapshot every agent's settings as a profile
@@ -186,6 +188,9 @@ func set(a *agent.Agent, key, value string) error {
 func fieldForValue(a *agent.Agent, v string) *agent.Field {
 	vals := a.Values()
 	for i := 1; i < len(a.Fields); i++ {
+		if a.Fields[i].Named {
+			continue // reached by name only, so a model name stays the main model
+		}
 		for _, o := range a.Fields[i].Options(vals) {
 			if o.Value == v {
 				return &a.Fields[i]
@@ -213,6 +218,9 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
+				if f.Named && v == "" {
+					continue // a tier that follows the main model is not worth a row
+				}
 				if v == "" {
 					v = faint.Render("—")
 				}
