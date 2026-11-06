@@ -3,171 +3,149 @@ package provider
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
-	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
+	"image"
+	_ "image/gif"  // registers the GIF decoder for image.DecodeConfig
+	_ "image/jpeg" // registers the JPEG decoder for image.DecodeConfig
+	_ "image/png"  // registers the PNG decoder for image.DecodeConfig
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
-// A custom provider can carry its own logo. The picture is copied into the
-// icons folder next to providers.json, named after its content, and the
-// provider stores "file:<name>". Only that exact name shape ever resolves to
-// a path, so an icon reference cannot reach anything outside the folder.
-
-// MaxIcon is the largest picture accepted as an icon.
+// MaxIcon is the largest image that can be kept as a provider icon.
 const MaxIcon = 1 << 20
 
-// iconPrefix marks a provider icon that refers to a stored file.
-const iconPrefix = "file:"
+// iconName is the only shape a stored icon file name takes: 8 bytes of the
+// content's SHA-256 in hex, then the extension sniffed from the content.
+var iconName = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
 
-// iconGrace is how long an unreferenced picture is kept, so one just chosen
-// in the editor survives until the provider is saved.
-const iconGrace = time.Hour
+var svgTag = regexp.MustCompile(`(?i)<svg[\s>/]`)
 
-var iconNameRe = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
-
-// iconDir is the icons folder, beside providers.json.
-func iconDir() string {
-	return filepath.Join(filepath.Dir(Path()), "icons")
+// builtinIcons are the logos bundled with the GUI (internal/gui/assets/icons).
+var builtinIcons = map[string]bool{
+	"ai302-color": true, "aihubmix-color": true, "anthropic": true, "claude-color": true,
+	"claudecode-color": true, "codex-color": true, "crush": true, "cursor": true,
+	"deepseek-color": true, "fireworks-color": true, "gemini-color": true, "geminicli-color": true,
+	"githubcopilot": true, "googlecloud-color": true, "goose": true, "groq": true,
+	"kimi": true, "lmstudio": true, "minimax-color": true, "mistral-color": true,
+	"moonshot": true, "ollama": true, "openai": true, "opencode": true,
+	"openrouter": true, "pi": true, "qwen-color": true, "siliconcloud-color": true,
+	"together-color": true, "xai": true, "yylx": true, "zai": true, "zhipu-color": true,
 }
 
-// sniffIcon names the extension of a picture by its content, or "" when it
-// is not one of the supported formats.
-func sniffIcon(data []byte) string {
-	switch {
-	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
-		return ".png"
-	case bytes.HasPrefix(data, []byte("\xff\xd8\xff")):
-		return ".jpg"
-	case bytes.HasPrefix(data, []byte("GIF87a")), bytes.HasPrefix(data, []byte("GIF89a")):
-		return ".gif"
-	case len(data) >= 12 && bytes.HasPrefix(data, []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")):
-		return ".webp"
-	case bytes.HasPrefix(data, []byte{0, 0, 1, 0}):
-		return ".ico"
-	case isSVG(data):
-		return ".svg"
+// BuiltinIcon reports whether name is one of the logos bundled with magpie.
+func BuiltinIcon(name string) bool { return builtinIcons[name] }
+
+// iconsDir is the icons folder inside magpie's config directory.
+func iconsDir() string { return filepath.Join(filepath.Dir(Path()), "icons") }
+
+// IconFile maps a stored icon's file name to its path on disk. Anything
+// that is not exactly such a name (a path, "..", another extension) gives "".
+func IconFile(name string) string {
+	if !iconName.MatchString(name) {
+		return ""
 	}
-	return ""
+	return filepath.Join(iconsDir(), name)
 }
 
-// isSVG is true when the document's root element is <svg>. It reads tokens
-// only as far as the first element, so no entity or DTD is expanded.
-func isSVG(data []byte) bool {
-	d := xml.NewDecoder(bytes.NewReader(data))
-	d.Strict = true
-	for {
-		tok, err := d.Token()
-		if err != nil {
-			return false
-		}
-		if se, ok := tok.(xml.StartElement); ok {
-			return se.Name.Local == "svg"
-		}
-	}
-}
-
-// StoreIcon saves a picture into the icons folder and returns the icon value
-// that refers to it ("file:<name>"). The same content is stored once; an
-// existing copy has its time refreshed so the cleanup leaves it alone.
+// StoreIcon keeps an image as a provider icon and returns the reference to
+// put in Provider.Icon ("file:<name>"). The same image is stored once; a
+// stored image that is picked again has its timestamp refreshed so the
+// next Save does not treat it as abandoned.
 func StoreIcon(data []byte) (string, error) {
 	if len(data) == 0 {
 		return "", errors.New("the icon is empty")
 	}
 	if len(data) > MaxIcon {
-		return "", fmt.Errorf("the icon is larger than %d KB", MaxIcon>>10)
+		return "", fmt.Errorf("the icon is %d KB; the limit is %d KB", len(data)>>10, MaxIcon>>10)
 	}
-	ext := sniffIcon(data)
-	if ext == "" {
-		return "", errors.New("the file is not an image (PNG, JPEG, GIF, WebP, ICO or SVG)")
+	ext, err := sniffIcon(data)
+	if err != nil {
+		return "", err
 	}
 	sum := sha256.Sum256(data)
 	name := hex.EncodeToString(sum[:8]) + ext
-	dir := iconDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, name)
-	now := time.Now()
+	path := IconFile(name)
 	if _, err := os.Stat(path); err == nil {
+		now := time.Now()
 		_ = os.Chtimes(path, now, now)
-		return iconPrefix + name, nil
+		return "file:" + name, nil
 	}
-	tmp, err := os.CreateTemp(dir, ".icon-*")
-	if err != nil {
+	if err := os.MkdirAll(iconsDir(), 0o755); err != nil {
 		return "", err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return "", err
 	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return "", err
-	}
-	return iconPrefix + name, nil
+	return "file:" + name, nil
 }
 
-// IconFile turns a stored icon's file name into its path on disk. Anything
-// that is not exactly "<16 hex digits>.<known extension>" gives "".
-func IconFile(name string) string {
-	if !iconNameRe.MatchString(name) {
-		return ""
+// sniffIcon names the extension of an image by its content.
+func sniffIcon(data []byte) (string, error) {
+	if cfg, format, err := image.DecodeConfig(bytes.NewReader(data)); err == nil && cfg.Width > 0 && cfg.Height > 0 {
+		switch format {
+		case "png":
+			return ".png", nil
+		case "jpeg":
+			return ".jpg", nil
+		case "gif":
+			return ".gif", nil
+		}
 	}
-	return filepath.Join(iconDir(), name)
+	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		return ".webp", nil
+	}
+	if len(data) >= 6 && bytes.Equal(data[:4], []byte{0, 0, 1, 0}) && binary.LittleEndian.Uint16(data[4:6]) > 0 {
+		return ".ico", nil
+	}
+	if isSVG(data) {
+		return ".svg", nil
+	}
+	return "", errors.New("not an image magpie can show: PNG, JPEG, GIF, WebP, ICO or SVG")
 }
 
-// pruneIcons deletes stored pictures that no provider refers to and that have
-// not been written for over an hour. Files that do not have the stored name
-// shape are not ours to remove and are left alone.
+// isSVG is true for UTF-8 text that opens an <svg> element near its start.
+func isSVG(data []byte) bool {
+	if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
+		return false
+	}
+	head := data
+	if len(head) > 8192 {
+		head = head[:8192]
+	}
+	return svgTag.Match(head)
+}
+
+// pruneIcons deletes stored icons that no provider refers to and that are
+// more than an hour old, so a picture chosen but not yet saved survives.
 func pruneIcons(ps []Provider) {
 	used := map[string]bool{}
 	for _, p := range ps {
-		if name, ok := strings.CutPrefix(p.Icon, iconPrefix); ok {
-			used[name] = true
+		if n, ok := strings.CutPrefix(p.Icon, "file:"); ok {
+			used[n] = true
 		}
 	}
-	entries, err := os.ReadDir(iconDir())
+	dir := iconsDir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	cutoff := time.Now().Add(-iconGrace)
+	cutoff := time.Now().Add(-time.Hour)
 	for _, e := range entries {
-		name := e.Name()
-		if !e.Type().IsRegular() || !iconNameRe.MatchString(name) || used[name] {
+		if e.IsDir() || !iconName.MatchString(e.Name()) || used[e.Name()] {
 			continue
 		}
 		info, err := e.Info()
 		if err != nil || info.ModTime().After(cutoff) {
 			continue
 		}
-		_ = os.Remove(filepath.Join(iconDir(), name))
+		_ = os.Remove(filepath.Join(dir, e.Name()))
 	}
-}
-
-// StoreIconFile is StoreIcon for a picture on disk. It reads at most one
-// byte past MaxIcon, so a huge file is refused without being loaded whole.
-func StoreIconFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, MaxIcon+1))
-	if err != nil {
-		return "", err
-	}
-	return StoreIcon(data)
 }

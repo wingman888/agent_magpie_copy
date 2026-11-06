@@ -31,11 +31,6 @@ type SubscriptionQuota struct {
 	Plan     string        `json:"plan,omitempty"`
 	Windows  []QuotaWindow `json:"windows"`
 	Error    string        `json:"error,omitempty"`
-
-	// FiveHour and Weekly are the used share, in percent, of the 5-hour and
-	// the weekly window; LoginUsage fills them in from Windows.
-	FiveHour float64 `json:"fiveHour,omitempty"`
-	Weekly   float64 `json:"weekly,omitempty"`
 }
 
 var subscriptionUsageCache struct {
@@ -160,27 +155,26 @@ type accountStatusError struct{ status int }
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
-	return claudeQuota(ctx, claudeToken)
-}
-
-// claudeQuota asks Anthropic for the usage of the account whose access token
-// token returns.
-func claudeQuota(ctx context.Context, token func(context.Context) (string, error)) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
-	tok, err := token(ctx)
+	token, err := claudeToken(ctx)
 	if err != nil {
 		q.Error = err.Error()
 		return q
 	}
 	_, plan, _ := claudeIdentity()
 	q.Plan = plan
+	return claudeQuota(ctx, q, token)
+}
+
+// claudeQuota reads the rolling windows with one Claude OAuth token.
+func claudeQuota(ctx context.Context, q SubscriptionQuota, token string) SubscriptionQuota {
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", tok, map[string]string{
+	err := accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
@@ -218,6 +212,11 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		q.Error = err.Error()
 		return q
 	}
+	return codexQuota(ctx, q, token, accountID)
+}
+
+// codexQuota reads the rolling windows with one ChatGPT access token.
+func codexQuota(ctx context.Context, q SubscriptionQuota, token, accountID string) SubscriptionQuota {
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -226,7 +225,7 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	err := accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
 	if err != nil {
 		q.Error = err.Error()
 		return q
