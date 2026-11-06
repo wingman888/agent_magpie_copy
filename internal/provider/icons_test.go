@@ -52,7 +52,7 @@ func TestStoreIconFormats(t *testing.T) {
 	cases := map[string][]byte{
 		"jpg":  append([]byte{0xff, 0xd8, 0xff, 0xe0}, []byte("jpegdata")...),
 		"gif":  []byte("GIF89a-data"),
-		"webp": append(append([]byte("RIFF\x00\x00\x00\x00WEBP"), []byte("VP8 data")...)),
+		"webp": append([]byte("RIFF\x00\x00\x00\x00WEBP"), []byte("VP8 data")...),
 		"ico":  []byte{0, 0, 1, 0, 1, 0, 16, 16},
 		"svg":  []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`),
 	}

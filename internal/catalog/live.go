@@ -174,6 +174,10 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 // ApplyHeaders sets extra headers on h exactly as named: the name keeps the
 // case it was given on the wire, and it replaces any header of the same
 // name (in any case) that is already set, so it can override a default.
+//
+// One exception: net/http only lets a User-Agent set under its canonical
+// spelling suppress its own default, so that name is always written as
+// "User-Agent" (otherwise two User-Agent lines would go out).
 func ApplyHeaders(h http.Header, extra map[string]string) {
 	names := make([]string, 0, len(extra))
 	for n := range extra {
@@ -181,12 +185,16 @@ func ApplyHeaders(h http.Header, extra map[string]string) {
 	}
 	sort.Strings(names)
 	for _, n := range names {
+		key := n
+		if strings.EqualFold(n, "User-Agent") {
+			key = "User-Agent"
+		}
 		for k := range h {
-			if _, own := extra[k]; !own && strings.EqualFold(k, n) {
+			if _, own := extra[k]; !own && strings.EqualFold(k, key) {
 				delete(h, k)
 			}
 		}
-		h[n] = []string{extra[n]}
+		h[key] = []string{extra[n]}
 	}
 }
 

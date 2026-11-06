@@ -160,8 +160,8 @@ func TestCustomHeaderNameKeepsCaseAndOverridesDefaults(t *testing.T) {
 	if !hasLine(r, "x-org-id", "acme") {
 		t.Errorf("header name not sent as typed: %q", r)
 	}
-	if !hasLine(r, "user-agent", "relay-cli") {
-		t.Errorf("custom User-Agent not sent under its own name: %q", r)
+	if !hasLine(r, "User-Agent", "relay-cli") {
+		t.Errorf("custom User-Agent not sent: %q", r)
 	}
 	if n := countFold(r, "User-Agent"); n != 1 {
 		t.Errorf("expected exactly one User-Agent header (the custom one), found %d: %q", n, r)
