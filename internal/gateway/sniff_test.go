@@ -3,7 +3,7 @@ package gateway
 import (
 	"testing"
 
-	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/dial/internal/provider"
 )
 
 func TestSniffAnthropicStream(t *testing.T) {
