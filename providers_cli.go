@@ -33,10 +33,9 @@ const providerUsage = `usage:
 // providers: `dial providers`
 func providers() error {
 	all := provider.All()
-	excluded := provider.Excluded()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		printExcluded(excluded)
+		printExcluded()
 		return nil
 	}
 	uses := usesByProvider()
@@ -75,63 +74,23 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	printExcluded(excluded)
+	printExcluded()
 	return nil
 }
 
-// printExcluded ends the provider list with one line per sign-in dial sees
-// but does not offer, so nobody mistakes its absence for a fault.
-func printExcluded(ex []provider.Exclusion) {
-	for _, e := range ex {
-		fmt.Printf("  %s %s is signed in but not offered: %s\n", amber.Render("!"), agentName(e.Agent), e.Why)
-	}
-}
+// agentNames is how the CLI names an agent whose sign-in it talks about.
+var agentNames = map[string]string{"claude": "Claude Code", "codex": "Codex", "copilot": "Copilot"}
 
-// agentName is the name a person knows an agent by.
-func agentName(id string) string {
-	switch id {
-	case "codex":
-		return "Codex"
-	case "copilot":
-		return "Copilot"
-	case "claude":
-		return "Claude Code"
-	}
-	return id
-}
-
-// modelSource names where a provider's model list comes from, for messages.
-func modelSource(p provider.Provider) string {
-	if p.Account != nil {
-		if p.Account.Agent == "codex" {
-			return "built-in list"
+// printExcluded ends the provider list with each sign-in dial sees but does
+// not offer, and why.
+func printExcluded() {
+	for _, ex := range provider.Excluded() {
+		name := agentNames[ex.Agent]
+		if name == "" {
+			name = ex.Agent
 		}
-		return agentName(p.Account.Agent) + " API"
+		fmt.Printf("  %s is signed in but not offered: %s\n", name, ex.Why)
 	}
-	return p.Host()
-}
-
-// accountLine describes the sign-in a provider borrows: "user (plan pro, from codex)".
-func accountLine(a *provider.Account) string {
-	var parts []string
-	if a.Plan != "" {
-		parts = append(parts, "plan "+a.Plan)
-	}
-	parts = append(parts, "from "+a.Agent)
-	return a.User + " (" + strings.Join(parts, ", ") + ")"
-}
-
-// refreshProvider asks the vendor (or, for Copilot, GitHub) for the model
-// list again and shows the provider.
-func refreshProvider(p provider.Provider) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	ms, err := p.Fetch(ctx)
-	if err != nil {
-		return err
-	}
-	fmt.Println(green.Render("✓"), len(ms), "models from", modelSource(p))
-	return showProvider(p)
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -193,11 +152,7 @@ func models() error {
 	for _, e := range entries {
 		if e.Provider.ID != last {
 			last = e.Provider.ID
-			head := e.Provider.Name
-			if e.Provider.Account != nil {
-				head += " · signed in as " + e.Provider.Account.User
-			}
-			fmt.Println(faint.Render("  " + head))
+			fmt.Println(faint.Render("  " + e.Provider.Name))
 		}
 		line := "  " + pad(e.ID, w)
 		if e.Name != "" && e.Name != e.Model {
@@ -229,10 +184,6 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if p.Account != nil {
-			fmt.Println(amber.Render("!"), p.Name, "signs in through", agentName(p.Account.Agent), muted.Render("· no key is kept; the key was ignored"))
-			return nil
-		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
 			return err
@@ -249,11 +200,6 @@ func providerCmd(args []string) error {
 		}
 		if err := provider.Delete(p.ID); err != nil {
 			return err
-		}
-		if p.Account != nil {
-			fmt.Println(green.Render("✓"), "cleared the model choice for", p.Name,
-				muted.Render("· it stays while "+agentName(p.Account.Agent)+" is signed in; sign out there to remove it"))
-			return nil
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil
@@ -302,7 +248,14 @@ func providerCmd(args []string) error {
 			}
 			return showProvider(*p)
 		}
-		return refreshProvider(*p)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		ms, err := p.Fetch(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), len(ms), "models from", p.Host())
+		return showProvider(*p)
 	}
 	// `dial provider <id>`
 	p, err := provider.Find(verb)
@@ -369,8 +322,12 @@ func showProvider(p provider.Provider) error {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
-	if p.Account != nil {
-		kv("account", accountLine(p.Account))
+	if a := p.Account; a != nil {
+		acct := a.User
+		if a.Plan != "" {
+			acct += " · " + a.Plan
+		}
+		kv("account", acct+" · from "+a.Agent)
 	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
@@ -388,11 +345,8 @@ func showProvider(p provider.Provider) error {
 	kv("keys", p.KeysURL)
 	ms := p.Exposed()
 	src := "models.dev"
-	if p.Account != nil {
-		src = modelSource(p)
-	}
 	if t, ok := p.Fetched(); ok {
-		src = modelSource(p) + " · fetched " + ago(t)
+		src = p.Host() + " · fetched " + ago(t)
 	}
 	kv("models", fmt.Sprintf("%d exposed of %d %s", len(ms), len(p.Available()), muted.Render("from "+src)))
 	for i, m := range ms {

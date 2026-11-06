@@ -180,8 +180,6 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			fail(rw, err)
 			return
 		}
-		// a request may not claim to be an account; only the agent's sign-in does
-		in.Account = nil
 		switch r.PathValue("action") {
 		case "save":
 			// a preset needs nothing but the key; a saved provider keeps
