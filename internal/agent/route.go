@@ -35,23 +35,10 @@ func isDial(v string) bool {
 
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-func dialModels() []catalog.Model { return dialModelsExcept("") }
-
-// dialModelsExcept is dialModels without the models of one account sign-in.
-// Codex's own models are left out of Codex's file: routing them back through
-// dial would only go around in a circle. An account's models are noted with
-// the signed-in user, not the provider's name.
-func dialModelsExcept(agentID string) []catalog.Model {
+func dialModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		if agentID != "" && e.Provider.Account != nil && e.Provider.Account.Agent == agentID {
-			continue
-		}
-		note := e.Provider.Name
-		if e.Provider.Account != nil && e.Provider.Account.User != "" {
-			note = e.Provider.Account.User
-		}
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + note, Provider: e.Provider.Catalog, Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }
