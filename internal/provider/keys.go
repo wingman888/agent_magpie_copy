@@ -1,14 +1,11 @@
 package provider
 
-// Several API keys per provider, each one an account of the same vendor.
+// Several keys (accounts) per provider. The first key is the provider's
+// Key field, as it always was; the others sit in Keys, in the order they are
+// tried. A key that just failed rests for a minute at the back of the line,
+// as a fallback provider does, and an off key is kept but never used.
 //
-// The config keeps the front key in Key/KeyName, as it always did, and the
-// rest in Keys (each with an Off flag). The effective list, in the order
-// magpie tries them, is the front key followed by Keys. Invariants:
-//   - the front key is always enabled, so a provider with any key always has
-//     at least one enabled key;
-//   - keys are unique within a provider;
-//   - a provider with one key looks exactly as it did before this file existed.
+// A provider always has its first key enabled while it has any key at all.
 
 import (
 	"crypto/sha256"
@@ -16,283 +13,327 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 )
 
-// KeyInfo describes one key of a provider without revealing it.
+// KeyInfo describes one key of a provider. It never carries the full key.
 type KeyInfo struct {
-	ID     string // stable short id derived from the key; use it as keyRef
+	ID     string // stable short id from the key; what the key functions take
 	Name   string
 	Masked string
-	Active bool // this is the front key, tried first
-	On     bool // enabled; off keys are never sent upstream
+	Active bool // first in line: the key requests try first
+	On     bool // enabled: requests may use it
 }
 
-// KeyCred is an enabled key, with its name, in the order it is tried.
-type KeyCred struct {
+// KeyEntry is an enabled key, in the order requests try them.
+type KeyEntry struct {
 	Name string
 	Key  string
 }
 
-// keySlot is a key in the effective order, with its enabled state.
-type keySlot struct {
+// keyEntry is one key while it is being edited.
+type keyEntry struct {
 	name string
 	key  string
 	on   bool
 }
 
-// keyID is a short, stable reference to a key that does not reveal it.
-func keyID(key string) string {
+// keyCooldown is how long a key that failed waits at the back of the line.
+const keyCooldown = time.Minute
+
+// KeyRef is the stable short id of a key: the first 8 hex digits of its
+// SHA-256. It names a key without showing it.
+func KeyRef(key string) string {
 	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])[:10]
+	return hex.EncodeToString(sum[:])[:8]
 }
 
-// cleanKeys trims the stored keys and drops empty and duplicate ones,
-// returning nil when nothing is left so the field stays out of the JSON.
-func cleanKeys(front string, ks []StoredKey) []StoredKey {
-	seen := map[string]bool{}
-	if front != "" {
-		seen[front] = true
-	}
-	var out []StoredKey
-	for _, k := range ks {
-		k.Name = strings.TrimSpace(k.Name)
-		k.Key = strings.TrimSpace(k.Key)
-		if k.Key == "" || seen[k.Key] {
-			continue
-		}
-		seen[k.Key] = true
-		out = append(out, k)
-	}
-	return out
-}
-
-// slots lists the provider's keys in the order they are tried. A provider
-// whose front key is empty but which has stored keys promotes the first one.
-func (p Provider) slots() []keySlot {
-	var out []keySlot
-	rest := cleanKeys(p.Key, p.Keys)
+// chain lists the provider's keys in the order requests try them, the first
+// one always enabled.
+func chain(p *Provider) []keyEntry {
+	var out []keyEntry
 	if p.Key != "" {
-		out = append(out, keySlot{name: p.KeyName, key: p.Key, on: true})
-	} else if len(rest) > 0 {
-		out = append(out, keySlot{name: rest[0].Name, key: rest[0].Key, on: true})
-		rest = rest[1:]
+		out = append(out, keyEntry{name: p.KeyName, key: p.Key, on: true})
 	}
-	for _, k := range rest {
-		out = append(out, keySlot{name: k.Name, key: k.Key, on: !k.Off})
+	for _, k := range p.Keys {
+		if k.Key != "" {
+			out = append(out, keyEntry{name: k.Name, key: k.Key, on: !k.Off})
+		}
 	}
-	return out
+	return frontOn(out)
 }
 
-// writeSlots stores the keys back into the provider in the given order. The
-// first slot becomes the front key and must be enabled.
-func writeSlots(p *Provider, ss []keySlot) {
+// setChain writes the keys back into the provider's fields.
+func setChain(p *Provider, ks []keyEntry) {
 	p.Key, p.KeyName, p.Keys = "", "", nil
-	if len(ss) == 0 {
+	if len(ks) == 0 {
 		return
 	}
-	p.Key, p.KeyName = ss[0].key, ss[0].name
-	for _, s := range ss[1:] {
-		p.Keys = append(p.Keys, StoredKey{Name: s.name, Key: s.key, Off: !s.on})
+	p.Key, p.KeyName = ks[0].key, ks[0].name
+	for _, k := range ks[1:] {
+		p.Keys = append(p.Keys, ExtraKey{Name: k.name, Key: k.key, Off: !k.on})
 	}
 }
 
-func countOn(ss []keySlot) int {
+// frontOn makes sure the first key is enabled, moving the first enabled one
+// up if it is not.
+func frontOn(ks []keyEntry) []keyEntry {
+	if len(ks) == 0 || ks[0].on {
+		return ks
+	}
+	if i := firstOn(ks); i > 0 {
+		return promote(ks, i)
+	}
+	ks[0].on = true
+	return ks
+}
+
+// promote moves ks[i] to the front; the keys before it keep their order
+// behind it, then the rest.
+func promote(ks []keyEntry, i int) []keyEntry {
+	out := make([]keyEntry, 0, len(ks))
+	out = append(out, ks[i])
+	out = append(out, ks[:i]...)
+	return append(out, ks[i+1:]...)
+}
+
+// firstOn is the index of the first enabled key, or -1.
+func firstOn(ks []keyEntry) int {
+	for i, k := range ks {
+		if k.on {
+			return i
+		}
+	}
+	return -1
+}
+
+func countOn(ks []keyEntry) int {
 	n := 0
-	for _, s := range ss {
-		if s.on {
+	for _, k := range ks {
+		if k.on {
 			n++
 		}
 	}
 	return n
 }
 
-// firstOn is the index of the first enabled slot at or after from, or -1.
-func firstOn(ss []keySlot, from int) int {
-	for i := from; i < len(ss); i++ {
-		if ss[i].on {
+func findKey(ks []keyEntry, ref string) int {
+	for i, k := range ks {
+		if KeyRef(k.key) == ref {
 			return i
 		}
 	}
 	return -1
 }
 
-func keyIndex(ss []keySlot, ref string) int {
-	ref = strings.TrimSpace(ref)
-	for i, s := range ss {
-		if keyID(s.key) == ref {
-			return i
-		}
-	}
-	return -1
+func noKey(id, ref string) error {
+	return fmt.Errorf("%s has no key %q", id, ref)
 }
 
-// KeyList returns every key of the provider in the order they are tried.
-// Keys are shown masked only.
-func (p Provider) KeyList() []KeyInfo {
-	var out []KeyInfo
-	for i, s := range p.slots() {
-		out = append(out, KeyInfo{
-			ID:     keyID(s.key),
-			Name:   s.name,
-			Masked: Mask(s.key),
-			Active: i == 0,
-			On:     s.on,
-		})
-	}
-	return out
+func lastOn(id string) error {
+	return fmt.Errorf("%s needs at least one enabled key", id)
 }
 
-// KeysOn returns the enabled keys, with their names, in the order they are tried.
-func (p Provider) KeysOn() []KeyCred {
-	var out []KeyCred
-	for _, s := range p.slots() {
-		if s.on {
-			out = append(out, KeyCred{Name: s.name, Key: s.key})
-		}
-	}
-	return out
-}
-
-// editKeys runs fn on the stored provider id and saves the config when fn
-// succeeds. Signed-in accounts have no keys to manage.
-func editKeys(id string, fn func(p *Provider) error) error {
-	q := strings.ToLower(strings.TrimSpace(id))
-	if _, ok := find(Accounts(), q); ok {
-		return fmt.Errorf("%s is a signed-in account; it has no API keys to manage", q)
+// editKeys applies an edit to a provider's keys and saves the result. Signed-in
+// accounts have no keys to manage.
+func editKeys(id string, edit func(ks []keyEntry) ([]keyEntry, error)) error {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if _, ok := find(Accounts(), id); ok {
+		return fmt.Errorf("%s is a signed-in account and uses no API key", id)
 	}
 	f := load()
 	for i := range f.Providers {
-		p := &f.Providers[i]
-		if p.ID != q {
+		if f.Providers[i].ID != id {
 			continue
 		}
-		p.Key = strings.TrimSpace(p.Key)
-		p.KeyName = strings.TrimSpace(p.KeyName)
-		p.Keys = cleanKeys(p.Key, p.Keys)
-		if err := fn(p); err != nil {
+		p := f.Providers[i]
+		ks, err := edit(chain(&p))
+		if err != nil {
 			return err
 		}
+		setChain(&p, ks)
+		f.Providers[i] = p
 		return store(f)
 	}
 	return fmt.Errorf("no provider %q", id)
 }
 
-// AddKey adds a key to the provider. It is enabled and tried after the keys
-// already there, or becomes the front key when the provider has none.
+// AddKey gives a provider another key. It is enabled and goes behind the
+// keys it has; the first key a provider gets is the one tried first.
 func AddKey(id, name, key string) error {
-	name = strings.TrimSpace(name)
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return errors.New("API key 不能为空")
+		return errors.New("the key is empty")
 	}
-	return editKeys(id, func(p *Provider) error {
-		ss := p.slots()
-		for _, s := range ss {
-			if s.key == key {
-				return errors.New("这个 API key 已经添加过了")
+	name = strings.TrimSpace(name)
+	return editKeys(id, func(ks []keyEntry) ([]keyEntry, error) {
+		for _, k := range ks {
+			if k.key == key {
+				return nil, fmt.Errorf("%s already has the key %s", id, Mask(key))
 			}
 		}
-		writeSlots(p, append(ss, keySlot{name: name, key: key, on: true}))
-		return nil
+		return append(ks, keyEntry{name: name, key: key, on: true}), nil
 	})
 }
 
-// UseKey makes the given key the front one and enabled. The former front key
-// stays enabled and comes right after it.
+// UseKey makes a key the first one tried, enabled. The key that was first
+// stays enabled, right behind it.
 func UseKey(id, keyRef string) error {
-	return editKeys(id, func(p *Provider) error {
-		ss := p.slots()
-		i := keyIndex(ss, keyRef)
+	return editKeys(id, func(ks []keyEntry) ([]keyEntry, error) {
+		i := findKey(ks, keyRef)
 		if i < 0 {
-			return fmt.Errorf("no key %q for provider %s", keyRef, id)
+			return nil, noKey(id, keyRef)
 		}
 		if i == 0 {
-			return nil
+			return ks, nil
 		}
-		x := ss[i]
-		x.on = true
-		ns := []keySlot{x, ss[0]}
-		ns = append(ns, ss[1:i]...)
-		ns = append(ns, ss[i+1:]...)
-		writeSlots(p, ns)
-		return nil
+		ks[i].on = true
+		return promote(ks, i), nil
 	})
 }
 
-// SetKeyOn enables or disables a key. Disabling the front key hands the front
-// to the next enabled key, and the disabled one stays on file. At least one
-// key always stays enabled.
+// SetKeyOn enables or disables a key. Disabling the first key hands the front
+// to the next enabled one; a provider always keeps one enabled key.
 func SetKeyOn(id, keyRef string, on bool) error {
-	return editKeys(id, func(p *Provider) error {
-		ss := p.slots()
-		i := keyIndex(ss, keyRef)
+	return editKeys(id, func(ks []keyEntry) ([]keyEntry, error) {
+		i := findKey(ks, keyRef)
 		if i < 0 {
-			return fmt.Errorf("no key %q for provider %s", keyRef, id)
+			return nil, noKey(id, keyRef)
 		}
 		if on {
-			ss[i].on = true
-			writeSlots(p, ss)
-			return nil
+			ks[i].on = true
+			return ks, nil
 		}
-		if i != 0 {
-			ss[i].on = false
-			writeSlots(p, ss)
-			return nil
+		if !ks[i].on {
+			return ks, nil
 		}
-		j := firstOn(ss, 1)
-		if j < 0 {
-			return errors.New("至少要保留一个启用的 Key,这是最后一个启用的 Key,不能停用")
+		if countOn(ks) == 1 {
+			return nil, lastOn(id)
 		}
-		front := ss[j]
-		front.on = true
-		old := ss[0]
-		old.on = false
-		ns := []keySlot{front, old}
-		ns = append(ns, ss[1:j]...)
-		ns = append(ns, ss[j+1:]...)
-		writeSlots(p, ns)
-		return nil
-	})
-}
-
-// RemoveKey deletes a key. Removing the front key hands the front to the next
-// enabled key. The last enabled key cannot be removed.
-func RemoveKey(id, keyRef string) error {
-	return editKeys(id, func(p *Provider) error {
-		ss := p.slots()
-		i := keyIndex(ss, keyRef)
-		if i < 0 {
-			return fmt.Errorf("no key %q for provider %s", keyRef, id)
-		}
-		if ss[i].on && countOn(ss) == 1 {
-			return errors.New("这是最后一个启用的 Key,不能删除")
-		}
-		var ns []keySlot
+		ks[i].on = false
 		if i == 0 {
-			j := firstOn(ss, 1)
-			ns = []keySlot{ss[j]}
-			ns = append(ns, ss[1:j]...)
-			ns = append(ns, ss[j+1:]...)
-		} else {
-			ns = append(ns, ss[:i]...)
-			ns = append(ns, ss[i+1:]...)
+			ks = promote(ks, firstOn(ks))
 		}
-		writeSlots(p, ns)
-		return nil
+		return ks, nil
 	})
 }
 
-// RenameKey sets the name of a key. An empty name clears it.
+// RemoveKey deletes a key. Removing the first key hands the front to the next
+// enabled one; the last enabled key cannot be removed.
+func RemoveKey(id, keyRef string) error {
+	return editKeys(id, func(ks []keyEntry) ([]keyEntry, error) {
+		i := findKey(ks, keyRef)
+		if i < 0 {
+			return nil, noKey(id, keyRef)
+		}
+		if ks[i].on && countOn(ks) == 1 {
+			return nil, lastOn(id)
+		}
+		if i == 0 {
+			rest := ks[1:]
+			return promote(rest, firstOn(rest)), nil
+		}
+		out := make([]keyEntry, 0, len(ks)-1)
+		out = append(out, ks[:i]...)
+		return append(out, ks[i+1:]...), nil
+	})
+}
+
+// RenameKey names a key; an empty name clears it.
 func RenameKey(id, keyRef, name string) error {
 	name = strings.TrimSpace(name)
-	return editKeys(id, func(p *Provider) error {
-		ss := p.slots()
-		i := keyIndex(ss, keyRef)
+	return editKeys(id, func(ks []keyEntry) ([]keyEntry, error) {
+		i := findKey(ks, keyRef)
 		if i < 0 {
-			return fmt.Errorf("no key %q for provider %s", keyRef, id)
+			return nil, noKey(id, keyRef)
 		}
-		ss[i].name = name
-		writeSlots(p, ss)
-		return nil
+		ks[i].name = name
+		return ks, nil
 	})
+}
+
+// KeyList describes the provider's keys in the order they are tried.
+func (p *Provider) KeyList() []KeyInfo {
+	ks := chain(p)
+	out := make([]KeyInfo, 0, len(ks))
+	for i, k := range ks {
+		out = append(out, KeyInfo{
+			ID:     KeyRef(k.key),
+			Name:   k.name,
+			Masked: Mask(k.key),
+			Active: i == 0,
+			On:     k.on,
+		})
+	}
+	return out
+}
+
+// KeysOn lists the enabled keys in the order requests should try them. A key
+// that failed within the last minute is listed last, not dropped.
+func (p *Provider) KeysOn() []KeyEntry {
+	var ready, resting []KeyEntry
+	for _, k := range chain(p) {
+		if !k.on {
+			continue
+		}
+		e := KeyEntry{Name: k.name, Key: k.key}
+		if KeyResting(p.ID, KeyRef(k.key)) {
+			resting = append(resting, e)
+		} else {
+			ready = append(ready, e)
+		}
+	}
+	return append(ready, resting...)
+}
+
+// keyRest remembers when each key last failed, by provider and key ref.
+var keyRest = struct {
+	sync.Mutex
+	m map[string]time.Time
+}{m: map[string]time.Time{}}
+
+// MarkKeyFailed records that a key just failed: it rests for a minute and
+// moves to the back of the line.
+func MarkKeyFailed(providerID, keyRef string) {
+	keyRest.Lock()
+	defer keyRest.Unlock()
+	keyRest.m[providerID+"/"+keyRef] = time.Now().Add(keyCooldown)
+}
+
+// KeyResting reports whether a key failed within the last minute.
+func KeyResting(providerID, keyRef string) bool {
+	keyRest.Lock()
+	defer keyRest.Unlock()
+	return time.Now().Before(keyRest.m[providerID+"/"+keyRef])
+}
+
+// keepKeys is what Save stores for a provider being replaced by p. A caller
+// that does not manage the extra keys (a form, say) keeps them: the front
+// key is replaced by p.Key, and the others stay unless p.Key is one of them.
+// A caller that sends no key at all keeps every key as it was.
+func keepKeys(old, p Provider) Provider {
+	ks := chain(&old)
+	if len(ks) < 2 || len(p.Keys) > 0 || p.KeyName != "" {
+		return p
+	}
+	if p.Key == "" {
+		setChain(&p, ks)
+		return p
+	}
+	front := keyEntry{key: p.Key, on: true}
+	for _, k := range ks {
+		if k.key == p.Key {
+			front.name = k.name
+			break
+		}
+	}
+	out := []keyEntry{front}
+	for _, k := range ks[1:] {
+		if k.key != p.Key {
+			out = append(out, k)
+		}
+	}
+	setChain(&p, out)
+	return p
 }

@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,12 +23,15 @@ const fallbackCooldown = time.Minute
 type candidate struct {
 	p     provider.Provider
 	model string
+	// keyed is set when p is one account of a provider that has several
+	// enabled keys: p.Key is that one key, and it rests on its own.
+	keyed bool
 }
 
 // candidates is the primary and then its fallbacks, those resting after a
 // recent failure moved behind the rest.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := []candidate{{p, model}}
+	out := []candidate{{p: p, model: model}}
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -35,14 +39,14 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, candidate{fp, fm})
+		out = append(out, candidate{p: fp, model: fm})
 	}
 	if len(out) == 1 {
 		return out
 	}
 	var ready, resting []candidate
 	for _, c := range out {
-		if s.providerResting(c.p) {
+		if s.resting(c.p.ID) {
 			resting = append(resting, c)
 		} else {
 			ready = append(ready, c)
@@ -66,6 +70,51 @@ func (s *Server) rest(id string) {
 	restingUntil.Lock()
 	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
 	restingUntil.Unlock()
+}
+
+// keyCandidates turns each provider that has several enabled keys into one
+// candidate per key that is ready, in the order KeysOn gives them. A key
+// that failed within the last minute is not tried at all, and an off key is
+// never listed. A provider whose keys are all resting is skipped as a whole,
+// so the request goes on to its fallbacks. A provider with one enabled key
+// that is ready stays a single candidate, as it always was.
+func keyCandidates(cands []candidate) []candidate {
+	var out []candidate
+	for _, c := range cands {
+		on := c.p.KeysOn()
+		// no key at all (a keyless endpoint), or one ready key: as before
+		if len(on) == 0 || (len(on) == 1 && !provider.KeyResting(c.p.ID, provider.KeyRef(on[0].Key))) {
+			out = append(out, c)
+			continue
+		}
+		for _, k := range on {
+			if provider.KeyResting(c.p.ID, provider.KeyRef(k.Key)) {
+				continue
+			}
+			kp := c.p
+			kp.Key, kp.KeyName, kp.Keys = k.Key, k.Name, nil
+			out = append(out, candidate{p: kp, model: c.model, keyed: true})
+		}
+	}
+	return out
+}
+
+// accountLabel names the account a candidate used, for the call record: the
+// provider and the key's name, or its masked key when it has no name. The
+// full key never appears.
+func accountLabel(p provider.Provider) string {
+	if p.KeyName != "" {
+		return p.ID + "(" + p.KeyName + ")"
+	}
+	return p.ID + "(" + provider.Mask(p.Key) + ")"
+}
+
+// hideKey replaces the full key in a message, should an upstream echo it.
+func hideKey(msg, key string) string {
+	if key == "" {
+		return msg
+	}
+	return strings.ReplaceAll(msg, key, provider.Mask(key))
 }
 
 // quotaWords are how vendors say "out of quota" or "slow down" when their
