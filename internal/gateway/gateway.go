@@ -72,6 +72,9 @@ type Call struct {
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	// Fallback lists the providers that failed before this one answered,
+	// as "<providerId>: <reason>" joined by "; ". Empty when nothing switched.
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // Server is the gateway.
@@ -84,6 +87,9 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
+	// cooling maps a provider id to when its fallback rest period ends. It
+	// lives in memory only, so a restart clears it.
+	cooling map[string]time.Time
 }
 
 // New makes a gateway.
@@ -97,6 +103,7 @@ func New() *Server {
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
+		cooling:      make(map[string]time.Time),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -349,38 +356,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	// A Claude Code subscription must run through the genuine binary. Direct
-	// OAuth HTTP requests are content-classified as third-party traffic when
-	// they carry another agent's harness (Pi, OpenCode, and others).
-	if p.Account != nil && p.Account.Agent == "claude" {
-		call.To = provider.Anthropic
-		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
-		call.Millis = time.Since(start).Milliseconds()
-		finishCapture()
-		s.record(call)
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-		return
-	}
-	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+	if cands := candidates(p, model); len(cands) > 1 {
+		// the provider names fallbacks: try them in turn (see fallback.go)
+		final := s.serveFallbacks(w, r, from, cands, body, &call)
+		p, model = final.p, final.model
 	} else {
-		to := p.Speaks()
-		if len(to) == 0 {
-			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
-			writeError(w, from, call.Status, call.Error)
-			call.Millis = time.Since(start).Milliseconds()
-			finishCapture()
-			s.record(call)
-			return
-		}
-		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+		call.To, call.Status, call.Error = s.attempt(w, r, p, from, model, body, &call.Usage)
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
@@ -388,6 +369,33 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+}
+
+// attempt sends the request to one provider and writes its reply to w. It
+// returns the protocol the provider answered in, the status, and the error
+// message ("" when the reply succeeded).
+func (s *Server) attempt(w http.ResponseWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, u *Usage) (provider.Protocol, int, string) {
+	// A Claude Code subscription must run through the genuine binary. Direct
+	// OAuth HTTP requests are content-classified as third-party traffic when
+	// they carry another agent's harness (Pi, OpenCode, and others).
+	if p.Account != nil && p.Account.Agent == "claude" {
+		status, msg := s.serveClaudeSubscription(w, r, from, model, body, u)
+		return provider.Anthropic, status, msg
+	}
+	// a backend that only streams gets a non-streaming request translated
+	// (the provider is always streamed on that path) rather than relayed
+	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
+	if relay {
+		status, msg := s.passthrough(w, r, p, from, model, body, u)
+		return from, status, msg
+	}
+	to := p.Speaks()
+	if len(to) == 0 {
+		msg := p.Name + " has no endpoint configured"
+		return "", writeError(w, from, 502, msg), msg
+	}
+	status, msg := s.translate(w, r, p, from, to[0], model, body, u)
+	return to[0], status, msg
 }
 
 // forward sends a request to the provider.
