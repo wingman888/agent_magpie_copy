@@ -44,6 +44,14 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
+	// Headers are extra HTTP request headers sent to the vendor, exactly as
+	// the user typed them. They ride on every request magpie makes to a plain
+	// key+URL provider — forwarded calls, connectivity tests, and model-list
+	// fetches — applied after the auth headers, so the user can override those
+	// when a gateway insists on a private scheme. Signed-in agent accounts
+	// ignore them: their auth is the agent's own.
+	Headers map[string]string `json:"headers,omitempty"`
+
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
@@ -59,6 +67,11 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
+
+	// Fallback lists "provider/model" references tried in order when this
+	// provider cannot take a request (quota, rate limit, outage). Kept at the
+	// end of the struct so existing field order is unchanged.
+	Fallback []string `json:"fallback,omitempty"`
 }
 
 type file struct {
@@ -94,11 +107,8 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := os.Chmod(p, 0o600); err != nil {
-		return err
-	}
-	pruneIcons(f) // best effort; never fails the save
-	return nil
+	pruneIcons(f)
+	return os.Chmod(p, 0o600)
 }
 
 // All lists the configured providers in the order they were added, then
@@ -121,6 +131,7 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -184,7 +195,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -255,6 +266,13 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
+	p.Headers = cleanHeaders(p.Headers)
+	if p.Preset != "" {
+		// Presets own their request shape; custom headers are supported only
+		// for user-defined providers.
+		p.Headers = nil
+	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -278,6 +296,21 @@ func cleanList(xs []string) []string {
 		if x = strings.TrimSpace(x); x != "" && !contains(out, x) {
 			out = append(out, x)
 		}
+	}
+	return out
+}
+
+// cleanHeaders trims header names and values and drops entries with an empty
+// name, returning nil when nothing is left so the field stays out of the JSON.
+func cleanHeaders(h map[string]string) map[string]string {
+	out := make(map[string]string, len(h))
+	for k, v := range h {
+		if k = strings.TrimSpace(k); k != "" {
+			out[k] = strings.TrimSpace(v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
