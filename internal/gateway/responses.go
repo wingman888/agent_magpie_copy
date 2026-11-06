@@ -169,7 +169,7 @@ func responsesParts(raw json.RawMessage) []Part {
 }
 
 // buildResponses renders a request for a Responses upstream.
-func buildResponses(r *Request, model string) []byte {
+func buildResponses(r *Request, model string, rejectTemp bool) []byte {
 	var input []map[string]any
 	for _, m := range r.Messages {
 		var content []map[string]any
@@ -216,7 +216,7 @@ func buildResponses(r *Request, model string) []byte {
 	if r.MaxTokens > 0 {
 		out["max_output_tokens"] = r.MaxTokens
 	}
-	if !reasoningModel(model) {
+	if !rejectTemp {
 		if r.Temp != nil {
 			out["temperature"] = *r.Temp
 		}
