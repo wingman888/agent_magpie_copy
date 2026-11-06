@@ -61,7 +61,7 @@ func pin(t *testing.T, v *string, val string) {
 func codexLoginFile(t *testing.T, home string, exp time.Time) string {
 	t.Helper()
 	access := fakeJWT(map[string]any{
-		"exp":                       exp.Unix(),
+		"exp":                         exp.Unix(),
 		"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"},
 	})
 	b, _ := json.Marshal(map[string]any{

@@ -35,6 +35,7 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
+		printNotices()
 		return nil
 	}
 	uses := usesByProvider()
@@ -43,10 +44,12 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" {
+		if p.Preset == "" && !p.IsAccount() {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
+		case p.IsAccount():
+			r.key = green.Render("●") + " " + muted.Render(signedIn(p))
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -71,7 +74,23 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
+	printNotices()
 	return nil
+}
+
+// signedIn names the login behind an account provider.
+func signedIn(p provider.Provider) string {
+	if info, ok := p.Account(); ok && info.User != "" {
+		return "signed in as " + info.User
+	}
+	return "signed in"
+}
+
+// printNotices lists the agents that are signed in but deliberately not offered.
+func printNotices() {
+	for _, n := range provider.Notices() {
+		fmt.Printf("  %s  %s\n", muted.Render(n.Name), faint.Render(n.Note))
+	}
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -299,10 +318,21 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" {
+	if p.Preset == "" && !p.IsAccount() {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
+	if info, ok := p.Account(); ok {
+		parts := []string{}
+		if info.User != "" {
+			parts = append(parts, info.User)
+		}
+		if info.Plan != "" {
+			parts = append(parts, info.Plan+" plan")
+		}
+		parts = append(parts, "from "+info.Source)
+		kv("account", strings.Join(parts, " · "))
+	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)

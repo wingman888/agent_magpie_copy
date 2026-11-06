@@ -78,11 +78,19 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key.
+// Field looks a field up by key, or by the label it shows on screen when no
+// key matches (`dial gemini auth …` finds the field labelled "auth").
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
 			return &a.Fields[i]
+		}
+	}
+	if a.ID == "gemini" {
+		for i := range a.Fields {
+			if a.Fields[i].Label == key {
+				return &a.Fields[i]
+			}
 		}
 	}
 	return nil
