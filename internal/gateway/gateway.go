@@ -302,12 +302,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
 	p, model, ok := provider.Resolve(call.Model)
 	if !ok {
-		if msg, gone := provider.SignedOutMessage(accountIDOf(call.Model)); gone {
-			call.Status, call.Error = 401, msg
-			s.record(call)
-			writeError(w, from, 401, msg)
-			return
-		}
 		call.Status, call.Error = 404, "unknown model"
 		s.record(call)
 		msg := fmt.Sprintf("dial knows no model %q", call.Model)
@@ -320,9 +314,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	if p.Account != nil {
-		s.account(w, r, p, from, model, body, &call)
-	} else if p.Base(from) != "" {
+	if p.Base(from) != "" {
 		call.To = from
 		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
 	} else {
@@ -343,9 +335,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
-	if p.Account != nil {
-		return s.forwardAccount(ctx, p, to, body)
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
