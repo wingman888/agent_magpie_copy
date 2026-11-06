@@ -298,7 +298,7 @@ func addProvider(rest []string) error {
 		return err
 	}
 	fmt.Println(green.Render("✓"), "added", saved.Name, muted.Render("("+saved.ID+")"))
-	afterAdd(saved)
+	afterAdd(*saved)
 	return nil
 }
 
