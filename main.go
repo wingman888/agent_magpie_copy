@@ -43,6 +43,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
+  magpie import [-y] <link>            add a provider from a magpie://import link, after showing it
   magpie models                   every model agents can pick, as provider/model
 
   magpie serve                    run the gateway alone (the app runs it too)
@@ -79,7 +80,13 @@ func run(args []string) error {
 		}
 		return tui.Run()
 	}
+	// a magpie: link handed over by the system (or pasted) is an import
+	if strings.HasPrefix(strings.ToLower(args[0]), "magpie:") {
+		return importCmd(args)
+	}
 	switch args[0] {
+	case "import":
+		return importCmd(args[1:])
 	case "tui":
 		return tui.Run()
 	case "app", "gui":

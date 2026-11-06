@@ -107,11 +107,32 @@ func TestAccountsAreProviders(t *testing.T) {
 	if len(codex.Exposed()) != 1 || codex.Exposed()[0].ID != "gpt-5.5" || codex.Responses == "" {
 		t.Fatalf("picks: %+v", codex.Exposed())
 	}
+	// rm only hides a signed-in account: it leaves the list and the
+	// gateway, its picks stay in the file, and the login is untouched
 	if err := Delete("codex"); err != nil {
 		t.Fatal(err)
 	}
-	if codex, _ = find(All(), "codex"); len(codex.Models) != 0 || codex.Account == nil {
-		t.Fatalf("after delete: %+v", codex)
+	if _, ok := find(All(), "codex"); ok {
+		t.Fatal("codex still listed after rm")
+	}
+	if _, _, ok := Resolve("codex/gpt-5.5"); ok {
+		t.Fatal("codex/gpt-5.5 still resolves after rm")
+	}
+	if ex := Excluded(); len(ex) != 1 || ex[0].Provider != "codex" || ex[0].Agent != "codex" || !strings.Contains(ex[0].Why, "magpie provider add codex") {
+		t.Fatalf("excluded: %+v", ex)
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".codex", "auth.json")); err != nil {
+		t.Fatalf("codex sign-in touched by rm: %v", err)
+	}
+	// adding it back restores the account and the picks it had
+	if err := Save(Provider{ID: "codex", Name: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if codex, ok = find(All(), "codex"); !ok || codex.Account == nil || len(codex.Exposed()) != 1 || codex.Exposed()[0].ID != "gpt-5.5" {
+		t.Fatalf("after add back: %+v", codex)
+	}
+	if len(Excluded()) != 0 {
+		t.Fatalf("still excluded after add back: %+v", Excluded())
 	}
 
 	// signed out: gone, and a stale picks entry is not a provider

@@ -55,6 +55,10 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
+
+	// Removed hides a signed-in account from magpie (see Delete). Its model
+	// picks stay in the file so adding it back restores them.
+	Removed bool `json:"removed,omitempty"`
 }
 
 type file struct {
@@ -99,17 +103,21 @@ func store(f file) error {
 func All() []Provider {
 	stored := load().Providers
 	picks := map[string][]string{}
+	hidden := map[string]bool{}
 	var out []Provider
 	for _, p := range stored {
 		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			picks[p.ID] = p.Models
+			if p.Removed {
+				hidden[p.ID] = true
+			}
 			continue
 		}
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken {
+		if _, taken := find(out, a.ID); taken || hidden[a.ID] {
 			continue
 		}
 		a.Models = picks[a.ID]
@@ -146,7 +154,13 @@ func Slug(name string) string {
 }
 
 // Save adds or replaces a provider.
-func Save(p Provider) error {
+func Save(p Provider) error { return save(p, true) }
+
+// SaveImported saves a provider from an import link. Unlike Save it accepts a
+// provider with no key yet; the user adds the key later with `magpie provider key`.
+func SaveImported(p Provider) error { return save(p, false) }
+
+func save(p Provider, needKey bool) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -164,11 +178,17 @@ func Save(p Provider) error {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in
 		p = Provider{ID: a.ID, Models: p.Models}
+		// adding back a removed account keeps the picks it had
+		for _, old := range load().Providers {
+			if old.ID == a.ID && old.Removed && len(p.Models) == 0 {
+				p.Models = old.Models
+			}
+		}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
-		if p.Key == "" && !keyOptional(p) {
+		if needKey && p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
@@ -183,18 +203,19 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider. For an account it forgets the model picks;
-// signing out is the agent's job.
+// Delete removes a provider. An account is only hidden from magpie: its model
+// picks are kept for when it is added back, and the agent's own sign-in is
+// never touched.
 func Delete(id string) error {
 	if _, ok := find(Accounts(), id); ok {
 		f := load()
-		keep := f.Providers[:0]
-		for _, p := range f.Providers {
-			if p.ID != id {
-				keep = append(keep, p)
+		for i := range f.Providers {
+			if f.Providers[i].ID == id {
+				f.Providers[i].Removed = true
+				return store(f)
 			}
 		}
-		f.Providers = keep
+		f.Providers = append(f.Providers, Provider{ID: id, Removed: true})
 		return store(f)
 	}
 	f := load()

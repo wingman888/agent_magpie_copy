@@ -25,7 +25,8 @@ const providerUsage = `usage:
   magpie provider key <id> <key>          change the API key
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
-  magpie provider rm <id>                 remove a provider
+  magpie provider rm <id>                 remove a provider (a signed-in account is only hidden)
+  magpie import [-y] <link>               add a provider from a magpie://import link, after showing it
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
        magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
@@ -35,6 +36,7 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
+		printExcluded()
 		return nil
 	}
 	uses := usesByProvider()
@@ -73,15 +75,20 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
+	printExcluded()
+	return nil
+}
+
+// printExcluded notes, at the end of the list, the accounts the user removed.
+func printExcluded() {
 	for _, x := range provider.Excluded() {
 		name := x.Agent
 		if a, err := agent.Find(x.Agent); err == nil {
 			name = a.Name
 		}
 		fmt.Println()
-		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why))
+		fmt.Println(" ", muted.Render(name+": "+x.Why))
 	}
-	return nil
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -193,6 +200,9 @@ func providerCmd(args []string) error {
 			return err
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
+		if p.Account != nil {
+			fmt.Println(" ", muted.Render("its sign-in is untouched · magpie provider add "+p.ID+" brings it back"))
+		}
 		return nil
 	case "test":
 		if len(rest) != 1 {
@@ -288,6 +298,12 @@ func addProvider(rest []string) error {
 		return err
 	}
 	fmt.Println(green.Render("✓"), "added", saved.Name, muted.Render("("+saved.ID+")"))
+	afterAdd(saved)
+	return nil
+}
+
+// afterAdd fetches a newly saved provider's model list and says what is exposed.
+func afterAdd(saved provider.Provider) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if ms, err := saved.Fetch(ctx); err == nil {
@@ -299,7 +315,6 @@ func addProvider(rest []string) error {
 	} else {
 		fmt.Printf("  %d models in the catalog · %s\n", n, muted.Render("magpie models"))
 	}
-	return nil
 }
 
 func showProvider(p provider.Provider) error {
