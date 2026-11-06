@@ -142,10 +142,6 @@ func run(args []string) error {
 
 func set(a *agent.Agent, key, value string) error {
 	f := a.Field(key)
-	if f == nil && a.ID == "gemini" {
-		// Gemini's fields may also be named by the labels its UI shows.
-		f = a.FieldNamed(key)
-	}
 	if f == nil {
 		var keys []string
 		for _, f := range a.Fields {
