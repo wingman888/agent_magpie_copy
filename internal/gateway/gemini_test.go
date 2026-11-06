@@ -5,8 +5,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/dial/internal/provider"
+	"github.com/yetone/dial/internal/usage"
 )
 
 const geminiGen = "/v1beta/models/fake/m1:generateContent"
@@ -196,5 +198,32 @@ func TestGeminiNotFoundCountAndModels(t *testing.T) {
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/nothing", nil))
 	if rec.Code != 404 || !strings.Contains(rec.Body.String(), "v1beta") {
 		t.Errorf("404 hint: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGeminiJSONModeAndUsageLog(t *testing.T) {
+	f := &fake{t: t, reply: sse(
+		`data: {"id":"c4","model":"m1","choices":[{"index":0,"delta":{"content":"{\"a\":\"x\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`,
+		`data: [DONE]`)}
+	setup(t, provider.Chat, f)
+	code, body := post(t, geminiGen, `{"contents":[{"role":"user","parts":[{"text":"give json"}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"OBJECT","properties":{"a":{"type":"STRING"}}}}}`)
+	if code != 200 || !strings.Contains(body, `{\"a\":\"x\"}`) && !strings.Contains(body, `"text":"{\"a\":\"x\"}"`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	if strings.Contains(string(f.got), "response_format") {
+		t.Errorf("upstream got a JSON-mode field: %s", f.got)
+	}
+	if !strings.Contains(string(f.got), "只输出符合以下 schema 的 JSON") || !strings.Contains(string(f.got), `"type":"object"`) {
+		t.Errorf("JSON instruction missing: %s", f.got)
+	}
+	recs := usage.Load(time.Now().Add(-time.Hour))
+	found := false
+	for _, r := range recs {
+		if r.Provider == "fake" && r.Model == "m1" && r.Input == 3 && r.Output == 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("usage not logged: %+v", recs)
 	}
 }
