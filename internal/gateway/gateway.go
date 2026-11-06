@@ -364,15 +364,20 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
+		// a key always holds its error reply, so that a failure is seen and
+		// the key rests even when it is the last one in line
+		hw := newHoldWriter(w, !last || c.keyed)
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
 		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
 		if c.keyed {
 			call.Error = hideKey(call.Error, c.p.Key)
 		}
-		if !last && hw.failed() {
+		failed := hw.failed()
+		if c.keyed && failed {
+			provider.MarkKeyFailed(c.p.ID, provider.KeyRef(c.p.Key))
+		}
+		if !last && failed {
 			if c.keyed {
-				provider.MarkKeyFailed(c.p.ID, provider.KeyRef(c.p.Key))
 				skipped = append(skipped, accountLabel(c.p)+": "+call.Error)
 			} else {
 				s.rest(c.p.ID)
