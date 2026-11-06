@@ -29,7 +29,7 @@ import (
 type Account struct {
 	Agent string `json:"agent"` // "codex" or "copilot"
 	User  string `json:"user"`  // account name shown to the user
-	Plan  string `json:"plan"`  // subscription tier, when the agent says (may be empty)
+	Plan  string `json:"plan,omitempty"` // subscription tier, when the agent says (may be empty)
 }
 
 // Exclusion is a sign-in dial recognises but does not offer as a provider.
@@ -185,27 +185,33 @@ func claudeCredsFile() string {
 	return filepath.Join(dir, ".credentials.json")
 }
 
+// claudeKeychain caches the macOS probe for at most a minute. The key is the
+// config path it was asked under, so a different config directory never reuses
+// another's answer.
 var claudeKeychain struct {
 	sync.Mutex
+	key string
 	at  time.Time
 	has bool
 }
 
 // claudeKeychainItem reports whether macOS holds a Claude Code login item. It
-// asks for the item without -w, so the secret is neither printed nor requested,
-// and the answer is kept for a minute to avoid running the tool on every call.
+// asks for the item without -w, so the secret is neither printed nor requested.
+// On other platforms it returns false without any probe or cache.
 func claudeKeychainItem() bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
+	key := claudeCredsFile()
 	claudeKeychain.Lock()
 	defer claudeKeychain.Unlock()
-	if time.Since(claudeKeychain.at) < time.Minute {
+	if claudeKeychain.key == key && time.Since(claudeKeychain.at) < time.Minute {
 		return claudeKeychain.has
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials").Run()
+	claudeKeychain.key = key
 	claudeKeychain.has = err == nil
 	claudeKeychain.at = time.Now()
 	return claudeKeychain.has
@@ -257,31 +263,17 @@ func Accounts() []Provider {
 	return out
 }
 
-// excludedCache keeps the last Excluded answer for a minute. It is keyed by the
-// Claude credentials path, so a different config directory is never served a
-// stale answer. Accounts() is never cached: signing out must take effect at once.
-var excludedCache struct {
-	sync.Mutex
-	key string
-	at  time.Time
-	out []Exclusion
-}
-
 // Excluded lists sign-ins dial recognises but does not offer. Claude Code's
-// login is only detected, never read or used.
+// login is only detected, never read or used. Every call checks afresh, so a
+// sign-in that appears or disappears takes effect at once. The only cache is
+// the macOS keychain probe (claudeKeychainItem), which is darwin-only and kept
+// for at most a minute.
 func Excluded() []Exclusion {
-	key := claudeCredsFile()
-	excludedCache.Lock()
-	defer excludedCache.Unlock()
-	if excludedCache.key == key && time.Since(excludedCache.at) < time.Minute {
-		return append([]Exclusion(nil), excludedCache.out...)
-	}
 	var out []Exclusion
-	if fileExists(key) || claudeKeychainItem() {
+	if fileExists(claudeCredsFile()) || claudeKeychainItem() {
 		out = append(out, Exclusion{Agent: "claude", Why: claudeWhy})
 	}
-	excludedCache.key, excludedCache.at, excludedCache.out = key, time.Now(), out
-	return append([]Exclusion(nil), out...)
+	return out
 }
 
 func fileExists(p string) bool {
