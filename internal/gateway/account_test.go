@@ -156,7 +156,7 @@ func TestCodexStreamingResponsesRelayed(t *testing.T) {
 	withCodexBackend(t, c)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"codex/gpt-5.5","input":"hi","stream":true,"max_output_tokens":8}`))
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"codex/gpt-5.5","input":"hi","stream":true,"max_output_tokens":8,"reasoning":{"effort":"low"}}`))
 	New().Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
