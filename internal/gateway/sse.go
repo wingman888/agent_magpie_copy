@@ -45,44 +45,6 @@ func readSSE(r io.Reader, fn func(event, data string) error) error {
 	return sc.Err()
 }
 
-// eventStreamLeads are the ways a server-sent event stream can open.
-var eventStreamLeads = []string{"event:", "data:", ":"}
-
-// eventStreamBody reports whether a provider reply is a server-sent event
-// stream, and returns the reader to consume the body from. A Content-Type of
-// text/event-stream settles it; otherwise the first bytes of the body decide,
-// for upstreams that send no Content-Type. The returned reader replays any
-// bytes that were peeked, so callers must read from it, not from res.Body.
-func eventStreamBody(res *http.Response) (io.Reader, bool) {
-	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
-		return res.Body, true
-	}
-	br := bufio.NewReader(res.Body)
-	return br, startsEventStream(br)
-}
-
-// startsEventStream peeks at the head of br, a byte at a time, until it can
-// tell whether the body opens with an SSE field or comment.
-func startsEventStream(br *bufio.Reader) bool {
-	for n := 1; n <= 64; n++ {
-		b, err := br.Peek(n)
-		t := bytes.TrimLeft(b, " \t\r\n")
-		undecided := len(t) == 0
-		for _, lead := range eventStreamLeads {
-			if bytes.HasPrefix(t, []byte(lead)) {
-				return true
-			}
-			if len(t) < len(lead) && strings.HasPrefix(lead, string(t)) {
-				undecided = true
-			}
-		}
-		if !undecided || err != nil {
-			return false
-		}
-	}
-	return false
-}
-
 // sseWriter writes events to a client and flushes each one.
 type sseWriter struct {
 	w     http.ResponseWriter
