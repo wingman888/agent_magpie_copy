@@ -31,7 +31,12 @@ func gemini(home string) *Agent {
 		return ""
 	}
 
+	rt := geminiRoute{settings: path, env: envPath}
+
 	current := func() string {
+		if rt.routed() {
+			return dialID
+		}
 		if base() != "" {
 			return "custom"
 		}
@@ -44,6 +49,21 @@ func gemini(home string) *Agent {
 		return "google"
 	}
 	use := func(id string) error {
+		if id == dialID {
+			if rt.routed() {
+				return nil
+			}
+			return fmt.Errorf("dial is enabled by choosing a catalog model, e.g. dial gemini model <provider/model>")
+		}
+		if rt.routed() {
+			// any other sign-in first gives back what routing replaced
+			if err := rt.unroute(); err != nil {
+				return err
+			}
+			if id == "" {
+				return nil
+			}
+		}
 		switch id {
 		case "":
 			// back to the CLI's own first-run choice
@@ -89,7 +109,7 @@ func gemini(home string) *Agent {
 		},
 		Fields: []Field{
 			{
-				Key: "provider", Label: "auth",
+				Key: "provider", Label: "auth", ByLabel: true,
 				Get: current,
 				Set: use,
 				Options: func(map[string]string) []Option {
@@ -106,6 +126,7 @@ func gemini(home string) *Agent {
 						{Value: "google", Label: "Google account", Icon: "gemini-color", Note: "OAuth sign-in"},
 						key,
 						{Value: "vertex", Label: "Vertex AI", Icon: "googlecloud-color", Note: "Vertex AI · $GOOGLE_CLOUD_PROJECT"},
+						{Value: dialID, Label: "dial", Icon: "gemini-color", Note: "local gateway · models from every provider in dial"},
 					}
 					if current() == "custom" {
 						out = append(out, Option{Value: "custom", Note: hostOf(base()) + " (from .env)"})
@@ -114,9 +135,23 @@ func gemini(home string) *Agent {
 				},
 			},
 			{
-				Key: "model", Label: "model",
-				Get: jsonGet(path, "model.name"),
-				Set: jsonSet(path, "model.name"),
+				Key: "model", Label: "model", ByLabel: true,
+				Get: jsonGet(path, geminiModel),
+				Set: func(v string) error {
+					switch {
+					case isDial(v):
+						return rt.route(v)
+					case v == "":
+						if rt.routed() {
+							return rt.unroute()
+						}
+					default:
+						if err := rt.unroute(); err != nil {
+							return err
+						}
+					}
+					return jsonSet(path, geminiModel)(v)
+				},
 				Options: func(map[string]string) []Option {
 					var ms []catalog.Model
 					for _, m := range catalog.Provider("google") {
@@ -124,7 +159,8 @@ func gemini(home string) *Agent {
 							ms = append(ms, m)
 						}
 					}
-					return options(ms, "")
+					out := group("Gemini CLI", options(ms, ""))
+					return append(out, viaDial("")...)
 				},
 			},
 		},
