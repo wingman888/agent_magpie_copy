@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,38 +33,19 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
-		var url, body, path string
-		headers := map[string]string{"Authorization": "Bearer " + p.Key}
+		var url, body string
 		switch proto {
 		case Chat:
-			path = "/chat/completions"
-			url = p.Chat + path
+			url = p.Chat + "/chat/completions"
 			body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 		case Responses:
-			path = "/responses"
-			url = p.Responses + path
+			url = p.Responses + "/responses"
 			body = fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
 		case Anthropic:
-			path = "/v1/messages"
-			url = p.Anthropic + path
+			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
-			headers = AuthHeaders(p, Anthropic)
 		}
-		if p.Account != nil {
-			// The login's own base and signature; the body is shaped the way
-			// the backend requires, exactly as a real request would be.
-			base, err := AccountBase(ctx, p)
-			if err != nil {
-				out = append(out, Result{Protocol: proto, Model: model, Error: err.Error()})
-				continue
-			}
-			sent := p.Prepare([]byte(body))
-			out = append(out, probeWith(ctx, proto, base+path, string(sent), model, func(req *http.Request) error {
-				return p.Sign(ctx, req, proto, sent)
-			}))
-			continue
-		}
-		out = append(out, probe(ctx, proto, url, body, model, headers))
+		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
 	}
 	return out
 }
@@ -83,18 +65,7 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
-func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string) Result {
-	return probeWith(ctx, proto, url, body, model, func(req *http.Request) error {
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		return nil
-	})
-}
-
-// probeWith posts body to url, with sign attaching whatever the provider
-// needs to the request before it is sent.
-func probeWith(ctx context.Context, proto Protocol, url, body, model string, sign func(*http.Request) error) Result {
+func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -102,14 +73,17 @@ func probeWith(ctx context.Context, proto Protocol, url, body, model string, sig
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		r.Error = err.Error()
 		return r
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	if err := sign(req); err != nil {
+	if p.IsOpenCode() {
+		req.Header.Set("x-opencode-session", "magpie-test-"+randomUUID())
+	}
+	if err := p.Sign(ctx, req, proto, body); err != nil {
 		r.Error = err.Error()
 		return r
 	}
