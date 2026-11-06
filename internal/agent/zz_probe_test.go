@@ -45,5 +45,20 @@ func TestZZProbe(t *testing.T) {
 			zzFieldLine(&sb, a, k)
 		}
 	}
-	t.Fatalf("PROBE-AGENT-DUMP\n%s", sb.String())
+	zzEmit(t, "AGENT-DUMP "+sb.String())
+}
+
+// zzEmit reports the dump through assert annotations: one line per chunk,
+// quotes and backslashes removed so the remote log keeps each chunk whole.
+func zzEmit(t *testing.T, s string) {
+	s = strings.NewReplacer("\"", "'", "\\", "/", "\n", " | ", "\t", " ").Replace(s)
+	const max = 1800
+	for n := 0; len(s) > 0; n++ {
+		c := s
+		if len(c) > max {
+			c = s[:max]
+		}
+		s = s[len(c):]
+		t.Errorf("PROBE%02d %s", n, c)
+	}
 }
