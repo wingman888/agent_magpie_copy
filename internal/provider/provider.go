@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,14 +45,6 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
-	// Headers are extra HTTP request headers sent to the vendor, exactly as
-	// the user typed them. They ride on every request magpie makes to a plain
-	// key+URL provider — forwarded calls, connectivity tests, and model-list
-	// fetches — applied after the auth headers, so the user can override those
-	// when a gateway insists on a private scheme. Signed-in agent accounts
-	// ignore them: their auth is the agent's own.
-	Headers map[string]string `json:"headers,omitempty"`
-
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
@@ -68,10 +61,10 @@ type Provider struct {
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
 
-	// Fallback lists "provider/model" references tried in order when this
-	// provider cannot take a request (quota, rate limit, outage). Kept at the
-	// end of the struct so existing field order is unchanged.
-	Fallback []string `json:"fallback,omitempty"`
+	// Headers are extra request headers sent to a custom provider's upstream
+	// on every request, names kept exactly as typed. Ignored for presets and
+	// signed-in accounts.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type file struct {
@@ -107,8 +100,11 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	pruneIcons(f)
-	return os.Chmod(p, 0o600)
+	if err := os.Chmod(p, 0o600); err != nil {
+		return err
+	}
+	pruneIcons(f) // best effort; never fails the save
+	return nil
 }
 
 // All lists the configured providers in the order they were added, then
@@ -131,7 +127,6 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -195,7 +190,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -266,14 +261,9 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Fallback = cleanList(p.Fallback)
 	p.Headers = cleanHeaders(p.Headers)
-	if p.Preset != "" {
-		// Presets own their request shape; custom headers are supported only
-		// for user-defined providers.
-		p.Headers = nil
-	}
 	if pr := Preset(p.Preset); pr != nil {
+		p.Headers = nil // presets do not take user headers
 		if p.Icon == "" {
 			p.Icon = pr.Icon
 		}
@@ -300,19 +290,49 @@ func cleanList(xs []string) []string {
 	return out
 }
 
-// cleanHeaders trims header names and values and drops entries with an empty
-// name, returning nil when nothing is left so the field stays out of the JSON.
-func cleanHeaders(h map[string]string) map[string]string {
-	out := make(map[string]string, len(h))
-	for k, v := range h {
-		if k = strings.TrimSpace(k); k != "" {
-			out[k] = strings.TrimSpace(v)
+// cleanHeaders trims header names and values, drops entries with an empty
+// name, and keeps names case-sensitively (X-ORG-id and X-Org-Id are two
+// entries). It returns nil when nothing is left, so the field is not written.
+func cleanHeaders(hs map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range hs {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
 		}
-	}
-	if len(out) == 0 {
-		return nil
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = strings.TrimSpace(v)
 	}
 	return out
+}
+
+// customHeaders are the extra headers a request to this provider carries.
+// Only a plain custom provider has them: not a preset, not a signed-in account.
+func (p Provider) customHeaders() map[string]string {
+	if p.Account != nil || Preset(p.Preset) != nil {
+		return nil
+	}
+	return p.Headers
+}
+
+// ApplyHeaders sets extra headers on h after the auth headers, so a user's
+// value wins over a same-named one. Names are written exactly as given: an
+// http.Header Set would canonicalise X-ORG-id to X-Org-Id. A differently
+// cased copy of a name the user set is dropped, so only the user's value goes
+// upstream.
+func ApplyHeaders(h http.Header, extra map[string]string) {
+	for name := range extra {
+		for k := range h {
+			if k != name && strings.EqualFold(k, name) {
+				delete(h, k)
+			}
+		}
+	}
+	for name, v := range extra {
+		h[name] = []string{v}
+	}
 }
 
 func contains(xs []string, x string) bool {
