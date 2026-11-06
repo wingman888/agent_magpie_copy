@@ -158,7 +158,7 @@ var streamErrors = map[string]int{
 // errorStatus is the status an error event stands for: its own code when that
 // is an HTTP status, else the name its type or code gives; 502 when neither says.
 func errorStatus(e map[string]any) int {
-	code, typ := text(e["code"]), text(e["type"])
+	code, typ := textOf(e["code"]), textOf(e["type"])
 	if n, err := strconv.Atoi(code); err == nil && n >= 400 && n <= 599 {
 		return n
 	}
@@ -170,7 +170,7 @@ func errorStatus(e map[string]any) int {
 	return 502
 }
 
-func text(x any) string {
+func textOf(x any) string {
 	switch t := x.(type) {
 	case string:
 		return t
