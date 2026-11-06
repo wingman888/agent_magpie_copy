@@ -29,6 +29,9 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
+	// Quiet fields are left out of listings while empty: they follow
+	// another field until set (Claude Code's per-tier models).
+	Quiet bool
 }
 
 // Agent is one supported coding agent.

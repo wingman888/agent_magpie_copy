@@ -52,9 +52,28 @@ type Provider struct {
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
+	// Hidden is set on an account the user removed from magpie; the
+	// agent stays signed in, magpie just leaves it alone.
+	Hidden bool `json:"hidden,omitempty"`
+
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
+
+	// Headers are extra request headers sent with every request to a custom
+	// provider, names exactly as the user typed them. Presets and signed-in
+	// accounts never send them.
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// Key is the current key; KeyName names it and KeyProtocol limits it to
+	// one protocol ("" is any). Keys are the other keys, tried in order.
+	KeyName     string     `json:"keyName,omitempty"`
+	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
+	Keys        []KeyEntry `json:"keys,omitempty"`
+
+	// Fallback lists "provider/model" targets tried, in order, once this
+	// provider's candidates have failed with a quota, rate or outage error.
+	Fallback []string `json:"fallback,omitempty"`
 }
 
 type file struct {
@@ -98,22 +117,36 @@ func store(f file) error {
 // model picks for one of those accounts.
 func All() []Provider {
 	stored := load().Providers
-	picks := map[string][]string{}
+	picks := map[string]Provider{}
 	var out []Provider
 	for _, p := range stored {
 		p = normalize(p)
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			picks[p.ID] = p.Models
+			picks[p.ID] = p
 			continue
 		}
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken {
+		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models = picks[a.ID]
+		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
+	}
+	return out
+}
+
+// Hidden lists the signed-in accounts the user removed from magpie.
+func Hidden() []Provider {
+	var out []Provider
+	for _, a := range Accounts() {
+		for _, p := range load().Providers {
+			if p.ID == a.ID && p.Hidden {
+				out = append(out, a)
+			}
+		}
 	}
 	return out
 }
@@ -147,19 +180,6 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
-	return save(p, false)
-}
-
-// SaveImported is Save for a provider taken from an import link: the link may
-// leave the key out, and the user adds it afterwards with `magpie provider key`.
-// Everything else is checked exactly as in Save.
-func SaveImported(p Provider) error {
-	return save(p, true)
-}
-
-// save is the shared body of Save and SaveImported. allowNoKey only relaxes the
-// empty-key check for non-local endpoints.
-func save(p Provider, allowNoKey bool) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -175,39 +195,53 @@ func save(p Provider, allowNoKey bool) error {
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in
-		p = Provider{ID: a.ID, Models: p.Models}
+		// agent's own sign-in. Saving it again brings a removed one back.
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
-		if p.Key == "" && !allowNoKey && !keyOptional(p) {
+		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
+		}
+		if err := validIcon(p.Icon); err != nil {
+			return err
+		}
+		if err := checkKeys(p); err != nil {
+			return err
 		}
 	}
 	f := load()
+	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
-			f.Providers[i] = p
-			return store(f)
+			f.Providers[i] = carryKeys(f.Providers[i], p)
+			replaced = true
+			break
 		}
 	}
-	f.Providers = append(f.Providers, p)
-	return store(f)
+	if !replaced {
+		f.Providers = append(f.Providers, p)
+	}
+	if err := store(f); err != nil {
+		return err
+	}
+	pruneIcons(f)
+	return nil
 }
 
-// Delete removes a provider. For an account it forgets the model picks;
-// signing out is the agent's job.
+// Delete removes a provider. An account is only hidden from magpie (its
+// model picks kept); signing out is the agent's job.
 func Delete(id string) error {
 	if _, ok := find(Accounts(), id); ok {
 		f := load()
-		keep := f.Providers[:0]
-		for _, p := range f.Providers {
-			if p.ID != id {
-				keep = append(keep, p)
+		for i := range f.Providers {
+			if f.Providers[i].ID == id {
+				f.Providers[i].Hidden = true
+				return store(f)
 			}
 		}
-		f.Providers = keep
+		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
 		return store(f)
 	}
 	f := load()
@@ -247,6 +281,10 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = joinCatalogs(p.Catalog)
+	p.Headers = cleanHeaders(p.Headers)
+	p = normalizeKeys(p)
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
