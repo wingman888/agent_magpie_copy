@@ -75,19 +75,17 @@ type Exclusion struct {
 	Why      string `json:"why"`
 }
 
-// Excluded lists the signed-in accounts the user removed from magpie. Each can
-// be brought back with `magpie provider add <id>`.
+// Excluded lists every account the user removed from magpie, whether or not it
+// is still signed in. Each can be brought back with `magpie provider add <id>`.
 func Excluded() []Exclusion {
 	var out []Exclusion
 	for _, p := range load().Providers {
 		if !p.Hidden || p.Chat != "" || p.Responses != "" || p.Anthropic != "" {
 			continue
 		}
-		a, ok := find(Accounts(), p.ID)
-		if !ok || a.Account == nil {
-			continue // signed out: nothing to bring back
-		}
-		out = append(out, Exclusion{Agent: a.Account.Agent, Provider: p.ID,
+		// a hidden entry without URLs is only ever written for a signed-in
+		// agent, and an account's id is its agent's id (claude, codex, copilot)
+		out = append(out, Exclusion{Agent: p.ID, Provider: p.ID,
 			Why: "removed from magpie · magpie provider add " + p.ID + " brings it back"})
 	}
 	return out
