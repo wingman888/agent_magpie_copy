@@ -56,6 +56,8 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
+	// the vendor's own headers go last, so they may override the defaults
+	catalog.SetRawHeaders(req.Header, p.CustomHeaders())
 	return nil
 }
 
@@ -326,24 +328,35 @@ func claudeIdentity() (user, plan string, signedOut bool) {
 	return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 }
 
-func claudeAccount() (Provider, bool) {
-	c, _, ok := claudeCredential()
-	if !ok {
-		return Provider{}, false
+// claudeWho names the account a Claude Code credential belongs to, with its
+// plan. Without an identity from Claude Code, the plan stands in for a name.
+func claudeWho(c claudeCredentials) (user, plan string, signedOut bool) {
+	name, statusPlan, out := claudeIdentity()
+	if out {
+		return "", "", true
 	}
-	user, statusPlan, signedOut := claudeIdentity()
-	if signedOut {
-		return Provider{}, false
-	}
-	plan := c.OAuth.SubscriptionType
+	plan = c.OAuth.SubscriptionType
 	if statusPlan != "" {
 		plan = statusPlan
 	}
+	user = name
 	if user == "" {
 		user = "Claude account"
 		if plan != "" {
 			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
 		}
+	}
+	return user, plan, false
+}
+
+func claudeAccount() (Provider, bool) {
+	c, _, ok := claudeCredential()
+	if !ok {
+		return Provider{}, false
+	}
+	user, plan, signedOut := claudeWho(c)
+	if signedOut {
+		return Provider{}, false
 	}
 	acct := &Account{Agent: "claude", User: user, Plan: plan}
 	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
@@ -452,17 +465,23 @@ func claudeFresh(c claudeCredentials) bool {
 // when it is about to expire. A refresh rotates the refresh token, so the new
 // pair goes back where Claude Code will look for it.
 func claudeToken(ctx context.Context) (string, error) {
+	return claudeTokenFrom(ctx, claudeCredential, readClaudeCredential)
+}
+
+// claudeTokenFrom is claudeToken over any credential: cached is the one held
+// in memory, latest reads it afresh from where it is kept.
+func claudeTokenFrom(ctx context.Context, cached, latest func() (claudeCredentials, claudeCredentialLocation, bool)) (string, error) {
 	claudeMu.Lock()
 	defer claudeMu.Unlock()
-	c, loc, ok := claudeCredential()
+	c, loc, ok := cached()
 	if !ok {
 		return "", errors.New("Claude Code is signed out; run claude auth login")
 	}
 	if !claudeFresh(c) {
 		// Claude Code itself may have rotated the token since the cache was
 		// filled; a stale refresh token would be rejected, so look again.
-		if latest, latestLoc, ok := readClaudeCredential(); ok {
-			c, loc = latest, latestLoc
+		if fresh, freshLoc, ok := latest(); ok {
+			c, loc = fresh, freshLoc
 		}
 	}
 	if claudeFresh(c) {
@@ -594,8 +613,14 @@ func codexAccount(home string) (Provider, bool) {
 		return Provider{}, false
 	}
 	id := jwtClaims(a.Tokens.IDToken)
-	acct := &Account{Agent: "codex", Stream: true,
-		User: claimString(id, "email"), Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")}
+	acct := newCodexAccount(path, claimString(id, "email"), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type"))
+	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
+}
+
+// newCodexAccount is a ChatGPT login kept in the auth.json at path: the Codex
+// CLI's own file, or a copy magpie keeps of another signed-in account.
+func newCodexAccount(path, user, plan string) *Account {
+	acct := &Account{Agent: "codex", Stream: true, User: user, Plan: plan}
 	if acct.User == "" {
 		acct.User = "ChatGPT"
 	}
@@ -615,7 +640,7 @@ func codexAccount(home string) (Provider, bool) {
 	acct.body = codexBody
 	acct.models = catalog.Codex
 	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
+	return acct
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -71,6 +72,9 @@ type Call struct {
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	// Fallback names the candidates tried and refused before the one that
+	// answered: provider ids, with the key name where the key has one.
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // Server is the gateway.
@@ -83,13 +87,19 @@ type Server struct {
 	responseOnly map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
+	// lastKey is, per provider, the fingerprint of the key that last answered.
+	lastKey map[string]string
+	// refusedAt is, per candidate (see cooldownKey), when it was last refused.
+	refusedAt map[string]time.Time
+	// clock tells the time for cooldowns; nil means the real clock.
+	clock func() time.Time
 }
 
 // New makes a gateway.
 func New() *Server {
 	return &Server{
 		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
+			Proxy:                 netproxy.Func,
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,
@@ -220,8 +230,9 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok && p.Anthropic != "" {
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+	pk, usable := p.KeyFor(provider.Anthropic)
+	if ok && p.Anthropic != "" && usable {
+		res, err := s.forward(r.Context(), pk, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
 			if res.StatusCode < 400 {
@@ -364,27 +375,36 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
-	} else {
-		to := p.Speaks()
-		if len(to) == 0 {
-			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
-			writeError(w, from, call.Status, call.Error)
-			call.Millis = time.Since(start).Milliseconds()
-			finishCapture()
-			s.record(call)
-			return
+	// a signed-in Codex account, then each remembered account that is on at the
+	// same time, is a candidate signed with its own login. The first is the
+	// account the agent is signed in to, and keeps the plain label.
+	var cands []candidate
+	for i, q := range provider.SignedInProviders(p) {
+		qRelay := q.Account == nil || !q.Account.Stream || streamOf(body)
+		for _, c := range candidates(q, from, model, qRelay, s.lastKeyRef(p.ID)) {
+			if i > 0 && q.Account != nil {
+				c.key, c.keyRef = q.Account.User, "account:"+strings.ToLower(q.Account.User)
+			}
+			cands = append(cands, c)
 		}
-		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
 	}
+	cands = append(cands, s.fallbackCandidates(p, from, body)...)
+	if len(cands) == 0 {
+		call.Status, call.Error = 502, p.Name+" has no endpoint configured"
+		writeError(w, from, call.Status, call.Error)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
+		return
+	}
+	done := s.try(w, r, from, model, body, s.restedLast(cands), &call.Usage)
+	call.Provider, call.To = done.used.p.ID, done.used.proto
+	call.Status, call.Error = done.status, done.msg
+	call.Fallback = strings.Join(done.failed, ", ")
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: done.used.model,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
@@ -419,11 +439,22 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	res, err := s.fetchRelay(r, p, proto, model, body)
+	return relayReply(w, res, err, p, proto, u)
+}
+
+// fetchRelay sends a request as it is, with the model name swapped for the
+// provider's own, to the endpoint of its own protocol.
+func (s *Server) fetchRelay(r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte) (*http.Response, error) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
 	}
-	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
+	return s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
+}
+
+// relayReply writes the provider's reply to a relayed request.
+func relayReply(w http.ResponseWriter, res *http.Response, err error, p provider.Provider, proto provider.Protocol, u *Usage) (int, string) {
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}
@@ -566,6 +597,12 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	stream := request.Stream
 	request.Stream = true
 	res, actual, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
+	return translateReply(w, res, err, p, from, actual, request, stream, u)
+}
+
+// translateReply writes the provider's reply to a translated request, in the
+// client's protocol.
+func translateReply(w http.ResponseWriter, res *http.Response, err error, p provider.Provider, from, actual provider.Protocol, request *Request, stream bool, u *Usage) (int, string) {
 	if err != nil {
 		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
 	}

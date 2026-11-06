@@ -14,6 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudebridge"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
@@ -38,6 +39,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
+  magpie accounts [claude|codex]  list your Claude Code and Codex sign-ins; switch, forget, add, on, off to manage them
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
@@ -64,6 +66,7 @@ var (
 
 func main() {
 	gateway.Version = version
+	netproxy.Install()
 	update.GUI = hasGUI
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
@@ -118,6 +121,8 @@ func run(args []string) error {
 		return profiles(args)
 	case "import":
 		return importCmd(args[1:])
+	case "accounts":
+		return accountsCmd(args[1:])
 	case "providers":
 		return providers()
 	case "presets":
