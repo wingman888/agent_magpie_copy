@@ -82,3 +82,52 @@ func TestSetIconBuiltinAndDefault(t *testing.T) {
 		t.Errorf("icon = %q, want empty after reset", p.Icon)
 	}
 }
+
+func TestApplyPairsMissingImageNameFails(t *testing.T) {
+	p := provider.Provider{ID: "relay", Icon: "deepseek-color"}
+	err := applyPairs(&p, []string{"icon=missing.png"})
+	if err == nil {
+		t.Fatal("expected an error for a missing image file name")
+	}
+	if !strings.Contains(err.Error(), "icon file not found") {
+		t.Errorf("error %q should say icon file not found", err)
+	}
+	if p.Icon != "deepseek-color" {
+		t.Errorf("icon = %q, want unchanged deepseek-color", p.Icon)
+	}
+}
+
+func TestSetIconMissingImageNameKeepsIcon(t *testing.T) {
+	for _, name := range []string{"missing.PNG", "logo.svg", "pic.jpeg"} {
+		p := provider.Provider{ID: "relay", Icon: "deepseek-color"}
+		if err := setIcon(&p, name); err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		if p.Icon != "deepseek-color" {
+			t.Errorf("%s: icon = %q, want unchanged", name, p.Icon)
+		}
+	}
+}
+
+func TestSetIconDirectoryFails(t *testing.T) {
+	dir := t.TempDir()
+	p := provider.Provider{ID: "relay", Icon: "deepseek-color"}
+	if err := setIcon(&p, dir); err == nil {
+		t.Fatal("expected an error for a directory")
+	}
+	if p.Icon != "deepseek-color" {
+		t.Errorf("icon = %q, want unchanged", p.Icon)
+	}
+}
+
+func TestSetIconBuiltinNamesNotAffected(t *testing.T) {
+	for _, name := range []string{"deepseek-color", "generic"} {
+		p := provider.Provider{ID: "relay"}
+		if err := setIcon(&p, name); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if p.Icon != name {
+			t.Errorf("icon = %q, want %q", p.Icon, name)
+		}
+	}
+}

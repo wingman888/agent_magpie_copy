@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -407,16 +408,30 @@ func showProvider(p provider.Provider) error {
 
 var errOnlyCustomIcon = errors.New("only custom providers can have an icon")
 
+// iconImageExts are extensions that mark an icon argument as a file name
+// rather than a built-in icon name.
+var iconImageExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
+	".webp": true, ".ico": true, ".svg": true,
+}
+
 // iconArg turns an icon argument into the value stored in Provider.Icon: an
 // existing file is stored as an image and gets its file: reference; "" means
-// the default icon; anything else is a built-in icon name.
+// the default icon; anything else is a built-in icon name. A value that is a
+// directory, or that looks like a file path or image file name but does not
+// exist, is an error rather than a built-in name.
 func iconArg(v string) (string, error) {
 	if v == "" {
 		return "", nil
 	}
-	if fi, err := os.Stat(v); err == nil && !fi.IsDir() {
+	fi, err := os.Stat(v)
+	if err == nil {
+		if fi.IsDir() {
+			return "", fmt.Errorf("icon is a directory, not a file: %s", v)
+		}
 		return provider.StoreIconFile(v)
-	} else if err != nil && strings.ContainsAny(v, `/\`) {
+	}
+	if strings.ContainsAny(v, `/\`) || iconImageExts[strings.ToLower(filepath.Ext(v))] {
 		return "", fmt.Errorf("icon file not found: %s", v)
 	}
 	return v, nil
