@@ -38,9 +38,9 @@ echo "{\"loggedIn\":true,\"email\":\"$letter@example.com\",\"subscriptionType\":
 	return home
 }
 
-// claudeSignIn writes the sign-in Claude Code keeps for account who ("a", "b",
+// signInClaude writes the sign-in Claude Code keeps for account who ("a", "b",
 // …). token varies the access token, as a refresh would.
-func claudeSignIn(t *testing.T, home, who, token string) {
+func signInClaude(t *testing.T, home, who, token string) {
 	t.Helper()
 	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), map[string]any{
 		"claudeAiOauth": map[string]any{
@@ -91,9 +91,9 @@ func remembered(t *testing.T, agent string) []RememberedAccount {
 // twoClaudeAccounts leaves a@ signed in and b@ remembered on alongside it.
 func twoClaudeAccounts(t *testing.T, home string) {
 	t.Helper()
-	claudeSignIn(t, home, "a", "1")
+	signInClaude(t, home, "a", "1")
 	fakeLogin(t, func(agent string) error {
-		claudeSignIn(t, home, "b", "1")
+		signInClaude(t, home, "b", "1")
 		return nil
 	})
 	if _, err := AddAccount("claude"); err != nil {
@@ -103,12 +103,12 @@ func twoClaudeAccounts(t *testing.T, home string) {
 
 func TestAddRemembersSecondAccountOn(t *testing.T) {
 	home := accountsHome(t)
-	claudeSignIn(t, home, "a", "1")
+	signInClaude(t, home, "a", "1")
 	fakeLogin(t, func(agent string) error {
 		if agent != "claude" {
 			t.Fatalf("login for %s", agent)
 		}
-		claudeSignIn(t, home, "b", "1")
+		signInClaude(t, home, "b", "1")
 		return nil
 	})
 
@@ -148,7 +148,7 @@ func TestSwitchKeepsLatestSignInAndOtherFields(t *testing.T) {
 
 	// a refreshes its tokens in the agent's store, and the agent's config has
 	// more in it than login
-	claudeSignIn(t, home, "a", "2")
+	signInClaude(t, home, "a", "2")
 	writeFile(t, filepath.Join(home, ".claude.json"), map[string]any{
 		"numStartups": 3, "projects": map[string]any{"/work": map[string]any{}},
 		"oauthAccount": map[string]any{"emailAddress": "a@example.com"},
@@ -270,7 +270,7 @@ func TestSwitchToUnknownAccountFails(t *testing.T) {
 
 func TestFailedAddPutsThePreviousSignInBack(t *testing.T) {
 	home := accountsHome(t)
-	claudeSignIn(t, home, "a", "1")
+	signInClaude(t, home, "a", "1")
 	fakeLogin(t, func(string) error { return errors.New("browser closed") })
 
 	if _, err := AddAccount("claude"); err == nil {
@@ -292,7 +292,7 @@ func TestAlongsideFollowsSavedOrder(t *testing.T) {
 	home := accountsHome(t)
 	twoClaudeAccounts(t, home)
 	fakeLogin(t, func(string) error {
-		claudeSignIn(t, home, "c", "1")
+		signInClaude(t, home, "c", "1")
 		return nil
 	})
 	if _, err := AddAccount("claude"); err != nil {
