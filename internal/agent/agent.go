@@ -78,14 +78,29 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key.
-func (a *Agent) Field(key string) *Field {
+// Field looks a field up by key, or failing that by its display label
+// (case-insensitive, surrounding space ignored). A key always wins.
+func (a *Agent) Field(name string) *Field {
 	for i := range a.Fields {
-		if a.Fields[i].Key == key {
+		if a.Fields[i].Key == name {
+			return &a.Fields[i]
+		}
+	}
+	want := normFieldName(name)
+	if want == "" {
+		return nil
+	}
+	for i := range a.Fields {
+		if normFieldName(a.Fields[i].Label) == want {
 			return &a.Fields[i]
 		}
 	}
 	return nil
+}
+
+// normFieldName folds a field name for label matching.
+func normFieldName(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // Values reads every field.
