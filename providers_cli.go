@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,14 +23,16 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo
   magpie provider key <id> <key>          change the API key
+  magpie provider icon <id> <file|name|"">  set a custom vendor's icon: an image file, a built-in icon name, or "" for the default
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
-       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
+       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
+       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme icon=./logo.png`
 
 // providers: `magpie providers`
 func providers() error {
@@ -186,6 +189,26 @@ func providerCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), p.Name, "key", muted.Render(provider.Mask(p.Key)))
 		return nil
+	case "icon":
+		if len(rest) != 2 {
+			return fmt.Errorf("magpie provider icon <id> <file|name|\"\">")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if err := setIcon(p, rest[1]); err != nil {
+			return err
+		}
+		if err := provider.Save(*p); err != nil {
+			return err
+		}
+		shown := p.Icon
+		if shown == "" {
+			shown = "default"
+		}
+		fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(shown))
+		return nil
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -269,6 +292,11 @@ func addProvider(rest []string) error {
 	var p provider.Provider
 	if pr, err := provider.FromPreset(strings.ToLower(rest[0])); err == nil {
 		p = pr
+		for _, kv := range rest {
+			if k, _, ok := strings.Cut(kv, "="); ok && strings.EqualFold(strings.TrimSpace(k), "icon") {
+				return errOnlyCustomIcon
+			}
+		}
 		if len(rest) > 1 && !strings.Contains(rest[1], "=") {
 			p.Key = rest[1]
 			rest = rest[2:]
@@ -341,6 +369,16 @@ func showProvider(p provider.Provider) error {
 	default:
 		kv("key", amber.Render("not set")+muted.Render("  magpie provider key "+p.ID+" …"))
 	}
+	if p.Preset == "" && p.Account == nil {
+		names := make([]string, 0, len(p.Headers))
+		for n := range p.Headers {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			fmt.Printf("  header  %s: %s\n", n, p.Headers[n])
+		}
+	}
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
@@ -367,11 +405,54 @@ func showProvider(p provider.Provider) error {
 	return nil
 }
 
+var errOnlyCustomIcon = errors.New("only custom providers can have an icon")
+
+// iconArg turns an icon argument into the value stored in Provider.Icon: an
+// existing file is stored as an image and gets its file: reference; "" means
+// the default icon; anything else is a built-in icon name.
+func iconArg(v string) (string, error) {
+	if v == "" {
+		return "", nil
+	}
+	if fi, err := os.Stat(v); err == nil && !fi.IsDir() {
+		return provider.StoreIconFile(v)
+	} else if err != nil && strings.ContainsAny(v, `/\`) {
+		return "", fmt.Errorf("icon file not found: %s", v)
+	}
+	return v, nil
+}
+
+// setIcon sets a custom provider's icon. Presets and signed-in agent
+// accounts keep their own icons.
+func setIcon(p *provider.Provider, v string) error {
+	if p.Preset != "" || p.Account != nil {
+		return errOnlyCustomIcon
+	}
+	icon, err := iconArg(v)
+	if err != nil {
+		return err
+	}
+	p.Icon = icon
+	return nil
+}
+
 func applyPairs(p *provider.Provider, pairs []string) error {
 	for _, kv := range pairs {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
 			return fmt.Errorf("expected key=value, got %q\n\n%s", kv, providerUsage)
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if len(k) >= len(headerPrefix) && strings.EqualFold(k[:len(headerPrefix)], headerPrefix) {
+			name := strings.TrimSpace(k[len(headerPrefix):])
+			if name == "" {
+				continue
+			}
+			if p.Headers == nil {
+				p.Headers = map[string]string{}
+			}
+			p.Headers[name] = v
+			continue
 		}
 		switch strings.ToLower(k) {
 		case "id":
@@ -395,13 +476,20 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "keys":
 			p.KeysURL = v
 		case "icon":
-			p.Icon = v
+			icon, err := iconArg(v)
+			if err != nil {
+				return err
+			}
+			p.Icon = icon
 		default:
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}
 	}
 	return nil
 }
+
+// headerPrefix introduces a custom request header on `provider add`: header.<name>=<value>.
+const headerPrefix = "header."
 
 func ago(t time.Time) string {
 	d := time.Since(t)
