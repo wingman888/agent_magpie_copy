@@ -40,11 +40,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
-  magpie backup [--no-keys] [file]  save everything to one passphrase-sealed file
-                                  (magpie.magpie-backup); --no-keys leaves out API keys
-  magpie restore [--no-agents] <file>  restore a backup on this machine; --no-agents
-                                  leaves the agents' models alone
-
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
@@ -62,6 +57,9 @@ const usage = `magpie — one place to pick every agent's model
   magpie sync                     refresh the model catalog and vendor model lists
   magpie agents                   list every supported agent
   magpie update [check]           install the newest release (check: only say if there is one)
+  magpie backup [--no-keys] [file]     save providers, keys, settings, profiles and agent models
+                                  to one passphrase-encrypted file (magpie.magpie-backup)
+  magpie restore [--no-agents] <file>  restore a backup here; --no-agents leaves agent models alone
 
 agents: claude (cc), codex, gemini, opencode (oc), pi, goose, cursor, copilot, crush
 `
@@ -133,10 +131,6 @@ func run(args []string) error {
 		return nil
 	case "save", "use", "rm", "profiles":
 		return profiles(args)
-	case "backup":
-		return backupCmd(args)
-	case "restore":
-		return restoreCmd(args)
 	case "import":
 		return importCmd(args[1:])
 	case "providers":
@@ -155,6 +149,10 @@ func run(args []string) error {
 		return usageCmd(args)
 	case "update":
 		return updateCmd(args)
+	case "backup":
+		return backupCmd(args[1:])
+	case "restore":
+		return restoreCmd(args[1:])
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 		return claudebridge.RunMCP(args[1:])
 	}
