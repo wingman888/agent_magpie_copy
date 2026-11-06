@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -309,7 +308,7 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	case "codex":
 		return signCodex(ctx, req)
 	case "copilot":
-		return errors.New("copilot: request signing is not implemented yet")
+		return signCopilot(ctx, req, proto, body)
 	}
 	return fmt.Errorf("%s: this login cannot be used to sign requests", p.Name)
 }
