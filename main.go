@@ -46,6 +46,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider key|models|test|rm <id>
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
+  magpie accounts [claude|codex]  your subscription accounts: list, switch, add, on/off, forget
 
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
@@ -120,6 +121,8 @@ func run(args []string) error {
 		return profiles(args)
 	case "import":
 		return importCmd(args[1:])
+	case "accounts":
+		return accountsCmd(args[1:])
 	case "providers":
 		return providers()
 	case "presets":

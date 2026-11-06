@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -60,13 +61,19 @@ type Provider struct {
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
 
-	// Headers are extra request headers sent to a custom provider, after the
-	// auth headers; names keep the user's case. Presets and accounts ignore them.
+	// Headers are extra request headers sent with every request to a custom
+	// provider (name → value). Presets and accounts ignore them.
 	Headers map[string]string `json:"headers,omitempty"`
 
-	// Fallback is the ordered list of "provider/model" ids to try when this
-	// provider cannot answer. Kept on signed-in accounts too.
+	// Fallback lists "provider/model" ids tried, in order, when this
+	// provider cannot answer (see the gateway).
 	Fallback []string `json:"fallback,omitempty"`
+
+	// KeyName names the key in use (Key); KeyProtocol limits it to one
+	// protocol ("" for any). Keys are the other keys, in the order added.
+	KeyName     string     `json:"keyName,omitempty"`
+	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
+	Keys        []KeyEntry `json:"keys,omitempty"`
 }
 
 type file struct {
@@ -187,8 +194,9 @@ func Save(p Provider) error {
 		p.Name = p.ID
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
-		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in. Saving it again brings a removed one back.
+		// an account keeps only the user's model picks and fallbacks; the
+		// rest is the agent's own sign-in. Saving it again brings a removed
+		// one back.
 		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
@@ -197,9 +205,17 @@ func Save(p Provider) error {
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
+		if !validKeyProtocol(p.KeyProtocol) {
+			return fmt.Errorf("key protocol %q: use chat, responses, anthropic, or nothing for any", p.KeyProtocol)
+		}
+		for _, k := range p.Keys {
+			if !validKeyProtocol(k.Protocol) {
+				return fmt.Errorf("key %q protocol %q: use chat, responses, anthropic, or nothing for any", k.Name, k.Protocol)
+			}
+		}
 	}
-	if p.Preset != "" {
-		p.Headers = nil // presets ignore custom headers
+	if name, ok := strings.CutPrefix(p.Icon, iconPrefix); ok && IconFile(name) == "" {
+		return fmt.Errorf("icon %q is not a stored icon", p.Icon)
 	}
 	f := load()
 	replaced := false
@@ -264,6 +280,8 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
+	p.KeyName = strings.TrimSpace(p.KeyName)
+	p.Keys = cleanKeys(p.Key, p.Keys)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -272,8 +290,7 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = cleanCatalogs(p.Catalog)
-	p.Headers = cleanHeaders(p.Headers, p.Preset == "")
+	p.Headers = cleanHeaders(p.Headers)
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -288,7 +305,69 @@ func normalize(p Provider) Provider {
 			p.KeysURL = pr.KeysURL
 		}
 	}
+	p.Catalog = strings.Join(catalogIDs(p.Catalog), ",")
 	return p
+}
+
+// catalogIDs splits a "catalog=a,b" list into its models.dev ids.
+func catalogIDs(s string) []string {
+	return cleanList(strings.Split(s, ","))
+}
+
+// cleanHeaders trims header names and values, drops entries with no name, a
+// name that is not an HTTP token, or a value that could not be sent, and
+// returns nil for an empty map so nothing is written. Names keep the case
+// the user typed.
+func cleanHeaders(h map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range h {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" || !validHeaderName(k) || strings.ContainsAny(v, "\r\n") {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// validHeaderName is true for an HTTP token, the only shape a header name may take.
+func validHeaderName(k string) bool {
+	for _, c := range k {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", c):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// extraHeaders are the request headers sent with this provider's requests:
+// a custom provider's own, never a preset's or an account's.
+func (p Provider) extraHeaders() map[string]string {
+	if p.Preset != "" || p.Account != nil {
+		return nil
+	}
+	return p.Headers
+}
+
+// applyHeaders sets the extra headers on req, after the auth headers so they
+// can override them. Each name is written exactly as stored (net/http would
+// canonicalize it); any other spelling of the same name already on req is
+// removed first.
+func (p Provider) applyHeaders(req *http.Request) {
+	for k, v := range p.extraHeaders() {
+		for have := range req.Header {
+			if strings.EqualFold(have, k) {
+				delete(req.Header, have)
+			}
+		}
+		req.Header[k] = []string{v}
+	}
 }
 
 func cleanList(xs []string) []string {

@@ -31,6 +31,11 @@ type SubscriptionQuota struct {
 	Plan     string        `json:"plan,omitempty"`
 	Windows  []QuotaWindow `json:"windows"`
 	Error    string        `json:"error,omitempty"`
+
+	// FiveHour and Weekly are the used share, in percent, of the 5-hour and
+	// the weekly window; LoginUsage fills them in from Windows.
+	FiveHour float64 `json:"fiveHour,omitempty"`
+	Weekly   float64 `json:"weekly,omitempty"`
 }
 
 var subscriptionUsageCache struct {
@@ -155,8 +160,14 @@ type accountStatusError struct{ status int }
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
+	return claudeQuota(ctx, claudeToken)
+}
+
+// claudeQuota asks Anthropic for the usage of the account whose access token
+// token returns.
+func claudeQuota(ctx context.Context, token func(context.Context) (string, error)) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
-	token, err := claudeToken(ctx)
+	tok, err := token(ctx)
 	if err != nil {
 		q.Error = err.Error()
 		return q
@@ -169,7 +180,7 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
+	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", tok, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
