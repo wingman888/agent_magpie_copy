@@ -605,7 +605,7 @@ func iconValue(v string) (string, error) {
 	if strings.ContainsAny(v, `/\`) || filepath.Ext(v) != "" {
 		return provider.StoreIconFile(v)
 	}
-	if _, err := os.Stat(v); err == nil {
+	if fi, err := os.Stat(v); err == nil && fi.Mode().IsRegular() {
 		return provider.StoreIconFile(v)
 	}
 	if !iconName.MatchString(v) {

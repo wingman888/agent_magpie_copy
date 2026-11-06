@@ -136,6 +136,7 @@ func (s *Server) tryKeys(hw *heldWriter, r *http.Request, p provider.Provider, f
 	for i, t := range tries {
 		hw.reset()
 		call.To = t.proto
+		call.Key = keyTag(t.cred)
 		if t.proto == from {
 			status, msg = s.passthrough(hw, r, t.p, from, model, body, &call.Usage)
 		} else {
@@ -295,6 +296,15 @@ func claudeTransient(msg string) bool {
 		}
 	}
 	return false
+}
+
+// keyTag names the key an attempt was sent with, for the recent calls: its
+// name, or its fingerprint when it has none.
+func keyTag(c provider.Credential) string {
+	if c.Name != "" {
+		return c.Name
+	}
+	return c.Ref
 }
 
 // failLabel names a failed attempt for the recent calls: the provider, and

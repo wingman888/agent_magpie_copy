@@ -79,9 +79,18 @@ func (p Provider) Exposed() []catalog.Model {
 		for _, id := range ids {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
-			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
+				continue
 			}
+			// a "vendor/" prefixed id takes the name and levels of the model
+			// after the last slash; the id itself stays what the vendor is sent
+			if i := strings.LastIndex(id, "/"); i >= 0 {
+				if m, ok := byID[id[i+1:]]; ok {
+					m.ID = id
+					out = append(out, m)
+					continue
+				}
+			}
+			out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
 		}
 		return out
 	}
