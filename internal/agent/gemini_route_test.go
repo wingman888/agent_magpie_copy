@@ -148,7 +148,12 @@ func TestGemRouteManualDialNeedsRouting(t *testing.T) {
 	if err := a.Field("provider").Set("dial"); err == nil {
 		t.Fatal("choosing dial without routing should fail")
 	}
-	gemRouteFacts(settings, envPath) // no files written by the failed attempt
+	if _, err := os.Stat(envPath); err == nil {
+		t.Errorf("failed dial choice wrote %s", envPath)
+	}
+	if _, err := os.Stat(settings); err == nil {
+		t.Errorf("failed dial choice wrote %s", settings)
+	}
 
 	gemRouteSet(t, a, "model", "fake/m1")
 	if err := a.Field("provider").Set("dial"); err != nil {
