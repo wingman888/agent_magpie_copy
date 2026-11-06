@@ -81,12 +81,13 @@ func ParseImport(link string) (Provider, error) {
 		}
 	}
 
+	// Check the raw name first: trimming would hide a trailing %0A.
+	if hasControl(q.Get("name")) {
+		return Provider{}, fmt.Errorf("provider name contains control characters")
+	}
 	name := get("name")
 	if pr == nil && name == "" {
 		return Provider{}, fmt.Errorf("import link needs a preset or a name")
-	}
-	if hasControl(name) {
-		return Provider{}, fmt.Errorf("provider name contains control characters")
 	}
 	if name != "" {
 		p.Name = truncateRunes(name, importNameMax)

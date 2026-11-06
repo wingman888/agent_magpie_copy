@@ -189,7 +189,7 @@ func TestParseImportLocalHTTP(t *testing.T) {
 }
 
 func TestParseImportNameTruncated(t *testing.T) {
-	long := strings.Repeat("界", 100)
+	long := "R" + strings.Repeat("界", 100) // ASCII letter keeps a derivable id
 	p, err := ParseImport("magpie://import?name=" + long + "&chat=https://r.example/v1")
 	if err != nil {
 		t.Fatal(err)
