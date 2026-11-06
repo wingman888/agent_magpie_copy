@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -69,10 +70,9 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchWith is Fetch with extra request headers (a custom vendor's own
-// headers). They go on after the auth headers, so they can override them;
-// their names keep the case the user typed.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
+// FetchWith is Fetch with extra request headers, sent after the usual ones
+// and under the names given (see ApplyHeaders).
+func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -99,7 +99,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOneWith(ctx, u, key, anthropic, extra)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -116,11 +116,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
-	return fetchOneWith(ctx, url, key, anthropic, nil)
-}
-
-func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -136,7 +132,7 @@ func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra ma
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	SetRawHeaders(req.Header, extra)
+	ApplyHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -175,29 +171,37 @@ func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra ma
 	return out, nil
 }
 
+// ApplyHeaders sets extra headers on h exactly as named: the name keeps the
+// case it was given on the wire, and it replaces any header of the same
+// name (in any case) that is already set, so it can override a default.
+//
+// One exception: net/http only lets a User-Agent set under its canonical
+// spelling suppress its own default, so that name is always written as
+// "User-Agent" (otherwise two User-Agent lines would go out).
+func ApplyHeaders(h http.Header, extra map[string]string) {
+	names := make([]string, 0, len(extra))
+	for n := range extra {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		key := n
+		if strings.EqualFold(n, "User-Agent") {
+			key = "User-Agent"
+		}
+		for k := range h {
+			if _, own := extra[k]; !own && strings.EqualFold(k, key) {
+				delete(h, k)
+			}
+		}
+		h[key] = []string{extra[n]}
+	}
+}
+
 type liveModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
-}
-
-// SetRawHeaders puts extra headers on h with their names exactly as given:
-// net/http would canonicalise a name set through Set ("x-org-id" becomes
-// "X-Org-Id"), so the entry is written straight into the map. Any header
-// already there under the same name, in any case, is replaced, so an extra
-// header overrides a default one. Empty names are skipped.
-func SetRawHeaders(h http.Header, extra map[string]string) {
-	for name, value := range extra {
-		if name == "" {
-			continue
-		}
-		for k := range h {
-			if strings.EqualFold(k, name) {
-				delete(h, k)
-			}
-		}
-		h[name] = []string{value}
-	}
 }
 
 // Decorate fills in names and reasoning levels for live models from the
@@ -205,21 +209,11 @@ func SetRawHeaders(h http.Header, extra map[string]string) {
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
-		if _, dup := byID[m.ID]; !dup {
-			byID[m.ID] = m // the first catalog in the list wins
-		}
+		byID[m.ID] = m
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if !ok {
-			// a relay that namespaces its ids ("deepseek/deepseek-chat")
-			// is matched on the part after the last slash.
-			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
-				k, ok = byID[m.ID[i+1:]]
-			}
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

@@ -56,24 +56,14 @@ type Provider struct {
 	// agent stays signed in, magpie just leaves it alone.
 	Hidden bool `json:"hidden,omitempty"`
 
-	// Headers are extra request headers sent with every request to a custom
-	// vendor (forwarding, the connection test, the model list). Names keep the
-	// case the user typed. Presets and signed-in accounts ignore them.
-	Headers map[string]string `json:"headers,omitempty"`
-
-	// Fallback is the ordered list of "provider/model" ids tried when this
-	// provider cannot answer (quota, rate limit, outage). Kept on accounts too.
-	Fallback []string `json:"fallback,omitempty"`
-
-	// The key in use is Key above; its name and protocol limit are these. The
-	// other keys follow in Keys, each enabled unless Off (see keys.go).
-	KeyName     string     `json:"keyName,omitempty"`
-	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
-	Keys        []KeyEntry `json:"keys,omitempty"`
-
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
+
+	// Headers are extra request headers sent with every request to a custom
+	// provider, names exactly as the user typed them. Presets and signed-in
+	// accounts never send them.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type file struct {
@@ -116,7 +106,6 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
-	rememberSignIns()
 	stored := load().Providers
 	picks := map[string]Provider{}
 	var out []Provider
@@ -133,7 +122,6 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -197,7 +185,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -205,24 +193,27 @@ func Save(p Provider) error {
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
-		if !validKeyProto(p.KeyProtocol) {
-			return fmt.Errorf("key protocol %q is not chat, responses or anthropic", p.KeyProtocol)
-		}
-		for _, k := range p.Keys {
-			if !validKeyProto(k.Protocol) {
-				return fmt.Errorf("key protocol %q is not chat, responses or anthropic", k.Protocol)
-			}
+		if err := validIcon(p.Icon); err != nil {
+			return err
 		}
 	}
 	f := load()
+	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			return saveAndTidy(f)
+			replaced = true
+			break
 		}
 	}
-	f.Providers = append(f.Providers, p)
-	return saveAndTidy(f)
+	if !replaced {
+		f.Providers = append(f.Providers, p)
+	}
+	if err := store(f); err != nil {
+		return err
+	}
+	pruneIcons(f)
+	return nil
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -276,11 +267,7 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = joinCatalogs(p.Catalog)
 	p.Headers = cleanHeaders(p.Headers)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p.Keys)
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -296,49 +283,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
-}
-
-// cleanHeaders trims names and values and drops entries with no name. An
-// empty result is nil, so it is not written at all.
-func cleanHeaders(h map[string]string) map[string]string {
-	var out map[string]string
-	for k, v := range h {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" {
-			continue
-		}
-		if out == nil {
-			out = map[string]string{}
-		}
-		out[k] = v
-	}
-	return out
-}
-
-// CustomHeaders are the extra headers that apply to this provider: those of a
-// custom vendor only. Presets and signed-in accounts get none.
-func (p Provider) CustomHeaders() map[string]string {
-	if p.Preset != "" || p.Account != nil {
-		return nil
-	}
-	return p.Headers
-}
-
-// joinCatalogs turns "openai, deepseek" into "openai,deepseek"; a provider
-// may list several models.dev catalogs, searched in the order given.
-func joinCatalogs(s string) string {
-	return strings.Join(splitCatalogs(s), ",")
-}
-
-// splitCatalogs lists the models.dev catalog ids of a provider, in order.
-func splitCatalogs(s string) []string {
-	var out []string
-	for _, c := range strings.Split(s, ",") {
-		if c = strings.TrimSpace(c); c != "" && !contains(out, c) {
-			out = append(out, c)
-		}
-	}
-	return out
 }
 
 func cleanList(xs []string) []string {

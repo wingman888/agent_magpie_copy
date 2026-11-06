@@ -31,11 +31,6 @@ type SubscriptionQuota struct {
 	Plan     string        `json:"plan,omitempty"`
 	Windows  []QuotaWindow `json:"windows"`
 	Error    string        `json:"error,omitempty"`
-
-	// FiveHour and Weekly are the used shares (0-100) of the 5-hour and the
-	// 7-day windows, when the vendor reports them. Nil means not reported.
-	FiveHour *float64 `json:"fiveHour,omitempty"`
-	Weekly   *float64 `json:"weekly,omitempty"`
 }
 
 var subscriptionUsageCache struct {
@@ -160,13 +155,8 @@ type accountStatusError struct{ status int }
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
-	return claudeUsageWith(ctx, claudeToken)
-}
-
-// claudeUsageWith reads a Claude account's quota with the token tokenOf gives.
-func claudeUsageWith(ctx context.Context, tokenOf func(context.Context) (string, error)) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
-	token, err := tokenOf(ctx)
+	token, err := claudeToken(ctx)
 	if err != nil {
 		q.Error = err.Error()
 		return q

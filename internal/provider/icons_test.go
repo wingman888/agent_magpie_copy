@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -9,135 +10,150 @@ import (
 	"time"
 )
 
-var storedIconRe = regexp.MustCompile(`^file:[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
+var storedNameRe = regexp.MustCompile(`^file:[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
 
-func pngBytes(rest string) []byte {
-	return append([]byte("\x89PNG\r\n\x1a\n"), []byte(rest)...)
+// pngOf returns a PNG-looking picture whose content is made unique by n.
+func pngOf(n int) []byte {
+	return append([]byte("\x89PNG\r\n\x1a\n"), []byte(strings.Repeat("x", 16)+string(rune('a'+n%26))+strings.Repeat("y", n))...)
 }
 
-func TestStoreIconKeepsOneCopyOfAPicture(t *testing.T) {
-	isolateConfig(t)
-	img := pngBytes("one picture")
-	v1, err := StoreIcon(img)
+func TestStoreIconKeepsOneCopy(t *testing.T) {
+	freshHome(t)
+	data := pngOf(1)
+	a, err := StoreIcon(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !storedIconRe.MatchString(v1) {
-		t.Fatalf("icon value %q is not file:<16 hex>.png", v1)
+	if !storedNameRe.MatchString(a) {
+		t.Fatalf("bad icon reference %q", a)
 	}
-	v2, err := StoreIcon(img)
+	b, err := StoreIcon(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v1 != v2 {
-		t.Fatalf("same picture stored twice: %q and %q", v1, v2)
+	if a != b {
+		t.Errorf("same picture stored under two names: %q and %q", a, b)
 	}
-	entries, err := os.ReadDir(iconsDir())
+	ents, err := os.ReadDir(IconsDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("icons dir holds %d files, want 1", len(entries))
+	if len(ents) != 1 {
+		t.Errorf("expected one stored file, found %d", len(ents))
 	}
-	name := strings.TrimPrefix(v1, "file:")
-	if path := IconFile(name); path == "" || filepath.Dir(path) != iconsDir() {
-		t.Fatalf("IconFile(%q) = %q, want a file inside icons/", name, path)
-	} else if _, err := os.Stat(path); err != nil {
-		t.Fatalf("stored file missing: %v", err)
+	got, err := os.ReadFile(IconFile(strings.TrimPrefix(a, "file:")))
+	if err != nil || !bytes.Equal(got, data) {
+		t.Errorf("stored content does not match: %v", err)
 	}
 }
 
-func TestStoreIconRecognisesFormats(t *testing.T) {
-	isolateConfig(t)
-	for want, data := range map[string][]byte{
-		".png":  pngBytes("x"),
-		".jpg":  append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte("jfif")...),
-		".gif":  []byte("GIF89a-data"),
-		".webp": append(append([]byte("RIFF\x00\x00\x00\x00"), []byte("WEBP")...), []byte("VP8 ")...),
-		".ico":  {0, 0, 1, 0, 1, 0},
-		".svg":  []byte("  <?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"),
-	} {
-		v, err := StoreIcon(data)
+func TestStoreIconFormats(t *testing.T) {
+	freshHome(t)
+	cases := map[string][]byte{
+		"jpg":  append([]byte{0xff, 0xd8, 0xff, 0xe0}, []byte("jpegdata")...),
+		"gif":  []byte("GIF89a-data"),
+		"webp": append([]byte("RIFF\x00\x00\x00\x00WEBP"), []byte("VP8 data")...),
+		"ico":  []byte{0, 0, 1, 0, 1, 0, 16, 16},
+		"svg":  []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`),
+	}
+	for ext, data := range cases {
+		ref, err := StoreIcon(data)
 		if err != nil {
-			t.Fatalf("%s: %v", want, err)
+			t.Errorf("%s rejected: %v", ext, err)
+			continue
 		}
-		if !strings.HasSuffix(v, want) {
-			t.Errorf("%s stored as %q", want, v)
+		if !strings.HasSuffix(ref, "."+ext) {
+			t.Errorf("%s stored as %q", ext, ref)
 		}
+	}
+	if _, err := StoreIcon([]byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>`)); err != nil {
+		t.Errorf("xml-declared svg rejected: %v", err)
 	}
 }
 
-func TestStoreIconRejectsBadContent(t *testing.T) {
-	isolateConfig(t)
+func TestStoreIconRejects(t *testing.T) {
+	freshHome(t)
 	if _, err := StoreIcon(nil); err == nil {
-		t.Error("empty content accepted")
+		t.Error("empty icon accepted")
 	}
-	if _, err := StoreIcon([]byte("just some plain text, not a picture")); err == nil {
-		t.Error("plain text accepted")
-	}
-	if _, err := StoreIcon([]byte("<html><body>not svg</body></html>")); err == nil {
-		t.Error("html accepted as an icon")
-	}
-	big := pngBytes(strings.Repeat("a", MaxIcon))
-	if len(big) <= MaxIcon {
-		t.Fatal("test picture is not over the limit")
-	}
+	big := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, MaxIcon)...)
 	if _, err := StoreIcon(big); err == nil {
-		t.Error("icon over MaxIcon accepted")
+		t.Errorf("icon of %d bytes accepted", len(big))
 	}
-	atLimit := append(pngBytes(""), make([]byte, MaxIcon-8)...)
-	if len(atLimit) != MaxIcon {
-		t.Fatalf("test picture is %d bytes", len(atLimit))
+	for _, text := range []string{"hello world", "<html><body></body></html>", "{\"json\": true}"} {
+		if _, err := StoreIcon([]byte(text)); err == nil {
+			t.Errorf("plain text %q accepted as an icon", text)
+		}
 	}
-	if _, err := StoreIcon(atLimit); err != nil {
-		t.Errorf("icon of exactly MaxIcon rejected: %v", err)
+	if _, err := os.Stat(IconsDir()); err == nil {
+		ents, _ := os.ReadDir(IconsDir())
+		if len(ents) != 0 {
+			t.Errorf("rejected icons were stored: %d files", len(ents))
+		}
 	}
 }
 
 func TestIconFileOnlyAcceptsStoredNames(t *testing.T) {
-	isolateConfig(t)
+	freshHome(t)
+	ok := "0123456789abcdef.png"
+	if got := IconFile(ok); got != filepath.Join(IconsDir(), ok) {
+		t.Errorf("IconFile(%q) = %q", ok, got)
+	}
 	for _, bad := range []string{
-		"", "..", "../0123456789abcdef.png", "0123456789abcdef.png/../x", "a/0123456789abcdef.png",
-		`..\0123456789abcdef.png`, "0123456789ABCDEF.png", "0123456789abcdef.exe", "0123456789abcdef",
-		"0123456789abcdef.svg.exe", "file:0123456789abcdef.png", "/etc/passwd", "0123456789abcde.png",
+		"", "../0123456789abcdef.png", "sub/0123456789abcdef.png", `sub\0123456789abcdef.png`,
+		"0123456789abcdef.exe", "0123456789ABCDEF.png", "0123456789abcdef.jpeg", "short.png",
+		"0123456789abcdef.png/..", "..png", "/etc/passwd", "file:0123456789abcdef.png",
 	} {
 		if got := IconFile(bad); got != "" {
 			t.Errorf("IconFile(%q) = %q, want empty", bad, got)
 		}
 	}
-	good := "0123456789abcdef.webp"
-	if got := IconFile(good); got != filepath.Join(iconsDir(), good) {
-		t.Errorf("IconFile(%q) = %q", good, got)
+}
+
+func TestSaveRejectsIconReferencesOutsideIcons(t *testing.T) {
+	freshHome(t)
+	for _, icon := range []string{"file:../providers.json", "file:../../etc/passwd", "../../secret.png", `a\b`} {
+		err := Save(Provider{Name: "Relay", Chat: "https://relay.example.com/v1", Key: "k", Icon: icon})
+		if err == nil {
+			t.Errorf("icon %q accepted", icon)
+		}
 	}
 }
 
-func TestSaveSweepsOldUnusedIcons(t *testing.T) {
-	isolateConfig(t)
-	if err := os.MkdirAll(iconsDir(), 0o755); err != nil {
+func TestSaveRemovesUnusedOldIcons(t *testing.T) {
+	freshHome(t)
+	kept, err := StoreIcon(pngOf(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := StoreIcon(pngOf(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := StoreIcon(pngOf(4))
+	if err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-2 * time.Hour)
-	unused := "00000000000000aa.png"
-	used := "00000000000000bb.png"
-	fresh := "00000000000000cc.png"
-	for _, n := range []string{unused, used, fresh} {
-		if err := os.WriteFile(filepath.Join(iconsDir(), n), pngBytes(n), 0o644); err != nil {
+	for _, ref := range []string{kept, stale} {
+		if err := os.Chtimes(IconFile(strings.TrimPrefix(ref, "file:")), old, old); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, n := range []string{unused, used} {
-		if err := os.Chtimes(filepath.Join(iconsDir(), n), old, old); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := Save(Provider{ID: "keep", Name: "Keep", Chat: "https://keep.example/v1", Key: "k",
-		Icon: "file:" + used}); err != nil {
+	if err := Save(Provider{Name: "Relay", Chat: "https://relay.example.com/v1", Key: "k", Icon: kept}); err != nil {
 		t.Fatal(err)
 	}
-	for n, want := range map[string]bool{unused: false, used: true, fresh: true} {
-		_, err := os.Stat(filepath.Join(iconsDir(), n))
-		if exists := err == nil; exists != want {
-			t.Errorf("%s exists=%v, want %v", n, exists, want)
-		}
+	exists := func(ref string) bool {
+		_, err := os.Stat(IconFile(strings.TrimPrefix(ref, "file:")))
+		return err == nil
+	}
+	if !exists(kept) {
+		t.Error("referenced icon was removed")
+	}
+	if exists(stale) {
+		t.Error("old unreferenced icon was kept")
+	}
+	if !exists(fresh) {
+		t.Error("recent unreferenced icon was removed; it may not be saved yet")
 	}
 }

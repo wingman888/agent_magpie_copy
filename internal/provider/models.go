@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = catalogModels(p.Catalog)
+		known = catalog.Provider(p.Catalog)
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -54,11 +54,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		kp, ok := p.KeyFor(proto)
-		if !ok {
-			continue
-		}
-		ms, err := catalog.FetchWith(ctx, p.Base(proto), kp.Key, proto == Anthropic, p.CustomHeaders())
+		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.customHeaders())
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -153,22 +149,6 @@ func Catalog() []Entry {
 	return out
 }
 
-// ResolveFallback reads one fallback entry, "provider/model", into the
-// provider and the vendor's model id. Entries that name no provider, no model,
-// or a provider that is not ready are not usable and report false.
-func ResolveFallback(entry string) (Provider, string, bool) {
-	pid, model, ok := strings.Cut(strings.TrimSpace(entry), "/")
-	model = strings.TrimSpace(model)
-	if !ok || model == "" {
-		return Provider{}, "", false
-	}
-	p, err := Find(strings.TrimSpace(pid))
-	if err != nil || !p.Ready() {
-		return Provider{}, "", false
-	}
-	return *p, model, true
-}
-
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
 // It accepts catalog ids, "provider/model" for any model (exposed or not),
 // and the bare model id when exactly one provider serves it.
@@ -220,21 +200,5 @@ func IDs() []string {
 		out = append(out, e.ID)
 	}
 	sort.Strings(out)
-	return out
-}
-
-// catalogModels is the models.dev list of every catalog a provider names, in
-// the order given; a model listed by two catalogs is kept once, from the first.
-func catalogModels(s string) []catalog.Model {
-	var out []catalog.Model
-	seen := map[string]bool{}
-	for _, c := range splitCatalogs(s) {
-		for _, m := range catalog.Provider(c) {
-			if !seen[m.ID] {
-				seen[m.ID] = true
-				out = append(out, m)
-			}
-		}
-	}
 	return out
 }

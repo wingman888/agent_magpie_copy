@@ -3,9 +3,11 @@ package provider
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,180 +15,270 @@ import (
 	"testing"
 )
 
-// isolateConfig points HOME and the XDG dirs at a fresh temp dir, so nothing reads
-// or writes the developer's real config, cache or agent sign-ins.
-func isolateConfig(t *testing.T) {
+// freshHome points HOME, the config and the cache at a fresh temp dir.
+func freshHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	return home
 }
 
-// rawServer answers every request with a one-model list and records the
-// request lines and header lines exactly as they arrive. net/http's server
-// canonicalises header names, which would hide the case the test checks.
-type rawServer struct {
-	ln   net.Listener
-	mu   sync.Mutex
-	reqs []rawRequest
-}
-
-type rawRequest struct {
-	line    string
-	headers []string
-}
-
-func newRawServer(t *testing.T) *rawServer {
+// rawServer answers every request with body and records the request exactly
+// as it arrived on the wire, header names and their case included. Go's own
+// server would canonicalise names, so this reads the bytes itself.
+func rawServer(t *testing.T, body string) (string, func() [][]string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	s := &rawServer{ln: ln}
+	var mu sync.Mutex
+	var seen [][]string
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go s.serve(c)
+			go func() {
+				lines := serveRaw(c, body)
+				if lines != nil {
+					mu.Lock()
+					seen = append(seen, lines)
+					mu.Unlock()
+				}
+			}()
 		}
 	}()
-	return s
+	return "http://" + ln.Addr().String(), func() [][]string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([][]string(nil), seen...)
+	}
 }
 
-func (s *rawServer) URL() string { return "http://" + s.ln.Addr().String() }
-
-func (s *rawServer) serve(c net.Conn) {
+// serveRaw reads one request, returns its header lines verbatim, and replies 200.
+func serveRaw(c net.Conn, body string) []string {
 	defer c.Close()
-	r := bufio.NewReader(c)
-	var req rawRequest
-	length := 0
-	for first := true; ; first = false {
-		line, err := r.ReadString('\n')
+	br := bufio.NewReader(c)
+	if _, err := br.ReadString('\n'); err != nil {
+		return nil
+	}
+	var lines []string
+	clen := 0
+	for {
+		h, err := br.ReadString('\n')
 		if err != nil {
-			return
+			return nil
 		}
-		line = strings.TrimRight(line, "\r\n")
-		if first {
-			req.line = line
-			continue
-		}
-		if line == "" {
+		h = strings.TrimRight(h, "\r\n")
+		if h == "" {
 			break
 		}
-		req.headers = append(req.headers, line)
-		if name, value, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
-			length, _ = strconv.Atoi(strings.TrimSpace(value))
+		lines = append(lines, h)
+		if k, v, ok := strings.Cut(h, ":"); ok && strings.EqualFold(strings.TrimSpace(k), "Content-Length") {
+			clen, _ = strconv.Atoi(strings.TrimSpace(v))
 		}
 	}
-	if length > 0 {
-		io.CopyN(io.Discard, r, int64(length))
+	if clen > 0 {
+		io.CopyN(io.Discard, br, int64(clen))
 	}
-	s.mu.Lock()
-	s.reqs = append(s.reqs, req)
-	s.mu.Unlock()
-	body := `{"data":[{"id":"m1"}]}`
-	io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "+
-		strconv.Itoa(len(body))+"\r\nConnection: close\r\n\r\n"+body)
+	fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+	return lines
 }
 
-func (s *rawServer) seen() []rawRequest {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]rawRequest(nil), s.reqs...)
-}
-
-func hasLine(headers []string, want string) bool {
-	for _, h := range headers {
-		if h == want {
+// hasLine reports whether a request carried exactly "name: value" (name case-sensitive).
+func hasLine(lines []string, name, value string) bool {
+	for _, l := range lines {
+		k, v, ok := strings.Cut(l, ":")
+		if ok && k == name && strings.TrimSpace(v) == value {
 			return true
 		}
 	}
 	return false
 }
 
-func TestCustomHeadersReachUpstreamWithTheirCase(t *testing.T) {
-	isolateConfig(t)
-	srv := newRawServer(t)
-	p := Provider{ID: "relay", Name: "Relay", Chat: srv.URL() + "/v1", Key: "sk-test",
+// countFold counts header lines whose name matches name in any case.
+func countFold(lines []string, name string) int {
+	n := 0
+	for _, l := range lines {
+		if k, _, ok := strings.Cut(l, ":"); ok && strings.EqualFold(k, name) {
+			n++
+		}
+	}
+	return n
+}
+
+const modelsBody = `{"data":[{"id":"m1"}]}`
+
+func TestCustomHeadersReachForwardTestAndModelList(t *testing.T) {
+	freshHome(t)
+	base, seen := rawServer(t, modelsBody)
+	p := Provider{ID: "relay", Name: "Relay", Chat: base + "/v1", Key: "sk-test",
 		Headers: map[string]string{"X-Org-Id": "acme"}}
 
-	for _, r := range p.Test(context.Background()) {
-		if !r.OK {
-			t.Fatalf("probe %s failed: %s", r.Protocol, r.Error)
-		}
+	res := p.Test(context.Background())
+	if len(res) != 1 || !res[0].OK {
+		t.Fatalf("probe failed: %+v", res)
 	}
-	reqs := srv.seen()
+	reqs := seen()
 	if len(reqs) < 2 {
-		t.Fatalf("want the model list and the probe on the wire, got %d requests", len(reqs))
+		t.Fatalf("expected a model-list fetch and a probe, saw %d requests", len(reqs))
 	}
-	for _, r := range reqs {
-		if !hasLine(r.headers, "X-Org-Id: acme") {
-			t.Errorf("%s: X-Org-Id not sent as typed; headers %q", r.line, r.headers)
+	for i, r := range reqs {
+		if !hasLine(r, "X-Org-Id", "acme") {
+			t.Errorf("request %d lacks X-Org-Id: acme (raw headers %q)", i, r)
 		}
+	}
+
+	// the model-list fetch on its own
+	if _, err := p.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	last := seen()
+	if !hasLine(last[len(last)-1], "X-Org-Id", "acme") {
+		t.Errorf("Fetch request lacks the custom header: %q", last[len(last)-1])
 	}
 }
 
-func TestCustomHeaderOverridesDefaultAuth(t *testing.T) {
-	isolateConfig(t)
-	srv := newRawServer(t)
-	p := Provider{ID: "relay", Name: "Relay", Chat: srv.URL() + "/v1", Key: "sk-test",
-		Headers: map[string]string{"authorization": "Bearer custom"}}
+func TestCustomHeaderNameKeepsCaseAndOverridesDefaults(t *testing.T) {
+	freshHome(t)
+	base, seen := rawServer(t, modelsBody)
+	p := Provider{ID: "relay", Name: "Relay", Chat: base + "/v1", Key: "sk-test",
+		Headers: map[string]string{"x-org-id": "acme", "user-agent": "relay-cli"}}
+	if _, err := p.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reqs := seen()
+	if len(reqs) == 0 {
+		t.Fatal("no request reached the upstream")
+	}
+	r := reqs[0]
+	if !hasLine(r, "x-org-id", "acme") {
+		t.Errorf("header name not sent as typed: %q", r)
+	}
+	if !hasLine(r, "User-Agent", "relay-cli") {
+		t.Errorf("custom User-Agent not sent: %q", r)
+	}
+	if n := countFold(r, "User-Agent"); n != 1 {
+		t.Errorf("expected exactly one User-Agent header (the custom one), found %d: %q", n, r)
+	}
+}
+
+func TestPresetAndAccountNeverSendCustomHeaders(t *testing.T) {
+	freshHome(t)
+	base, seen := rawServer(t, modelsBody)
+	p := Provider{ID: "deepseek", Name: "DeepSeek", Preset: "deepseek", Chat: base + "/v1", Key: "k",
+		Headers: map[string]string{"X-Org-Id": "acme"}}
+
+	p.Test(context.Background())
+	if _, err := p.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range seen() {
+		if countFold(r, "X-Org-Id") != 0 {
+			t.Errorf("preset request %d carried a custom header: %q", i, r)
+		}
+	}
+
+	// the forwarding path: Sign is what the gateway calls before sending
+	acct := Provider{ID: "codex", Name: "Codex", Headers: map[string]string{"X-Org-Id": "acme"},
+		Account: &Account{Agent: "codex", User: "a@example.com", sign: func(ctx context.Context, req *http.Request, body []byte) error {
+			return nil
+		}}}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.invalid/v1/responses", nil)
+	if err := acct.Sign(context.Background(), req, Responses, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := req.Header["X-Org-Id"]; ok {
+		t.Error("signed-in account request carried a custom header")
+	}
+}
+
+func TestForwardedRequestGetsHeadersAfterAuth(t *testing.T) {
+	freshHome(t)
+	p := Provider{ID: "relay", Name: "Relay", Chat: "https://relay.example.com/v1", Key: "sk-test",
+		Headers: map[string]string{"X-Org-Id": "acme", "authorization": "Token override"}}
+	req, _ := http.NewRequest(http.MethodPost, "https://relay.example.com/v1/chat/completions", nil)
+	if err := p.Sign(context.Background(), req, Chat, nil); err != nil {
+		t.Fatal(err)
+	}
+	if v := req.Header["X-Org-Id"]; len(v) != 1 || v[0] != "acme" {
+		t.Errorf("X-Org-Id not set as typed: %v", req.Header)
+	}
+	if v := req.Header["authorization"]; len(v) != 1 || v[0] != "Token override" {
+		t.Errorf("custom header did not override the default auth: %v", req.Header)
+	}
+	if _, ok := req.Header["Authorization"]; ok {
+		t.Error("default Authorization still sent next to the override")
+	}
+}
+
+func TestHandWrittenHeadersAreNormalisedOnRead(t *testing.T) {
+	freshHome(t)
+	if err := os.MkdirAll(filepath.Dir(Path()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base, seen := rawServer(t, modelsBody)
+	raw := fmt.Sprintf(`{"providers":[{"id":"relay","name":"Relay","chat":%q,"key":"sk-test",`+
+		`"headers":{" X-Org-Id ":" acme ","":"dropped","   ":"dropped too"}}]}`, base+"/v1")
+	if err := os.WriteFile(Path(), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := Find("relay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Headers) != 1 || p.Headers["X-Org-Id"] != "acme" {
+		t.Fatalf("hand-written headers not normalised on read: %#v", p.Headers)
+	}
 
 	if _, err := p.Fetch(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	reqs := srv.seen()
+	reqs := seen()
 	if len(reqs) == 0 {
 		t.Fatal("no request reached the upstream")
 	}
-	for _, r := range reqs {
-		if !hasLine(r.headers, "authorization: Bearer custom") {
-			t.Errorf("override not sent as typed; headers %q", r.headers)
-		}
-		for _, h := range r.headers {
-			if strings.EqualFold(h, "Authorization: Bearer sk-test") {
-				t.Errorf("default Authorization was not replaced: %q", h)
-			}
+	r := reqs[0]
+	if !hasLine(r, "X-Org-Id", "acme") {
+		t.Errorf("X-Org-Id: acme not sent: %q", r)
+	}
+	for _, l := range r {
+		if strings.HasPrefix(l, ":") {
+			t.Errorf("empty-named header was sent: %q", r)
 		}
 	}
 }
 
-func TestPresetAndAccountIgnoreCustomHeaders(t *testing.T) {
-	pr, err := FromPreset("deepseek")
+func TestSaveNormalisesHeaders(t *testing.T) {
+	freshHome(t)
+	if err := Save(Provider{Name: "Relay", Chat: "https://relay.example.com/v1", Key: "k",
+		Headers: map[string]string{"  X-Org-Id ": " acme ", "  ": "dropped"}}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Find("relay")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pr.Key = "sk-test"
-	pr.Headers = map[string]string{"X-Org-Id": "acme"}
-	if pr.CustomHeaders() != nil {
-		t.Fatal("a preset must not carry custom headers")
+	if len(p.Headers) != 1 || p.Headers["X-Org-Id"] != "acme" {
+		t.Errorf("headers not normalised: %#v", p.Headers)
 	}
-	req, _ := http.NewRequest(http.MethodPost, pr.Chat+"/chat/completions", nil)
-	if err := pr.Sign(context.Background(), req, Chat, nil); err != nil {
+
+	// an empty map is not written at all
+	if err := Save(Provider{Name: "Plain", Chat: "https://plain.example.com/v1", Key: "k",
+		Headers: map[string]string{" ": "x"}}); err != nil {
 		t.Fatal(err)
 	}
-	for k := range req.Header {
-		if strings.EqualFold(k, "X-Org-Id") {
-			t.Errorf("preset request carries %s", k)
-		}
+	b, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	acct := Provider{ID: "claude", Account: &Account{}, Headers: map[string]string{"X-Org-Id": "acme"}}
-	if acct.CustomHeaders() != nil {
-		t.Fatal("a signed-in account must not carry custom headers")
-	}
-}
-
-func TestHeadersAreNormalized(t *testing.T) {
-	p := normalize(Provider{ID: "x", Headers: map[string]string{" X-A ": " 1 ", "": "dropped", "   ": "dropped too"}})
-	if len(p.Headers) != 1 || p.Headers["X-A"] != "1" {
-		t.Fatalf("headers = %#v, want only X-A=1", p.Headers)
-	}
-	if q := normalize(Provider{ID: "x", Headers: map[string]string{"": "x"}}); q.Headers != nil {
-		t.Fatalf("an empty map must not be kept, got %#v", q.Headers)
+	if strings.Count(string(b), `"headers"`) != 1 {
+		t.Errorf("expected only the non-empty header map to be written:\n%s", b)
 	}
 }
