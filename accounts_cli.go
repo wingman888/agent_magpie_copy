@@ -10,122 +10,153 @@ import (
 )
 
 const accountsUsage = `usage:
-  magpie accounts [claude|codex]                 list remembered sign-ins and their usage
-  magpie accounts switch <agent> <email>         sign the agent in to a remembered account
-  magpie accounts forget <agent> <email>         forget a remembered account
-  magpie accounts add <agent>                    sign in to another account and remember it
+  magpie accounts [claude|codex]            list the subscription accounts magpie remembers, with usage
+  magpie accounts switch <agent> <email>    sign the agent in as a remembered account
+  magpie accounts add <agent>               sign in to another account and remember it, on alongside the current one
+  magpie accounts on|off <agent> <email>    keep a remembered account on alongside the one signed in
+  magpie accounts forget <agent> <email>    forget a remembered account (the one signed in cannot be forgotten)
+
 agents: claude (cc), codex`
 
-// accountsCmd handles `magpie accounts …`.
+var accountAgentLabels = map[string]string{"claude": "Claude Code", "codex": "Codex"}
+
+// accountsCmd: `magpie accounts …`
 func accountsCmd(args []string) error {
 	if len(args) == 0 {
 		return listAccounts("")
 	}
-	switch args[0] {
-	case "switch", "forget", "add":
-		return accountsAction(args[0], args[1:])
+	verb := strings.ToLower(args[0])
+	switch verb {
+	case "switch", "forget", "on", "off":
+		if len(args) != 3 {
+			return fmt.Errorf("magpie accounts %s <agent> <email>\n\n%s", verb, accountsUsage)
+		}
+		agent, err := accountAgentArg(args[1])
+		if err != nil {
+			return err
+		}
+		return accountChange(verb, agent, args[2])
+	case "add":
+		if len(args) != 2 {
+			return fmt.Errorf("magpie accounts add <agent>\n\n%s", accountsUsage)
+		}
+		agent, err := accountAgentArg(args[1])
+		if err != nil {
+			return err
+		}
+		return addAccount(agent)
 	}
-	agent, ok := provider.AgentID(args[0])
-	if !ok || len(args) > 1 {
-		return accountsUsageError(args[0])
+	if len(args) != 1 {
+		return fmt.Errorf("%s", accountsUsage)
+	}
+	agent, err := accountAgentArg(args[0])
+	if err != nil {
+		return err
 	}
 	return listAccounts(agent)
 }
 
-// accountsUsageError reports an agent magpie does not handle, with the usage.
-func accountsUsageError(agent string) error {
-	return fmt.Errorf("unknown agent %q\n%s", agent, accountsUsage)
+// accountAgentArg reads an agent name for the accounts commands, aliases included.
+func accountAgentArg(name string) (string, error) {
+	if a, ok := provider.AccountAgent(name); ok {
+		return a, nil
+	}
+	return "", fmt.Errorf("unknown agent %q\n\n%s", name, accountsUsage)
 }
 
-func accountsAction(verb string, rest []string) error {
-	if len(rest) == 0 {
-		return fmt.Errorf("%s", accountsUsage)
-	}
-	agent, ok := provider.AgentID(rest[0])
-	if !ok {
-		return accountsUsageError(rest[0])
-	}
+// accountChange runs switch, forget, on or off for one remembered account.
+func accountChange(verb, agent, email string) error {
+	label := accountAgentLabels[agent]
 	switch verb {
 	case "switch":
-		if len(rest) != 2 {
-			return fmt.Errorf("magpie accounts switch <claude|codex> <email>")
-		}
-		if err := provider.SwitchLogin(agent, rest[1]); err != nil {
-			return err
-		}
-		fmt.Println(green.Render("✓"), agent, "now signs in as", bold.Render(rest[1]))
-		fmt.Println(muted.Render("sessions already running keep the old account; restart them to use this one"))
-		return nil
-	case "forget":
-		if len(rest) != 2 {
-			return fmt.Errorf("magpie accounts forget <claude|codex> <email>")
-		}
-		if err := provider.ForgetLogin(agent, rest[1]); err != nil {
-			return err
-		}
-		fmt.Println(green.Render("✓"), "forgot", bold.Render(rest[1]), muted.Render("("+agent+")"))
-		return nil
-	case "add":
-		if len(rest) != 1 {
-			return fmt.Errorf("magpie accounts add <claude|codex>")
-		}
-		user, err := provider.AddLogin(agent)
+		acct, err := provider.SwitchAccount(agent, email)
 		if err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), "remembered", bold.Render(user), muted.Render("("+agent+")"))
-		return listAccounts(agent)
-	}
-	return accountsUsageError(verb)
-}
-
-// listAccounts prints the remembered sign-ins of one agent, or of all.
-func listAccounts(agent string) error {
-	logins := provider.Logins(agent)
-	if len(logins) == 0 {
-		fmt.Println(muted.Render("no remembered accounts · magpie accounts add claude|codex"))
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	usage := map[string]map[string]provider.SubscriptionQuota{}
-	for _, l := range logins {
-		if _, ok := usage[l.Agent]; !ok {
-			usage[l.Agent] = provider.LoginUsage(ctx, l.Agent)
+		fmt.Println(green.Render("✓"), label, "is signed in as", bold.Render(acct.User))
+		fmt.Println(muted.Render("  sessions already running keep the previous account until they restart · 已运行的会话在重启前仍用旧账号"))
+	case "forget":
+		if err := provider.ForgetAccount(agent, email); err != nil {
+			return err
 		}
-	}
-	type row struct{ agent, user, state, on, plan, quota string }
-	var rows []row
-	userW, planW := 0, 0
-	for _, l := range logins {
-		state := "signed out"
-		switch {
-		case l.Current:
-			state = "signed in"
-		case l.NeedsLogin:
-			state = "needs sign-in"
+		fmt.Println(green.Render("✓"), "forgot", email, muted.Render("("+label+")"))
+	case "on", "off":
+		if err := provider.SetLoginOn(agent, email, verb == "on"); err != nil {
+			return err
 		}
-		on := "off"
-		if l.On || l.Current {
-			on = "on"
+		state := "on alongside the signed-in account"
+		if verb == "off" {
+			state = "off"
 		}
-		r := row{agent: l.Agent, user: l.User, state: state, on: on, plan: l.Plan, quota: quotaLine(usage[l.Agent][l.User])}
-		userW = max(userW, len(r.user))
-		planW = max(planW, len(r.plan))
-		rows = append(rows, r)
-	}
-	for _, r := range rows {
-		line := fmt.Sprintf("  %-6s  %s  %s  %s  %s", r.agent, pad(r.user, userW), pad(r.plan, planW), pad(r.state, 12), r.on)
-		if r.quota != "" {
-			line += "  " + muted.Render(r.quota)
-		}
-		fmt.Println(line)
+		fmt.Println(green.Render("✓"), email, muted.Render("is "+state+" ("+label+")"))
 	}
 	return nil
 }
 
-// quotaLine summarizes one account's windows, e.g. "5 hours 42% · 7 days 10%".
-func quotaLine(q provider.SubscriptionQuota) string {
+// addAccount runs the vendor's sign-in, remembers the account, and lists the accounts.
+func addAccount(agent string) error {
+	acct, err := provider.AddAccount(agent)
+	if err != nil {
+		return err
+	}
+	if acct.Current {
+		fmt.Println(green.Render("✓"), "signed in again as", bold.Render(acct.User))
+	} else {
+		fmt.Println(green.Render("✓"), "remembered", bold.Render(acct.User), muted.Render("· on alongside the signed-in account"))
+	}
+	return listAccounts(agent)
+}
+
+// listAccounts prints the remembered accounts of one agent, or of both.
+func listAccounts(only string) error {
+	agents := []string{"claude", "codex"}
+	if only != "" {
+		agents = []string{only}
+	}
+	for i, a := range agents {
+		rows, err := provider.RememberedAccounts(a)
+		if err != nil {
+			return err
+		}
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Println(bold.Render(accountAgentLabels[a]))
+		if len(rows) == 0 {
+			fmt.Println("  " + muted.Render("no accounts yet · sign in with the agent, or magpie accounts add "+a))
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		usage := provider.LoginUsage(ctx, a)
+		cancel()
+		w := 0
+		for _, r := range rows {
+			w = max(w, len(r.User))
+		}
+		for _, r := range rows {
+			mark, note := faint.Render("○"), ""
+			switch {
+			case r.Current:
+				mark, note = green.Render("●"), green.Render("signed in")
+			case r.On:
+				mark, note = green.Render("◌"), green.Render("on alongside")
+			}
+			plan := r.Plan
+			if plan == "" {
+				plan = "-"
+			}
+			line := fmt.Sprintf("  %s %s  %s  %s", mark, pad(r.User, w), pad(muted.Render(plan), 8), note)
+			if q, ok := usage[r.User]; ok {
+				line += "  " + muted.Render(usageSummary(q))
+			}
+			fmt.Println(strings.TrimRight(line, " "))
+		}
+	}
+	return nil
+}
+
+// usageSummary is the 5-hour and weekly share of an account, in words.
+func usageSummary(q provider.SubscriptionQuota) string {
 	if q.Error != "" {
 		return "usage unavailable"
 	}

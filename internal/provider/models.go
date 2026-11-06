@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = p.catalogModels()
+		known = catalog.ProviderList(p.Catalog)
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -54,7 +54,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.customHeaders())
+		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.extraHeaders())
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -74,18 +74,23 @@ func (p Provider) Exposed() []catalog.Model {
 	for _, m := range avail {
 		byID[m.ID] = m
 	}
-	known := p.catalogModels()
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
-			} else if m, ok := matchModel(known, id); ok {
-				m.ID = id // keep the id the user wrote; the vendor is sent it
-				out = append(out, m)
-			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
+				continue
 			}
+			// a "vendor/" prefixed id takes the name and levels of the model
+			// after the last slash; the id itself stays what the vendor is sent
+			if i := strings.LastIndex(id, "/"); i >= 0 {
+				if m, ok := byID[id[i+1:]]; ok {
+					m.ID = id
+					out = append(out, m)
+					continue
+				}
+			}
+			out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
 		}
 		return out
 	}

@@ -1,15 +1,15 @@
 package provider
 
 import (
-	"regexp"
+	"strings"
 	"testing"
 )
 
-// keyedRelay saves a provider "relay" whose first key is k1, with one endpoint.
-func keyedRelay(t *testing.T) string {
+// keyedRelay saves a custom relay with one key and returns its id.
+func keyedRelay(t *testing.T, key string) string {
 	t.Helper()
-	isolateHome(t)
-	if err := Save(Provider{ID: "relay", Name: "Relay", Key: "k1", Chat: "https://relay.example/v1"}); err != nil {
+	isolateConfig(t)
+	if err := Save(Provider{Name: "Relay", Chat: "https://relay.example/v1", Anthropic: "https://relay.example", Key: key}); err != nil {
 		t.Fatal(err)
 	}
 	return "relay"
@@ -24,242 +24,271 @@ func mustFind(t *testing.T, id string) Provider {
 	return *p
 }
 
-func TestKeyRefIsTenLowercaseHexChars(t *testing.T) {
-	ref := KeyRef("sk-secret")
-	if !regexp.MustCompile(`^[0-9a-f]{10}$`).MatchString(ref) {
-		t.Fatalf("KeyRef = %q, want 10 lowercase hex chars", ref)
+// names lists the key names in order, current first; "-" marks an off key.
+func names(p Provider) string {
+	var out []string
+	for _, k := range p.ListKeys() {
+		n := k.Name
+		if !k.On {
+			n += "-"
+		}
+		out = append(out, n)
 	}
-	if KeyRef("sk-secret") != ref || KeyRef("other") == ref {
-		t.Error("KeyRef is not a stable fingerprint of the key")
+	return strings.Join(out, ",")
+}
+
+func refOf(key string) string { return KeyRef(key) }
+
+func TestKeyRefIsTenHexChars(t *testing.T) {
+	r := KeyRef("sk-abc")
+	if len(r) != 10 || strings.ToLower(r) != r || strings.Trim(r, "0123456789abcdef") != "" {
+		t.Fatalf("ref %q is not 10 lowercase hex chars", r)
+	}
+	if KeyRef("sk-abc") != r || KeyRef("sk-abd") == r {
+		t.Fatalf("ref is not a stable fingerprint")
 	}
 }
 
-func TestAddKeyFirstBecomesCurrent(t *testing.T) {
-	isolateHome(t)
-	if err := Save(Provider{ID: "local", Name: "Local", Chat: "http://localhost:1/v1"}); err != nil {
+func TestFirstKeyIsCurrentAndAddedKeysFollow(t *testing.T) {
+	isolateConfig(t)
+	if err := Save(Provider{Name: "Local", Chat: "http://localhost:1234/v1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddKey("local", "first", "abc", ""); err != nil {
+	if err := AddKey("local", "first", "sk-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKey("local", "second", "sk-2", ProtoAnthropic); err != nil {
 		t.Fatal(err)
 	}
 	p := mustFind(t, "local")
-	if p.Key != "abc" || p.KeyName != "first" || len(p.Keys) != 0 {
-		t.Fatalf("first key = %+v", p)
+	if p.Key != "sk-1" || p.KeyName != "first" {
+		t.Fatalf("current key = %q %q, want sk-1 first", p.Key, p.KeyName)
+	}
+	if got := names(p); got != "first,second" {
+		t.Fatalf("order = %s", got)
+	}
+	if ks := p.ListKeys(); !ks[0].Current || ks[1].Current || !ks[1].On || ks[1].Protocol != Anthropic {
+		t.Fatalf("list = %+v", ks)
 	}
 }
 
-func TestAddKeyAppendsEnabledAndRejects(t *testing.T) {
-	id := keyedRelay(t)
-	if err := AddKey(id, "team", "k2", Chat); err != nil {
-		t.Fatal(err)
+func TestAddKeyRejectsDuplicatesUnknownProtocolAndAccounts(t *testing.T) {
+	id := keyedRelay(t, "sk-1")
+	if err := AddKey(id, "again", "sk-1", ""); err == nil {
+		t.Fatal("duplicate key accepted")
 	}
-	if err := AddKey(id, "dup", "k1", ""); err == nil {
-		t.Error("duplicate of the key in use accepted")
+	if err := AddKey(id, "x", "sk-2", Protocol("gemini")); err == nil {
+		t.Fatal("gemini accepted as a key protocol")
 	}
-	if err := AddKey(id, "dup2", "k2", ""); err == nil {
-		t.Error("duplicate of another key accepted")
+	if err := AddKey(id, "x", "sk-2", Protocol("nonsense")); err == nil {
+		t.Fatal("unknown protocol accepted")
 	}
-	if err := AddKey(id, "bad", "k3", Gemini); err == nil {
-		t.Error("gemini accepted as a key protocol")
+	if err := AddKey(id, "x", "  ", ""); err == nil {
+		t.Fatal("empty key accepted")
 	}
-	if err := AddKey(id, "bad", "k3", "gpt"); err == nil {
-		t.Error("unknown protocol accepted")
+	if err := AddKey("nope", "x", "sk-3", ""); err == nil {
+		t.Fatal("unknown provider accepted")
 	}
-	if err := AddKey(id, "empty", "  ", ""); err == nil {
-		t.Error("empty key accepted")
-	}
-	p := mustFind(t, id)
-	if p.Key != "k1" || len(p.Keys) != 1 || p.Keys[0].Key != "k2" || p.Keys[0].Off || p.Keys[0].Protocol != Chat {
-		t.Fatalf("keys after adds = %+v", p.Keys)
+	if p := mustFind(t, id); len(p.ListKeys()) != 1 {
+		t.Fatalf("failed adds changed the keys: %s", names(p))
 	}
 }
 
-func TestUseKeyKeepsOthersAndTheirLimits(t *testing.T) {
-	id := keyedRelay(t)
-	if err := RenameKey(id, KeyRef("k1"), "personal"); err != nil {
-		t.Fatal(err)
+func TestSaveRejectsBadStoredProtocol(t *testing.T) {
+	isolateConfig(t)
+	if err := Save(Provider{Name: "Bad", Chat: "https://bad.example/v1", Key: "sk-1", KeyProtocol: "gemini"}); err == nil {
+		t.Fatal("bad keyProtocol saved")
 	}
-	if err := AddKey(id, "team", "k2", Anthropic); err != nil {
-		t.Fatal(err)
-	}
-	if err := AddKey(id, "backup", "k3", Chat); err != nil {
-		t.Fatal(err)
-	}
-	if err := UseKey(id, KeyRef("k3")); err != nil {
-		t.Fatal(err)
-	}
-	p := mustFind(t, id)
-	if p.Key != "k3" || p.KeyName != "backup" || p.KeyProtocol != Chat {
-		t.Fatalf("in use = %q %q %q", p.Key, p.KeyName, p.KeyProtocol)
-	}
-	if len(p.Keys) != 2 || p.Keys[0].Key != "k1" || p.Keys[0].Name != "personal" || p.Keys[0].Off ||
-		p.Keys[1].Key != "k2" || p.Keys[1].Protocol != Anthropic {
-		t.Fatalf("others = %+v", p.Keys)
+	if err := Save(Provider{Name: "Bad", Chat: "https://bad.example/v1", Key: "sk-1",
+		Keys: []KeyEntry{{Name: "x", Key: "sk-2", Protocol: "foo"}}}); err == nil {
+		t.Fatal("bad key protocol saved")
 	}
 }
 
-func TestSetKeyOnRules(t *testing.T) {
-	id := keyedRelay(t)
-	if err := AddKey(id, "team", "k2", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetKeyOn(id, KeyRef("k2"), false); err != nil {
-		t.Fatal(err)
-	}
-	if p := mustFind(t, id); p.Key != "k1" || !p.Keys[0].Off {
-		t.Fatalf("after disabling k2: %+v", p)
-	}
-	// k1 is the only enabled key now: it cannot be turned off
-	if err := SetKeyOn(id, KeyRef("k1"), false); err == nil {
-		t.Fatal("last enabled key was disabled")
-	}
-	if p := mustFind(t, id); p.Key != "k1" || len(p.Keys) != 1 || !p.Keys[0].Off {
-		t.Fatalf("failed disable changed the file: %+v", p)
-	}
-	if err := SetKeyOn(id, KeyRef("k2"), true); err != nil {
-		t.Fatal(err)
-	}
-	// with k2 enabled, k1 may step aside; k2 takes over, k1 is kept off
-	if err := SetKeyOn(id, KeyRef("k1"), false); err != nil {
-		t.Fatal(err)
-	}
-	p := mustFind(t, id)
-	if p.Key != "k2" || len(p.Keys) != 1 || p.Keys[0].Key != "k1" || !p.Keys[0].Off {
-		t.Fatalf("after k1 steps aside: %+v", p)
-	}
-	if err := SetKeyOn(id, KeyRef("k2"), false); err == nil {
-		t.Fatal("last enabled key was disabled after takeover")
-	}
-	if err := SetKeyOn(id, KeyRef("nope"), false); err == nil {
-		t.Fatal("unknown key accepted")
-	}
-}
-
-func TestRemoveKeyRules(t *testing.T) {
-	id := keyedRelay(t)
-	if err := AddKey(id, "team", "k2", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := RemoveKey(id, KeyRef("k2")); err != nil {
-		t.Fatal(err)
-	}
-	if err := RemoveKey(id, KeyRef("k1")); err == nil {
-		t.Fatal("last enabled key was removed")
-	}
-	if err := AddKey(id, "team", "k2", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := RemoveKey(id, KeyRef("k1")); err != nil {
-		t.Fatal(err)
-	}
-	p := mustFind(t, id)
-	if p.Key != "k2" || len(p.Keys) != 0 {
-		t.Fatalf("after removing the key in use: %+v", p)
-	}
-}
-
-func TestRenameAndSetKeyProtocol(t *testing.T) {
-	id := keyedRelay(t)
-	if err := AddKey(id, "team", "k2", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := RenameKey(id, KeyRef("k2"), "shared"); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetKeyProtocol(id, KeyRef("k1"), Anthropic); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetKeyProtocol(id, KeyRef("k2"), Gemini); err == nil {
-		t.Error("gemini accepted as a key protocol")
-	}
-	p := mustFind(t, id)
-	if p.Keys[0].Name != "shared" || p.KeyProtocol != Anthropic {
-		t.Fatalf("after rename and protocol: %+v", p)
-	}
-	if err := SetKeyProtocol(id, KeyRef("k1"), ""); err != nil {
-		t.Fatal(err)
-	}
-	if p := mustFind(t, id); p.KeyProtocol != "" {
-		t.Errorf("protocol not cleared: %q", p.KeyProtocol)
-	}
-}
-
-func TestSaveRejectsBadKeyProtocolAndKeepsKeys(t *testing.T) {
-	id := keyedRelay(t)
-	if err := AddKey(id, "team", "k2", Responses); err != nil {
-		t.Fatal(err)
-	}
-	if err := Save(Provider{ID: id, Name: "Relay", Key: "k1", Chat: "https://relay.example/v1", KeyProtocol: "gemini"}); err == nil {
-		t.Error("Save accepted an unknown key protocol")
-	}
-	// saving again without the key list keeps the other keys
-	if err := Save(Provider{ID: id, Name: "Relay", Key: "k1", Chat: "https://relay.example/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	p := mustFind(t, id)
-	if len(p.Keys) != 1 || p.Keys[0].Key != "k2" || p.Keys[0].Protocol != Responses {
-		t.Fatalf("keys after re-save = %+v", p.Keys)
-	}
-}
-
-func TestKeySlotsAndCandidateOrder(t *testing.T) {
-	p := Provider{ID: "relay", Name: "Relay", Key: "ant", KeyProtocol: Anthropic,
-		Anthropic: "https://a.example", Chat: "https://c.example/v1",
-		Keys: []KeyEntry{{Key: "oai", Protocol: Chat}, {Key: "any"}, {Key: "off", Protocol: Anthropic, Off: true}}}
-	order := func(cs []Provider) []string {
-		var out []string
-		for _, c := range cs {
-			out = append(out, c.Key)
-		}
-		return out
-	}
-	eq := func(got []string, want ...string) bool {
-		if len(got) != len(want) {
-			return false
-		}
-		for i := range got {
-			if got[i] != want[i] {
-				return false
-			}
-		}
-		return true
-	}
-	if got := order(p.Candidates(Anthropic, "claude-opus-5")); !eq(got, "ant", "any", "oai") {
-		t.Errorf("claude from anthropic: %v", got)
-	}
-	if got := order(p.Candidates(Chat, "gpt-5.5")); !eq(got, "oai", "any", "ant") {
-		t.Errorf("gpt from chat: %v", got)
-	}
-	if got := order(p.Candidates(Anthropic, "deepseek/deepseek-chat")); !eq(got, "ant", "any", "oai") {
-		t.Errorf("other from anthropic: %v", got)
-	}
-	// an Anthropic-limited key is scoped to that endpoint only
-	for _, c := range p.Candidates(Chat, "gpt-5.5") {
-		if c.Key == "ant" && (c.Chat != "" || c.Anthropic == "") {
-			t.Errorf("anthropic-limited key reaches %+v", c)
+func TestUseKeyKeepsOthersAndLimits(t *testing.T) {
+	id := keyedRelay(t, "sk-1")
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
-	// a key whose endpoint the provider lacks does not take part
-	noAnt := Provider{ID: "x", Name: "X", Key: "ant", KeyProtocol: Anthropic, Chat: "https://c.example/v1",
-		Keys: []KeyEntry{{Key: "oai", Protocol: Chat}}}
-	if got := order(noAnt.Candidates(Anthropic, "claude-opus-5")); !eq(got, "oai") {
-		t.Errorf("key without endpoint took part: %v", got)
+	must(AddKey(id, "b", "sk-2", ProtoChat))
+	must(AddKey(id, "c", "sk-3", ProtoAnthropic))
+	must(RenameKey(id, refOf("sk-1"), "a"))
+	must(UseKey(id, refOf("sk-3")))
+	p := mustFind(t, id)
+	if p.Key != "sk-3" || p.KeyProtocol != Anthropic || p.KeyName != "c" {
+		t.Fatalf("current = %q %q %q", p.Key, p.KeyName, p.KeyProtocol)
+	}
+	if got := names(p); got != "c,a,b" {
+		t.Fatalf("order after use = %s", got)
+	}
+	// the limit of b survives too
+	for _, k := range p.Keys {
+		if k.Name == "b" && k.Protocol != Chat {
+			t.Fatalf("b lost its limit: %+v", k)
+		}
+	}
+	if err := UseKey(id, "0000000000"); err == nil {
+		t.Fatal("unknown ref accepted")
 	}
 }
 
-func TestModelFamily(t *testing.T) {
-	cases := map[string]modelFamily{
-		"claude-opus-5":          familyClaude,
-		"anthropic/claude-haiku": familyClaude,
-		"gpt-5.5":                familyOpenAI,
-		"o3-mini":                familyOpenAI,
-		"gpt-5-codex":            familyOpenAI,
-		"deepseek/deepseek-chat": familyOther,
-		"openrouter-thing":       familyOther,
+func TestDisableCurrentHandsOverToNext(t *testing.T) {
+	id := keyedRelay(t, "sk-1")
+	if err := AddKey(id, "b", "sk-2", Chat); err != nil {
+		t.Fatal(err)
 	}
-	for m, want := range cases {
-		if got := familyOf(m); got != want {
-			t.Errorf("familyOf(%q) = %v, want %v", m, got, want)
+	if err := SetKeyOn(id, refOf("sk-1"), false); err != nil {
+		t.Fatal(err)
+	}
+	p := mustFind(t, id)
+	if p.Key != "sk-2" || p.KeyName != "b" || p.KeyProtocol != Chat {
+		t.Fatalf("next key did not take over: %q %q %q", p.Key, p.KeyName, p.KeyProtocol)
+	}
+	// the first key had no name; it is kept, off, after the current one
+	if got := names(p); got != "b,-" {
+		t.Fatalf("order = %s", got)
+	}
+	creds := p.Credentials()
+	if len(creds) != 1 || creds[0].Key != "sk-2" {
+		t.Fatalf("credentials = %+v", creds)
+	}
+	// turning it back on keeps it after the current key
+	if err := SetKeyOn(id, refOf("sk-1"), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(mustFind(t, id).Credentials()); got != 2 {
+		t.Fatalf("re-enabled key not tried: %d credentials", got)
+	}
+}
+
+func TestLastEnabledKeyCannotBeDisabledOrRemoved(t *testing.T) {
+	id := keyedRelay(t, "sk-1")
+	if err := SetKeyOn(id, refOf("sk-1"), false); err == nil {
+		t.Fatal("the only key was disabled")
+	}
+	if err := RemoveKey(id, refOf("sk-1")); err == nil {
+		t.Fatal("the only key was removed")
+	}
+	if err := AddKey(id, "b", "sk-2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetKeyOn(id, refOf("sk-2"), false); err != nil {
+		t.Fatal(err)
+	}
+	// sk-1 is now the only enabled key
+	if err := SetKeyOn(id, refOf("sk-1"), false); err == nil {
+		t.Fatal("the last enabled key was disabled")
+	}
+	if err := RemoveKey(id, refOf("sk-1")); err == nil {
+		t.Fatal("the last enabled key was removed")
+	}
+	p := mustFind(t, id)
+	if p.Key != "sk-1" || len(p.Credentials()) != 1 {
+		t.Fatalf("refused changes still changed the list: %s", names(p))
+	}
+}
+
+func TestRemoveCurrentPromotesNextEnabled(t *testing.T) {
+	id := keyedRelay(t, "sk-1")
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
 		}
+	}
+	must(AddKey(id, "b", "sk-2", ""))
+	must(AddKey(id, "c", "sk-3", ""))
+	must(RemoveKey(id, refOf("sk-1")))
+	p := mustFind(t, id)
+	if p.Key != "sk-2" || p.KeyName != "b" {
+		t.Fatalf("current after remove = %q %q", p.Key, p.KeyName)
+	}
+	must(RemoveKey(id, refOf("sk-3")))
+	if got := names(mustFind(t, id)); got != "b" {
+		t.Fatalf("list = %s", got)
+	}
+}
+
+func TestRenameAndProtocolOfAnyKey(t *testing.T) {
+	id := keyedRelay(t, "sk-1")
+	if err := AddKey(id, "b", "sk-2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := RenameKey(id, refOf("sk-2"), "team"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RenameKey(id, refOf("sk-1"), "personal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetKeyProtocol(id, refOf("sk-2"), Anthropic); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetKeyProtocol(id, refOf("sk-1"), Protocol("bogus")); err == nil {
+		t.Fatal("bogus protocol accepted")
+	}
+	p := mustFind(t, id)
+	if p.KeyName != "personal" || p.Keys[0].Name != "team" || p.Keys[0].Protocol != Anthropic {
+		t.Fatalf("after rename/protocol: %q %+v", p.KeyName, p.Keys)
+	}
+	if err := SetKeyProtocol(id, refOf("sk-2"), ""); err != nil {
+		t.Fatal(err)
+	}
+	if p := mustFind(t, id); p.Keys[0].Protocol != "" {
+		t.Fatalf("protocol not cleared: %+v", p.Keys[0])
+	}
+	if err := RenameKey(id, "0000000000", "x"); err == nil {
+		t.Fatal("unknown ref renamed")
+	}
+	if err := SetKeyProtocol("nope", refOf("sk-1"), ""); err == nil {
+		t.Fatal("unknown provider accepted")
+	}
+}
+
+func TestCredentialsSkipOffKeysInOrder(t *testing.T) {
+	id := keyedRelay(t, "sk-1")
+	if err := AddKey(id, "b", "sk-2", ProtoResponses); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKey(id, "c", "sk-3", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetKeyOn(id, refOf("sk-2"), false); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range mustFind(t, id).Credentials() {
+		got = append(got, c.Key)
+	}
+	if strings.Join(got, ",") != "sk-1,sk-3" {
+		t.Fatalf("credentials = %v", got)
+	}
+}
+
+func TestKeylessProviderHasOneEmptyCredential(t *testing.T) {
+	isolateConfig(t)
+	if err := Save(Provider{Name: "Local", Chat: "http://localhost:1234/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	creds := mustFind(t, "local").Credentials()
+	if len(creds) != 1 || creds[0].Key != "" {
+		t.Fatalf("credentials = %+v", creds)
+	}
+}
+
+func TestKeysSurviveSaveAndReload(t *testing.T) {
+	id := keyedRelay(t, "sk-1")
+	if err := AddKey(id, "team", "sk-2", ProtoAnthropic); err != nil {
+		t.Fatal(err)
+	}
+	p := mustFind(t, id)
+	if err := Save(p); err != nil {
+		t.Fatal(err)
+	}
+	// sk-1 has no name, so its entry is blank
+	if got := names(mustFind(t, id)); got != ",team" {
+		t.Fatalf("after save: %s", got)
 	}
 }
