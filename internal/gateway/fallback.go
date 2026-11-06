@@ -338,6 +338,8 @@ type holdWriter struct {
 	status  int
 	passing bool
 	held    bytes.Buffer
+	// upstream is the provider's raw error reply, when the sender kept it
+	upstream []byte
 }
 
 func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
@@ -385,6 +387,19 @@ func (h *holdWriter) Flush() {
 // failed reports a held error another provider could answer instead.
 func (h *holdWriter) failed() bool {
 	return !h.passing && h.status >= 400 && retryable(h.status, h.held.Bytes())
+}
+
+// notOnAPI reports a held error saying the model is not served on the API
+// the request went to, so another API may do.
+func (h *holdWriter) notOnAPI() bool {
+	if h.passing || h.status < 400 {
+		return false
+	}
+	body := h.held.Bytes()
+	if h.upstream != nil {
+		body = h.upstream
+	}
+	return notChatModel(h.status, body)
 }
 
 // release sends a held reply after all: nobody else is left to try.
