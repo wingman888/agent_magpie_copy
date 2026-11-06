@@ -52,7 +52,7 @@ func codex(home string) *Agent {
 	settle := func() error {
 		ms := models()
 		model, effort := get("model"), get("model_reasoning_effort")
-		if e := catalog.Efforts(ms, model); len(e) > 0 && !contains(e, effort) {
+		if e := catalog.Efforts(ms, model); len(e) > 0 && !codexListHasString(e, effort) {
 			return edit.SetTOMLTop(path, edit.KV{Path: "model_reasoning_effort", Value: defaultEffort(e)})
 		}
 		return nil
@@ -166,7 +166,7 @@ func codex(home string) *Agent {
 	}
 }
 
-func contains(xs []string, x string) bool {
+func codexListHasString(xs []string, x string) bool {
 	for _, v := range xs {
 		if v == x {
 			return true
@@ -179,7 +179,7 @@ func contains(xs []string, x string) bool {
 // offered, else whatever the list starts with.
 func defaultEffort(e []string) string {
 	for _, want := range []string{"medium", "high"} {
-		if contains(e, want) {
+		if codexListHasString(e, want) {
 			return want
 		}
 	}

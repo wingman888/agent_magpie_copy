@@ -174,12 +174,12 @@ func refreshCodex(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, append(b, '\n'), 0o600)
+	return codexWriteAtomic(path, append(b, '\n'), 0o600)
 }
 
-// writeFileAtomic replaces path through a temporary file in the same
+// codexWriteAtomic replaces path through a temporary file in the same
 // directory, so a reader never sees a half-written file.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+func codexWriteAtomic(path string, data []byte, perm os.FileMode) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".auth-*.tmp")
 	if err != nil {
 		return err

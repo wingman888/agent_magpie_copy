@@ -10,6 +10,16 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
+// fxPost sends one request through the gateway handler and returns the
+// status code and body.
+func fxPost(t *testing.T, path, body string) (int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	New().Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
 // fxNoCTChat is an ordinary Chat upstream that streams its reply but sends
 // no Content-Type at all.
 func fxNoCTChat(t *testing.T) *httptest.Server {
@@ -33,7 +43,7 @@ func fxNoCTChat(t *testing.T) *httptest.Server {
 // is refused as it always was, not read as an event stream.
 func TestFxPlainProviderNoContentTypeIsStillRefused(t *testing.T) {
 	fxNoCTChat(t)
-	code, body := post(t, "/v1/responses", `{"model":"m1","stream":true,"input":"hi"}`)
+	code, body := fxPost(t, "/v1/responses", `{"model":"m1","stream":true,"input":"hi"}`)
 	if code != http.StatusBadGateway || !strings.Contains(body, "did not stream") {
 		t.Fatalf("status %d, body %s; want 502 did not stream", code, body)
 	}

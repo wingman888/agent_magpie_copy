@@ -267,14 +267,14 @@ func normalize(p Provider) Provider {
 func cleanList(xs []string) []string {
 	var out []string
 	for _, x := range xs {
-		if x = strings.TrimSpace(x); x != "" && !contains(out, x) {
+		if x = strings.TrimSpace(x); x != "" && !accountListHasString(out, x) {
 			out = append(out, x)
 		}
 	}
 	return out
 }
 
-func contains(xs []string, x string) bool {
+func accountListHasString(xs []string, x string) bool {
 	for _, v := range xs {
 		if v == x {
 			return true

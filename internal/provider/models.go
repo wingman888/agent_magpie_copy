@@ -10,7 +10,7 @@ import (
 	"github.com/yetone/dial/internal/catalog"
 )
 
-func errorf(format string, a ...any) error { return fmt.Errorf(format, a...) }
+func modelsErrorf(format string, a ...any) error { return fmt.Errorf(format, a...) }
 
 // manyModels is where "expose everything" stops being helpful.
 const manyModels = 24
@@ -69,7 +69,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 		lastErr = err
 	}
 	if lastErr == nil {
-		lastErr = errorf("%s has no endpoint to ask", p.Name)
+		lastErr = modelsErrorf("%s has no endpoint to ask", p.Name)
 	}
 	return nil, lastErr
 }

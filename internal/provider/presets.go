@@ -140,7 +140,7 @@ func Preset(id string) *PresetDef {
 func FromPreset(id string) (Provider, error) {
 	pr := Preset(id)
 	if pr == nil {
-		return Provider{}, errorf("no preset %q — dial presets lists them", id)
+		return Provider{}, modelsErrorf("no preset %q — dial presets lists them", id)
 	}
 	return Provider{
 		ID: pr.ID, Name: pr.Name, Icon: pr.Icon, Preset: pr.ID,

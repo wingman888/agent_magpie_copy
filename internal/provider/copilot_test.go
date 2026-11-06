@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +16,37 @@ import (
 
 	"github.com/yetone/dial/internal/catalog"
 )
+
+// cplHomeEnv gives the test a private HOME and XDG config dir.
+func cplHomeEnv(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	return home
+}
+
+// cplPutFile writes a fixture file, creating its directory.
+func cplPutFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// cplFindProvider returns the provider with the given id, or nil.
+func cplFindProvider(ps []Provider, id string) *Provider {
+	for i := range ps {
+		if ps[i].ID == id {
+			return &ps[i]
+		}
+	}
+	return nil
+}
 
 // cplRecord captures what the stand-in Copilot server saw.
 type cplRecord struct {
@@ -30,9 +62,9 @@ type cplRecord struct {
 // writes a Copilot login for user octo-cpl.
 func cplEnv(t *testing.T) {
 	t.Helper()
-	home := sacctEnv(t)
+	home := cplHomeEnv(t)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
-	sacctWrite(t, filepath.Join(home, "xdg", "github-copilot", "apps.json"),
+	cplPutFile(t, filepath.Join(home, "xdg", "github-copilot", "apps.json"),
 		`{"github.com:Iv1.cpl":{"user":"octo-cpl","oauth_token":"gho_cpl_oauth"}}`)
 	copilotCache = copilotSession{}
 	t.Cleanup(func() { copilotCache = copilotSession{} })
@@ -77,7 +109,7 @@ func cplServer(t *testing.T, models string, rec *cplRecord) *httptest.Server {
 
 func cplProvider(t *testing.T) Provider {
 	t.Helper()
-	p := sacctFind(Accounts(), "copilot")
+	p := cplFindProvider(Accounts(), "copilot")
 	if p == nil {
 		t.Fatal("precondition: copilot login should be found")
 	}

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,6 +14,72 @@ import (
 	"testing"
 	"time"
 )
+
+// fxHomeEnv gives the test a private HOME and XDG config dir.
+func fxHomeEnv(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	return home
+}
+
+// fxPutFile writes a fixture file, creating its directory.
+func fxPutFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fxFindProvider returns the provider with the given id, or nil.
+func fxFindProvider(ps []Provider, id string) *Provider {
+	for i := range ps {
+		if ps[i].ID == id {
+			return &ps[i]
+		}
+	}
+	return nil
+}
+
+// fxJWT builds an unsigned JWT whose payload is the given claims.
+func fxJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	b, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
+}
+
+const fxAccessToken = "tok-sacct-access-7f3a"
+
+// fxCodexLogin writes a ChatGPT-mode Codex login under home.
+func fxCodexLogin(t *testing.T, home string) {
+	t.Helper()
+	idTok := fxJWT(t, map[string]any{
+		"email": "dev@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_plan_type": "pro",
+		},
+	})
+	auth := map[string]any{
+		"auth_mode":      "chatgpt",
+		"OPENAI_API_KEY": nil,
+		"tokens": map[string]any{
+			"id_token":      idTok,
+			"access_token":  fxAccessToken,
+			"refresh_token": "rt-sacct",
+			"account_id":    "acct-sacct-1",
+		},
+	}
+	b, _ := json.Marshal(auth)
+	fxPutFile(t, filepath.Join(home, ".codex", "auth.json"), string(b))
+}
 
 // fxRecord is what the stand-in servers below saw in the last request.
 type fxRecord struct {
@@ -43,9 +110,9 @@ const fxSSEReply = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"
 // the login at it. The login belongs to user fx-octo.
 func fxCopilot(t *testing.T, rec *fxRecord) {
 	t.Helper()
-	home := sacctEnv(t)
+	home := fxHomeEnv(t)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
-	sacctWrite(t, filepath.Join(home, "xdg", "github-copilot", "apps.json"),
+	fxPutFile(t, filepath.Join(home, "xdg", "github-copilot", "apps.json"),
 		`{"github.com:Iv1.fx":{"user":"fx-octo","oauth_token":"gho_fx_oauth"}}`)
 	copilotCache = copilotSession{}
 	t.Cleanup(func() { copilotCache = copilotSession{} })
@@ -82,9 +149,9 @@ func fxCopilot(t *testing.T, rec *fxRecord) {
 // the Codex login at it. The login is the sacct fixture.
 func fxCodex(t *testing.T, rec *fxRecord) {
 	t.Helper()
-	home := sacctEnv(t)
+	home := fxHomeEnv(t)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
-	sacctCodexLogin(t, home)
+	fxCodexLogin(t, home)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		rec.note(r, body)
@@ -121,7 +188,7 @@ func fxPlainLogin(t *testing.T, path string) map[string]any {
 func TestFxCopilotProviderTestSucceeds(t *testing.T) {
 	var rec fxRecord
 	fxCopilot(t, &rec)
-	p := sacctFind(Accounts(), "copilot")
+	p := fxFindProvider(Accounts(), "copilot")
 	if p == nil {
 		t.Fatal("precondition: copilot login should be found")
 	}
@@ -143,7 +210,7 @@ func TestFxCopilotProviderTestSucceeds(t *testing.T) {
 func TestFxCodexProviderTestSucceeds(t *testing.T) {
 	var rec fxRecord
 	fxCodex(t, &rec)
-	p := sacctFind(Accounts(), "codex")
+	p := fxFindProvider(Accounts(), "codex")
 	if p == nil {
 		t.Fatal("precondition: codex login should be found")
 	}
@@ -154,7 +221,7 @@ func TestFxCodexProviderTestSucceeds(t *testing.T) {
 	if !res[0].OK || res[0].Error != "" || res[0].Protocol != Responses {
 		t.Fatalf("codex test should succeed over responses: %+v", res[0])
 	}
-	if rec.path != "/responses" || rec.auth != "Bearer "+sacctAccessToken || rec.acctID != "acct-sacct-1" {
+	if rec.path != "/responses" || rec.auth != "Bearer "+fxAccessToken || rec.acctID != "acct-sacct-1" {
 		t.Fatalf("probe not signed with the login: path=%q auth=%q account=%q", rec.path, rec.auth, rec.acctID)
 	}
 	var sent map[string]any
@@ -173,7 +240,7 @@ func TestFxCodexProviderTestSucceeds(t *testing.T) {
 }
 
 func TestFxPlainProviderStillSignsWithKey(t *testing.T) {
-	sacctEnv(t)
+	fxHomeEnv(t)
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	var rec fxRecord
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -224,21 +291,21 @@ func TestFxSelectionFileHoldsOnlyModels(t *testing.T) {
 	if len(entry) != 2 || entry["id"] != "copilot" {
 		t.Fatalf("selection record should hold id and models only, got %v", entry)
 	}
-	if p := sacctFind(All(), "copilot"); p == nil || len(p.Models) != 1 || p.Models[0] != "gpt-5.5" {
+	if p := fxFindProvider(All(), "copilot"); p == nil || len(p.Models) != 1 || p.Models[0] != "gpt-5.5" {
 		t.Fatalf("copilot should expose only the chosen model: %+v", p)
 	}
 
 	if err := Delete("copilot"); err != nil {
 		t.Fatal(err)
 	}
-	p := sacctFind(All(), "copilot")
+	p := fxFindProvider(All(), "copilot")
 	if p == nil || len(p.Models) != 0 {
 		t.Fatalf("delete should clear the choice and keep the provider: %+v", p)
 	}
 }
 
 func TestFxOwnProviderKeepsNameAndKey(t *testing.T) {
-	sacctEnv(t)
+	fxHomeEnv(t)
 	if err := Save(Provider{ID: "fxown", Name: "Fx Own", Chat: "https://relay.example.com/v1", Key: "k-fx-own"}); err != nil {
 		t.Fatal(err)
 	}
