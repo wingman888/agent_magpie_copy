@@ -367,10 +367,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	cands := s.candidates(p, model)
 	for i, c := range cands {
 		hw.reset()
-		labels, st, m := s.attempt(hw, r, c.p, from, c.model, body, &call)
+		labels, st, m, retry := s.attempt(hw, r, c.p, from, c.model, body, &call)
 		failed = append(failed, labels...)
 		last, status, msg = c, st, m
-		if hw.state != stateWithheld || !retryable(st, m) || i == len(cands)-1 {
+		if hw.state != stateWithheld || !retry || i == len(cands)-1 {
 			break
 		}
 		// another candidate may answer: this one rests, and its error is dropped
@@ -394,13 +394,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 }
 
 // attempt sends the request to one provider through hw. It returns the keys
-// that failed on the way (for keyed providers) and the final outcome. An error
-// reply is still held in hw; the caller decides whether it goes to the client.
-func (s *Server) attempt(hw *heldWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, call *Call) (failed []string, status int, msg string) {
+// that failed on the way (for keyed providers) and the final outcome, and
+// whether that outcome may move on to another candidate. An error reply is
+// still held in hw; the caller decides whether it goes to the client.
+func (s *Server) attempt(hw *heldWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, call *Call) (failed []string, status int, msg string, retry bool) {
 	switch {
 	case p.Account == nil:
 		// API keys: tried in turn, a retryable failure moves on to the next
-		return s.tryKeys(hw, r, p, from, model, body, call)
+		failed, status, msg = s.tryKeys(hw, r, p, from, model, body, call)
+		return failed, status, msg, retryable(status, msg)
 	case p.Account.Agent == "claude":
 		// A Claude Code subscription must run through the genuine binary. Direct
 		// OAuth HTTP requests are content-classified as third-party traffic when
@@ -408,6 +410,9 @@ func (s *Server) attempt(hw *heldWriter, r *http.Request, p provider.Provider, f
 		call.To = provider.Anthropic
 		r = r.WithContext(withClaudeConfigDir(r.Context(), p.Account.ConfigDir()))
 		status, msg = s.serveClaudeSubscription(hw, r, from, model, body, &call.Usage)
+		// the binary reports its failures as 502; only a limit, overload or
+		// outage moves on, a rejected request stays with this account
+		return nil, status, msg, retryable(status, msg) && claudeTransient(msg)
 	case p.Base(from) != "" && (!p.Account.Stream || streamOf(body)):
 		// a backend that only streams gets a non-streaming request translated
 		// (the provider is always streamed on that path) rather than relayed
@@ -418,12 +423,12 @@ func (s *Server) attempt(hw *heldWriter, r *http.Request, p provider.Provider, f
 		if len(to) == 0 {
 			status, msg = 502, p.Name+" has no endpoint configured"
 			writeError(hw, from, status, msg)
-			return nil, status, msg
+			return nil, status, msg, false
 		}
 		call.To = to[0]
 		status, msg = s.translate(hw, r, p, from, to[0], model, body, &call.Usage)
 	}
-	return nil, status, msg
+	return nil, status, msg, retryable(status, msg)
 }
 
 // forward sends a request to the provider.

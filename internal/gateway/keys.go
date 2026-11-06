@@ -126,7 +126,10 @@ func (s *Server) relayKeys(w http.ResponseWriter, r *http.Request, p provider.Pr
 func (s *Server) tryKeys(hw *heldWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, call *Call) (failed []string, status int, msg string) {
 	tries := s.keyTries(p, from, model)
 	if len(tries) == 0 {
-		msg = p.Name + " has no key for a protocol it serves"
+		msg = p.Name + " has no endpoint configured"
+		if len(p.Speaks()) > 0 {
+			msg = p.Name + " has no key for a protocol it serves"
+		}
 		writeError(hw, from, 502, msg)
 		return nil, 502, msg
 	}
@@ -277,6 +280,22 @@ func retryable(status int, msg string) bool {
 // that it may not do this.
 var quotaWords = []string{"quota", "insufficient", "balance", "exhaust", "exceed", "limit",
 	"额度", "余额", "用完", "用尽", "超出", "超限"}
+
+// claudeTransient reads a Claude Code failure's text: only one that names a
+// limit, an overload or an outage may move on to another account. The binary
+// reports everything as 502, so the text is what tells a rejected request
+// (which must go back to the client as it is) from a busy account.
+func claudeTransient(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, w := range []string{"rate limit", "rate_limit", "429", "529", "overload",
+		"usage limit", "quota", "insufficient", "unavailable", "502", "503", "504",
+		"timed out", "timeout", "额度", "余额", "用完", "用尽", "超出", "超限"} {
+		if strings.Contains(m, w) {
+			return true
+		}
+	}
+	return false
+}
 
 // failLabel names a failed attempt for the recent calls: the provider, and
 // the key's name when it has one.

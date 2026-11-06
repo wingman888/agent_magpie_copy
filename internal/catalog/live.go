@@ -240,14 +240,16 @@ func index(ms []Model) map[string]Model {
 	return byID
 }
 
-// lookupIn resolves an id in an index: the part after the last "/" first,
-// then the id as written.
+// lookupIn resolves an id in an index: the id as written first (as Decorate
+// always matched), then the part after the last "/".
 func lookupIn(byID map[string]Model, id string) (Model, bool) {
+	if m, ok := byID[id]; ok {
+		return m, true
+	}
 	if i := strings.LastIndex(id, "/"); i >= 0 {
 		if m, ok := byID[id[i+1:]]; ok {
 			return m, true
 		}
 	}
-	m, ok := byID[id]
-	return m, ok
+	return Model{}, false
 }
