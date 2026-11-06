@@ -13,9 +13,9 @@ import (
 	"testing"
 )
 
-// isolate points HOME and the XDG dirs at a fresh temp dir, so nothing reads
+// isolateConfig points HOME and the XDG dirs at a fresh temp dir, so nothing reads
 // or writes the developer's real config, cache or agent sign-ins.
-func isolate(t *testing.T) {
+func isolateConfig(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -109,7 +109,7 @@ func hasLine(headers []string, want string) bool {
 }
 
 func TestCustomHeadersReachUpstreamWithTheirCase(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	srv := newRawServer(t)
 	p := Provider{ID: "relay", Name: "Relay", Chat: srv.URL() + "/v1", Key: "sk-test",
 		Headers: map[string]string{"X-Org-Id": "acme"}}
@@ -131,7 +131,7 @@ func TestCustomHeadersReachUpstreamWithTheirCase(t *testing.T) {
 }
 
 func TestCustomHeaderOverridesDefaultAuth(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	srv := newRawServer(t)
 	p := Provider{ID: "relay", Name: "Relay", Chat: srv.URL() + "/v1", Key: "sk-test",
 		Headers: map[string]string{"authorization": "Bearer custom"}}

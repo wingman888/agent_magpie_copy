@@ -10,7 +10,7 @@ import (
 )
 
 func TestFallbackIsCleanedAndSaved(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	if err := Save(Provider{ID: "p1", Name: "P1", Chat: "https://p1.example/v1", Key: "k",
 		Fallback: []string{" openai/gpt-5.5 ", "", "deepseek/deepseek-chat", "openai/gpt-5.5", "   "}}); err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func writeModels(t *testing.T) {
 }
 
 func TestMultipleCatalogsAndPrefixedIDs(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	writeModels(t)
 	p := Provider{ID: "gw", Name: "GW", Chat: "https://gw.example/v1", Key: "k", Catalog: "openai, deepseek"}
 

@@ -16,7 +16,7 @@ func pngBytes(rest string) []byte {
 }
 
 func TestStoreIconKeepsOneCopyOfAPicture(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	img := pngBytes("one picture")
 	v1, err := StoreIcon(img)
 	if err != nil {
@@ -48,7 +48,7 @@ func TestStoreIconKeepsOneCopyOfAPicture(t *testing.T) {
 }
 
 func TestStoreIconRecognisesFormats(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	for want, data := range map[string][]byte{
 		".png":  pngBytes("x"),
 		".jpg":  append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte("jfif")...),
@@ -68,7 +68,7 @@ func TestStoreIconRecognisesFormats(t *testing.T) {
 }
 
 func TestStoreIconRejectsBadContent(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	if _, err := StoreIcon(nil); err == nil {
 		t.Error("empty content accepted")
 	}
@@ -95,7 +95,7 @@ func TestStoreIconRejectsBadContent(t *testing.T) {
 }
 
 func TestIconFileOnlyAcceptsStoredNames(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	for _, bad := range []string{
 		"", "..", "../0123456789abcdef.png", "0123456789abcdef.png/../x", "a/0123456789abcdef.png",
 		`..\0123456789abcdef.png`, "0123456789ABCDEF.png", "0123456789abcdef.exe", "0123456789abcdef",
@@ -112,7 +112,7 @@ func TestIconFileOnlyAcceptsStoredNames(t *testing.T) {
 }
 
 func TestSaveSweepsOldUnusedIcons(t *testing.T) {
-	isolate(t)
+	isolateConfig(t)
 	if err := os.MkdirAll(iconsDir(), 0o755); err != nil {
 		t.Fatal(err)
 	}
