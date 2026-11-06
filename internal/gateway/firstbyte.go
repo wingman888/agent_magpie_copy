@@ -63,7 +63,11 @@ func streamLook(proto provider.Protocol, name, data string) (content bool, statu
 		}
 		c, _ := choices[0].(map[string]any)
 		d, _ := c["delta"].(map[string]any)
+		// reasoning is output the agent is already reading, so it counts
 		if s, _ := d["content"].(string); s != "" {
+			return true, 0, "", false
+		}
+		if s, _ := d["reasoning_content"].(string); s != "" {
 			return true, 0, "", false
 		}
 		_, tools := d["tool_calls"]
