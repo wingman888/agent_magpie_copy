@@ -446,7 +446,7 @@ tries:
 				skipped = append(skipped, c.label()+": "+call.Error)
 				break // the next candidate
 			}
-			if wait, ok := retryDelay(call.Status, hw.header, retries); ok && retries < maxRetries {
+			if wait, ok := retryDelay(call.Status, hw.header, retries); ok && retries < maxRetries && !namesOtherAPI([]byte(call.Error)) {
 				try.Fail = failure(call.Status, []byte(call.Error))
 				try.Retry = &Retry{Attempt: retries + 1, Wait: wait.Milliseconds()}
 				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })

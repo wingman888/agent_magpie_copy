@@ -224,6 +224,24 @@ func TestServerErrorNamingAnotherAPIIsNotRefusal(t *testing.T) {
 	}
 }
 
+// (d2) A plain server fault on the last candidate is still retried: the
+// wording check only stops retries for replies that name another API.
+func TestPlainServerFaultOnLastCandidateIsRetried(t *testing.T) {
+	waits := recordWaits(t)
+	f := &scripted{replies: map[string]reply{
+		pChat: {500, "application/json", `{"error":{"message":"upstream broke"}}`},
+	}}
+	endpointSetup(t, f, []string{"m1"}, nil, true, false, false)
+	body := `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`
+	code, out := callOn(New().Handler(), pChat, body)
+	if code != 500 {
+		t.Fatalf("status %d, want 500: %s", code, out)
+	}
+	if f.count(pChat) != 3 || len(*waits) != 2 {
+		t.Fatalf("chat calls %d, waits %v; want 3 calls and 2 waits", f.count(pChat), *waits)
+	}
+}
+
 // endpointRefused tells a refusal of the endpoint from every other failure.
 func TestEndpointRefused(t *testing.T) {
 	for _, tc := range []struct {

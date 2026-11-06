@@ -45,6 +45,14 @@ func endpointRefused(status int, body []byte) bool {
 	if status < 400 || status >= 500 {
 		return false
 	}
+	return namesOtherAPI(body)
+}
+
+// namesOtherAPI reports whether a reply's text says the model is served on
+// another endpoint, whatever the status. Retrying the same endpoint cannot
+// help such a reply, so a server fault that carries this wording is not
+// retried; endpointRefused still decides what moves on.
+func namesOtherAPI(body []byte) bool {
 	msg := strings.ToLower(string(body))
 	if notAccessible.MatchString(msg) {
 		return true
