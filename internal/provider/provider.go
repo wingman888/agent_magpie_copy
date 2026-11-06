@@ -23,6 +23,7 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
+	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
 // Protocols in the order dial prefers them when it has to translate.
@@ -50,6 +51,11 @@ type Provider struct {
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// Account is set on providers that borrow a login the agent already
+	// holds (see accounts.go). Such a provider has no key and no tokens of
+	// its own: the agent's credential file is read each time it is used.
+	Account *Account `json:"account,omitempty"`
 }
 
 type file struct {
@@ -277,4 +283,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
