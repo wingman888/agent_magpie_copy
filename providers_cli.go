@@ -387,7 +387,7 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			return fmt.Errorf("expected key=value, got %q\n\n%s", kv, providerUsage)
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if len(k) > len(headerPrefix) && strings.EqualFold(k[:len(headerPrefix)], headerPrefix) {
+		if len(k) >= len(headerPrefix) && strings.EqualFold(k[:len(headerPrefix)], headerPrefix) {
 			// header.<name>=<value>: the name keeps the case the user typed
 			if name := strings.TrimSpace(k[len(headerPrefix):]); name != "" {
 				if p.Headers == nil {
