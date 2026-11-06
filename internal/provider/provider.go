@@ -23,10 +23,6 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-
-	// Gemini is the Gemini API. It is only ever a client protocol: vendors
-	// never get it, so it is left out of Protocols.
-	Gemini Protocol = "gemini"
 )
 
 // Protocols in the order dial prefers them when it has to translate.
