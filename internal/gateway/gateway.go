@@ -411,6 +411,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	if len(failed) > 0 {
 		call.Fallback = strings.Join(failed, ", ")
 	}
+	if len(attempts) > 1 && call.Status >= 400 && retryable(call.Status, call.Error) {
+		// the last candidate failed too: it rests like the others
+		s.cooldown(attempts[len(attempts)-1])
+	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
