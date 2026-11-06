@@ -29,6 +29,9 @@ type Field struct {
 	Get     func() string
 	Set     func(string) error
 	Options func(cur map[string]string) []Option
+	// Optional fields are shown only once they have a value, and a bare
+	// value on the command line never selects them (the main model wins).
+	Optional bool
 }
 
 // Agent is one supported coding agent.

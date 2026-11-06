@@ -177,6 +177,81 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 `auth` to API key with the gateway token, and names the model in
 `settings.json`; a native model puts the previous auth back.
 
+## Import links
+
+A provider can be shared as a link. `magpie://import?…` describes one
+provider; magpie shows what it would add (the name, the hosts the requests
+and the key go to, and the models) and saves nothing until you confirm.
+
+```sh
+magpie import 'magpie://import?preset=deepseek&key=sk-…'   # shows it, then asks: Add it? [y/N]
+magpie import -y 'magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…'
+```
+
+`magpie:import?…`, `magpie:///import?…`, any letter case of the scheme, and
+`import/` are all accepted; other schemes and other actions are refused.
+Values are URL-encoded.
+
+| Parameter | Meaning |
+| --------- | ------- |
+| `preset` | a preset id (`magpie presets`); its endpoints are used |
+| `region` | the preset's region, when it has several; an unknown region is an error |
+| `name` | the provider's name; required without `preset`, overrides the preset's name with it |
+| `id` | the provider id; otherwise derived from the name (or the preset id) |
+| `key` | the API key; without it, add one later with `magpie provider key <id> <key>` |
+| `chat` / `responses` / `anthropic` | base URLs for the three APIs (`anthropic` is the root, without `/v1`) |
+| `models` | comma-separated model ids (blanks ignored, at most 200) |
+| `catalog` | a models.dev provider id, for model names and reasoning levels |
+| `website` / `keys` | the vendor's website and its key page; only `https` is kept, anything else is ignored |
+
+A link is refused as a whole, never partly imported, when:
+
+- it has no `preset` and no `name`, or no base URL at all;
+- a base URL is not `https`. Plain `http` is allowed only for `localhost`, loopback, private addresses and `.local` names; a base URL must not carry a user name, password, query or fragment;
+- the id is `magpie`, or the name (or `id`) reduces to nothing. The name becomes an id by lowercasing it and replacing every character outside `a-z0-9-` with `-`, then trimming `-` from both ends (`Acme Relay` → `acme-relay`). An explicit `id` must already be in that form;
+- the key contains a control character (a newline, say) or is longer than 4096 characters;
+- the preset or region is unknown.
+
+Names longer than 80 characters are cut to 80. Without `-y`, `magpie import`
+asks before it writes; it refuses to run in a non-interactive terminal
+without `-y`. If the id already exists, it says the existing provider will be
+replaced. The key is never printed in full.
+
+Browsers and GitHub cannot reliably open custom schemes, so a web page can
+link to the same parameters in the fragment instead, which is never sent to
+the server:
+
+```
+https://usemagpie.ai/import#name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…
+```
+
+## Claude Code model tiers
+
+Claude Code has four model tiers: `opus`, `sonnet`, `haiku` and `fable`.
+Each one is a model Claude Code uses for the work it assigns to that tier.
+Through magpie they all follow the main model unless you pin one:
+
+```sh
+magpie claude deepseek/pro          # the main model: every tier follows it
+magpie claude haiku deepseek/flash  # pin haiku; opus, sonnet and fable still follow deepseek/pro
+magpie claude haiku ""              # haiku follows the main model again
+```
+
+Changing the main model moves the tiers that follow it and leaves the pinned
+ones alone. The haiku tier also sets Claude Code's small, fast model. While any
+tier differs from the main model, magpie stops forcing one model on every
+sub-agent (`CLAUDE_CODE_SUBAGENT_MODEL` is removed); once every tier is the
+main model again, it is restored. A tier can only be pinned after Claude Code
+is routed through magpie, and the value must be a `provider/model` magpie
+offers. Clearing the main model (`magpie claude default`) removes all of
+these settings and leaves the rest of `settings.json` alone. Pinned tiers
+appear in `magpie ls`; tiers that follow the main model do not.
+
+These are written to the `env` block of `~/.claude/settings.json` as
+`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+`ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL`, with the
+main model in `ANTHROPIC_MODEL`.
+
 ## Install
 
 Download the app for macOS, Windows or Linux from
@@ -251,6 +326,7 @@ magpie codex effort high        # other fields
 magpie codex xhigh              # bare effort levels are recognised too
 magpie codex deepseek/deepseek-chat   # any catalog model, through the gateway
 magpie claude moonshot/kimi-k2.5
+magpie claude haiku deepseek/deepseek-flash   # pin one Claude Code tier ("" to follow the main model)
 magpie gemini auth api-key
 magpie opencode anthropic/claude-sonnet-5
 magpie oc small anthropic/claude-haiku-4-5
