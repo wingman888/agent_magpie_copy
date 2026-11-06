@@ -3,6 +3,7 @@ package provider
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -53,6 +54,19 @@ func accountSignedIn(id string) bool {
 		}
 	}
 	return false
+}
+
+// MarshalJSON writes an account provider as its id and picks alone. The rest
+// (name, key, sign-in) belongs to the agent and never reaches the file.
+func (p Provider) MarshalJSON() ([]byte, error) {
+	if isAccount(p.ID) {
+		return json.Marshal(struct {
+			ID     string   `json:"id"`
+			Models []string `json:"models,omitempty"`
+		}{p.ID, p.Models})
+	}
+	type plain Provider
+	return json.Marshal(plain(p))
 }
 
 // saveAccount records the model picks of an account provider and nothing

@@ -28,8 +28,11 @@ func (c *codexUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.header = r.Header.Clone()
 	c.body = nil
 	json.NewDecoder(r.Body).Decode(&c.body)
-	if c.noType {
-		w.Header()["Content-Type"] = nil
+	switch {
+	case c.noType:
+		w.Header()["Content-Type"] = nil // the backend sent no type at all
+	default:
+		w.Header().Set("Content-Type", "text/event-stream")
 	}
 	io.WriteString(w, c.reply)
 }
