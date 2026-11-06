@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -453,7 +454,25 @@ func iconArg(v string) (string, error) {
 		}
 		return ref, nil
 	}
+	if looksLikeFile(v) {
+		// a path or an image file name that is not there: refuse rather than
+		// store it as a built-in name nothing will ever match
+		return "", fmt.Errorf("%s: no such image file (use a built-in icon name, or \"\" for the default)", v)
+	}
 	return v, nil
+}
+
+// looksLikeFile reports whether an icon argument reads as a file path rather
+// than a built-in icon name: it has a path separator or an image extension.
+func looksLikeFile(v string) bool {
+	if strings.ContainsAny(v, `/\`) {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(v)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg":
+		return true
+	}
+	return false
 }
 
 // setIcon: `magpie provider icon <id> <path | name | "">`
