@@ -201,7 +201,10 @@ func buildChat(r *Request, model, host string) []byte {
 			if len(calls) > 0 {
 				am["tool_calls"] = calls
 			}
-			if deepseek && think != "" {
+			// DeepSeek needs earlier reasoning sent back; so does a history a
+			// Gemini client built from the thoughts it was given. Other clients
+			// keep the Chat rendering they always had.
+			if (deepseek || r.fromGemini) && think != "" {
 				am["reasoning_content"] = think
 			}
 			msgs = append(msgs, am)

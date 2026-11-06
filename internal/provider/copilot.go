@@ -46,9 +46,9 @@ func copilotConfigPath() string {
 	return filepath.Join(dir, "github-copilot", "apps.json")
 }
 
-// readCopilot returns the GitHub login and OAuth token from Copilot's
+// copilotReadAuth returns the GitHub login and OAuth token from Copilot's
 // sign-in file: the entry whose key starts with github.com.
-func readCopilot() (user, token string, ok bool) {
+func copilotReadAuth() (user, token string, ok bool) {
 	b, err := os.ReadFile(copilotConfigPath())
 	if err != nil {
 		return "", "", false
@@ -77,7 +77,7 @@ func readCopilot() (user, token string, ok bool) {
 
 // copilotAccount is the Copilot account as its sign-in describes it.
 func copilotAccount() (Provider, bool) {
-	user, _, ok := readCopilot()
+	user, _, ok := copilotReadAuth()
 	if !ok {
 		return Provider{}, false
 	}
@@ -91,7 +91,7 @@ func copilotAccount() (Provider, bool) {
 // copilotSessionFor gives the request a Copilot session and the API address
 // that session returned.
 func copilotSessionFor(ctx context.Context, p Provider) (Provider, error) {
-	_, oauth, ok := readCopilot()
+	_, oauth, ok := copilotReadAuth()
 	if !ok {
 		return p, errors.New("Copilot 未登录，请先在编辑器或 Copilot CLI 中登录 GitHub Copilot")
 	}

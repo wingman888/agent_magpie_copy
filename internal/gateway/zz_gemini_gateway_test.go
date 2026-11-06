@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -9,8 +11,84 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// geminiReplyText reads the text and finish reason of a whole Gemini reply.
-func geminiReplyText(t *testing.T, body string) (string, string) {
+// zzFake is an upstream that records what it got and replies with a script.
+type zzFake struct {
+	t     *testing.T
+	got   []byte
+	path  string
+	head  http.Header
+	reply string // SSE body
+	ctype string
+	code  int
+}
+
+func (f *zzFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.got, _ = io.ReadAll(r.Body)
+	f.path, f.head = r.URL.Path, r.Header
+	ct := f.ctype
+	if ct == "" {
+		ct = "text/event-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	if f.code != 0 {
+		w.WriteHeader(f.code)
+	}
+	io.WriteString(w, f.reply)
+}
+
+func zzSSE(lines ...string) string {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l + "\n\n")
+	}
+	return b.String()
+}
+
+// zzSetup points dial's provider file at a temp dir and adds one provider
+// speaking only the given protocol, backed by the fake.
+func zzSetup(t *testing.T, proto provider.Protocol, f *zzFake) *httptest.Server {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	up := httptest.NewServer(f)
+	t.Cleanup(up.Close)
+	p := provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}}
+	switch proto {
+	case provider.Chat:
+		p.Chat = up.URL + "/v1"
+	case provider.Responses:
+		p.Responses = up.URL + "/v1"
+	case provider.Anthropic:
+		p.Anthropic = up.URL
+	}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	return up
+}
+
+func zzPost(t *testing.T, path, body string) (int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	New().Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+func zzEvents(body string) []map[string]any {
+	var out []map[string]any
+	readSSE(strings.NewReader(body), func(_, data string) error {
+		var m map[string]any
+		if json.Unmarshal([]byte(data), &m) == nil {
+			out = append(out, m)
+		}
+		return nil
+	})
+	return out
+}
+
+// zzGeminiReplyText reads the text and finish reason of a whole Gemini reply.
+func zzGeminiReplyText(t *testing.T, body string) (string, string) {
 	t.Helper()
 	var m map[string]any
 	if err := json.Unmarshal([]byte(body), &m); err != nil {
@@ -26,8 +104,8 @@ func geminiReplyText(t *testing.T, body string) (string, string) {
 	return text, cand["finishReason"].(string)
 }
 
-// geminiUsage reads usageMetadata of a whole Gemini reply.
-func geminiUsage(t *testing.T, body string) map[string]any {
+// zzGeminiUsage reads usageMetadata of a whole Gemini reply.
+func zzGeminiUsage(t *testing.T, body string) map[string]any {
 	t.Helper()
 	var m map[string]any
 	if err := json.Unmarshal([]byte(body), &m); err != nil {
@@ -40,8 +118,8 @@ func geminiUsage(t *testing.T, body string) map[string]any {
 	return u
 }
 
-// partsOf is the parts of one streamed Gemini event.
-func partsOf(t *testing.T, ev map[string]any) []any {
+// zzPartsOf is the parts of one streamed Gemini event.
+func zzPartsOf(t *testing.T, ev map[string]any) []any {
 	t.Helper()
 	cands, ok := ev["candidates"].([]any)
 	if !ok || len(cands) == 0 {
@@ -51,31 +129,31 @@ func partsOf(t *testing.T, ev map[string]any) []any {
 }
 
 // chatText is a Chat Completions reply that says "ok" and stops.
-func chatText(text string) string {
-	return sse(
+func zzChatText(text string) string {
+	return zzSSE(
 		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"`+text+`"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}`,
 		`data: [DONE]`)
 }
 
-func TestGeminiGenerateOverChat(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestZzGeminiGenerateOverChat(t *testing.T) {
+	f := &zzFake{t: t, reply: zzSSE(
 		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"Hello"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{"content":" world"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
 		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	zzSetup(t, provider.Chat, f)
+	code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	text, finish := geminiReplyText(t, body)
+	text, finish := zzGeminiReplyText(t, body)
 	if text != "Hello world" || finish != "STOP" || !strings.Contains(body, `"finishReason":"STOP"`) {
 		t.Errorf("reply: %s", body)
 	}
-	u := geminiUsage(t, body)
+	u := zzGeminiUsage(t, body)
 	if u["promptTokenCount"] != float64(10) || u["candidatesTokenCount"] != float64(5) {
 		t.Errorf("usage: %v", u)
 	}
@@ -84,20 +162,20 @@ func TestGeminiGenerateOverChat(t *testing.T) {
 	}
 }
 
-func TestGeminiGenerateOverResponses(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestZzGeminiGenerateOverResponses(t *testing.T) {
+	f := &zzFake{t: t, reply: zzSSE(
 		`data: {"type":"response.created","response":{"id":"r1","model":"m1"}}`,
 		`data: {"type":"response.output_text.delta","delta":"Hi"}`,
 		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"output_tokens_details":{"reasoning_tokens":2}}}}`)}
-	setup(t, provider.Responses, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	zzSetup(t, provider.Responses, f)
+	code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	if text, finish := geminiReplyText(t, body); text != "Hi" || finish != "STOP" {
+	if text, finish := zzGeminiReplyText(t, body); text != "Hi" || finish != "STOP" {
 		t.Errorf("reply: %s", body)
 	}
-	u := geminiUsage(t, body)
+	u := zzGeminiUsage(t, body)
 	if u["promptTokenCount"] != float64(7) || u["thoughtsTokenCount"] != float64(2) {
 		t.Errorf("usage: %v", u)
 	}
@@ -106,23 +184,23 @@ func TestGeminiGenerateOverResponses(t *testing.T) {
 	}
 }
 
-func TestGeminiGenerateOverAnthropic(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestZzGeminiGenerateOverAnthropic(t *testing.T) {
+	f := &zzFake{t: t, reply: zzSSE(
 		`data: {"type":"message_start","message":{"id":"msg1","model":"m1","usage":{"input_tokens":4}}}`,
 		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Yo"}}`,
 		`data: {"type":"content_block_stop","index":0}`,
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
 		`data: {"type":"message_stop"}`)}
-	setup(t, provider.Anthropic, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	zzSetup(t, provider.Anthropic, f)
+	code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	if text, finish := geminiReplyText(t, body); text != "Yo" || finish != "STOP" {
+	if text, finish := zzGeminiReplyText(t, body); text != "Yo" || finish != "STOP" {
 		t.Errorf("reply: %s", body)
 	}
-	u := geminiUsage(t, body)
+	u := zzGeminiUsage(t, body)
 	if u["promptTokenCount"] != float64(4) || u["candidatesTokenCount"] != float64(2) {
 		t.Errorf("usage: %v", u)
 	}
@@ -133,8 +211,8 @@ func TestGeminiGenerateOverAnthropic(t *testing.T) {
 
 // TestGeminiStreamOrder: thinking, then text, then the function call, each as
 // one event, and a last event with finishReason and usage.
-func TestGeminiStreamOrder(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestZzGeminiStreamOrder(t *testing.T) {
+	f := &zzFake{t: t, reply: zzSSE(
 		`data: {"id":"c2","model":"m1","choices":[{"delta":{"reasoning_content":"hmm"}}]}`,
 		`data: {"id":"c2","choices":[{"delta":{"content":"Hi"}}]}`,
 		`data: {"id":"c2","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"read","arguments":""}}]}}]}`,
@@ -143,23 +221,23 @@ func TestGeminiStreamOrder(t *testing.T) {
 		`data: {"id":"c2","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 		`data: {"id":"c2","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":6,"completion_tokens_details":{"reasoning_tokens":4}}}`,
 		`data: [DONE]`)}
-	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
+	zzSetup(t, provider.Chat, f)
+	code, body := zzPost(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	evs := events(body)
+	evs := zzEvents(body)
 	if len(evs) != 4 {
 		t.Fatalf("want 4 events, got %d: %s", len(evs), body)
 	}
-	th := partsOf(t, evs[0])[0].(map[string]any)
+	th := zzPartsOf(t, evs[0])[0].(map[string]any)
 	if th["thought"] != true || th["text"] != "hmm" {
 		t.Errorf("thought event: %v", th)
 	}
-	if tx := partsOf(t, evs[1])[0].(map[string]any); tx["text"] != "Hi" {
+	if tx := zzPartsOf(t, evs[1])[0].(map[string]any); tx["text"] != "Hi" {
 		t.Errorf("text event: %v", tx)
 	}
-	fc := partsOf(t, evs[2])[0].(map[string]any)["functionCall"].(map[string]any)
+	fc := zzPartsOf(t, evs[2])[0].(map[string]any)["functionCall"].(map[string]any)
 	args := fc["args"].(map[string]any)
 	if fc["id"] != "call_9" || fc["name"] != "read" || args["path"] != "a.go" {
 		t.Errorf("function call event: %v", fc)
@@ -177,9 +255,9 @@ func TestGeminiStreamOrder(t *testing.T) {
 // TestGeminiRequestTranslation checks what a Chat upstream is sent for a
 // Gemini request with a system instruction, a call and its response, typed
 // schemas, a tool choice and a thinking budget of -1.
-func TestGeminiRequestTranslation(t *testing.T) {
-	f := &fake{t: t, reply: chatText("ok")}
-	setup(t, provider.Chat, f)
+func TestZzGeminiRequestTranslation(t *testing.T) {
+	f := &zzFake{t: t, reply: zzChatText("ok")}
+	zzSetup(t, provider.Chat, f)
 	reqBody := `{
 	  "systemInstruction":{"parts":[{"text":"be brief"}]},
 	  "contents":[
@@ -191,7 +269,7 @@ func TestGeminiRequestTranslation(t *testing.T) {
 	    "parameters":{"type":"OBJECT","properties":{"path":{"type":"STRING"}}}}]}],
 	  "toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["read"]}},
 	  "generationConfig":{"thinkingConfig":{"thinkingBudget":-1},"maxOutputTokens":300,"temperature":0.2}}`
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", reqBody)
+	code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", reqBody)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
@@ -234,15 +312,15 @@ func TestGeminiRequestTranslation(t *testing.T) {
 }
 
 // TestGeminiCallIDs: calls with and without ids keep or pair ids correctly.
-func TestGeminiCallIDs(t *testing.T) {
-	f := &fake{t: t, reply: chatText("ok")}
-	setup(t, provider.Chat, f)
+func TestZzGeminiCallIDs(t *testing.T) {
+	f := &zzFake{t: t, reply: zzChatText("ok")}
+	zzSetup(t, provider.Chat, f)
 	reqBody := `{"contents":[
 	  {"role":"model","parts":[{"functionCall":{"id":"fc1","name":"a","args":{}}}]},
 	  {"role":"user","parts":[{"functionResponse":{"id":"fc1","name":"a","response":{"result":"A"}}}]},
 	  {"role":"model","parts":[{"functionCall":{"name":"b","args":{}}}]},
 	  {"role":"user","parts":[{"functionResponse":{"name":"b","response":{"result":"B"}}}]}]}`
-	if code, body := post(t, "/v1beta/models/fake/m1:generateContent", reqBody); code != 200 {
+	if code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", reqBody); code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
 	var up map[string]any
@@ -261,15 +339,15 @@ func TestGeminiCallIDs(t *testing.T) {
 	}
 }
 
-func TestGeminiAnthropicUpstreamTranslation(t *testing.T) {
-	f := &fake{t: t, reply: sse(
+func TestZzGeminiAnthropicUpstreamTranslation(t *testing.T) {
+	f := &zzFake{t: t, reply: zzSSE(
 		`data: {"type":"message_start","message":{"id":"msg1","model":"m1","usage":{"input_tokens":4}}}`,
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`)}
-	setup(t, provider.Anthropic, f)
+	zzSetup(t, provider.Anthropic, f)
 	reqBody := `{"systemInstruction":{"parts":[{"text":"be brief"}]},
 	  "contents":[{"role":"user","parts":[{"text":"hi"}]}],
 	  "generationConfig":{"maxOutputTokens":500,"thinkingConfig":{"thinkingBudget":-1}}}`
-	if code, body := post(t, "/v1beta/models/fake/m1:generateContent", reqBody); code != 200 {
+	if code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", reqBody); code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
 	var up map[string]any
@@ -283,13 +361,13 @@ func TestGeminiAnthropicUpstreamTranslation(t *testing.T) {
 	}
 }
 
-func TestGeminiInlineData(t *testing.T) {
-	f := &fake{t: t, reply: chatText("ok")}
-	setup(t, provider.Chat, f)
+func TestZzGeminiInlineData(t *testing.T) {
+	f := &zzFake{t: t, reply: zzChatText("ok")}
+	zzSetup(t, provider.Chat, f)
 	reqBody := `{"contents":[{"role":"user","parts":[{"text":"look"},
 	  {"inlineData":{"mimeType":"image/png","data":"AAAA"}},
 	  {"inlineData":{"mimeType":"application/pdf","data":"BBBB"}}]}]}`
-	if code, body := post(t, "/v1beta/models/fake/m1:generateContent", reqBody); code != 200 {
+	if code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", reqBody); code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
 	got := string(f.got)
@@ -301,15 +379,15 @@ func TestGeminiInlineData(t *testing.T) {
 	}
 }
 
-func TestGeminiJSONModeAndToolChoiceNone(t *testing.T) {
-	f := &fake{t: t, reply: chatText("{}")}
-	setup(t, provider.Chat, f)
+func TestZzGeminiJSONModeAndToolChoiceNone(t *testing.T) {
+	f := &zzFake{t: t, reply: zzChatText("{}")}
+	zzSetup(t, provider.Chat, f)
 	reqBody := `{"contents":[{"role":"user","parts":[{"text":"who"}]}],
 	  "tools":[{"functionDeclarations":[{"name":"t","parameters":{"type":"OBJECT"}}]}],
 	  "toolConfig":{"functionCallingConfig":{"mode":"NONE"}},
 	  "generationConfig":{"responseMimeType":"application/json",
 	    "responseSchema":{"type":"OBJECT","properties":{"name":{"type":"STRING"}}}}}`
-	if code, body := post(t, "/v1beta/models/fake/m1:generateContent", reqBody); code != 200 {
+	if code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", reqBody); code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
 	var up map[string]any
@@ -324,20 +402,20 @@ func TestGeminiJSONModeAndToolChoiceNone(t *testing.T) {
 	}
 }
 
-func TestGeminiUnknownModel404(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t, reply: chatText("ok")})
-	code, body := post(t, "/v1beta/models/nope/x:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+func TestZzGeminiUnknownModel404(t *testing.T) {
+	zzSetup(t, provider.Chat, &zzFake{t: t, reply: zzChatText("ok")})
+	code, body := zzPost(t, "/v1beta/models/nope/x:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	if code != 404 || !strings.Contains(body, `"status":"NOT_FOUND"`) || !strings.Contains(body, `"code":404`) {
 		t.Errorf("%d %s", code, body)
 	}
 }
 
-func TestGeminiCountTokens(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t, reply: chatText("ok")})
+func TestZzGeminiCountTokens(t *testing.T) {
+	zzSetup(t, provider.Chat, &zzFake{t: t, reply: zzChatText("ok")})
 	direct := `{"contents":[{"role":"user","parts":[{"text":"hello world, this is a test of counting"}]}]}`
 	wrapped := `{"generateContentRequest":{"model":"models/fake/m1","contents":[{"role":"user","parts":[{"text":"hello world, this is a test of counting"}]}]}}`
-	code1, b1 := post(t, "/v1beta/models/fake/m1:countTokens", direct)
-	code2, b2 := post(t, "/v1beta/models/fake/m1:countTokens", wrapped)
+	code1, b1 := zzPost(t, "/v1beta/models/fake/m1:countTokens", direct)
+	code2, b2 := zzPost(t, "/v1beta/models/fake/m1:countTokens", wrapped)
 	if code1 != 200 || code2 != 200 || !strings.HasPrefix(b1, `{"totalTokens":`) || b1 != b2 {
 		t.Errorf("direct %d %s; wrapped %d %s", code1, b1, code2, b2)
 	}
@@ -346,8 +424,8 @@ func TestGeminiCountTokens(t *testing.T) {
 	}
 }
 
-func TestGeminiListModels(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
+func TestZzGeminiListModels(t *testing.T) {
+	zzSetup(t, provider.Chat, &zzFake{t: t})
 	rec := httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1beta/models", nil))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"name":"models/fake/m1"`) ||
@@ -356,8 +434,8 @@ func TestGeminiListModels(t *testing.T) {
 	}
 }
 
-func TestGeminiRootAndNotFoundMentionV1beta(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
+func TestZzGeminiRootAndNotFoundMentionV1beta(t *testing.T) {
+	zzSetup(t, provider.Chat, &zzFake{t: t})
 	rec := httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if !strings.Contains(rec.Body.String(), "v1beta") {
@@ -370,17 +448,17 @@ func TestGeminiRootAndNotFoundMentionV1beta(t *testing.T) {
 	}
 }
 
-func TestGeminiUpstreamErrorIsGeminiShaped(t *testing.T) {
-	f := &fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance","type":"x"}}`}
-	setup(t, provider.Chat, f)
-	code, body := post(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+func TestZzGeminiUpstreamErrorIsGeminiShaped(t *testing.T) {
+	f := &zzFake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance","type":"x"}}`}
+	zzSetup(t, provider.Chat, f)
+	code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	if code != 402 || !strings.Contains(body, `"error":{"code":402`) || !strings.Contains(body, "Fake: Insufficient Balance") {
 		t.Errorf("%d %s", code, body)
 	}
 }
 
-func TestGeminiCallIsLogged(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t, reply: chatText("ok")})
+func TestZzGeminiCallIsLogged(t *testing.T) {
+	zzSetup(t, provider.Chat, &zzFake{t: t, reply: zzChatText("ok")})
 	s := New()
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1beta/models/fake/m1:generateContent",
@@ -391,7 +469,7 @@ func TestGeminiCallIsLogged(t *testing.T) {
 	}
 }
 
-func TestGeminiThinkingMapping(t *testing.T) {
+func TestZzGeminiThinkingMapping(t *testing.T) {
 	ptr := func(n int) *int { return &n }
 	cases := []struct {
 		in     *gThinking
@@ -412,10 +490,98 @@ func TestGeminiThinkingMapping(t *testing.T) {
 	}
 }
 
-func TestLowerSchema(t *testing.T) {
-	got := string(lowerSchema(json.RawMessage(`{"type":"OBJECT","properties":{"type":{"type":"STRING"}},"items":{"type":"ARRAY"}}`)))
+func TestZzLowerSchema(t *testing.T) {
+	got := string(geminiLowerSchema(json.RawMessage(`{"type":"OBJECT","properties":{"type":{"type":"STRING"}},"items":{"type":"ARRAY"}}`)))
 	want := `{"items":{"type":"array"},"properties":{"type":{"type":"string"}},"type":"object"}`
 	if got != want {
 		t.Errorf("got %s\nwant %s", got, want)
+	}
+}
+
+// TestAuditGeminiThoughtGoesBackToChat: a thought in the Gemini history is
+// sent back to a Chat upstream as the assistant's reasoning_content.
+func TestZzAuditGeminiThoughtGoesBackToChat(t *testing.T) {
+	f := &zzFake{t: t, reply: zzChatText("ok")}
+	zzSetup(t, provider.Chat, f)
+	body := `{"contents":[
+	  {"role":"user","parts":[{"text":"q"}]},
+	  {"role":"model","parts":[{"thought":true,"text":"plan"},{"text":"answer"}]},
+	  {"role":"user","parts":[{"text":"again"}]}]}`
+	if code, b := zzPost(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
+		t.Fatalf("status %d: %s", code, b)
+	}
+	var up map[string]any
+	if err := json.Unmarshal(f.got, &up); err != nil {
+		t.Fatalf("upstream body: %s", f.got)
+	}
+	msgs := up["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("messages: %s", f.got)
+	}
+	asst := msgs[1].(map[string]any)
+	if asst["role"] != "assistant" || asst["reasoning_content"] != "plan" || asst["content"] != "answer" {
+		t.Errorf("thought not sent back: %s", f.got)
+	}
+}
+
+// TestAuditGeminiThoughtSignatureToAnthropic: a signed thought goes back as a
+// thinking block carrying its signature.
+func TestZzAuditGeminiThoughtSignatureToAnthropic(t *testing.T) {
+	f := &zzFake{t: t, reply: zzSSE(
+		`data: {"type":"message_start","message":{"id":"msg1","model":"m1","usage":{"input_tokens":4}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Yo"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
+		`data: {"type":"message_stop"}`)}
+	zzSetup(t, provider.Anthropic, f)
+	body := `{"contents":[
+	  {"role":"user","parts":[{"text":"q"}]},
+	  {"role":"model","parts":[{"thought":true,"text":"plan","thoughtSignature":"sig1"},{"text":"answer"}]},
+	  {"role":"user","parts":[{"text":"again"}]}]}`
+	if code, b := zzPost(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
+		t.Fatalf("status %d: %s", code, b)
+	}
+	got := string(f.got)
+	if !strings.Contains(got, `"type":"thinking"`) || !strings.Contains(got, `"signature":"sig1"`) || !strings.Contains(got, `"thinking":"plan"`) {
+		t.Errorf("signed thought not sent back: %s", got)
+	}
+}
+
+// TestAuditGeminiReplyMetadata: a Gemini reply names the model and carries a response id.
+func TestZzAuditGeminiReplyMetadata(t *testing.T) {
+	zzSetup(t, provider.Chat, &zzFake{t: t, reply: zzChatText("ok")})
+	code, body := zzPost(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("not JSON: %s", body)
+	}
+	id, _ := m["responseId"].(string)
+	if code != 200 || m["modelVersion"] != "m1" || id == "" {
+		t.Errorf("%d: modelVersion=%v responseId=%v", code, m["modelVersion"], m["responseId"])
+	}
+}
+
+// TestAuditGeminiToolChoiceModes: ANY with several names is "required", AUTO is "auto".
+func TestZzAuditGeminiToolChoiceModes(t *testing.T) {
+	cases := []struct{ cfg, want string }{
+		{`{"mode":"ANY","allowedFunctionNames":["a","b"]}`, "required"},
+		{`{"mode":"ANY"}`, "required"},
+		{`{"mode":"AUTO"}`, "auto"},
+	}
+	for _, c := range cases {
+		f := &zzFake{t: t, reply: zzChatText("ok")}
+		zzSetup(t, provider.Chat, f)
+		body := `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+		  "tools":[{"functionDeclarations":[{"name":"a","parameters":{"type":"OBJECT"}},{"name":"b","parameters":{"type":"OBJECT"}}]}],
+		  "toolConfig":{"functionCallingConfig":` + c.cfg + `}}`
+		if code, b := zzPost(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
+			t.Fatalf("status %d: %s", code, b)
+		}
+		var up map[string]any
+		json.Unmarshal(f.got, &up)
+		if up["tool_choice"] != c.want {
+			t.Errorf("%s: tool_choice = %v, want %s", c.cfg, up["tool_choice"], c.want)
+		}
 	}
 }

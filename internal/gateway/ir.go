@@ -75,6 +75,8 @@ type Request struct {
 	Effort     string // low | medium | high | xhigh | max, when the client asked
 	Thinking   bool   // the client asked for visible reasoning
 	Parallel   *bool  // parallel tool calls allowed
+
+	fromGemini bool // the request came through the Gemini API
 }
 
 // EventKind is what a streamed event carries.

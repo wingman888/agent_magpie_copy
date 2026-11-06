@@ -45,9 +45,9 @@ func codexAuthPath() string {
 	return filepath.Join(home, ".codex", "auth.json")
 }
 
-// readCodex reads the sign-in. Only a ChatGPT login counts; an API-key login
+// codexReadAuth reads the sign-in. Only a ChatGPT login counts; an API-key login
 // is not an account.
-func readCodex() (*codexAuth, bool) {
+func codexReadAuth() (*codexAuth, bool) {
 	a := &codexAuth{path: codexAuthPath()}
 	b, err := os.ReadFile(a.path)
 	if err != nil {
@@ -92,14 +92,14 @@ func (a *codexAuth) write() error {
 
 // codexAccount is the Codex account as the sign-in describes it.
 func codexAccount() (Provider, bool) {
-	a, ok := readCodex()
+	a, ok := codexReadAuth()
 	if !ok {
 		return Provider{}, false
 	}
-	idc := jwtClaims(a.tok("id_token"))
-	user := claimEmail(idc)
+	idc := codexJWTClaims(a.tok("id_token"))
+	user := codexClaimEmail(idc)
 	if user == "" {
-		user = claimEmail(jwtClaims(a.tok("access_token")))
+		user = codexClaimEmail(codexJWTClaims(a.tok("access_token")))
 	}
 	if user == "" {
 		user = "ChatGPT account"
@@ -112,11 +112,11 @@ func codexAccount() (Provider, bool) {
 func codexSession(ctx context.Context, p Provider) (Provider, error) {
 	codexMu.Lock()
 	defer codexMu.Unlock()
-	a, ok := readCodex()
+	a, ok := codexReadAuth()
 	if !ok {
 		return p, errors.New(codexRelogin)
 	}
-	if exp, ok := jwtExp(a.tok("access_token")); ok && time.Until(exp) < codexSkew {
+	if exp, ok := codexJWTExp(a.tok("access_token")); ok && time.Until(exp) < codexSkew {
 		if err := refreshCodex(ctx, a); err != nil {
 			return p, err
 		}
@@ -212,7 +212,7 @@ func CodexFinal(r io.Reader) ([]byte, error) {
 	}
 	var final []byte
 	var failure string
-	for _, data := range sseData(b) {
+	for _, data := range codexSSEData(b) {
 		var ev struct {
 			Type     string          `json:"type"`
 			Message  string          `json:"message"`
@@ -226,7 +226,7 @@ func CodexFinal(r io.Reader) ([]byte, error) {
 		case "response.completed", "response.incomplete":
 			final = []byte(ev.Response)
 		case "response.failed", "error":
-			failure = firstNonEmpty(errMessage(ev.Error), errMessage(ev.Response), ev.Message, "Codex 返回错误")
+			failure = acctFirstNonEmpty(acctErrMessage(ev.Error), acctErrMessage(ev.Response), ev.Message, "Codex 返回错误")
 		}
 	}
 	if len(final) > 0 {
@@ -238,8 +238,8 @@ func CodexFinal(r io.Reader) ([]byte, error) {
 	return nil, errors.New("Codex 没有返回完整的回复")
 }
 
-// sseData returns the data of each event in a stream, multi-line data joined.
-func sseData(b []byte) [][]byte {
+// codexSSEData returns the data of each event in a stream, multi-line data joined.
+func codexSSEData(b []byte) [][]byte {
 	var out [][]byte
 	var cur []byte
 	flush := func() {
@@ -265,8 +265,8 @@ func sseData(b []byte) [][]byte {
 	return out
 }
 
-// errMessage pulls a message out of an {"message": …} or {"error": {"message": …}} object.
-func errMessage(raw json.RawMessage) string {
+// acctErrMessage pulls a message out of an {"message": …} or {"error": {"message": …}} object.
+func acctErrMessage(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -280,10 +280,10 @@ func errMessage(raw json.RawMessage) string {
 	if o.Message != "" {
 		return o.Message
 	}
-	return errMessage(o.Error)
+	return acctErrMessage(o.Error)
 }
 
-func firstNonEmpty(xs ...string) string {
+func acctFirstNonEmpty(xs ...string) string {
 	for _, x := range xs {
 		if x != "" {
 			return x
@@ -292,9 +292,9 @@ func firstNonEmpty(xs ...string) string {
 	return ""
 }
 
-// jwtClaims reads the payload of a JWT without checking its signature: dial
+// codexJWTClaims reads the payload of a JWT without checking its signature: dial
 // only needs what the sign-in says about itself.
-func jwtClaims(tok string) map[string]any {
+func codexJWTClaims(tok string) map[string]any {
 	parts := strings.Split(tok, ".")
 	if len(parts) < 2 {
 		return nil
@@ -310,16 +310,16 @@ func jwtClaims(tok string) map[string]any {
 	return m
 }
 
-// jwtExp is the expiry of a JWT, when it has one.
-func jwtExp(tok string) (time.Time, bool) {
-	n, ok := jwtClaims(tok)["exp"].(float64)
+// codexJWTExp is the expiry of a JWT, when it has one.
+func codexJWTExp(tok string) (time.Time, bool) {
+	n, ok := codexJWTClaims(tok)["exp"].(float64)
 	if !ok {
 		return time.Time{}, false
 	}
 	return time.Unix(int64(n), 0), true
 }
 
-func claimEmail(c map[string]any) string {
+func codexClaimEmail(c map[string]any) string {
 	if e, ok := c["email"].(string); ok && e != "" {
 		return e
 	}

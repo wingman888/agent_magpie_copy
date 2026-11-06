@@ -262,7 +262,7 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			p = sess
 		}
 		switch {
-		case p.Account == "codex" && from == provider.Responses && !wantsStream(body):
+		case p.Account == "codex" && from == provider.Responses && !acctWantsStream(body):
 			// Codex only streams; read the stream through and answer with its final object
 			call.To = from
 			call.Status, call.Error = s.codexFinal(w, r, p, model, body, &call.Usage)

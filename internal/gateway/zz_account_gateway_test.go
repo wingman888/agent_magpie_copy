@@ -15,9 +15,9 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// codexUp is a fake ChatGPT Codex backend: it records what it was sent and
+// zzCodexUp is a fake ChatGPT Codex backend: it records what it was sent and
 // answers with a script.
-type codexUp struct {
+type zzCodexUp struct {
 	header http.Header
 	body   map[string]any
 	reply  string
@@ -25,7 +25,7 @@ type codexUp struct {
 	code   int
 }
 
-func (c *codexUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (c *zzCodexUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.header = r.Header.Clone()
 	c.body = nil
 	json.NewDecoder(r.Body).Decode(&c.body)
@@ -41,10 +41,10 @@ func (c *codexUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, c.reply)
 }
 
-func TestCodexUnauthorizedSaysRelogin(t *testing.T) {
-	up := &codexUp{code: http.StatusUnauthorized, reply: `{"detail":"token revoked"}`}
-	codexSetup(t, up)
-	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+func TestZzCodexUnauthorizedSaysRelogin(t *testing.T) {
+	up := &zzCodexUp{code: http.StatusUnauthorized, reply: `{"detail":"token revoked"}`}
+	zzCodexSetup(t, up)
+	code, body := zzAcctPost(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
 	if code != 401 {
 		t.Fatalf("status %d: %s", code, body)
 	}
@@ -53,15 +53,15 @@ func TestCodexUnauthorizedSaysRelogin(t *testing.T) {
 	}
 }
 
-func accountJWT(claims map[string]any) string {
+func zzAccountJWT(claims map[string]any) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	b, _ := json.Marshal(claims)
 	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
-// codexSetup signs a fake Codex account in under a temp HOME and points the
+// zzCodexSetup signs a fake Codex account in under a temp HOME and points the
 // Codex backend at the fake. It returns the access token the account holds.
-func codexSetup(t *testing.T, up *codexUp) string {
+func zzCodexSetup(t *testing.T, up *zzCodexUp) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -73,9 +73,9 @@ func codexSetup(t *testing.T, up *codexUp) string {
 	provider.CodexBase = srv.URL
 	t.Cleanup(func() { provider.CodexBase = old })
 
-	access := accountJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	access := zzAccountJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
 	doc := map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{
-		"id_token":     accountJWT(map[string]any{"email": "dev@example.com"}),
+		"id_token":     zzAccountJWT(map[string]any{"email": "dev@example.com"}),
 		"access_token": access, "refresh_token": "rt", "account_id": "acct-1"}}
 	b, _ := json.Marshal(doc)
 	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
@@ -87,18 +87,18 @@ func codexSetup(t *testing.T, up *codexUp) string {
 	return access
 }
 
-func codexCompleted(id string) string {
-	return sse(
+func zzCodexCompleted(id string) string {
+	return zzAcctSSE(
 		`event: response.created`,
 		`data: {"type":"response.created","response":{"id":"`+id+`"}}`,
 		`data: {"type":"response.output_text.delta","delta":"Hello"}`,
 		`data: {"type":"response.completed","response":{"id":"`+id+`","object":"response","status":"completed","model":"gpt-5.5","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":4,"output_tokens":1}}}`)
 }
 
-func TestCodexNonStreamResponsesAnswersJSON(t *testing.T) {
-	up := &codexUp{reply: codexCompleted("resp_1")}
-	access := codexSetup(t, up)
-	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hello","max_output_tokens":50,"temperature":0.5}`)
+func TestZzCodexNonStreamResponsesAnswersJSON(t *testing.T) {
+	up := &zzCodexUp{reply: zzCodexCompleted("resp_1")}
+	access := zzCodexSetup(t, up)
+	code, body := zzAcctPost(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hello","max_output_tokens":50,"temperature":0.5}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
@@ -129,9 +129,9 @@ func TestCodexNonStreamResponsesAnswersJSON(t *testing.T) {
 	}
 }
 
-func TestCodexStreamForwardedWithoutContentType(t *testing.T) {
-	up := &codexUp{noType: true, reply: codexCompleted("resp_2")}
-	codexSetup(t, up)
+func TestZzCodexStreamForwardedWithoutContentType(t *testing.T) {
+	up := &zzCodexUp{noType: true, reply: zzCodexCompleted("resp_2")}
+	zzCodexSetup(t, up)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"codex/gpt-5.5","stream":true,"input":"hi","temperature":1}`))
 	New().Handler().ServeHTTP(rec, req)
@@ -152,10 +152,10 @@ func TestCodexStreamForwardedWithoutContentType(t *testing.T) {
 	}
 }
 
-func TestCodexChatClientThroughTranslation(t *testing.T) {
-	up := &codexUp{reply: codexCompleted("resp_3")}
-	codexSetup(t, up)
-	code, body := post(t, "/v1/chat/completions", `{"model":"codex/gpt-5.5","messages":[{"role":"user","content":"hi"}],"max_tokens":20}`)
+func TestZzCodexChatClientThroughTranslation(t *testing.T) {
+	up := &zzCodexUp{reply: zzCodexCompleted("resp_3")}
+	zzCodexSetup(t, up)
+	code, body := zzAcctPost(t, "/v1/chat/completions", `{"model":"codex/gpt-5.5","messages":[{"role":"user","content":"hi"}],"max_tokens":20}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
@@ -170,17 +170,33 @@ func TestCodexChatClientThroughTranslation(t *testing.T) {
 	}
 }
 
-func TestCodexLoggedOutIsUnknown(t *testing.T) {
-	up := &codexUp{reply: codexCompleted("resp_4")}
-	codexSetup(t, up)
+func TestZzCodexLoggedOutIsUnknown(t *testing.T) {
+	up := &zzCodexUp{reply: zzCodexCompleted("resp_4")}
+	zzCodexSetup(t, up)
 	if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".codex", "auth.json")); err != nil {
 		t.Fatal(err)
 	}
-	code, body := post(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
+	code, body := zzAcctPost(t, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi"}`)
 	if code != 404 {
 		t.Fatalf("status %d: %s", code, body)
 	}
 	if up.body != nil {
 		t.Error("a logged-out account still reached the backend")
 	}
+}
+
+func zzAcctSSE(lines ...string) string {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l + "\n\n")
+	}
+	return b.String()
+}
+
+func zzAcctPost(t *testing.T, path, body string) (int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	New().Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
 }

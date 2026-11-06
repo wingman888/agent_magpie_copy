@@ -103,12 +103,12 @@ func store(f file) error {
 func All() []Provider {
 	var out []Provider
 	for _, p := range load().Providers {
-		if isAccount(p.ID) || p.ID == claudeID {
-			continue // accounts come from the agents' own sign-ins, see accounts
+		if isAccountID(p.ID) || p.ID == claudeID {
+			continue // accounts come from the agents' own sign-ins, see accountList
 		}
 		out = append(out, normalize(p))
 	}
-	return append(out, accounts()...)
+	return append(out, accountList()...)
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -138,7 +138,7 @@ func Save(p Provider) error {
 	if p.ID == claudeID {
 		return errors.New("claude is Claude Code's own sign-in, and dial does not serve it")
 	}
-	if isAccount(p.ID) {
+	if isAccountID(p.ID) {
 		return saveAccount(p)
 	}
 	if p.ID == "" || p.ID != Slug(p.ID) {
@@ -180,7 +180,7 @@ func Delete(id string) error {
 		keep = append(keep, p)
 	}
 	if !found {
-		if isAccount(id) && accountSignedIn(id) {
+		if isAccountID(id) && accountSignedIn(id) {
 			return nil // nothing was recorded, and the account stays signed in
 		}
 		return fmt.Errorf("no provider %q", id)

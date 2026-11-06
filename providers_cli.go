@@ -35,7 +35,7 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		printNotices()
+		printProviderNotices()
 		return nil
 	}
 	uses := usesByProvider()
@@ -74,12 +74,12 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	printNotices()
+	printProviderNotices()
 	return nil
 }
 
-// printNotices says what dial leaves out on purpose, e.g. a signed-in Claude Code.
-func printNotices() {
+// printProviderNotices says what dial leaves out on purpose, e.g. a signed-in Claude Code.
+func printProviderNotices() {
 	for _, n := range provider.Notices() {
 		fmt.Println(amber.Render("!"), n.Text)
 	}

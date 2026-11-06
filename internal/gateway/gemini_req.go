@@ -97,7 +97,7 @@ func parseGemini(body []byte, model string) (*Request, error) {
 	if len(g.Contents) == 0 {
 		return nil, fmt.Errorf("contents is required")
 	}
-	r := &Request{Model: model}
+	r := &Request{Model: model, fromGemini: true}
 
 	var sys []string
 	if si := g.SystemInstruction; si != nil {
@@ -133,7 +133,7 @@ func parseGemini(body []byte, model string) (*Request, error) {
 					id = newCallID()
 				}
 				lastID[fc.Name] = id
-				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: id, Name: fc.Name, Args: rawArgs(fc.Args)})
+				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: id, Name: fc.Name, Args: geminiRawArgs(fc.Args)})
 			case p.FunctionResponse != nil:
 				fr := p.FunctionResponse
 				id := fr.ID
@@ -143,7 +143,7 @@ func parseGemini(body []byte, model string) (*Request, error) {
 						lastID[fr.Name] = id
 					}
 				}
-				text, isErr := responseText(fr.Response)
+				text, isErr := geminiResponseText(fr.Response)
 				msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: id, Text: text, IsError: isErr})
 			case p.InlineData != nil:
 				d := p.InlineData
@@ -178,7 +178,7 @@ func parseGemini(body []byte, model string) (*Request, error) {
 				schema = fd.Parameters
 			}
 			if len(schema) > 0 {
-				schema = lowerSchema(schema)
+				schema = geminiLowerSchema(schema)
 			}
 			r.Tools = append(r.Tools, Tool{Name: fd.Name, Description: fd.Description, Schema: schema})
 		}
@@ -214,7 +214,7 @@ func parseGemini(body []byte, model string) (*Request, error) {
 			if len(schema) == 0 {
 				schema = gc.ResponseSchema
 			}
-			sys = append(sys, jsonInstruction(schema))
+			sys = append(sys, geminiJSONInstruction(schema))
 		}
 	}
 	r.System = strings.Join(sys, "\n\n")
@@ -254,17 +254,17 @@ func geminiThinking(tc *gThinking) (string, bool) {
 	return "", false
 }
 
-// jsonInstruction is the system text that stands in for responseMimeType.
-func jsonInstruction(schema json.RawMessage) string {
+// geminiJSONInstruction is the system text that stands in for responseMimeType.
+func geminiJSONInstruction(schema json.RawMessage) string {
 	if len(schema) == 0 || string(schema) == "null" {
 		return "Respond only with a single valid JSON value, with no text outside the JSON."
 	}
 	return "Respond only with JSON that conforms to this JSON schema, with no text outside the JSON:\n" +
-		string(lowerSchema(schema))
+		string(geminiLowerSchema(schema))
 }
 
-// rawArgs keeps a function call's args, or nil when there are none.
-func rawArgs(raw json.RawMessage) json.RawMessage {
+// geminiRawArgs keeps a function call's args, or nil when there are none.
+func geminiRawArgs(raw json.RawMessage) json.RawMessage {
 	s := strings.TrimSpace(string(raw))
 	if s == "" || s == "null" {
 		return nil
@@ -272,10 +272,10 @@ func rawArgs(raw json.RawMessage) json.RawMessage {
 	return json.RawMessage(s)
 }
 
-// responseText reads a function response as the text a tool result carries.
+// geminiResponseText reads a function response as the text a tool result carries.
 // Gemini wraps the output in an object; the conventional "output" or "result"
 // string is taken out of it, anything else is passed on as JSON.
-func responseText(raw json.RawMessage) (string, bool) {
+func geminiResponseText(raw json.RawMessage) (string, bool) {
 	s := strings.TrimSpace(string(raw))
 	if s == "" || s == "null" {
 		return "", false
@@ -296,23 +296,23 @@ func responseText(raw json.RawMessage) (string, bool) {
 	return s, isErr
 }
 
-// lowerSchema turns Gemini's upper-case schema types (OBJECT, STRING…) into
+// geminiLowerSchema turns Gemini's upper-case schema types (OBJECT, STRING…) into
 // the lower-case JSON Schema names upstreams expect, at every depth.
-func lowerSchema(raw json.RawMessage) json.RawMessage {
+func geminiLowerSchema(raw json.RawMessage) json.RawMessage {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return raw
 	}
-	b, err := json.Marshal(lowerTypes(v))
+	b, err := json.Marshal(geminiLowerTypes(v))
 	if err != nil {
 		return raw
 	}
 	return b
 }
 
-func lowerTypes(v any) any {
+func geminiLowerTypes(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
 		for k, y := range x {
@@ -330,21 +330,21 @@ func lowerTypes(v any) any {
 					continue
 				}
 			}
-			x[k] = lowerTypes(y)
+			x[k] = geminiLowerTypes(y)
 		}
 		return x
 	case []any:
 		for i := range x {
-			x[i] = lowerTypes(x[i])
+			x[i] = geminiLowerTypes(x[i])
 		}
 		return x
 	}
 	return v
 }
 
-// estimateTokens is a rough count, about four characters to a token, for
+// geminiEstimateTokens is a rough count, about four characters to a token, for
 // countTokens. Nothing is sent upstream to count.
-func estimateTokens(r *Request) int {
+func geminiEstimateTokens(r *Request) int {
 	n := len(r.System)
 	for _, m := range r.Messages {
 		for _, p := range m.Parts {

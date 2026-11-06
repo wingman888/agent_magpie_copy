@@ -17,7 +17,7 @@ import (
 
 // sandbox points every path dial and the agents read at a fresh temp dir and
 // forgets any Copilot session kept from an earlier test.
-func sandbox(t *testing.T) string {
+func zzSandbox(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -30,17 +30,17 @@ func sandbox(t *testing.T) string {
 	return home
 }
 
-func fakeJWT(claims map[string]any) string {
+func zzFakeJWT(claims map[string]any) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	b, _ := json.Marshal(claims)
 	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
-func freshToken() string {
-	return fakeJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+func zzFreshToken() string {
+	return zzFakeJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
 }
 
-func writeJSONFile(t *testing.T, path string, v any) {
+func zzWriteJSONFile(t *testing.T, path string, v any) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -51,26 +51,26 @@ func writeJSONFile(t *testing.T, path string, v any) {
 	}
 }
 
-func codexAuthFile(home string) string { return filepath.Join(home, ".codex", "auth.json") }
+func zzCodexAuthFile(home string) string { return filepath.Join(home, ".codex", "auth.json") }
 
-// signInCodex writes a ChatGPT login the way codex login does.
-func signInCodex(t *testing.T, home, access string) {
+// zzSignInCodex writes a ChatGPT login the way codex login does.
+func zzSignInCodex(t *testing.T, home, access string) {
 	t.Helper()
-	id := fakeJWT(map[string]any{"email": "dev@example.com",
+	id := zzFakeJWT(map[string]any{"email": "dev@example.com",
 		"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"}})
-	writeJSONFile(t, codexAuthFile(home), map[string]any{
+	zzWriteJSONFile(t, zzCodexAuthFile(home), map[string]any{
 		"auth_mode": "chatgpt", "OPENAI_API_KEY": nil, "last_refresh": "2026-01-01T00:00:00Z", "extra": "keep",
 		"tokens": map[string]any{"id_token": id, "access_token": access, "refresh_token": "rt-old", "account_id": "acct-1"},
 	})
 }
 
-func signInCopilot(t *testing.T) {
+func zzSignInCopilot(t *testing.T) {
 	t.Helper()
-	writeJSONFile(t, filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "github-copilot", "apps.json"),
+	zzWriteJSONFile(t, filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "github-copilot", "apps.json"),
 		map[string]any{"github.com:Iv1.abc": map[string]any{"user": "octo", "oauth_token": "gho_test"}})
 }
 
-func mustFind(t *testing.T, ps []Provider, id string) Provider {
+func zzMustFind(t *testing.T, ps []Provider, id string) Provider {
 	t.Helper()
 	for _, p := range ps {
 		if p.ID == id {
@@ -81,7 +81,7 @@ func mustFind(t *testing.T, ps []Provider, id string) Provider {
 	return Provider{}
 }
 
-func catalogHas(id string) bool {
+func zzCatalogHas(id string) bool {
 	for _, e := range Catalog() {
 		if e.ID == id {
 			return true
@@ -90,10 +90,10 @@ func catalogHas(id string) bool {
 	return false
 }
 
-func TestCodexSignedInIsServed(t *testing.T) {
-	home := sandbox(t)
-	signInCodex(t, home, freshToken())
-	p := mustFind(t, All(), "codex")
+func TestZzCodexSignedInIsServed(t *testing.T) {
+	home := zzSandbox(t)
+	zzSignInCodex(t, home, zzFreshToken())
+	p := zzMustFind(t, All(), "codex")
 	if p.User != "dev@example.com" || p.Plan != "plus" || p.Source != "Codex" {
 		t.Fatalf("account = %+v", p)
 	}
@@ -106,14 +106,14 @@ func TestCodexSignedInIsServed(t *testing.T) {
 	if p.Host() != "chatgpt.com" {
 		t.Errorf("host = %q", p.Host())
 	}
-	if !catalogHas("codex/gpt-5.5") {
+	if !zzCatalogHas("codex/gpt-5.5") {
 		t.Error("codex/gpt-5.5 should be in the catalog without any pick or refresh")
 	}
 }
 
-func TestCodexAPIKeyLoginIsNotAnAccount(t *testing.T) {
-	home := sandbox(t)
-	writeJSONFile(t, codexAuthFile(home), map[string]any{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x"})
+func TestZzCodexAPIKeyLoginIsNotAnAccount(t *testing.T) {
+	home := zzSandbox(t)
+	zzWriteJSONFile(t, zzCodexAuthFile(home), map[string]any{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x"})
 	for _, p := range All() {
 		if p.ID == "codex" {
 			t.Fatal("an API-key login must not be served as an account")
@@ -121,13 +121,13 @@ func TestCodexAPIKeyLoginIsNotAnAccount(t *testing.T) {
 	}
 }
 
-func TestLoggedOutAccountDisappearsButPicksStay(t *testing.T) {
-	home := sandbox(t)
-	signInCodex(t, home, freshToken())
+func TestZzLoggedOutAccountDisappearsButPicksStay(t *testing.T) {
+	home := zzSandbox(t)
+	zzSignInCodex(t, home, zzFreshToken())
 	if err := Save(Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(codexAuthFile(home)); err != nil {
+	if err := os.Remove(zzCodexAuthFile(home)); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range All() {
@@ -135,7 +135,7 @@ func TestLoggedOutAccountDisappearsButPicksStay(t *testing.T) {
 			t.Fatal("a logged-out agent must not be a provider")
 		}
 	}
-	if catalogHas("codex/gpt-5.5") {
+	if zzCatalogHas("codex/gpt-5.5") {
 		t.Fatal("a residual pick must not reach the catalog")
 	}
 	if len(load().Providers) != 1 {
@@ -143,9 +143,9 @@ func TestLoggedOutAccountDisappearsButPicksStay(t *testing.T) {
 	}
 }
 
-func TestSaveAccountWritesOnlyModels(t *testing.T) {
-	home := sandbox(t)
-	signInCodex(t, home, freshToken())
+func TestZzSaveAccountWritesOnlyModels(t *testing.T) {
+	home := zzSandbox(t)
+	zzSignInCodex(t, home, zzFreshToken())
 	err := Save(Provider{ID: "codex", Name: "Mine", Key: "sk-secret", Chat: "https://x.example/v1", Models: []string{"gpt-5.5"}})
 	if err != nil {
 		t.Fatal(err)
@@ -163,43 +163,43 @@ func TestSaveAccountWritesOnlyModels(t *testing.T) {
 	if !strings.Contains(s, "gpt-5.5") {
 		t.Errorf("the pick was not written: %s", s)
 	}
-	if got := mustFind(t, All(), "codex").Models; len(got) != 1 || got[0] != "gpt-5.5" {
+	if got := zzMustFind(t, All(), "codex").Models; len(got) != 1 || got[0] != "gpt-5.5" {
 		t.Errorf("models = %v", got)
 	}
 }
 
-func TestDeleteAccountOnlyClearsPicks(t *testing.T) {
-	home := sandbox(t)
-	signInCodex(t, home, freshToken())
+func TestZzDeleteAccountOnlyClearsPicks(t *testing.T) {
+	home := zzSandbox(t)
+	zzSignInCodex(t, home, zzFreshToken())
 	if err := Save(Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := Delete("codex"); err != nil {
 		t.Fatal(err)
 	}
-	p := mustFind(t, All(), "codex")
+	p := zzMustFind(t, All(), "codex")
 	if len(p.Models) != 0 {
 		t.Errorf("picks survived delete: %v", p.Models)
 	}
-	if _, err := os.Stat(codexAuthFile(home)); err != nil {
+	if _, err := os.Stat(zzCodexAuthFile(home)); err != nil {
 		t.Errorf("delete touched the sign-in: %v", err)
 	}
 }
 
-func TestDeleteUnknownAccountFails(t *testing.T) {
-	sandbox(t)
+func TestZzDeleteUnknownAccountFails(t *testing.T) {
+	zzSandbox(t)
 	if err := Delete("copilot"); err == nil {
 		t.Error("deleting a copilot that is neither recorded nor signed in should fail")
 	}
 }
 
-func TestClaudeIsNeverServed(t *testing.T) {
-	sandbox(t)
+func TestZzClaudeIsNeverServed(t *testing.T) {
+	zzSandbox(t)
 	dir := os.Getenv("CLAUDE_CONFIG_DIR")
-	writeJSONFile(t, filepath.Join(dir, ".credentials.json"),
+	zzWriteJSONFile(t, filepath.Join(dir, ".credentials.json"),
 		map[string]any{"claudeAiOauth": map[string]any{"accessToken": "SECRET-CLAUDE-TOKEN"}})
 	// a file entry named claude must not surface either
-	writeJSONFile(t, Path(), map[string]any{"providers": []any{map[string]any{"id": "claude", "models": []string{"m"}}}})
+	zzWriteJSONFile(t, Path(), map[string]any{"providers": []any{map[string]any{"id": "claude", "models": []string{"m"}}}})
 	for _, p := range All() {
 		if p.ID == "claude" {
 			t.Fatal("claude listed as a provider")
@@ -222,14 +222,14 @@ func TestClaudeIsNeverServed(t *testing.T) {
 	}
 }
 
-func TestNoClaudeNoticeWithoutSignIn(t *testing.T) {
-	sandbox(t)
+func TestZzNoClaudeNoticeWithoutSignIn(t *testing.T) {
+	zzSandbox(t)
 	if ns := Notices(); len(ns) != 0 {
 		t.Fatalf("notices without a Claude sign-in: %+v", ns)
 	}
 }
 
-func TestCodexBodyRewrite(t *testing.T) {
+func TestZzCodexBodyRewrite(t *testing.T) {
 	in := `{"model":"codex/gpt-5.5","input":"hi","temperature":0.2,"max_output_tokens":10,"store":true,"stream":false,"top_k":3}`
 	var m map[string]any
 	if err := json.Unmarshal(CodexBody([]byte(in)), &m); err != nil {
@@ -257,7 +257,7 @@ func TestCodexBodyRewrite(t *testing.T) {
 	}
 }
 
-func TestCodexFinalReturnsCompletedObject(t *testing.T) {
+func TestZzCodexFinalReturnsCompletedObject(t *testing.T) {
 	ok := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n" +
 		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n"
@@ -278,7 +278,7 @@ func TestCodexFinalReturnsCompletedObject(t *testing.T) {
 	}
 }
 
-func TestFixEventStreamWithoutContentType(t *testing.T) {
+func TestZzFixEventStreamWithoutContentType(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header()["Content-Type"] = nil // no type at all, not even a sniffed one
 		io.WriteString(w, "event: response.created\ndata: {}\n\n")
@@ -299,18 +299,18 @@ func TestFixEventStreamWithoutContentType(t *testing.T) {
 	}
 }
 
-func TestCodexDefaultListHasGpt55(t *testing.T) {
-	home := sandbox(t)
-	signInCodex(t, home, freshToken())
-	if !hasModel(mustFind(t, All(), "codex").Available(), "gpt-5.5") {
+func TestZzCodexDefaultListHasGpt55(t *testing.T) {
+	home := zzSandbox(t)
+	zzSignInCodex(t, home, zzFreshToken())
+	if !acctHasModel(zzMustFind(t, All(), "codex").Available(), "gpt-5.5") {
 		t.Fatal("the default Codex list must include gpt-5.5")
 	}
 }
 
-func TestCodexRefreshWritesBack(t *testing.T) {
-	home := sandbox(t)
-	signInCodex(t, home, fakeJWT(map[string]any{"exp": time.Now().Add(time.Minute).Unix()})) // inside the 5 minute window
-	newAccess := freshToken()
+func TestZzCodexRefreshWritesBack(t *testing.T) {
+	home := zzSandbox(t)
+	zzSignInCodex(t, home, zzFakeJWT(map[string]any{"exp": time.Now().Add(time.Minute).Unix()})) // inside the 5 minute window
+	newAccess := zzFreshToken()
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
@@ -321,7 +321,7 @@ func TestCodexRefreshWritesBack(t *testing.T) {
 	CodexRefreshURL = srv.URL
 	defer func() { CodexRefreshURL = old }()
 
-	s, err := Session(context.Background(), mustFind(t, All(), "codex"))
+	s, err := Session(context.Background(), zzMustFind(t, All(), "codex"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestCodexRefreshWritesBack(t *testing.T) {
 		t.Errorf("refresh request = %v", got)
 	}
 	var doc map[string]any
-	b, _ := os.ReadFile(codexAuthFile(home))
+	b, _ := os.ReadFile(zzCodexAuthFile(home))
 	if err := json.Unmarshal(b, &doc); err != nil {
 		t.Fatal(err)
 	}
@@ -348,9 +348,9 @@ func TestCodexRefreshWritesBack(t *testing.T) {
 	}
 }
 
-func TestCodexRefreshFailureSaysRelogin(t *testing.T) {
-	home := sandbox(t)
-	signInCodex(t, home, fakeJWT(map[string]any{"exp": time.Now().Add(time.Minute).Unix()}))
+func TestZzCodexRefreshFailureSaysRelogin(t *testing.T) {
+	home := zzSandbox(t)
+	zzSignInCodex(t, home, zzFakeJWT(map[string]any{"exp": time.Now().Add(time.Minute).Unix()}))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -359,14 +359,14 @@ func TestCodexRefreshFailureSaysRelogin(t *testing.T) {
 	CodexRefreshURL = srv.URL
 	defer func() { CodexRefreshURL = old }()
 
-	_, err := Session(context.Background(), mustFind(t, All(), "codex"))
+	_, err := Session(context.Background(), zzMustFind(t, All(), "codex"))
 	if err == nil || !strings.Contains(err.Error(), "已登出，请运行 `codex login`") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-// copilotFake serves a Copilot session endpoint and a model list.
-func copilotFake(t *testing.T, models string) (api *httptest.Server, tokenURL string) {
+// zzCopilotFake serves a Copilot session endpoint and a model list.
+func zzCopilotFake(t *testing.T, models string) (api *httptest.Server, tokenURL string) {
 	t.Helper()
 	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" || r.Header.Get("Authorization") != "Bearer sess-1" {
@@ -391,17 +391,17 @@ func copilotFake(t *testing.T, models string) (api *httptest.Server, tokenURL st
 	return api, tok.URL
 }
 
-func TestCopilotListFiltersAndSavesLive(t *testing.T) {
-	sandbox(t)
-	signInCopilot(t)
-	copilotFake(t, `{"data":[
+func TestZzCopilotListFiltersAndSavesLive(t *testing.T) {
+	zzSandbox(t)
+	zzSignInCopilot(t)
+	zzCopilotFake(t, `{"data":[
 		{"id":"auto","name":"Auto","model_picker_enabled":true,"capabilities":{"type":"chat"}},
 		{"id":"gpt-5.5","name":"GPT-5.5","model_picker_enabled":true,"capabilities":{"type":"chat"},"policy":{"state":"enabled"}},
 		{"id":"internal-x","name":"Internal","model_picker_enabled":false,"capabilities":{"type":"chat"}},
 		{"id":"off-model","name":"Off","model_picker_enabled":true,"capabilities":{"type":"chat"},"policy":{"state":"disabled"}},
 		{"id":"text-embedding-3","name":"Embed","model_picker_enabled":true,"capabilities":{"type":"embeddings"}}
 	]}`)
-	p := mustFind(t, All(), "copilot")
+	p := zzMustFind(t, All(), "copilot")
 	if p.User != "octo" || p.Source != "Copilot" {
 		t.Fatalf("account = %+v", p)
 	}
@@ -412,19 +412,19 @@ func TestCopilotListFiltersAndSavesLive(t *testing.T) {
 	if len(ms) != 1 || ms[0].ID != "gpt-5.5" {
 		t.Fatalf("fetched = %+v", ms)
 	}
-	if _, ok := mustFind(t, All(), "copilot").Fetched(); !ok {
+	if _, ok := zzMustFind(t, All(), "copilot").Fetched(); !ok {
 		t.Error("the live list was not saved")
 	}
-	av := mustFind(t, All(), "copilot").Available()
+	av := zzMustFind(t, All(), "copilot").Available()
 	if len(av) != 1 || av[0].ID != "gpt-5.5" {
 		t.Errorf("available after refresh = %+v", av)
 	}
 }
 
-func TestCopilotBuiltinListHasNoAuto(t *testing.T) {
-	sandbox(t)
-	signInCopilot(t)
-	av := mustFind(t, All(), "copilot").Available()
+func TestZzCopilotBuiltinListHasNoAuto(t *testing.T) {
+	zzSandbox(t)
+	zzSignInCopilot(t)
+	av := zzMustFind(t, All(), "copilot").Available()
 	if len(av) == 0 {
 		t.Fatal("the built-in Copilot list is empty")
 	}
@@ -433,25 +433,25 @@ func TestCopilotBuiltinListHasNoAuto(t *testing.T) {
 			t.Fatal("auto in the built-in Copilot list")
 		}
 	}
-	if !catalogHas("copilot/gpt-5.5") {
+	if !zzCatalogHas("copilot/gpt-5.5") {
 		t.Error("copilot models should be in /v1/models before any refresh")
 	}
 }
 
-func TestCopilotSessionFailureSaysRelogin(t *testing.T) {
-	sandbox(t)
-	signInCopilot(t)
-	copilotFake(t, `{"data":[]}`)
+func TestZzCopilotSessionFailureSaysRelogin(t *testing.T) {
+	zzSandbox(t)
+	zzSignInCopilot(t)
+	zzCopilotFake(t, `{"data":[]}`)
 	// the token endpoint rejects this token
-	writeJSONFile(t, filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "github-copilot", "apps.json"),
+	zzWriteJSONFile(t, filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "github-copilot", "apps.json"),
 		map[string]any{"github.com:Iv1.abc": map[string]any{"user": "octo", "oauth_token": "gho_wrong"}})
-	_, err := Session(context.Background(), mustFind(t, All(), "copilot"))
+	_, err := Session(context.Background(), zzMustFind(t, All(), "copilot"))
 	if err == nil || !strings.Contains(err.Error(), "请重新登录 Copilot") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestCopilotHeadersMarkTurnsAndVision(t *testing.T) {
+func TestZzCopilotHeadersMarkTurnsAndVision(t *testing.T) {
 	h := CopilotHeaders([]byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"x"},{"role":"tool","content":"r"}]}`))
 	if h["X-Initiator"] != "agent" {
 		t.Errorf("tool turn X-Initiator = %q", h["X-Initiator"])

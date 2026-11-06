@@ -75,7 +75,7 @@ func (s *Server) geminiCall(w http.ResponseWriter, r *http.Request, ref string, 
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		s.record(call)
-		writeGeminiError(w, http.StatusNotFound, unknownModelMsg(ref))
+		writeGeminiError(w, http.StatusNotFound, geminiUnknownModelMsg(ref))
 		return
 	}
 	call.Provider = p.ID
@@ -128,7 +128,7 @@ func (s *Server) geminiReply(w http.ResponseWriter, r *http.Request, p provider.
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeGeminiError(w, res.StatusCode, msg), msg
 	}
-	in, ok := sseBody(res)
+	in, ok := geminiSSEBody(res)
 	if !ok {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
@@ -179,14 +179,14 @@ func (s *Server) geminiCount(w http.ResponseWriter, r *http.Request, ref string)
 		return
 	}
 	if _, _, ok := provider.Resolve(ref); !ok {
-		writeGeminiError(w, http.StatusNotFound, unknownModelMsg(ref))
+		writeGeminiError(w, http.StatusNotFound, geminiUnknownModelMsg(ref))
 		return
 	}
-	writeGeminiRaw(w, http.StatusOK, []byte(fmt.Sprintf(`{"totalTokens":%d}`, estimateTokens(req))))
+	writeGeminiRaw(w, http.StatusOK, []byte(fmt.Sprintf(`{"totalTokens":%d}`, geminiEstimateTokens(req))))
 }
 
-// unknownModelMsg explains a model the gateway does not have.
-func unknownModelMsg(ref string) string {
+// geminiUnknownModelMsg explains a model the gateway does not have.
+func geminiUnknownModelMsg(ref string) string {
 	msg := fmt.Sprintf("dial knows no model %q", ref)
 	if ids := provider.IDs(); len(ids) > 0 {
 		msg += "; it has " + strings.Join(ids, ", ")
@@ -196,10 +196,10 @@ func unknownModelMsg(ref string) string {
 	return msg
 }
 
-// sseBody reports whether an upstream reply is an event stream and returns a
+// geminiSSEBody reports whether an upstream reply is an event stream and returns a
 // reader over it. The Content-Type is trusted when present; without one the
 // body is looked at, since some upstreams (ChatGPT's backend) omit it.
-func sseBody(res *http.Response) (io.Reader, bool) {
+func geminiSSEBody(res *http.Response) (io.Reader, bool) {
 	br := bufio.NewReader(res.Body)
 	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
 		return br, true

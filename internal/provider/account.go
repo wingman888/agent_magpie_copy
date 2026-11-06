@@ -25,11 +25,11 @@ const claudeID = "claude"
 // accountHosts is the host each account provider shows for itself.
 var accountHosts = map[string]string{"codex": "chatgpt.com", "copilot": "api.githubcopilot.com"}
 
-func isAccount(id string) bool { _, ok := accountHosts[id]; return ok }
+func isAccountID(id string) bool { _, ok := accountHosts[id]; return ok }
 
-// accounts lists the agent sign-ins dial serves right now. A sign-in that is
+// accountList lists the agent sign-ins dial serves right now. A sign-in that is
 // gone (the agent logged out) is absent, whatever the file says.
-func accounts() []Provider {
+func accountList() []Provider {
 	picks := map[string][]string{}
 	for _, p := range load().Providers {
 		picks[p.ID] = p.Models
@@ -48,7 +48,7 @@ func accounts() []Provider {
 
 // accountSignedIn reports whether an account provider is currently signed in.
 func accountSignedIn(id string) bool {
-	for _, p := range accounts() {
+	for _, p := range accountList() {
 		if p.ID == id {
 			return true
 		}
@@ -59,7 +59,7 @@ func accountSignedIn(id string) bool {
 // MarshalJSON writes an account provider as its id and picks alone. The rest
 // (name, key, sign-in) belongs to the agent and never reaches the file.
 func (p Provider) MarshalJSON() ([]byte, error) {
-	if isAccount(p.ID) {
+	if isAccountID(p.ID) {
 		return json.Marshal(struct {
 			ID     string   `json:"id"`
 			Models []string `json:"models,omitempty"`
@@ -130,7 +130,7 @@ func accountKnown(acct string) []catalog.Model {
 	case "codex":
 		out = append(out, catalog.Codex()...)
 		for _, m := range catalog.Builtin("codex") {
-			if !hasModel(out, m.ID) {
+			if !acctHasModel(out, m.ID) {
 				out = append(out, m)
 			}
 		}
@@ -144,7 +144,7 @@ func accountKnown(acct string) []catalog.Model {
 	return out
 }
 
-func hasModel(ms []catalog.Model, id string) bool {
+func acctHasModel(ms []catalog.Model, id string) bool {
 	for _, m := range ms {
 		if m.ID == id {
 			return true
@@ -174,7 +174,7 @@ func Notices() []Notice {
 	var out []Notice
 	if claudeSignedIn() {
 		out = append(out, Notice{Agent: "Claude Code",
-			Text: "Claude Code 已登录，但不作为 Provider 提供：它的登录令牌只供 Claude Code 自己使用，dial 只检测登录是否存在，从不读取或转发其中的凭据。需要在 dial 里使用 Claude 时，请添加 Anthropic Provider 并填入 API Key。"})
+			Text: "Claude Code 已登录但不提供：它的登录令牌只供 Claude Code 自己使用，dial 不把它作为 Provider 提供，也从不读取或转发其中的凭据（dial 只检测登录是否存在）。需要在 dial 里使用 Claude 时，请添加 Anthropic Provider 并填入 API Key。"})
 	}
 	return out
 }
@@ -203,10 +203,10 @@ func FixEventStream(res *http.Response) {
 	if s := string(head); strings.HasPrefix(s, "event:") || strings.HasPrefix(s, "data:") {
 		res.Header.Set("Content-Type", "text/event-stream")
 	}
-	res.Body = readCloser{Reader: br, Closer: res.Body}
+	res.Body = acctReadCloser{Reader: br, Closer: res.Body}
 }
 
-type readCloser struct {
+type acctReadCloser struct {
 	io.Reader
 	io.Closer
 }

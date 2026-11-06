@@ -9,8 +9,8 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// wantsStream reads whether a request asked for a streamed reply.
-func wantsStream(body []byte) bool {
+// acctWantsStream reads whether a request asked for a streamed reply.
+func acctWantsStream(body []byte) bool {
 	var v struct {
 		Stream bool `json:"stream"`
 	}
