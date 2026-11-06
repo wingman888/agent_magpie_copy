@@ -211,20 +211,14 @@ func gemini(home string) *Agent {
 				Key: "model", Label: "model",
 				Get: jsonGet(path, "model.name"),
 				Set: func(v string) error {
-					switch {
-					case isDial(v):
+					if isDial(v) {
 						return route(v)
-					case strings.Contains(v, "/"):
-						return fmt.Errorf("no provider serves %q — dial providers lists them", v)
 					}
 					// a native model, or Default: the CLI's own settings come back first
 					if err := leave(); err != nil {
 						return err
 					}
-					if v == "" {
-						return edit.DelJSON(path, "model.name")
-					}
-					return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
+					return jsonSet(path, "model.name")(v)
 				},
 				Options: func(map[string]string) []Option {
 					var ms []catalog.Model
