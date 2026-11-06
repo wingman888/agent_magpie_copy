@@ -263,6 +263,14 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			old, _ := provider.Find(in.ID)
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
+				if in.KeyName == "" {
+					in.KeyName = old.KeyName
+				}
+			}
+			// the form does not carry the other keys; keep them when it
+			// sends none, so editing a name or model leaves the accounts be
+			if old != nil && in.Keys == nil {
+				in.Keys = old.Keys
 			}
 			if in.Icon == "" && old != nil && in.Preset == "" {
 				in.Icon = old.Icon

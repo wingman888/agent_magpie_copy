@@ -74,15 +74,19 @@ type Provider struct {
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
 
-	// KeyName names Key, when the user gave it one. Keys holds the other
-	// keys in the order they are tried; see keys.go.
-	KeyName string     `json:"keyName,omitempty"`
-	Keys    []ExtraKey `json:"keys,omitempty"`
+	// KeyName names the front key (Key). Optional; absent for a single
+	// unnamed key, so old configs read and write exactly as before.
+	KeyName string `json:"keyName,omitempty"`
+
+	// Keys are the other accounts' keys, in the order they are tried after
+	// the front one. Off keeps a key on file without ever sending it upstream.
+	// See keys.go.
+	Keys []StoredKey `json:"keys,omitempty"`
 }
 
-// ExtraKey is a key after the first one of a provider. Off keeps it on file
-// without ever sending it upstream.
-type ExtraKey struct {
+// StoredKey is one of the non-front API keys of a provider, as kept in the
+// config file.
+type StoredKey struct {
 	Name string `json:"name,omitempty"`
 	Key  string `json:"key"`
 	Off  bool   `json:"off,omitempty"`
@@ -220,7 +224,7 @@ func Save(p Provider) error {
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
-			f.Providers[i] = keepKeys(f.Providers[i], p)
+			f.Providers[i] = p
 			return store(f)
 		}
 	}
@@ -272,6 +276,8 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
+	p.KeyName = strings.TrimSpace(p.KeyName)
+	p.Keys = cleanKeys(p.Key, p.Keys)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {

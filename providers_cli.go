@@ -188,7 +188,17 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		p.Key = rest[1]
+		newKey := strings.TrimSpace(rest[1])
+		if newKey != p.Key {
+			// a new key is a new account: it must not inherit the old name
+			for _, k := range p.Keys {
+				if strings.TrimSpace(k.Key) == newKey {
+					return fmt.Errorf("这个 key (%s) 已经是该供应商的另一个账号,不能重复添加", provider.Mask(newKey))
+				}
+			}
+			p.KeyName = ""
+		}
+		p.Key = newKey
 		if err := provider.Save(*p); err != nil {
 			return err
 		}
