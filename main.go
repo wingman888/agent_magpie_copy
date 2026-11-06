@@ -16,6 +16,7 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
@@ -39,6 +40,9 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
+  magpie backup [--no-keys] [file]    providers, keys, settings, profiles and agent models in one file, sealed with a passphrase
+  magpie restore [--no-agents] <file> put a backup in on this machine
+
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
@@ -47,7 +51,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider fallback <id> <provider/model>…   use these when it's out of quota or down
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
-  magpie accounts [agent]         the Claude Code and Codex subscriptions magpie remembers
+  magpie accounts [agent] [--json]  every subscription magpie knows, with each one's allowance used and when it resets
   magpie accounts add <agent>     sign in to one more Claude or ChatGPT subscription
   magpie accounts switch <agent> <email>   sign the agent in to another of them
 
@@ -78,6 +82,11 @@ func main() {
 }
 
 func run(args []string) error {
+	// internal: the auth provider of a Grok run behind the gateway, asked
+	// for a token often; nothing else of magpie's needs to start for it
+	if len(args) == 3 && args[0] == "grok-token" {
+		return provider.GrokToken(os.Stdout, args[1], args[2], os.Getenv("GROK_AUTH_EXPIRED") == "1")
+	}
 	settings.Migrate()
 	agent.RenameLegacy()
 	if len(args) == 0 {
@@ -140,6 +149,10 @@ func run(args []string) error {
 		return usageCmd(args)
 	case "update":
 		return updateCmd(args)
+	case "backup":
+		return backupCmd(args[1:])
+	case "restore":
+		return restoreCmd(args[1:])
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 		return claudebridge.RunMCP(args[1:])
 	}
