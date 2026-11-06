@@ -351,20 +351,25 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands := keyCandidates(s.candidates(p, model))
+	ts := s.tries(s.candidates(p, model))
 	var skipped []string
-	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
+	for i, t := range ts {
+		c := t.c
+		last := i == len(ts)-1 || r.Context().Err() != nil
 		hw := newHoldWriter(w, !last)
+		pc := c.p
+		if t.keyed {
+			pc.Key, pc.KeyName, pc.Keys = t.key.Key, t.key.Name, nil
+		}
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		if c.keyed {
-			call.Error = hideKey(call.Error, c.p.Key)
+		call.Status, call.Error = s.attempt(hw, r, from, pc, c.model, body, &call)
+		if t.keyed {
+			call.Error = scrub(call.Error, t.key.Key)
 		}
 		if !last && hw.failed() {
-			if c.keyed {
-				provider.MarkKeyFailed(c.p.ID, provider.KeyRef(c.p.Key))
-				skipped = append(skipped, accountLabel(c.p)+": "+call.Error)
+			if t.keyed {
+				s.restKey(c.p.ID, t.key.Key)
+				skipped = append(skipped, t.label()+": "+call.Error)
 			} else {
 				s.rest(c.p.ID)
 				skipped = append(skipped, c.p.ID+": "+call.Error)
