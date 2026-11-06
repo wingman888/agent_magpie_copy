@@ -644,6 +644,11 @@ body.window .foot { padding-left: 18px; }
 .row.pref .who { flex: 1 1 auto; }
 .row.pref .sub { margin-top: 2px; }
 .row.pref .segs { flex: none; margin-left: auto; }
+.proxy-segs { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
+.proxy-segs input.proxy { width: 180px; min-width: 0; height: 27px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12.5px; outline: none; transition: border-color .12s, box-shadow .12s; }
+.proxy-segs input.proxy:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.proxy-segs input.proxy::placeholder { color: var(--faint); }
+@media (max-width: 520px) { .proxy-segs { flex-wrap: wrap; justify-content: flex-end; } }
 .prefs .val { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; min-width: 0; max-width: 60%; flex: none; }
 .prefs .val code { font-size: 12px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; padding: 0 6px; }
 .prefs .val .text { padding: 3px 6px; }
