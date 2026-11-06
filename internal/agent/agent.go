@@ -86,11 +86,9 @@ func (a *Agent) Field(key string) *Field {
 			return &a.Fields[i]
 		}
 	}
-	if a.ID == "gemini" {
-		for i := range a.Fields {
-			if a.Fields[i].Label == key {
-				return &a.Fields[i]
-			}
+	for i := range a.Fields {
+		if a.Fields[i].Label == key {
+			return &a.Fields[i]
 		}
 	}
 	return nil
