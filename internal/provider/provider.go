@@ -183,10 +183,8 @@ func Slug(name string) string {
 func Save(p Provider) error {
 	p = normalize(p)
 	// An account provider (as Find returns it) saves its picks only: its address
-	// and key are ignored. A bare record under an agent's id is picks too, and so
-	// is anything saved under the id of a signed-in account when the user has no
-	// provider of their own under that id: the id belongs to the agent then.
-	if p.Account != nil || isPick(p) || (accountID(p.ID) && !ownProvider(p.ID) && signedIn(p.ID)) {
+	// and key are ignored. A bare record under an agent's id is picks too.
+	if p.Account != nil || isPick(p) {
 		if p.ID == "" && p.Account != nil {
 			p.ID = p.Account.Agent
 		}

@@ -2,43 +2,8 @@ package provider
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 )
-
-// A plain Provider literal saved under a signed-in account's id, with an
-// address and key typed in, keeps only the picks: the id belongs to the agent.
-func TestSaveUnderSignedInAccountIdStoresOnlyPicks(t *testing.T) {
-	setupEnv(t)
-	isolateCache(t)
-	writeCodex(t, "chatgpt", map[string]any{"email": "dev@example.com"})
-	err := Save(Provider{
-		ID:        "codex",
-		Chat:      "https://relay.example.com/v1",
-		Responses: "https://relay.example.com/v1",
-		Key:       "sk-LEAK-ME",
-		Models:    []string{"gpt-5.5"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := configText(t)
-	for _, leak := range []string{"relay.example.com", "sk-LEAK-ME"} {
-		if strings.Contains(text, leak) {
-			t.Errorf("config holds %q:\n%s", leak, text)
-		}
-	}
-	p := findAccount(All(), "codex")
-	if p == nil {
-		t.Fatal("codex account not offered after saving picks")
-	}
-	if p.Chat != "" || p.Responses != "" || p.Key != "" {
-		t.Errorf("account carries an address or key: %+v", p)
-	}
-	if !reflect.DeepEqual(p.Models, []string{"gpt-5.5"}) {
-		t.Errorf("picks = %v, want [gpt-5.5]", p.Models)
-	}
-}
 
 // With the user's own provider under the same id, the account is not offered
 // and saving goes to the own provider as an ordinary edit.
@@ -61,5 +26,20 @@ func TestSaveUnderOwnProviderEditsItAsUsual(t *testing.T) {
 	}
 	if p.Chat != "https://other.example.com/v1" || p.Key != "sk-other" {
 		t.Errorf("own provider not edited as usual: %+v", p)
+	}
+}
+
+// Picks saved for an account keep their order and drop duplicates, and the
+// account's own address and key are never part of them.
+func TestPicksForAccountAreCleanedOnSave(t *testing.T) {
+	setupEnv(t)
+	isolateCache(t)
+	writeCodex(t, "chatgpt", map[string]any{"email": "dev@example.com"})
+	if err := Save(Provider{ID: "codex", Models: []string{" gpt-5.5 ", "gpt-5.5", "gpt-5.3-codex"}}); err != nil {
+		t.Fatal(err)
+	}
+	p := findAccount(All(), "codex")
+	if p == nil || !reflect.DeepEqual(p.Models, []string{"gpt-5.5", "gpt-5.3-codex"}) {
+		t.Fatalf("picks = %+v, want [gpt-5.5 gpt-5.3-codex]", p)
 	}
 }
