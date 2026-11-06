@@ -98,7 +98,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOneWith(ctx, u, key, anthropic, extra)
+		ms, err := fetchOne(ctx, u, key, anthropic, extra)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -133,11 +133,7 @@ func SetHeaders(h http.Header, extra map[string]string) {
 	}
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
-	return fetchOneWith(ctx, url, key, anthropic, nil)
-}
-
-func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
