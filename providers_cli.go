@@ -22,14 +22,16 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.<Name>
   magpie provider key <id> <key>          change the API key
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
+  magpie provider icon <id> <file|name|"">  set a custom vendor's icon: a picture file, a built-in name, or "" for the generic one
+  magpie provider fallback <id> [ids…]    show or set the fallback list: provider/model, tried in order
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
-  e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
-       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
+  e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme
+       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic,deepseek`
 
 // providers: `magpie providers`
 func providers() error {
@@ -252,6 +254,10 @@ func providerCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), len(ms), "models from", p.Host())
 		return showProvider(*p)
+	case "icon":
+		return iconCmd(rest)
+	case "fallback":
+		return fallbackCmd(rest)
 	}
 	// `magpie provider <id>`
 	p, err := provider.Find(verb)
@@ -344,6 +350,15 @@ func showProvider(p provider.Provider) error {
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
+	if p.Preset == "" && p.Account == nil {
+		kv("icon", p.Icon)
+		for _, h := range headerLines(p) {
+			kv("header", h)
+		}
+	}
+	if len(p.Fallback) > 0 {
+		kv("fallback", fallbackText(p.Fallback))
+	}
 	ms := p.Exposed()
 	src := "models.dev"
 	if t, ok := p.Fetched(); ok {
@@ -373,6 +388,12 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		if !ok {
 			return fmt.Errorf("expected key=value, got %q\n\n%s", kv, providerUsage)
 		}
+		if name, ok := headerPair(k); ok {
+			if err := setHeader(p, name, v); err != nil {
+				return err
+			}
+			continue
+		}
 		switch strings.ToLower(k) {
 		case "id":
 			p.ID = v
@@ -395,7 +416,14 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "keys":
 			p.KeysURL = v
 		case "icon":
-			p.Icon = v
+			if p.Preset != "" || p.Account != nil {
+				return customOnly(*p)
+			}
+			icon, err := resolveIcon(v)
+			if err != nil {
+				return err
+			}
+			p.Icon = icon
 		default:
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}

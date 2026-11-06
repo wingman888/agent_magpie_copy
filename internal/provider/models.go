@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = catalog.Provider(p.Catalog)
+		known = catalogModels(p.Catalog)
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -54,7 +54,11 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key, proto == Anthropic)
+		kp, ok := p.KeyFor(proto)
+		if !ok {
+			continue
+		}
+		ms, err := catalog.FetchWith(ctx, p.Base(proto), kp.Key, proto == Anthropic, p.CustomHeaders())
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -200,5 +204,21 @@ func IDs() []string {
 		out = append(out, e.ID)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// catalogModels is the models.dev list of every catalog a provider names, in
+// the order given; a model listed by two catalogs is kept once, from the first.
+func catalogModels(s string) []catalog.Model {
+	var out []catalog.Model
+	seen := map[string]bool{}
+	for _, c := range splitCatalogs(s) {
+		for _, m := range catalog.Provider(c) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out = append(out, m)
+			}
+		}
+	}
 	return out
 }
