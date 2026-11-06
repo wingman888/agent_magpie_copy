@@ -139,15 +139,7 @@ func Open(data []byte, pass string) (Bundle, error) {
 		Format  string          `json:"format"`
 		Version json.RawMessage `json:"version"`
 	}
-	if json.Unmarshal(head, &probe) != nil {
-		// The first line is not a whole JSON document. If the data still
-		// looks like a magpie header, the header was split or altered.
-		if looksLikeHeader(data) {
-			return none, ErrPassphrase
-		}
-		return none, ErrNotBackup
-	}
-	if probe.Format != formatName {
+	if json.Unmarshal(head, &probe) != nil || probe.Format != formatName {
 		return none, ErrNotBackup
 	}
 	var ver int
@@ -199,16 +191,7 @@ func Open(data []byte, pass string) (Bundle, error) {
 	if err := json.Unmarshal(plain, &b); err != nil {
 		return none, fmt.Errorf("backup contents are damaged: %w", err)
 	}
-	b.Version = ver
 	return b, nil
-}
-
-// looksLikeHeader reports whether data begins like a magpie header, even if
-// that header no longer parses as JSON.
-func looksLikeHeader(data []byte) bool {
-	return len(data) > 0 && data[0] == '{' &&
-		bytes.Contains(data, []byte(`"format"`)) &&
-		bytes.Contains(data, []byte(formatName))
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {

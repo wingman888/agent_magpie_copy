@@ -2,13 +2,11 @@ package backup
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/settings"
 )
 
 const secretKey = "sk-live-SECRET-0123456789"
@@ -142,71 +140,5 @@ func TestCiphertextHidesContents(t *testing.T) {
 		if bytes.Contains(data, []byte(s)) {
 			t.Fatalf("backup file contains plaintext %q", s)
 		}
-	}
-}
-
-func TestSplitHeaderIsPassphraseError(t *testing.T) {
-	// A header whose first line was broken across lines is a changed file,
-	// not a foreign one.
-	data := mustSeal(t, sampleBundle(), "pw")
-	tampered := bytes.Replace(data, []byte(`"iterations": 600000,`), []byte("\n\"iterations\": 600000,"), 1)
-	if bytes.Equal(tampered, data) {
-		t.Fatal("test setup did not alter the header")
-	}
-	_, err := Open(tampered, "pw")
-	if !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("split header: err = %v, want ErrPassphrase", err)
-	}
-	if errors.Is(err, ErrNotBackup) || errors.Is(err, ErrNewer) {
-		t.Fatalf("split header reported as %v", err)
-	}
-}
-
-func TestOpenReturnsHeaderVersion(t *testing.T) {
-	got, err := Open(mustSeal(t, sampleBundle(), "pw"), "pw")
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if got.Version != 1 {
-		t.Fatalf("Version = %d, want 1", got.Version)
-	}
-}
-
-func TestNullSectionsAreAbsent(t *testing.T) {
-	isolate(t)
-	if err := settings.Save(settings.Settings{Theme: "dark"}); err != nil {
-		t.Fatal(err)
-	}
-	b := Bundle{Version: 1,
-		Providers: []provider.Provider{{ID: "nul", Name: "Nul", Chat: "https://nul.example.test/v1", Key: "k"}},
-		Settings:  json.RawMessage("null"),
-	}
-	res, err := Restore(b, All)
-	if err != nil {
-		t.Fatalf("Restore: %v", err)
-	}
-	if res.Settings {
-		t.Fatal("null settings reported as restored")
-	}
-	if s := settings.Load(); s.Theme != "dark" {
-		t.Fatalf("local settings overwritten by null: %+v", s)
-	}
-}
-
-func TestDuplicateIDsCountedOnce(t *testing.T) {
-	isolate(t)
-	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "dup", Name: "First", Chat: "https://first.example.test/v1", Key: "k1"},
-		{ID: "dup", Name: "Second", Chat: "https://second.example.test/v1", Key: "k2"},
-	}}
-	res, err := Restore(b, All)
-	if err != nil {
-		t.Fatalf("Restore: %v", err)
-	}
-	if res.Added != 1 || res.Replaced != 0 {
-		t.Fatalf("Added=%d Replaced=%d, want 1/0", res.Added, res.Replaced)
-	}
-	if got := findProvider(t, "dup"); got.Name != "Second" || got.Key != "k2" {
-		t.Fatalf("provider = %+v, want last entry", got)
 	}
 }

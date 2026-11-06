@@ -1,7 +1,6 @@
 package backup
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -153,7 +152,7 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 
 	// Decode everything up front so a damaged section fails before any write.
 	var st *settings.Settings
-	if parts.Settings && hasSection(b.Settings) {
+	if parts.Settings && len(b.Settings) > 0 {
 		var s settings.Settings
 		if err := json.Unmarshal(b.Settings, &s); err != nil {
 			return res, fmt.Errorf("backup settings are damaged: %w", err)
@@ -161,13 +160,13 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		st = &s
 	}
 	var profs map[string]profile.Profile
-	if parts.Profiles && hasSection(b.Profiles) {
+	if parts.Profiles && len(b.Profiles) > 0 {
 		if err := json.Unmarshal(b.Profiles, &profs); err != nil {
 			return res, fmt.Errorf("backup profiles are damaged: %w", err)
 		}
 	}
 	var agentVals map[string]string
-	if parts.Agents && hasSection(b.Agents) {
+	if parts.Agents && len(b.Agents) > 0 {
 		if err := json.Unmarshal(b.Agents, &agentVals); err != nil {
 			return res, fmt.Errorf("backup agent settings are damaged: %w", err)
 		}
@@ -199,13 +198,6 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 	return res, nil
 }
 
-// hasSection reports whether a raw section carries anything: absent, empty
-// and JSON null all mean the backup has no such section.
-func hasSection(raw json.RawMessage) bool {
-	t := bytes.TrimSpace(raw)
-	return len(t) > 0 && !bytes.Equal(t, []byte("null"))
-}
-
 func validID(id string) bool {
 	return id != "" && id != "magpie" && id == provider.Slug(id)
 }
@@ -218,16 +210,10 @@ func restoreProviders(b Bundle, res *Result) error {
 		}
 	}
 
-	// Whether each id was already on this machine before the restore.
-	existed := map[string]bool{}
-	for id := range local {
-		existed[id] = true
-	}
-
-	// A repeated id in the bundle is written once, with its last entry; the
-	// key falls back to whatever an earlier entry for that id supplied.
 	var order []string // ids in the order first seen, for stable output
-	final := map[string]provider.Provider{}
+	seen := map[string]bool{}
+	var put []provider.Provider
+	added, replaced := 0, 0
 	for _, bp := range b.Providers {
 		p := bp
 		p.ID = strings.ToLower(strings.TrimSpace(p.ID))
@@ -242,24 +228,20 @@ func restoreProviders(b Bundle, res *Result) error {
 		if strings.TrimSpace(p.Name) == "" {
 			p.Name = p.ID
 		}
-		if _, ok := final[p.ID]; !ok {
-			order = append(order, p.ID)
-		}
-		final[p.ID] = p
-		local[p.ID] = p
-	}
-	if len(order) == 0 {
-		return nil
-	}
-	put := make([]provider.Provider, 0, len(order))
-	added, replaced := 0, 0
-	for _, id := range order {
-		put = append(put, final[id])
-		if existed[id] {
+		if had {
 			replaced++
 		} else {
 			added++
 		}
+		local[p.ID] = p
+		put = append(put, p)
+		if !seen[p.ID] {
+			seen[p.ID] = true
+			order = append(order, p.ID)
+		}
+	}
+	if len(put) == 0 {
+		return nil
 	}
 
 	// Icons are written before the providers that name them.
