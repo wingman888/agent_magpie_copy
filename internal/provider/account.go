@@ -294,7 +294,7 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 }
 
 // Prepare adjusts a request body for the provider's backend. Plain providers
-// get it back unchanged; account providers will get their backend's rules here.
+// get it back unchanged; a Codex account gets the ChatGPT backend's rules.
 func (p Provider) Prepare(body []byte) []byte {
 	if p.Account != nil && p.Account.Agent == "codex" {
 		return prepareCodex(body)
