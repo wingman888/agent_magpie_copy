@@ -9,9 +9,9 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// two keys of one provider, the first answered last; the conversation is
+// two keys of one provider, the first rgxAnswered last; the conversation is
 // "conv-<name>" as asked of model m.
-func affCands(name string) (cs []candidate, rc routeCtx) {
+func rgxAffCands(name string) (cs []candidate, rc routeCtx) {
 	p := provider.Provider{ID: "x"}
 	cs = []candidate{
 		{p: p.WithKey(provider.KeyAccount{Key: "one"}), model: "m", rest: "x#1"},
@@ -21,13 +21,13 @@ func affCands(name string) (cs []candidate, rc routeCtx) {
 	return cs, rc
 }
 
-// answered records that candidate c answered the conversation at at, having read cache tokens.
-func answered(rc routeCtx, c candidate, cache int, at time.Time) {
+// rgxAnswered records that candidate c rgxAnswered the conversation at at, having read cache tokens.
+func rgxAnswered(rc routeCtx, c candidate, cache int, at time.Time) {
 	remember(rc.key, c, cache, at)
 }
 
 // The reasons affinity keeps a conversation, or not, as the trace names them.
-func TestAffinityWhy(t *testing.T) {
+func TestRgxAffinityWhy(t *testing.T) {
 	now := time.Now()
 	cases := []struct {
 		name   string
@@ -65,10 +65,10 @@ func TestAffinityWhy(t *testing.T) {
 			restingUntil.m = map[string]time.Time{}
 			restingUntil.note = map[string]Rest{}
 			restingUntil.Unlock()
-			cs, rc := affCands("why-" + tc.name)
+			cs, rc := rgxAffCands("why-" + tc.name)
 			rc.within = tc.within
 			if tc.mode != provider.AffinityOff && tc.why != "first" {
-				answered(rc, cs[1], tc.cache, now.Add(-tc.age))
+				rgxAnswered(rc, cs[1], tc.cache, now.Add(-tc.age))
 			}
 			if tc.setup != nil {
 				tc.setup(cs, rc)
@@ -88,8 +88,8 @@ func TestAffinityWhy(t *testing.T) {
 }
 
 // With one candidate affinity doesn't come into it, and the trace has none.
-func TestAffinityNotForOneCandidate(t *testing.T) {
-	cs, rc := affCands("one")
+func TestRgxAffinityNotForOneCandidate(t *testing.T) {
+	cs, rc := rgxAffCands("one")
 	cs = cs[:1]
 	if _, _, af := keepAffine(cs, planned{}, provider.AffinitySession, rc, time.Now()); af != nil {
 		t.Fatalf("affinity for one candidate: %+v", af)
@@ -97,7 +97,7 @@ func TestAffinityNotForOneCandidate(t *testing.T) {
 }
 
 // A subscription about to run out of its allowance is not kept.
-func TestAffinitySpentIsNotKept(t *testing.T) {
+func TestRgxAffinitySpentIsNotKept(t *testing.T) {
 	old := allowances
 	defer func() { allowances = old }()
 	allowances = func(string) map[string]provider.Allowance {
@@ -109,16 +109,16 @@ func TestAffinitySpentIsNotKept(t *testing.T) {
 		{p: provider.Provider{ID: "y"}, model: "m", rest: "y"},
 	}
 	rc := routeCtx{key: "conv-spent\x00m", model: "m"}
-	answered(rc, cs[0], 0, time.Now())
+	rgxAnswered(rc, cs[0], 0, time.Now())
 	if _, _, af := keepAffine(cs, planned{}, provider.AffinitySession, rc, time.Now()); af == nil || af.Why != "spent" || af.Kept {
 		t.Fatalf("affinity %+v", af)
 	}
 }
 
 // Memory is per requested model, and forgotten after a day unasked.
-func TestAffinityScopeAndDay(t *testing.T) {
-	cs, rc := affCands("scope")
-	answered(rc, cs[1], 0, time.Now())
+func TestRgxAffinityScopeAndDay(t *testing.T) {
+	cs, rc := rgxAffCands("scope")
+	rgxAnswered(rc, cs[1], 0, time.Now())
 	other := rc
 	other.key = "conv-scope\x00other"
 	if _, _, af := keepAffine(cs, planned{}, provider.AffinitySession, other, time.Now()); af == nil || af.Why != "first" {
@@ -135,7 +135,7 @@ func TestAffinityScopeAndDay(t *testing.T) {
 
 // Turns: a user message that says something is a turn; one that only sends
 // tool results back is within the turn it belongs to.
-func TestTurnsOf(t *testing.T) {
+func TestRgxTurnsOf(t *testing.T) {
 	text := func(s string) Message { return Message{Role: "user", Parts: []Part{{Kind: Text, Text: s}}} }
 	result := Message{Role: "user", Parts: []Part{{Kind: ToolResult, Text: "ok"}}}
 	reply := Message{Role: "assistant", Parts: []Part{{Kind: Text, Text: "ok"}}}
@@ -157,7 +157,7 @@ func TestTurnsOf(t *testing.T) {
 }
 
 // The session id is the first non-empty of the headers agents send, in order.
-func TestSessionHeaderOrder(t *testing.T) {
+func TestRgxSessionHeaderOrder(t *testing.T) {
 	for i := range sessionHeaders {
 		h := http.Header{}
 		for _, name := range sessionHeaders[i:] {
@@ -176,7 +176,7 @@ func TestSessionHeaderOrder(t *testing.T) {
 }
 
 // The trace names the group and the affinity in the fields agents read.
-func TestTraceFieldNames(t *testing.T) {
+func TestRgxTraceFieldNames(t *testing.T) {
 	r := Route{Group: &GroupTrace{ID: "mine", Name: "Mine", Routing: "order", Affinity: "", Auto: true, Members: []string{"b/m"}},
 		Affinity: &AffinityTrace{Mode: "auto", Turn: 2, Within: true, Last: "x#1", CacheRead: 5, Kept: true, Why: "turn"},
 		Order:    []Weighed{{ID: "x#1", Aside: true}}}

@@ -28,6 +28,12 @@ func isGroupID(model string) bool {
 	return strings.HasPrefix(model, provider.GroupPrefix+"/")
 }
 
+// countsUsage is false for a request an agent sent to a routing group; the
+// provider usage log does not count those.
+func countsUsage(model string) bool {
+	return !isGroupID(model)
+}
+
 // groupNotReady answers a group none of whose members can be used.
 func groupNotReady(id string) string {
 	return fmt.Sprintf("routing group %s 没有模型就绪", id)

@@ -5,7 +5,7 @@ import (
 )
 
 // The same model named differently by several vendors is one model.
-func TestNormalizeModelName(t *testing.T) {
+func TestRgxNormalizeModelName(t *testing.T) {
 	same := []string{
 		"claude-opus-5-5",
 		"anthropic/claude-opus-5.5",
@@ -34,7 +34,7 @@ func TestNormalizeModelName(t *testing.T) {
 
 // Routing is one of the three, or smart; the old name for least used still
 // reads.
-func TestNormalizeRouting(t *testing.T) {
+func TestRgxNormalizeRouting(t *testing.T) {
 	cases := map[string]string{
 		"order": Ordered, "rotate": Rotate, "least-used": LeastUsed,
 		"usage": LeastUsed, "": "", "ordered": "", "bogus": "",
@@ -47,7 +47,7 @@ func TestNormalizeRouting(t *testing.T) {
 }
 
 // Affinity is one of the four; anything else is automatic.
-func TestNormalizeAffinity(t *testing.T) {
+func TestRgxNormalizeAffinity(t *testing.T) {
 	cases := map[string]string{
 		"session": AffinitySession, "turn": AffinityTurn, "off": AffinityOff,
 		"": AffinityAuto, "sticky": AffinityAuto,
@@ -61,7 +61,7 @@ func TestNormalizeAffinity(t *testing.T) {
 
 // A provider's affinity and routing are saved as given, or dropped when
 // they're not known; "group" is no provider's id.
-func TestSaveNormalizesAndGroupID(t *testing.T) {
+func TestRgxSaveNormalizesAndGroupID(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	if err := Save(Provider{ID: "group", Name: "Group", Chat: "https://g.test/v1", Key: "sk-g"}); err == nil {
@@ -93,7 +93,7 @@ func TestSaveNormalizesAndGroupID(t *testing.T) {
 // Keys are ranked by how well they suit the request's protocol; a key with
 // no protocol of its own is taken to be the provider's KeyProtocol when it
 // is the first.
-func TestRankKeysByProtocol(t *testing.T) {
+func TestRgxRankKeysByProtocol(t *testing.T) {
 	keys := []KeyAccount{
 		{Key: "k-any"},
 		{Key: "k-chat", Protocol: Chat},

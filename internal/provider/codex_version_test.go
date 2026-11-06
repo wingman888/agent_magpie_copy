@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// withCodexVersion sets up a home with Codex CLI's cache at cacheVersion
+// rgxWithCodexVersion sets up a home with Codex CLI's cache at cacheVersion
 // ("" for none) and a Codex CLI that reports cliOut (nil for none installed).
-func withCodexVersion(t *testing.T, cacheVersion string, cliOut []byte) {
+func rgxWithCodexVersion(t *testing.T, cacheVersion string, cliOut []byte) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -38,37 +38,37 @@ func withCodexVersion(t *testing.T, cacheVersion string, cliOut []byte) {
 }
 
 // The client version is the newest of the CLI, the cache and the built-in one.
-func TestCodexRequestVersionNewestWins(t *testing.T) {
-	withCodexVersion(t, "0.154.0", []byte("codex-cli 0.155.1\n"))
+func TestRgxCodexRequestVersionNewestWins(t *testing.T) {
+	rgxWithCodexVersion(t, "0.154.0", []byte("codex-cli 0.155.1\n"))
 	if got := codexRequestVersion(context.Background()); got != "0.155.1" {
 		t.Fatalf("CLI 0.155.1, cache 0.154.0: asked with %q", got)
 	}
 }
 
-func TestCodexRequestVersionWithoutCLI(t *testing.T) {
-	withCodexVersion(t, "0.154.0", nil)
+func TestRgxCodexRequestVersionWithoutCLI(t *testing.T) {
+	rgxWithCodexVersion(t, "0.154.0", nil)
 	if got := codexRequestVersion(context.Background()); got != "0.154.0" {
 		t.Fatalf("no CLI: asked with %q", got)
 	}
 }
 
-func TestCodexRequestVersionCacheNewerThanCLI(t *testing.T) {
-	withCodexVersion(t, "0.156.0", []byte("codex-cli 0.155.1"))
+func TestRgxCodexRequestVersionCacheNewerThanCLI(t *testing.T) {
+	rgxWithCodexVersion(t, "0.156.0", []byte("codex-cli 0.155.1"))
 	if got := codexRequestVersion(context.Background()); got != "0.156.0" {
 		t.Fatalf("cache 0.156.0, CLI 0.155.1: asked with %q", got)
 	}
 }
 
-func TestCodexRequestVersionBuiltInDefault(t *testing.T) {
-	withCodexVersion(t, "", nil)
+func TestRgxCodexRequestVersionBuiltInDefault(t *testing.T) {
+	rgxWithCodexVersion(t, "", nil)
 	if got := codexRequestVersion(context.Background()); got != codexClientVersion {
 		t.Fatalf("nothing found: asked with %q", got)
 	}
 }
 
 // The answer is kept for a while, so the CLI isn't run on every list.
-func TestCodexRequestVersionCached(t *testing.T) {
-	withCodexVersion(t, "0.154.0", []byte("codex-cli 0.155.1"))
+func TestRgxCodexRequestVersionCached(t *testing.T) {
+	rgxWithCodexVersion(t, "0.154.0", []byte("codex-cli 0.155.1"))
 	if got := codexRequestVersion(context.Background()); got != "0.155.1" {
 		t.Fatalf("first: %q", got)
 	}
@@ -78,7 +78,7 @@ func TestCodexRequestVersionCached(t *testing.T) {
 	}
 }
 
-func TestCompareVersions(t *testing.T) {
+func TestRgxCompareVersions(t *testing.T) {
 	cases := []struct {
 		a, b string
 		want int

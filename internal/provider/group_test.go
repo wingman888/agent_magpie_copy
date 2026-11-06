@@ -8,9 +8,9 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 )
 
-// groupEnv isolates the config and the live model lists, as the other
+// rgxGroupEnv isolates the config and the live model lists, as the other
 // provider tests do.
-func groupEnv(t *testing.T) {
+func rgxGroupEnv(t *testing.T) {
 	t.Helper()
 	isolate(t)
 	t.Setenv("HOME", t.TempDir())
@@ -20,8 +20,8 @@ func groupEnv(t *testing.T) {
 	t.Cleanup(catalog.Reset)
 }
 
-// liveProvider saves a ready provider whose vendor list is models.
-func liveProvider(t *testing.T, id string, models ...catalog.Model) {
+// rgxLiveProvider saves a ready provider whose vendor list is models.
+func rgxLiveProvider(t *testing.T, id string, models ...catalog.Model) {
 	t.Helper()
 	if err := Save(Provider{ID: id, Name: strings.ToUpper(id), Key: "k-" + id, Chat: "https://" + id + ".test/v1"}); err != nil {
 		t.Fatal(err)
@@ -31,11 +31,11 @@ func liveProvider(t *testing.T, id string, models ...catalog.Model) {
 	}
 }
 
-// twoSources: a and b both serve claude-opus-5.5 under different spellings
+// rgxTwoSources: a and b both serve claude-opus-5.5 under different spellings
 // (b with a display name), m and v1.beta; a alone serves m:batch and only-a.
-func twoSources(t *testing.T) {
+func rgxTwoSources(t *testing.T) {
 	t.Helper()
-	liveProvider(t, "a",
+	rgxLiveProvider(t, "a",
 		catalog.Model{ID: "claude-opus-5-5", Efforts: []string{"low", "high"}},
 		catalog.Model{ID: "claude-opus-5-5-20260801"},
 		catalog.Model{ID: "m"},
@@ -43,14 +43,14 @@ func twoSources(t *testing.T) {
 		catalog.Model{ID: "v1.beta"},
 		catalog.Model{ID: "only-a"},
 	)
-	liveProvider(t, "b",
+	rgxLiveProvider(t, "b",
 		catalog.Model{ID: "anthropic/claude-opus-5.5", Name: "Claude Opus 5.5", Efforts: []string{"low"}},
 		catalog.Model{ID: "Vendor/V1.beta"},
 		catalog.Model{ID: "m"},
 	)
 }
 
-func ids(es []Entry) []string {
+func rgxIds(es []Entry) []string {
 	var out []string
 	for _, e := range es {
 		out = append(out, e.ID)
@@ -58,9 +58,9 @@ func ids(es []Entry) []string {
 	return out
 }
 
-func TestDiscoveryNormalizesOneModel(t *testing.T) {
-	groupEnv(t)
-	twoSources(t)
+func TestRgxDiscoveryNormalizesOneModel(t *testing.T) {
+	rgxGroupEnv(t)
+	rgxTwoSources(t)
 
 	g, ms, ok := FindGroup("group/auto-claude-opus-5-5")
 	if !ok {
@@ -96,17 +96,17 @@ func TestDiscoveryNormalizesOneModel(t *testing.T) {
 	}
 }
 
-func TestCatalogOrderProvidersThenGroups(t *testing.T) {
-	groupEnv(t)
-	twoSources(t)
+func TestRgxCatalogOrderProvidersThenGroups(t *testing.T) {
+	rgxGroupEnv(t)
+	rgxTwoSources(t)
 	es := Catalog()
-	ia, ig := slices.Index(ids(es), "a/only-a"), slices.Index(ids(es), "group/auto-claude-opus-5-5")
+	ia, ig := slices.Index(rgxIds(es), "a/only-a"), slices.Index(rgxIds(es), "group/auto-claude-opus-5-5")
 	if ia < 0 || ig < 0 || ia > ig {
-		t.Fatalf("catalog order %v", ids(es))
+		t.Fatalf("catalog order %v", rgxIds(es))
 	}
 	for i, e := range es {
 		if e.Kind == KindGroup && i < ia {
-			t.Fatalf("group before providers: %v", ids(es))
+			t.Fatalf("group before providers: %v", rgxIds(es))
 		}
 	}
 	var grp Entry
@@ -127,9 +127,9 @@ func TestCatalogOrderProvidersThenGroups(t *testing.T) {
 	}
 }
 
-func TestSaveGroupRules(t *testing.T) {
-	groupEnv(t)
-	twoSources(t)
+func TestRgxSaveGroupRules(t *testing.T) {
+	rgxGroupEnv(t)
+	rgxTwoSources(t)
 
 	if err := SaveGroup(Group{Name: "Mine"}); err == nil || !strings.Contains(err.Error(), "组里至少要有一个模型") {
 		t.Fatalf("empty members: %v", err)
@@ -170,9 +170,9 @@ func TestSaveGroupRules(t *testing.T) {
 	}
 }
 
-func TestDeleteShowAuto(t *testing.T) {
-	groupEnv(t)
-	twoSources(t)
+func TestRgxDeleteShowAuto(t *testing.T) {
+	rgxGroupEnv(t)
+	rgxTwoSources(t)
 
 	if err := DeleteGroup("auto-claude-opus-5-5"); err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestDeleteShowAuto(t *testing.T) {
 	if _, _, ok := FindGroup("group/auto-claude-opus-5-5"); ok {
 		t.Fatal("hidden group still found")
 	}
-	if slices.Contains(ids(Catalog()), "group/auto-claude-opus-5-5") {
+	if slices.Contains(rgxIds(Catalog()), "group/auto-claude-opus-5-5") {
 		t.Fatal("hidden group still listed")
 	}
 	if err := DeleteGroup("auto-claude-opus-5-5"); err == nil {
@@ -203,9 +203,9 @@ func TestDeleteShowAuto(t *testing.T) {
 	}
 }
 
-func TestEditingAutoGroupMakesItUsers(t *testing.T) {
-	groupEnv(t)
-	twoSources(t)
+func TestRgxEditingAutoGroupMakesItUsers(t *testing.T) {
+	rgxGroupEnv(t)
+	rgxTwoSources(t)
 
 	if err := SaveGroup(Group{ID: "auto-m", Name: "M", Members: []string{"b/m"}, Routing: "rotate"}); err != nil {
 		t.Fatal(err)
@@ -229,9 +229,9 @@ func TestEditingAutoGroupMakesItUsers(t *testing.T) {
 	}
 }
 
-func TestDeleteUserGroup(t *testing.T) {
-	groupEnv(t)
-	twoSources(t)
+func TestRgxDeleteUserGroup(t *testing.T) {
+	rgxGroupEnv(t)
+	rgxTwoSources(t)
 
 	if err := SaveGroup(Group{ID: "mine", Members: []string{"a/only-a"}}); err != nil {
 		t.Fatal(err)
@@ -247,9 +247,9 @@ func TestDeleteUserGroup(t *testing.T) {
 	}
 }
 
-func TestFindGroupNoReadyMember(t *testing.T) {
-	groupEnv(t)
-	twoSources(t)
+func TestRgxFindGroupNoReadyMember(t *testing.T) {
+	rgxGroupEnv(t)
+	rgxTwoSources(t)
 	if err := SaveGroup(Group{ID: "gone", Members: []string{"nobody/x", "a/only-a"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -263,14 +263,14 @@ func TestFindGroupNoReadyMember(t *testing.T) {
 	if _, ms, ok := FindGroup("none"); ok || len(ms) != 0 {
 		t.Fatalf("group with no usable member is ok: %v %v", ms, ok)
 	}
-	if slices.Contains(ids(Catalog()), "group/none") {
+	if slices.Contains(rgxIds(Catalog()), "group/none") {
 		t.Fatal("group with no usable member listed")
 	}
 }
 
-func TestSetAffinity(t *testing.T) {
-	groupEnv(t)
-	twoSources(t)
+func TestRgxSetAffinity(t *testing.T) {
+	rgxGroupEnv(t)
+	rgxTwoSources(t)
 	if err := SetAffinity("a", "session"); err != nil {
 		t.Fatal(err)
 	}
@@ -288,8 +288,8 @@ func TestSetAffinity(t *testing.T) {
 	}
 }
 
-func TestGroupProviderIDRejected(t *testing.T) {
-	groupEnv(t)
+func TestRgxGroupProviderIDRejected(t *testing.T) {
+	rgxGroupEnv(t)
 	if err := Save(Provider{ID: "group", Name: "G", Key: "k", Chat: "https://g.test/v1"}); err == nil {
 		t.Fatal("provider id group accepted")
 	}

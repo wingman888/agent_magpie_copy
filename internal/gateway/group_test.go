@@ -15,16 +15,16 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// keyLog is an upstream that answers every request, recording the key and the
+// rgxKeyLog is an upstream that answers every request, recording the key and the
 // vendor's model id each one came with. Keys in limited answer 429.
-type keyLog struct {
+type rgxKeyLog struct {
 	mu      sync.Mutex
 	limited map[string]bool
 	keys    []string
 	models  []string
 }
 
-func (k *keyLog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (k *rgxKeyLog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	var m struct {
@@ -55,8 +55,8 @@ func (k *keyLog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, `{"id":"from-`+key+`","choices":[]}`)
 }
 
-// keysFor are the keys the requests for one vendor model went with, in order.
-func (k *keyLog) keysFor(model string) []string {
+// rgxKeysFor are the keys the requests for one vendor model went with, in order.
+func (k *rgxKeyLog) rgxKeysFor(model string) []string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	var out []string
@@ -68,9 +68,9 @@ func (k *keyLog) keysFor(model string) []string {
 	return out
 }
 
-// grpSetup gives a test its own provider file and caches, and a fresh routing
+// rgxGrpSetup gives a test its own provider file and caches, and a fresh routing
 // state; the returned upstream serves every provider the test saves.
-func grpSetup(t *testing.T) (*keyLog, string) {
+func rgxGrpSetup(t *testing.T) (*rgxKeyLog, string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -86,13 +86,13 @@ func grpSetup(t *testing.T) (*keyLog, string) {
 	routed.used = map[string]tokenUse{}
 	routed.failures = map[string]int{}
 	routed.Unlock()
-	up := &keyLog{limited: map[string]bool{}}
+	up := &rgxKeyLog{limited: map[string]bool{}}
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
 	return up, srv.URL + "/v1"
 }
 
-func grpSend(s *Server, path, body string, hdr map[string]string) (int, string) {
+func rgxGrpSend(s *Server, path, body string, hdr map[string]string) (int, string) {
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))
 	for k, v := range hdr {
 		req.Header.Set(k, v)
@@ -102,8 +102,8 @@ func grpSend(s *Server, path, body string, hdr map[string]string) (int, string) 
 	return rec.Code, rec.Body.String()
 }
 
-// lastRoute is the most recent request's route in the trace.
-func lastRoute(t *testing.T, s *Server) Route {
+// rgxLastRoute is the most recent request's route in the trace.
+func rgxLastRoute(t *testing.T, s *Server) Route {
 	t.Helper()
 	rs := s.Trace(context.Background(), 0, 0).Routes
 	if len(rs) == 0 {
@@ -115,22 +115,22 @@ func lastRoute(t *testing.T, s *Server) Route {
 // Chat messages for a conversation: a user turn, a tool call and its result
 // within the turn, and an assistant reply.
 const (
-	grpUser     = `{"role":"user","content":"hi"}`
-	grpToolCall = `{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}`
-	grpToolRes  = `{"role":"tool","tool_call_id":"c1","content":"ok"}`
-	grpReply    = `{"role":"assistant","content":"ok"}`
+	rgxGrpUser     = `{"role":"user","content":"hi"}`
+	rgxGrpToolCall = `{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}`
+	rgxGrpToolRes  = `{"role":"tool","tool_call_id":"c1","content":"ok"}`
+	rgxGrpReply    = `{"role":"assistant","content":"ok"}`
 )
 
-func grpBody(model string, msgs ...string) string {
+func rgxGrpBody(model string, msgs ...string) string {
 	return `{"model":"` + model + `","messages":[` + strings.Join(msgs, ",") + `]}`
 }
 
-func grpUserText(s string) string { return `{"role":"user","content":"` + s + `"}` }
+func rgxGrpUserText(s string) string { return `{"role":"user","content":"` + s + `"}` }
 
 // A group of two providers, the first answering 429: the group's order sends
 // the request to the first member's key, then the second answers.
-func TestGroupOrderTriesMembersInTurn(t *testing.T) {
-	up, base := grpSetup(t)
+func TestRgxGroupOrderTriesMembersInTurn(t *testing.T) {
+	up, base := rgxGrpSetup(t)
 	up.limited["kb"] = true
 	for _, p := range []provider.Provider{
 		{ID: "b", Name: "B", Chat: base, Key: "kb", Models: []string{"vendor/m"}},
@@ -144,14 +144,14 @@ func TestGroupOrderTriesMembersInTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := New()
-	code, body := grpSend(s, "/v1/chat/completions", grpBody("group/mine", grpUser), nil)
+	code, body := rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("group/mine", rgxGrpUser), nil)
 	if code != 200 || !strings.Contains(body, "from-ka") {
 		t.Fatalf("%d %s", code, body)
 	}
 	if !slices.Equal(up.keys, []string{"kb", "ka"}) || !slices.Equal(up.models, []string{"vendor/m", "only-a"}) {
 		t.Fatalf("keys %v models %v", up.keys, up.models)
 	}
-	r := lastRoute(t, s)
+	r := rgxLastRoute(t, s)
 	if r.Group == nil || r.Group.ID != "mine" || r.Group.Name != "Mine" || r.Group.Routing != provider.Ordered || r.Group.Auto {
 		t.Fatalf("group %+v", r.Group)
 	}
@@ -165,8 +165,8 @@ func TestGroupOrderTriesMembersInTurn(t *testing.T) {
 
 // A group's rotation goes over its members' keys together: each new turn moves
 // on, and the turn's requests stay on the key it began with.
-func TestGroupRotatesAcrossMembers(t *testing.T) {
-	up, base := grpSetup(t)
+func TestRgxGroupRotatesAcrossMembers(t *testing.T) {
+	up, base := rgxGrpSetup(t)
 	for _, p := range []provider.Provider{
 		{ID: "ga", Name: "GA", Chat: base, Key: "ka"},
 		{ID: "gb", Name: "GB", Chat: base, Key: "kb"},
@@ -181,7 +181,7 @@ func TestGroupRotatesAcrossMembers(t *testing.T) {
 	s := New()
 	hdr := map[string]string{"x-session-id": "pair-1"}
 	for i := range 2 {
-		if code, body := grpSend(s, "/v1/chat/completions", grpBody("group/pair", grpUser), hdr); code != 200 {
+		if code, body := rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("group/pair", rgxGrpUser), hdr); code != 200 {
 			t.Fatalf("turn %d: %d %s", i, code, body)
 		}
 	}
@@ -192,8 +192,8 @@ func TestGroupRotatesAcrossMembers(t *testing.T) {
 
 // Within a turn the tool results stay on the key the turn began with (default
 // affinity), and the trace says why.
-func TestAffinityKeepsTurnWithinTurn(t *testing.T) {
-	up, base := grpSetup(t)
+func TestRgxAffinityKeepsTurnWithinTurn(t *testing.T) {
+	up, base := rgxGrpSetup(t)
 	if err := provider.Save(provider.Provider{ID: "r", Name: "R", Chat: base, Key: "k1", Keys: []provider.KeyAccount{{Key: "k2"}, {Key: "k3"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -202,12 +202,12 @@ func TestAffinityKeepsTurnWithinTurn(t *testing.T) {
 	}
 	s := New()
 	hdr := map[string]string{"x-session-id": "turn-1"}
-	grpSend(s, "/v1/chat/completions", grpBody("r/m1", grpUser), hdr)
-	grpSend(s, "/v1/chat/completions", grpBody("r/m1", grpUser, grpToolCall, grpToolRes), hdr)
+	rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("r/m1", rgxGrpUser), hdr)
+	rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("r/m1", rgxGrpUser, rgxGrpToolCall, rgxGrpToolRes), hdr)
 	if !slices.Equal(up.keys, []string{"k1", "k1"}) {
 		t.Fatalf("keys %v", up.keys)
 	}
-	a := lastRoute(t, s).Affinity
+	a := rgxLastRoute(t, s).Affinity
 	if a == nil || !a.Kept || !a.Within || a.Why != "turn" || a.Turn != 1 || a.Mode != "auto" || a.Last == "" {
 		t.Fatalf("affinity %+v", a)
 	}
@@ -215,8 +215,8 @@ func TestAffinityKeepsTurnWithinTurn(t *testing.T) {
 
 // Session affinity keeps the whole conversation on one key, even across turns
 // that rotation would move on.
-func TestAffinitySessionKeepsConversation(t *testing.T) {
-	up, base := grpSetup(t)
+func TestRgxAffinitySessionKeepsConversation(t *testing.T) {
+	up, base := rgxGrpSetup(t)
 	if err := provider.Save(provider.Provider{ID: "s", Name: "S", Chat: base, Key: "k1", Keys: []provider.KeyAccount{{Key: "k2"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -228,19 +228,19 @@ func TestAffinitySessionKeepsConversation(t *testing.T) {
 	}
 	s := New()
 	hdr := map[string]string{"x-session-id": "sess-1"}
-	grpSend(s, "/v1/chat/completions", grpBody("s/m1", grpUser), hdr)
-	grpSend(s, "/v1/chat/completions", grpBody("s/m1", grpUser, grpReply, grpUser), hdr)
+	rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("s/m1", rgxGrpUser), hdr)
+	rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("s/m1", rgxGrpUser, rgxGrpReply, rgxGrpUser), hdr)
 	if !slices.Equal(up.keys, []string{"k1", "k1"}) {
 		t.Fatalf("keys %v", up.keys)
 	}
-	if a := lastRoute(t, s).Affinity; a == nil || a.Why != "session" || a.Within {
+	if a := rgxLastRoute(t, s).Affinity; a == nil || a.Why != "session" || a.Within {
 		t.Fatalf("affinity %+v", a)
 	}
 }
 
 // Affinity off keeps nothing: the trace says so, and a new turn rotates.
-func TestAffinityOffKeepsNothing(t *testing.T) {
-	up, base := grpSetup(t)
+func TestRgxAffinityOffKeepsNothing(t *testing.T) {
+	up, base := rgxGrpSetup(t)
 	if err := provider.Save(provider.Provider{ID: "o", Name: "O", Chat: base, Key: "k1", Keys: []provider.KeyAccount{{Key: "k2"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -252,48 +252,48 @@ func TestAffinityOffKeepsNothing(t *testing.T) {
 	}
 	s := New()
 	hdr := map[string]string{"x-session-id": "off-1"}
-	grpSend(s, "/v1/chat/completions", grpBody("o/m1", grpUser), hdr)
-	grpSend(s, "/v1/chat/completions", grpBody("o/m1", grpUser, grpReply, grpUser), hdr)
+	rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("o/m1", rgxGrpUser), hdr)
+	rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("o/m1", rgxGrpUser, rgxGrpReply, rgxGrpUser), hdr)
 	if !slices.Equal(up.keys, []string{"k1", "k2"}) {
 		t.Fatalf("keys %v", up.keys)
 	}
-	if a := lastRoute(t, s).Affinity; a == nil || a.Kept || a.Why != "off" {
+	if a := rgxLastRoute(t, s).Affinity; a == nil || a.Kept || a.Why != "off" {
 		t.Fatalf("affinity %+v", a)
 	}
 }
 
 // The last answerer resting moves the conversation to another key, and the
 // trace says resting; a new session starts afresh.
-func TestAffinityRestingAndNewSession(t *testing.T) {
-	up, base := grpSetup(t)
+func TestRgxAffinityRestingAndNewSession(t *testing.T) {
+	up, base := rgxGrpSetup(t)
 	if err := provider.Save(provider.Provider{ID: "w", Name: "W", Chat: base, Key: "k1", Keys: []provider.KeyAccount{{Key: "k2"}}}); err != nil {
 		t.Fatal(err)
 	}
 	s := New()
 	hdr := map[string]string{"x-session-id": "rest-1"}
-	grpSend(s, "/v1/chat/completions", grpBody("w/m1", grpUser), hdr)
-	first := lastRoute(t, s).Tries[0].ID
+	rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("w/m1", rgxGrpUser), hdr)
+	first := rgxLastRoute(t, s).Tries[0].ID
 	restingUntil.Lock()
 	restingUntil.m[first] = time.Now().Add(time.Hour)
 	restingUntil.note[first] = Rest{Why: failRate, By: "retry-after"}
 	restingUntil.Unlock()
-	grpSend(s, "/v1/chat/completions", grpBody("w/m1", grpUser, grpReply, grpUser), hdr)
+	rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("w/m1", rgxGrpUser, rgxGrpReply, rgxGrpUser), hdr)
 	if !slices.Equal(up.keys, []string{"k1", "k2"}) {
 		t.Fatalf("keys %v", up.keys)
 	}
-	if a := lastRoute(t, s).Affinity; a == nil || a.Why != "resting" || a.Kept {
+	if a := rgxLastRoute(t, s).Affinity; a == nil || a.Why != "resting" || a.Kept {
 		t.Fatalf("affinity %+v", a)
 	}
-	grpSend(s, "/v1/chat/completions", grpBody("w/m1", grpUser), map[string]string{"x-session-id": "rest-2"})
-	if a := lastRoute(t, s).Affinity; a == nil || a.Why != "first" {
+	rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody("w/m1", rgxGrpUser), map[string]string{"x-session-id": "rest-2"})
+	if a := rgxLastRoute(t, s).Affinity; a == nil || a.Why != "first" {
 		t.Fatalf("affinity %+v", a)
 	}
 }
 
 // Rotation by turn: k1→k2→k3→k1 across new turns, the requests within a turn
 // and a request for another model in between don't move it.
-func TestRotateMovesByTurnOnly(t *testing.T) {
-	up, base := grpSetup(t)
+func TestRgxRotateMovesByTurnOnly(t *testing.T) {
+	up, base := rgxGrpSetup(t)
 	if err := provider.Save(provider.Provider{ID: "t", Name: "T", Chat: base, Key: "k1", Keys: []provider.KeyAccount{{Key: "k2"}, {Key: "k3"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -304,38 +304,38 @@ func TestRotateMovesByTurnOnly(t *testing.T) {
 	hdr := map[string]string{"x-session-id": "rot-1"}
 	send := func(model string, msgs ...string) {
 		t.Helper()
-		if code, body := grpSend(s, "/v1/chat/completions", grpBody(model, msgs...), hdr); code != 200 {
+		if code, body := rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody(model, msgs...), hdr); code != 200 {
 			t.Fatalf("%s: %d %s", model, code, body)
 		}
 	}
-	history := []string{grpUser}
+	history := []string{rgxGrpUser}
 	send("t/m1", history...)
-	history = append(history, grpToolCall, grpToolRes)
+	history = append(history, rgxGrpToolCall, rgxGrpToolRes)
 	send("t/m1", history...)
-	send("t/other", grpUserText("side question"))
-	history = append(history, grpReply, grpUserText("two"))
+	send("t/other", rgxGrpUserText("side question"))
+	history = append(history, rgxGrpReply, rgxGrpUserText("two"))
 	send("t/m1", history...)
-	history = append(history, grpReply, grpUserText("three"))
+	history = append(history, rgxGrpReply, rgxGrpUserText("three"))
 	send("t/m1", history...)
-	history = append(history, grpReply, grpUserText("four"))
+	history = append(history, rgxGrpReply, rgxGrpUserText("four"))
 	send("t/m1", history...)
-	if got := up.keysFor("m1"); !slices.Equal(got, []string{"k1", "k1", "k2", "k3", "k1"}) {
+	if got := up.rgxKeysFor("m1"); !slices.Equal(got, []string{"k1", "k1", "k2", "k3", "k1"}) {
 		t.Fatalf("keys for m1 %v (all %v)", got, up.keys)
 	}
-	if got := up.keysFor("other"); len(got) != 1 || got[0] != "k1" {
+	if got := up.rgxKeysFor("other"); len(got) != 1 || got[0] != "k1" {
 		t.Fatalf("keys for other %v", got)
 	}
 }
 
 // A group whose members are all unusable answers 404 saying so.
-func TestGroupWithNoMemberReadyIs404(t *testing.T) {
-	grpSetup(t)
+func TestRgxGroupWithNoMemberReadyIs404(t *testing.T) {
+	rgxGrpSetup(t)
 	if err := provider.SaveGroup(provider.Group{ID: "lost", Members: []string{"nowhere/x"}}); err != nil {
 		t.Fatal(err)
 	}
 	s := New()
 	for _, id := range []string{"group/lost", "group/unknown"} {
-		code, body := grpSend(s, "/v1/chat/completions", grpBody(id, grpUser), nil)
+		code, body := rgxGrpSend(s, "/v1/chat/completions", rgxGrpBody(id, rgxGrpUser), nil)
 		if code != 404 || !strings.Contains(body, "没有模型就绪") {
 			t.Fatalf("%s: %d %s", id, code, body)
 		}
@@ -343,8 +343,8 @@ func TestGroupWithNoMemberReadyIs404(t *testing.T) {
 }
 
 // A capability question about a group is answered by its first member.
-func TestGroupCapabilityIsItsFirstMember(t *testing.T) {
-	_, base := grpSetup(t)
+func TestRgxGroupCapabilityIsItsFirstMember(t *testing.T) {
+	_, base := rgxGrpSetup(t)
 	for _, p := range []provider.Provider{
 		{ID: "cb", Name: "CB", Chat: base, Key: "kb"},
 		{ID: "ca", Name: "CA", Chat: base, Key: "ka"},
@@ -369,8 +369,8 @@ func TestGroupCapabilityIsItsFirstMember(t *testing.T) {
 // A provider's key made for another protocol is tried only after the keys
 // that suit the request: the trace marks it aside, and it answers when the
 // others can't.
-func TestAsideKeyAnswersWhenPoolFails(t *testing.T) {
-	up, base := grpSetup(t)
+func TestRgxAsideKeyAnswersWhenPoolFails(t *testing.T) {
+	up, base := rgxGrpSetup(t)
 	up.limited["k1"], up.limited["k2"] = true, true
 	// the unspecified keys speak Anthropic natively; kc is a Chat key, so an
 	// Anthropic request reaches it translated
@@ -383,14 +383,14 @@ func TestAsideKeyAnswersWhenPoolFails(t *testing.T) {
 	}
 	s := New()
 	anthropic := `{"model":"pool/m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
-	code, body := grpSend(s, "/v1/messages", anthropic, nil)
+	code, body := rgxGrpSend(s, "/v1/messages", anthropic, nil)
 	if code != 200 || !strings.Contains(body, "from-kc") {
 		t.Fatalf("%d %s", code, body)
 	}
 	if !slices.Equal(up.keys, []string{"k1", "k2", "kc"}) {
 		t.Fatalf("keys %v", up.keys)
 	}
-	r := lastRoute(t, s)
+	r := rgxLastRoute(t, s)
 	if len(r.Order) != 3 || r.Order[0].Aside || r.Order[1].Aside || !r.Order[2].Aside {
 		t.Fatalf("order %+v", r.Order)
 	}
