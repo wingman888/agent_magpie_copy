@@ -44,22 +44,14 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
-	// Headers are extra HTTP request headers sent to the vendor, exactly as
-	// the user typed them. They ride on every request magpie makes to a plain
-	// key+URL provider — forwarded calls, connectivity tests, and model-list
-	// fetches — applied after the auth headers, so the user can override those
-	// when a gateway insists on a private scheme. Signed-in agent accounts
-	// ignore them: their auth is the agent's own.
-	Headers map[string]string `json:"headers,omitempty"`
-
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Fallback lists provider/model ids to try, in order, when this provider
-	// cannot serve a request (quota spent, rate limited, down). Saved trimmed,
-	// without empty or repeated entries.
-	Fallback []string `json:"fallback,omitempty"`
+	// Headers are extra HTTP headers sent with every request to a custom
+	// provider, under the names the user typed. Ignored for presets and
+	// signed-in accounts (see customHeaders).
+	Headers map[string]string `json:"headers,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
@@ -107,7 +99,6 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	pruneIcons(f)
 	return os.Chmod(p, 0o600)
 }
 
@@ -131,7 +122,6 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -195,10 +185,13 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
+		}
+		if p.Preset != "" {
+			p.Headers = nil // presets keep their own headers; the user's are for custom providers
 		}
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
@@ -266,13 +259,7 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Fallback = cleanList(p.Fallback)
 	p.Headers = cleanHeaders(p.Headers)
-	if p.Preset != "" {
-		// Presets own their request shape; custom headers are supported only
-		// for user-defined providers.
-		p.Headers = nil
-	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -301,18 +288,30 @@ func cleanList(xs []string) []string {
 }
 
 // cleanHeaders trims header names and values and drops entries with an empty
-// name, returning nil when nothing is left so the field stays out of the JSON.
-func cleanHeaders(h map[string]string) map[string]string {
-	out := make(map[string]string, len(h))
-	for k, v := range h {
-		if k = strings.TrimSpace(k); k != "" {
-			out[k] = strings.TrimSpace(v)
+// name. Names keep their case: some gateways match it exactly. An empty
+// result is nil, so the field is not written out.
+func cleanHeaders(hs map[string]string) map[string]string {
+	var out map[string]string
+	for name, value := range hs {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
 		}
-	}
-	if len(out) == 0 {
-		return nil
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[name] = strings.TrimSpace(value)
 	}
 	return out
+}
+
+// customHeaders are the headers to send with a request to the provider: the
+// user's, for a custom provider only. Presets and signed-in accounts get none.
+func (p Provider) customHeaders() map[string]string {
+	if p.Preset != "" || p.Account != nil {
+		return nil
+	}
+	return p.Headers
 }
 
 func contains(xs []string, x string) bool {

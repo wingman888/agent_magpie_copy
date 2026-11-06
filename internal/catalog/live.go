@@ -59,13 +59,35 @@ func SaveLive(provider, base string, models []Model) error {
 	return os.WriteFile(p, b, 0o644)
 }
 
+// SetRawHeaders adds each header to the request under exactly the name given.
+// http.Header.Set would canonicalise the name (X-ORG-id becomes X-Org-Id),
+// which some gateways match case-sensitively. Any header already present
+// whose name matches case-insensitively is replaced, so the given value is
+// the only one sent.
+func SetRawHeaders(req *http.Request, headers map[string]string) {
+	for name, value := range headers {
+		for k := range req.Header {
+			if strings.EqualFold(k, name) {
+				delete(req.Header, k)
+			}
+		}
+		req.Header[name] = []string{value}
+	}
+}
+
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
 // around it. The result keeps the server's order. anthropic sends the
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWithHeaders(ctx, base, key, anthropic, nil)
+}
+
+// FetchWithHeaders is Fetch with extra request headers, sent verbatim (see
+// SetRawHeaders) after the usual ones, so they win on a name clash.
+func FetchWithHeaders(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -125,11 +147,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	// The user's own headers, after the defaults so a private auth scheme
-	// wins. Written directly so the name keeps the exact case the user typed.
-	for k, v := range headers {
-		req.Header[k] = []string{v}
-	}
+	SetRawHeaders(req, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
