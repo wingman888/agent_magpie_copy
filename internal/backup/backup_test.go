@@ -460,14 +460,14 @@ func TestHeaderVersionMissingOrZeroIsTampered(t *testing.T) {
 
 func TestStripProxyUserinfo(t *testing.T) {
 	cases := map[string]string{
-		"":                                  "",
-		"direct":                            "direct",
-		"127.0.0.1:7890":                    "127.0.0.1:7890",
-		"http://127.0.0.1:7890":             "http://127.0.0.1:7890",
-		"http://user:pass@host:8080":        "http://host:8080",
-		"socks5://u:p%40x@10.0.0.1:1080":    "socks5://10.0.0.1:1080",
-		"user:pass@host:8080":               "host:8080",
-		"http://host:8080/a@b":              "http://host:8080/a@b",
+		"":                               "",
+		"direct":                         "direct",
+		"127.0.0.1:7890":                 "127.0.0.1:7890",
+		"http://127.0.0.1:7890":          "http://127.0.0.1:7890",
+		"http://user:pass@host:8080":     "http://host:8080",
+		"socks5://u:p%40x@10.0.0.1:1080": "socks5://10.0.0.1:1080",
+		"user:pass@host:8080":            "host:8080",
+		"http://host:8080/a@b":           "http://host:8080/a@b",
 	}
 	for in, want := range cases {
 		if got := stripProxyUserinfo(in); got != want {
