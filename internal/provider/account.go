@@ -45,12 +45,6 @@ type Account struct {
 	body   func(body []byte) []byte // request tweaks the backend insists on
 	models func() []catalog.Model
 	fetch  func(ctx context.Context) ([]catalog.Model, error)
-
-	// alts are the other switched-on logins that serve after this one (see
-	// logins.go); env is the extra environment the agent's binary needs to run
-	// as a login other than the one it is signed in as.
-	alts []*Account
-	env  func(ctx context.Context) ([]string, error)
 }
 
 // Sign authenticates a request to the provider, refreshing what needs it.
@@ -62,8 +56,6 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
-	// after the auth headers, so a custom header may override them
-	catalog.ApplyHeaders(req.Header, p.customHeaders())
 	return nil
 }
 
@@ -77,20 +69,14 @@ func (p Provider) Prepare(body []byte) []byte {
 
 // Exclusion is a sign-in magpie found but will not offer as a provider.
 type Exclusion struct {
-	Agent    string `json:"agent"`
-	Provider string `json:"provider,omitempty"` // set when the user removed it; saving it brings it back
-	Why      string `json:"why"`
+	Agent string `json:"agent"`
+	Why   string `json:"why"`
 }
 
-// Excluded lists sign-ins magpie detects but leaves out: the accounts the
-// user removed from magpie.
-func Excluded() []Exclusion {
-	var out []Exclusion
-	for _, a := range Hidden() {
-		out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID, Why: "You removed it from magpie."})
-	}
-	return out
-}
+// Excluded lists sign-ins magpie detects but cannot expose. It is currently
+// empty, but remains part of the API so the CLI and GUI can explain future
+// account types that are detectable but not usable.
+func Excluded() []Exclusion { return nil }
 
 const (
 	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -125,7 +111,6 @@ var (
 	claudeStatusAt   time.Time
 	claudeStatusUser string
 	claudeStatusPlan string
-	claudeStatusOut  bool // Claude Code says nobody is signed in
 
 	claudeCacheMu  sync.Mutex
 	claudeCacheAt  time.Time
@@ -280,8 +265,7 @@ func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) err
 	return nil
 }
 
-// claudeExecutable finds the claude CLI; a var so tests can fake it.
-var claudeExecutable = func() string {
+func claudeExecutable() string {
 	if p, err := exec.LookPath("claude"); err == nil {
 		return p
 	}
@@ -298,40 +282,33 @@ var claudeExecutable = func() string {
 // blob intentionally contains tokens and plan metadata but no display identity;
 // `claude auth status --json` is the authoritative, non-secret view shown by the
 // CLI. Cache it briefly because the providers screen refreshes often.
-//
-// It also says when Claude Code is signed out even though credentials are
-// still lying around (a keychain item logout left behind), so a signed-out
-// account stops showing up as a provider.
-func claudeIdentity() (user, plan string, signedOut bool) {
+func claudeIdentity() (string, string) {
 	claudeStatusMu.Lock()
 	defer claudeStatusMu.Unlock()
 	if time.Since(claudeStatusAt) < 30*time.Second {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return claudeStatusUser, claudeStatusPlan
 	}
 	claudeStatusAt = time.Now()
 	path := claudeExecutable()
 	if path == "" {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+		return claudeStatusUser, claudeStatusPlan
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// signed out, `claude auth status` exits 1 but still prints the JSON
-	out, _ := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
+	out, err := exec.CommandContext(ctx, path, "auth", "status", "--json").Output()
+	if err != nil {
+		return claudeStatusUser, claudeStatusPlan
+	}
 	var status struct {
-		LoggedIn         *bool  `json:"loggedIn"`
+		LoggedIn         bool   `json:"loggedIn"`
 		Email            string `json:"email"`
 		SubscriptionType string `json:"subscriptionType"`
 	}
-	if json.Unmarshal(out, &status) != nil || status.LoggedIn == nil {
-		return claudeStatusUser, claudeStatusPlan, claudeStatusOut
-	}
-	claudeStatusOut = !*status.LoggedIn
-	claudeStatusUser, claudeStatusPlan = "", ""
-	if *status.LoggedIn {
+	if json.Unmarshal(out, &status) == nil && status.LoggedIn {
 		claudeStatusUser = strings.TrimSpace(status.Email)
 		claudeStatusPlan = strings.TrimSpace(status.SubscriptionType)
 	}
-	return claudeStatusUser, claudeStatusPlan, claudeStatusOut
+	return claudeStatusUser, claudeStatusPlan
 }
 
 func claudeAccount() (Provider, bool) {
@@ -339,10 +316,7 @@ func claudeAccount() (Provider, bool) {
 	if !ok {
 		return Provider{}, false
 	}
-	user, statusPlan, signedOut := claudeIdentity()
-	if signedOut {
-		return Provider{}, false
-	}
+	user, statusPlan := claudeIdentity()
 	plan := c.OAuth.SubscriptionType
 	if statusPlan != "" {
 		plan = statusPlan
@@ -359,7 +333,16 @@ func claudeAccount() (Provider, bool) {
 		if err != nil {
 			return err
 		}
-		setClaudeHeaders(req, tok, body)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("User-Agent", claudeUserAgent())
+		req.Header.Set("X-Claude-Code-Session-Id", claudeSessionID())
+		req.Header.Set("anthropic-beta", claudeBetaHeader(claudeModelOf(body)))
+		req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+		req.Header.Set("x-app", "cli")
+		req.Header.Set("x-client-request-id", randomUUID())
+		for k, v := range claudeStainlessHeaders() {
+			req.Header.Set(k, v)
+		}
 		return nil
 	}
 	acct.body = claudeBody
@@ -513,10 +496,10 @@ func Accounts() []Provider {
 	}
 	var out []Provider
 	if p, ok := claudeAccount(); ok {
-		out = append(out, attachLogins(p))
+		out = append(out, p)
 	}
 	if p, ok := codexAccount(home); ok {
-		out = append(out, attachLogins(p))
+		out = append(out, p)
 	}
 	if p, ok := copilotAccount(cfg); ok {
 		out = append(out, p)
@@ -603,7 +586,12 @@ func codexAccount(home string) (Provider, bool) {
 		if err != nil {
 			return err
 		}
-		setCodexHeaders(req, tok, accountID)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		if accountID != "" {
+			req.Header.Set("chatgpt-account-id", accountID)
+		}
+		req.Header.Set("OpenAI-Beta", "responses=experimental")
+		req.Header.Set("originator", "magpie")
 		return nil
 	}
 	acct.body = codexBody
@@ -900,11 +888,4 @@ func copilotModels(ctx context.Context, github string) ([]catalog.Model, error) 
 		return nil, errors.New("Copilot lists no chat model for this account")
 	}
 	return out, nil
-}
-
-// forgetClaudeStatus drops what `claude auth status` said; tests use it.
-func forgetClaudeStatus() {
-	claudeStatusMu.Lock()
-	claudeStatusAt, claudeStatusUser, claudeStatusPlan, claudeStatusOut = time.Time{}, "", "", false
-	claudeStatusMu.Unlock()
 }

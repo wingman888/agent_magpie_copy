@@ -14,9 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudebridge"
 	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
-	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
@@ -45,9 +43,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
-  magpie import [-y] <link>       add the provider a magpie://import?… link describes
+  magpie import [-y] <链接>       add a provider from a magpie:// link, after you confirm
   magpie models                   every model agents can pick, as provider/model
-  magpie accounts [claude|codex]  subscription accounts: list, switch, add, forget
 
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
@@ -67,7 +64,6 @@ var (
 
 func main() {
 	gateway.Version = version
-	netproxy.Install()
 	update.GUI = hasGUI
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
@@ -76,34 +72,30 @@ func main() {
 }
 
 func run(args []string) error {
+	// Import writes nothing until the user confirms, so it is dispatched before
+	// the startup migrations; importCmd runs them after confirmation.
+	if !hasGUI && len(args) > 0 && isImportLink(args[0]) {
+		// the OS hands over a magpie:// link as the first argument
+		return importCmd(args)
+	}
+	if len(args) > 0 && args[0] == "import" {
+		return importCmd(args[1:])
+	}
 	settings.Migrate()
 	agent.RenameLegacy()
-	// remember the logins the agents are signed in as, before any of them is
-	// switched away; the Claude Code helper runs for every turn, so it is skipped
-	if len(args) == 0 || args[0] != "claude-mcp-helper" {
-		_ = provider.RememberLogins()
-	}
 	if len(args) == 0 {
 		if hasGUI {
-			return runGUI(true, "")
+			return runGUI(true)
 		}
 		return tui.Run()
-	}
-	// a magpie:// link the system handed over (Windows, Linux): the app
-	// opens it for the user to confirm
-	if strings.HasPrefix(strings.ToLower(args[0]), "magpie:") {
-		if !hasGUI {
-			return importCmd(args)
-		}
-		return runGUI(false, args[0])
 	}
 	switch args[0] {
 	case "tui":
 		return tui.Run()
 	case "app", "gui":
-		return runGUI(true, "")
+		return runGUI(true)
 	case "tray":
-		return runGUI(false, "")
+		return runGUI(false)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return nil
@@ -125,8 +117,6 @@ func run(args []string) error {
 		return nil
 	case "save", "use", "rm", "profiles":
 		return profiles(args)
-	case "import":
-		return importCmd(args[1:])
 	case "providers":
 		return providers()
 	case "presets":
@@ -135,8 +125,6 @@ func run(args []string) error {
 		return providerCmd(args)
 	case "models":
 		return models()
-	case "accounts":
-		return accountsCmd(args[1:])
 	case "serve":
 		return serve()
 	case "usage":
@@ -199,13 +187,6 @@ func set(a *agent.Agent, key, value string) error {
 
 func fieldForValue(a *agent.Agent, v string) *agent.Field {
 	vals := a.Values()
-	// a model stays with the model, even where other fields offer it too
-	// (Claude Code's opus/sonnet/haiku/fable)
-	for _, o := range a.Fields[0].Options(vals) {
-		if o.Value == v {
-			return nil
-		}
-	}
 	for i := 1; i < len(a.Fields); i++ {
 		for _, o := range a.Fields[i].Options(vals) {
 			if o.Value == v {
@@ -234,9 +215,6 @@ func list(agents []*agent.Agent, detectedOnly bool) error {
 			var parts []string
 			for _, f := range a.Fields {
 				v := vals[f.Key]
-				if v == "" && f.Quiet {
-					continue
-				}
 				if v == "" {
 					v = faint.Render("—")
 				}
