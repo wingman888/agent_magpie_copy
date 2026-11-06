@@ -2,11 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key><string>dial</string>
-	<key>CFBundleDisplayName</key><string>dial</string>
-	<key>CFBundleIdentifier</key><string>com.yetone.dial</string>
-	<key>CFBundleExecutable</key><string>dial</string>
-	<key>CFBundleIconFile</key><string>dial</string>
+	<key>CFBundleName</key><string>magpie</string>
+	<key>CFBundleDisplayName</key><string>magpie</string>
+	<key>CFBundleIdentifier</key><string>com.yetone.magpie</string>
+	<key>CFBundleExecutable</key><string>magpie</string>
+	<key>CFBundleIconFile</key><string>magpie</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>@VERSION@</string>
 	<key>CFBundleVersion</key><string>@VERSION@</string>
