@@ -202,8 +202,7 @@ func Stage(ctx context.Context, rel *Release, bundle string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("release %s has no %s", rel.Version, AppAsset())
 	}
-	// Unpacked beside the bundle so Install is a rename on one volume.
-	dir := filepath.Join(filepath.Dir(bundle), ".magpie-update")
+	dir := stageDir(filepath.Dir(bundle))
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -250,8 +249,22 @@ func team(ctx context.Context, app string) string {
 	return ""
 }
 
+// stageDir is where an update is unpacked: beside what it replaces, so
+// installing it is a rename on one volume, or, where magpie may not write,
+// in its cache, to be moved in with the administrator's password.
+func stageDir(dir string) string {
+	if !Writable(dir) {
+		if cache, err := os.UserCacheDir(); err == nil {
+			return filepath.Join(cache, "magpie", "update")
+		}
+	}
+	return filepath.Join(dir, ".magpie-update")
+}
+
 // Install swaps the staged app in for bundle. The running copy keeps going
-// until it quits; the next launch is the new one.
+// until it quits; the next launch is the new one. Where the folder is not
+// magpie's to change the error is a permission one (NeedsAdmin), and
+// InstallAsAdmin can do it instead.
 func Install(staged, bundle string) error {
 	old := filepath.Join(filepath.Dir(staged), "old.app")
 	os.RemoveAll(old)
@@ -266,6 +279,17 @@ func Install(staged, bundle string) error {
 	return nil
 }
 
+// InstallAsAdmin is Install with the administrator's password, asked for
+// by the system.
+func InstallAsAdmin(staged, bundle string) error {
+	old := filepath.Join(filepath.Dir(staged), "old.app")
+	err := asAdmin(swapScript(staged, bundle, old))
+	if err == nil {
+		os.RemoveAll(filepath.Dir(filepath.Dir(staged)))
+	}
+	return err
+}
+
 // Relaunch opens bundle again once this process (pid) has exited.
 func Relaunch(bundle string) error {
 	script := fmt.Sprintf(`while kill -0 %d 2>/dev/null; do sleep 0.2; done; open %q`, os.Getpid(), bundle)
@@ -277,15 +301,23 @@ func Relaunch(bundle string) error {
 // ReplaceBinary puts the release's build for this binary where the
 // running one is.
 func ReplaceBinary(ctx context.Context, rel *Release) error {
+	exe, err := Executable()
+	if err != nil {
+		return err
+	}
 	staged, err := StageBinary(ctx, rel)
 	if err != nil {
 		return err
 	}
-	return InstallBinary(staged)
+	err = InstallBinary(staged, exe)
+	if NeedsAdmin(err) && CanElevate() {
+		err = InstallBinaryAsAdmin(staged, exe)
+	}
+	return err
 }
 
-// StageBinary downloads the release's build for this binary next to it,
-// ready for InstallBinary.
+// StageBinary downloads the release's build for this binary next to it (or
+// to the cache, where magpie may not write there), ready for InstallBinary.
 func StageBinary(ctx context.Context, rel *Release) (string, error) {
 	a, ok := rel.Assets[BinaryAsset()]
 	if !ok {
@@ -296,6 +328,13 @@ func StageBinary(ctx context.Context, rel *Release) (string, error) {
 		return "", err
 	}
 	tmp := exe + ".new"
+	if !Writable(filepath.Dir(exe)) {
+		dir := stageDir(filepath.Dir(exe))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		tmp = filepath.Join(dir, filepath.Base(exe)+".new")
+	}
 	if err := download(ctx, a, tmp); err != nil {
 		return "", err
 	}
@@ -306,10 +345,9 @@ func StageBinary(ctx context.Context, rel *Release) (string, error) {
 	return tmp, nil
 }
 
-// InstallBinary swaps a staged binary in for the running one, which keeps
-// going until it exits.
-func InstallBinary(staged string) error {
-	exe := strings.TrimSuffix(staged, ".new")
+// InstallBinary swaps a staged binary in for exe, the running one, which
+// keeps going until it exits.
+func InstallBinary(staged, exe string) error {
 	if runtime.GOOS == "windows" {
 		// A running .exe cannot be overwritten, but it can be moved aside.
 		os.Remove(exe + ".old")
@@ -319,10 +357,21 @@ func InstallBinary(staged string) error {
 		}
 	}
 	if err := os.Rename(staged, exe); err != nil {
-		os.Remove(staged)
+		if !NeedsAdmin(err) { // kept for InstallBinaryAsAdmin
+			os.Remove(staged)
+		}
 		return err
 	}
 	return nil
+}
+
+// InstallBinaryAsAdmin is InstallBinary with the administrator's password.
+func InstallBinaryAsAdmin(staged, exe string) error {
+	err := asAdmin("mv -f " + shellQuote(staged) + " " + shellQuote(exe))
+	if err != nil && !errors.Is(err, ErrCanceled) {
+		os.Remove(staged)
+	}
+	return err
 }
 
 // RelaunchBinary starts exe again as the tray app. The new process waits
