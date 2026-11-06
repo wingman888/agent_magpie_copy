@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -92,7 +93,7 @@ func New() *Server {
 		client: &http.Client{Transport: &http.Transport{
 			// netproxy.For is consulted per request, so settings changes apply
 			// to new requests without a restart.
-			Proxy:                 netproxy.For,
+			Proxy:                 func(r *http.Request) (*url.URL, error) { return netproxy.For(r.URL) },
 			ResponseHeaderTimeout: 10 * time.Minute,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       90 * time.Second,

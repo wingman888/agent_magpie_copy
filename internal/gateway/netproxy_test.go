@@ -3,15 +3,19 @@ package gateway
 import (
 	"net/http"
 	"net/url"
-	"reflect"
 	"testing"
 
-	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/settings"
 )
 
-// The gateway's vendor client must pick proxies with netproxy.For, not with
-// the environment alone.
+// The gateway's vendor client must pick proxies through netproxy.For: a
+// proxy saved in settings applies to the very next request, and loopback
+// targets stay direct.
 func TestVendorTransportUsesNetproxy(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, n := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(n, "")
+	}
 	s := New()
 	tr, ok := s.client.Transport.(*http.Transport)
 	if !ok {
@@ -20,19 +24,24 @@ func TestVendorTransportUsesNetproxy(t *testing.T) {
 	if tr.Proxy == nil {
 		t.Fatal("Proxy is nil")
 	}
-	if reflect.ValueOf(tr.Proxy).Pointer() != reflect.ValueOf(netproxy.For).Pointer() {
-		t.Fatal("Proxy is not netproxy.For")
+	req := func(raw string) *http.Request {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Request{URL: u}
 	}
-}
 
-// Loopback targets always connect directly, whatever the proxy settings are.
-func TestVendorTransportLoopbackDirect(t *testing.T) {
-	s := New()
-	tr := s.client.Transport.(*http.Transport)
+	if err := settings.Save(settings.Settings{Proxy: "socks5://127.0.0.1:1080"}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := tr.Proxy(req("https://api.example.com/v1/messages"))
+	if err != nil || p == nil || p.String() != "socks5://127.0.0.1:1080" {
+		t.Errorf("vendor request: proxy %v err %v, want socks5://127.0.0.1:1080", p, err)
+	}
+
 	for _, raw := range []string{"http://127.0.0.1:3425/", "http://localhost:3425/", "http://[::1]:3425/"} {
-		u, _ := url.Parse(raw)
-		req := &http.Request{URL: u}
-		p, err := tr.Proxy(req)
+		p, err := tr.Proxy(req(raw))
 		if err != nil || p != nil {
 			t.Errorf("%s: proxy %v err %v, want direct", raw, p, err)
 		}
