@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -41,6 +42,10 @@ type Provider struct {
 	// accounts: keys saved to switch to (see keys.go).
 	KeyName string       `json:"keyName,omitempty"`
 	Keys    []KeyAccount `json:"keys,omitempty"`
+	// KeyProtocol, when set, is the one protocol the first key is good
+	// for: a relay that hands out one key for Anthropic and another for
+	// OpenAI (see KeyAccount.Protocol).
+	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -55,6 +60,15 @@ type Provider struct {
 	// tried in order.
 	Fallback []string `json:"fallback,omitempty"`
 
+	// Routing is how requests spread over the keys or accounts it has on:
+	// "" smart, the first while it has quota to spare, then whichever has
+	// the most; "order" in order, the next one only when the one before
+	// can't take it; "rotate" each in turn; "least-used" the least used first.
+	// The "usage" a config saved before was the same as "least-used".
+	// Whichever it is, one out of credit, out of quota, rate limited or
+	// failing is passed over for as long as that lasts.
+	Routing string `json:"routing,omitempty"`
+
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
 	// key+URL provider — forwarded calls, connectivity tests, and model-list
@@ -62,6 +76,13 @@ type Provider struct {
 	// when a gateway insists on a private scheme. Signed-in agent accounts
 	// ignore them: their auth is the agent's own.
 	Headers map[string]string `json:"headers,omitempty"`
+
+	// BalanceURL, when set, is where the vendor tells what is left on a
+	// key, asked with the key the way a chat request carries it; BalancePath
+	// picks the amount out of the JSON reply (see balance.go). The vendors
+	// magpie knows need neither.
+	BalanceURL  string `json:"balanceURL,omitempty"`
+	BalancePath string `json:"balancePath,omitempty"`
 
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
@@ -71,6 +92,11 @@ type Provider struct {
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
+	// IconURL is a picture the vendor named in an import link, to be fetched
+	// once the user confirms. It is only a carrier between parsing and that
+	// fetch: Save drops it, so it never reaches providers.json.
+	IconURL string `json:"iconUrl,omitempty"`
+
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
 	Hidden bool `json:"hidden,omitempty"`
@@ -79,13 +105,19 @@ type Provider struct {
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
 
-	// KeyProtocol limits the key in use to one protocol's endpoint; empty
-	// means the key works on every endpoint (see keys.go).
-	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
+	// Affinity is whether a conversation stays on the key or account that
+	// answered it last, so the vendor's prompt cache can hit: "" automatic,
+	// "session" the whole conversation, "turn" only within one user turn,
+	// "off" never (see groups.go).
+	Affinity string `json:"affinity,omitempty"`
 }
 
 type file struct {
 	Providers []Provider `json:"providers"`
+	// Groups are the routing groups the user made or changed, and
+	// HiddenGroups the automatic ones the user removed (see groups.go).
+	Groups       []Group  `json:"groups,omitempty"`
+	HiddenGroups []string `json:"hiddenGroups,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -140,7 +172,8 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
+		a.Models, a.Fallback, a.Routing = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing
+		a.Affinity = picks[a.ID].Affinity
 		out = append(out, a)
 	}
 	return out
@@ -189,6 +222,7 @@ func Slug(name string) string {
 // Save adds or replaces a provider.
 func Save(p Provider) error {
 	p = normalize(p)
+	p.IconURL = "" // import-only: never stored
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
@@ -198,14 +232,21 @@ func Save(p Provider) error {
 	if p.ID == "magpie" {
 		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
+	if p.ID == "group" {
+		return errors.New(`"group" is how routing groups are named (group/<id>); pick another id`)
+	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity}
 	} else {
+		if slices.Contains(accountIDs, p.ID) && !stored(p.ID) {
+			// taken, it would hide that subscription once signed in
+			return fmt.Errorf("%q is the id of the %s subscription; pick another name", p.ID, p.ID)
+		}
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
@@ -222,6 +263,31 @@ func Save(p Provider) error {
 	}
 	f.Providers = append(f.Providers, p)
 	return store(f)
+}
+
+// accountIDs are the ids of the subscriptions magpie can list (account.go).
+var accountIDs = []string{"claude", "codex", "copilot", "cursor", "grok"}
+
+func stored(id string) bool {
+	for _, p := range load().Providers {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// ShowAccount brings back the signed-in account of an agent the user had
+// removed from magpie.
+func ShowAccount(id string) error {
+	f := load()
+	for i := range f.Providers {
+		if f.Providers[i].ID == id && f.Providers[i].Hidden {
+			f.Providers[i].Hidden = false
+			return store(f)
+		}
+	}
+	return nil
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -276,6 +342,15 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
+	if p.Routing == "usage" { // saved by older versions
+		p.Routing = LeastUsed
+	}
+	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
+		p.Routing = ""
+	}
+	if !validAffinity(p.Affinity) {
+		p.Affinity = ""
+	}
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
