@@ -361,6 +361,6 @@ func IsEventStream(contentType string, body []byte) bool {
 	if ct != "" {
 		return false
 	}
-	s := bytes.TrimLeft(body, " \t\r\n﻿")
+	s := bytes.TrimLeft(body, " \t\r\n\ufeff")
 	return bytes.HasPrefix(s, []byte("event:")) || bytes.HasPrefix(s, []byte("data:"))
 }
