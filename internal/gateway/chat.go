@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -112,53 +111,6 @@ func parseChat(body []byte) (*Request, error) {
 	return r, nil
 }
 
-// developerAsSystem rewrites the "developer" role to "system" in a Chat
-// Completions request body, for backends that only know "system". Every other
-// field is kept as it was, and a body without developer messages is returned
-// unchanged.
-func developerAsSystem(body []byte) []byte {
-	var top map[string]json.RawMessage
-	if json.Unmarshal(body, &top) != nil {
-		return body
-	}
-	var msgs []map[string]json.RawMessage
-	if json.Unmarshal(top["messages"], &msgs) != nil {
-		return body
-	}
-	changed := false
-	for _, m := range msgs {
-		var role string
-		if json.Unmarshal(m["role"], &role) == nil && role == "developer" {
-			m["role"] = json.RawMessage(`"system"`)
-			changed = true
-		}
-	}
-	if !changed {
-		return body
-	}
-	var err error
-	if top["messages"], err = marshalNoHTML(msgs); err != nil {
-		return body
-	}
-	out, err := marshalNoHTML(top)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
-// marshalNoHTML is json.Marshal without escaping <, > and &, and without the
-// trailing newline an Encoder adds.
-func marshalNoHTML(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
-}
-
 // chatParts reads a message's content: a string, or an array of parts.
 func chatParts(raw json.RawMessage) []Part {
 	var s string
@@ -206,8 +158,19 @@ func dataURL(p Part) string {
 	return "data:" + p.MediaType + ";base64," + p.Data
 }
 
+// reasoningModel is a model that rejects temperature and top_p.
+func reasoningModel(model string) bool {
+	m := strings.ToLower(model)
+	for _, pre := range []string{"gpt-5", "o1", "o3", "o4", "codex"} {
+		if strings.HasPrefix(m, pre) || strings.Contains(m, "/"+pre) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildChat renders a request for a Chat Completions upstream.
-func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
+func buildChat(r *Request, model, host string) []byte {
 	var msgs []map[string]any
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
@@ -286,7 +249,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			out["max_tokens"] = r.MaxTokens
 		}
 	}
-	if !rejectTemp {
+	if !reasoningModel(model) {
 		if r.Temp != nil {
 			out["temperature"] = *r.Temp
 		}
