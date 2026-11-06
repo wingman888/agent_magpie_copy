@@ -34,9 +34,9 @@ func TestCodexVersionAskedIsTheNewest(t *testing.T) {
 		t.Fatalf("no CLI, cache 0.154.0: asked %q", got)
 	}
 
-	withCodexVersions(t, "codex-cli 0.9.0", "0.10.0")
-	if got := codexVersionAsked(); got != "0.10.0" {
-		t.Fatalf("numbers compare as numbers: asked %q", got)
+	// numbers compare as numbers, not as text: 0.10.0 is newer than 0.9.0
+	if got := latestVersion("codex-cli 0.9.0", "0.10.0"); got != "0.10.0" {
+		t.Fatalf("0.10.0 vs 0.9.0: %q", got)
 	}
 
 	withCodexVersions(t, "", "")
