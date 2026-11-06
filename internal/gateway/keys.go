@@ -103,25 +103,36 @@ type keyTry struct {
 	cooling bool // failed recently; tried after the others
 }
 
-// relayKeys sends a request to a provider that has API keys, trying them in
-// turn. A key that answers with a retryable error is passed over and the next
-// one tried, as long as nothing has reached the client yet. The last key's
-// reply goes back as it is. call records the outcome, including which keys
-// failed on the way.
+// relayKeys sends a request to a provider that has API keys and writes the
+// reply to w. It is tryKeys with the held reply released at the end, for a
+// caller that has no other provider to fall back on.
 func (s *Server) relayKeys(w http.ResponseWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, call *Call) {
+	hw := newHeldWriter(w)
+	failed, status, msg := s.tryKeys(hw, r, p, from, model, body, call)
+	hw.release()
+	call.Status, call.Error = status, msg
+	if len(failed) > 0 {
+		call.Fallback = strings.Join(failed, ", ")
+	}
+}
+
+// tryKeys sends a request to a provider that has API keys, trying them in
+// turn. A key that answers with a retryable error is passed over and the next
+// one tried, as long as nothing has reached the client yet. The reply goes
+// through hw, which holds back an error: when the last key fails retryably
+// the held error is left for the caller, which may still move on to another
+// provider. failed names the keys that failed on the way, and status and msg
+// are the final attempt's outcome.
+func (s *Server) tryKeys(hw *heldWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, call *Call) (failed []string, status int, msg string) {
 	tries := s.keyTries(p, from, model)
 	if len(tries) == 0 {
-		call.Status, call.Error = 502, p.Name+" has no key for a protocol it serves"
-		writeError(w, from, call.Status, call.Error)
-		return
+		msg = p.Name + " has no key for a protocol it serves"
+		writeError(hw, from, 502, msg)
+		return nil, 502, msg
 	}
-	hw := newHeldWriter(w)
-	var failed []string
 	for i, t := range tries {
 		hw.reset()
 		call.To = t.proto
-		var status int
-		var msg string
 		if t.proto == from {
 			status, msg = s.passthrough(hw, r, t.p, from, model, body, &call.Usage)
 		} else {
@@ -134,13 +145,9 @@ func (s *Server) relayKeys(w http.ResponseWriter, r *http.Request, p provider.Pr
 				continue
 			}
 		}
-		hw.release()
-		call.Status, call.Error = status, msg
 		break
 	}
-	if len(failed) > 0 {
-		call.Fallback = strings.Join(failed, ", ")
-	}
+	return failed, status, msg
 }
 
 // keyTries orders the attempts for a request: the keys that can reach an

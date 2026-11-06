@@ -356,47 +356,73 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	// A Claude Code subscription must run through the genuine binary. Direct
-	// OAuth HTTP requests are content-classified as third-party traffic when
-	// they carry another agent's harness (Pi, OpenCode, and others).
-	if p.Account != nil && p.Account.Agent == "claude" {
-		call.To = provider.Anthropic
-		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
-		call.Millis = time.Since(start).Milliseconds()
-		finishCapture()
-		s.record(call)
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-		return
-	}
-	if p.Account == nil {
-		// API keys: tried in turn, a retryable failure moves on to the next
-		s.relayKeys(w, r, p, from, model, body, &call)
-	} else if relay := p.Base(from) != "" && (!p.Account.Stream || streamOf(body)); relay {
-		// a backend that only streams gets a non-streaming request translated
-		// (the provider is always streamed on that path) rather than relayed
-		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
-	} else {
-		to := p.Speaks()
-		if len(to) == 0 {
-			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
-			writeError(w, from, call.Status, call.Error)
-			call.Millis = time.Since(start).Milliseconds()
-			finishCapture()
-			s.record(call)
-			return
+	// The reply goes through hw: an error is held back until it is known to be
+	// the last word, so the next candidate can answer without the client
+	// having seen the failure.
+	hw := newHeldWriter(w)
+	var failed []string
+	var last candidate
+	var status int
+	var msg string
+	cands := s.candidates(p, model)
+	for i, c := range cands {
+		hw.reset()
+		labels, st, m := s.attempt(hw, r, c.p, from, c.model, body, &call)
+		failed = append(failed, labels...)
+		last, status, msg = c, st, m
+		if hw.state != stateWithheld || !retryable(st, m) || i == len(cands)-1 {
+			break
 		}
-		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+		// another candidate may answer: this one rests, and its error is dropped
+		s.markProviderCooling(c.p.ID)
+		if len(labels) == 0 {
+			failed = append(failed, c.p.ID)
+		}
+	}
+	hw.release()
+	call.Provider = last.p.ID
+	call.Status, call.Error = status, msg
+	if len(failed) > 0 {
+		call.Fallback = strings.Join(failed, ", ")
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: last.p.ID, Model: last.model,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+}
+
+// attempt sends the request to one provider through hw. It returns the keys
+// that failed on the way (for keyed providers) and the final outcome. An error
+// reply is still held in hw; the caller decides whether it goes to the client.
+func (s *Server) attempt(hw *heldWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, call *Call) (failed []string, status int, msg string) {
+	switch {
+	case p.Account == nil:
+		// API keys: tried in turn, a retryable failure moves on to the next
+		return s.tryKeys(hw, r, p, from, model, body, call)
+	case p.Account.Agent == "claude":
+		// A Claude Code subscription must run through the genuine binary. Direct
+		// OAuth HTTP requests are content-classified as third-party traffic when
+		// they carry another agent's harness (Pi, OpenCode, and others).
+		call.To = provider.Anthropic
+		status, msg = s.serveClaudeSubscription(hw, r, from, model, body, &call.Usage)
+	case p.Base(from) != "" && (!p.Account.Stream || streamOf(body)):
+		// a backend that only streams gets a non-streaming request translated
+		// (the provider is always streamed on that path) rather than relayed
+		call.To = from
+		status, msg = s.passthrough(hw, r, p, from, model, body, &call.Usage)
+	default:
+		to := p.Speaks()
+		if len(to) == 0 {
+			status, msg = 502, p.Name+" has no endpoint configured"
+			writeError(hw, from, status, msg)
+			return nil, status, msg
+		}
+		call.To = to[0]
+		status, msg = s.translate(hw, r, p, from, to[0], model, body, &call.Usage)
+	}
+	return nil, status, msg
 }
 
 // forward sends a request to the provider.
