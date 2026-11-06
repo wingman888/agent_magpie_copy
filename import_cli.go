@@ -82,7 +82,7 @@ func runImport(args []string, in io.Reader, out io.Writer, interactive bool) err
 		}
 	}
 
-	saved, err := saveProvider(p)
+	saved, err := saveProviderWith(p, provider.SaveImported)
 	if err != nil {
 		return err
 	}

@@ -147,6 +147,19 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
+	return save(p, false)
+}
+
+// SaveImported is Save for a provider taken from an import link: the link may
+// leave the key out, and the user adds it afterwards with `magpie provider key`.
+// Everything else is checked exactly as in Save.
+func SaveImported(p Provider) error {
+	return save(p, true)
+}
+
+// save is the shared body of Save and SaveImported. allowNoKey only relaxes the
+// empty-key check for non-local endpoints.
+func save(p Provider, allowNoKey bool) error {
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -168,7 +181,7 @@ func Save(p Provider) error {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
-		if p.Key == "" && !keyOptional(p) {
+		if p.Key == "" && !allowNoKey && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}

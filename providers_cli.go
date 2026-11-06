@@ -284,7 +284,13 @@ func addProvider(rest []string) error {
 // saveProvider saves p, reports it and fetches the vendor's model list. It is
 // the save step of `magpie provider add`, shared with `magpie import`.
 func saveProvider(p provider.Provider) (*provider.Provider, error) {
-	if err := provider.Save(p); err != nil {
+	return saveProviderWith(p, provider.Save)
+}
+
+// saveProviderWith is saveProvider with the storage function injected; import
+// passes provider.SaveImported so that a link may omit the key.
+func saveProviderWith(p provider.Provider, save func(provider.Provider) error) (*provider.Provider, error) {
+	if err := save(p); err != nil {
 		return nil, err
 	}
 	saved, err := provider.Find(p.ID)
