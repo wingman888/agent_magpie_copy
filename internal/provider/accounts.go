@@ -393,12 +393,14 @@ func SwitchLogin(agent, user string) error {
 	out := -1
 	var outOn bool
 	if signedIn {
-		if b, ok := readLogin(id); ok {
-			if j := storedIndex(&f, id, cur); j >= 0 {
-				out, outOn = j, f.Accounts[j].On
-				f.Accounts[j].Creds, f.Accounts[j].On = b, target.On
-			}
+		// refuse rather than overwrite tokens magpie cannot keep
+		b, ok := readLogin(id)
+		j := storedIndex(&f, id, cur)
+		if !ok || j < 0 {
+			return fmt.Errorf("cannot read the %s account signed in now; sign in again before switching", id)
 		}
+		out, outOn = j, f.Accounts[j].On
+		f.Accounts[j].Creds, f.Accounts[j].On = b, target.On
 	}
 	if err := storeAccounts(f); err != nil {
 		return err
