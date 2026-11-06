@@ -235,6 +235,7 @@ func TestKeysMadeForOneProtocol(t *testing.T) {
 	restingUntil.m = map[string]time.Time{}
 	restingUntil.Unlock()
 	var seen []string
+	var rejectOAI bool // set: the OpenAI-made key is out of quota
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		key := r.Header.Get("x-api-key")
@@ -242,6 +243,11 @@ func TestKeysMadeForOneProtocol(t *testing.T) {
 			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		}
 		seen = append(seen, r.URL.Path+" "+key)
+		if rejectOAI && key == "k-oai" {
+			w.WriteHeader(429)
+			io.WriteString(w, `{"error":{"message":"rate limited"}}`)
+			return
+		}
 		if (r.URL.Path == "/v1/messages") != (key == "k-ant") {
 			w.WriteHeader(401)
 			io.WriteString(w, `{"error":{"message":"this key is for another protocol"}}`)
@@ -288,8 +294,9 @@ func TestKeysMadeForOneProtocol(t *testing.T) {
 	for _, x := range []struct{ path, body, want string }{
 		// Claude Code asking for Claude: the Anthropic key, relayed as-is
 		{"/v1/messages", `{"model":"relay/claude-opus-4-8","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
-		// an OpenAI agent asking for Claude: translated, to the Anthropic key
-		{"/v1/chat/completions", `{"model":"relay/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`, "/v1/messages k-ant"},
+		// an OpenAI agent asking for Claude: the key made for its protocol is the
+		// pool (the request's protocol decides, not the model's); the Anthropic key is set aside
+		{"/v1/chat/completions", `{"model":"relay/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
 		// Claude Code asking for GPT: translated, to the OpenAI key
 		{"/v1/messages", `{"model":"relay/gpt-5.5","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions k-oai"},
 		// a model only the Anthropic key lists goes there, whatever the agent spoke
@@ -300,6 +307,17 @@ func TestKeysMadeForOneProtocol(t *testing.T) {
 		if code != 200 || len(seen) != 1 || seen[0] != x.want {
 			t.Fatalf("%s %s: %d %s, upstream saw %v", x.path, x.body, code, body, seen)
 		}
+	}
+	// the OpenAI-made key is out of quota: the Anthropic key set aside answers,
+	// translated, after the pool
+	rejectOAI = true
+	seen = nil
+	code, body := post(t, "/v1/chat/completions", `{"model":"relay/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`)
+	restingUntil.Lock()
+	restingUntil.m = map[string]time.Time{}
+	restingUntil.Unlock()
+	if code != 200 || len(seen) != 2 || seen[0] != "/v1/chat/completions k-oai" || seen[1] != "/v1/messages k-ant" {
+		t.Fatalf("pool failing: %d %s, upstream saw %v", code, body, seen)
 	}
 	if got := modelFamily("openrouter/openai/o3-mini"); got != provider.Chat {
 		t.Errorf("o3: %q", got)

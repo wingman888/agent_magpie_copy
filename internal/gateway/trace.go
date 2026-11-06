@@ -21,23 +21,22 @@ const traceKeep = 60
 
 // Route is one request's way through routing.
 type Route struct {
-	Seq      int64     `json:"seq"` // the trace's count when it last changed
-	ID       int64     `json:"id"`
-	Time     time.Time `json:"time"`
-	Agent    string    `json:"agent"`
-	Model    string    `json:"model"`    // as the agent asked
-	Provider string    `json:"provider"` // the provider the model resolved to
-	Order    []Weighed `json:"order"`    // who was to try it, first first
-	Left     []Weighed `json:"left,omitempty"`
-	Tries    []Try     `json:"tries"`
-	Done     bool      `json:"done"`
-	Status   int       `json:"status,omitempty"`
-	Error    string    `json:"error,omitempty"`
-	Millis   int64     `json:"ms,omitempty"`
-	Tokens   int       `json:"tokens,omitempty"`
-
-	Group    *GroupTrace    `json:"group,omitempty"`    // the routing group the model named, if any
-	Affinity *AffinityTrace `json:"affinity,omitempty"` // how the conversation's affinity went, when there was a choice
+	Seq      int64          `json:"seq"` // the trace's count when it last changed
+	ID       int64          `json:"id"`
+	Time     time.Time      `json:"time"`
+	Agent    string         `json:"agent"`
+	Model    string         `json:"model"`    // as the agent asked
+	Provider string         `json:"provider"` // the provider the model resolved to
+	Order    []Weighed      `json:"order"`    // who was to try it, first first
+	Left     []Weighed      `json:"left,omitempty"`
+	Tries    []Try          `json:"tries"`
+	Done     bool           `json:"done"`
+	Status   int            `json:"status,omitempty"`
+	Error    string         `json:"error,omitempty"`
+	Millis   int64          `json:"ms,omitempty"`
+	Tokens   int            `json:"tokens,omitempty"`
+	Group    *GroupTrace    `json:"group,omitempty"`    // the routing group the agent asked for
+	Affinity *AffinityTrace `json:"affinity,omitempty"` // whether the conversation stayed on its last key
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -52,7 +51,7 @@ type Weighed struct {
 	Agent    string            `json:"agent,omitempty"`
 	Plan     string            `json:"plan,omitempty"`
 	Model    string            `json:"model"`
-	Routing  string            `json:"routing"` // its provider's: "", order, rotate, least-used
+	Routing  string            `json:"routing"` // its provider's: "", order, rotate, usage
 	Fallback bool              `json:"fallback,omitempty"`
 	Shared   bool              `json:"shared,omitempty"` // its provider has more than one on
 	Known    bool              `json:"known,omitempty"`  // the vendor said what the account has left
@@ -64,7 +63,7 @@ type Weighed struct {
 	Speaks   provider.Protocol `json:"speaks,omitempty"` // a key made for one protocol only
 	Rest     *Rest             `json:"rest,omitempty"`   // resting after a failure, when the request came
 	Unlisted bool              `json:"unlisted,omitempty"`
-	Aside    bool              `json:"aside,omitempty"` // a key made for another protocol: tried only after those that suit the request
+	Aside    bool              `json:"aside,omitempty"` // a key made for another protocol, tried only after the pool
 }
 
 // Try is one candidate trying the request.
@@ -81,6 +80,8 @@ type Try struct {
 
 type planned struct {
 	order, left []Weighed
+	group       *GroupTrace
+	affinity    *AffinityTrace
 }
 
 func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
@@ -94,7 +95,7 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 		if w.Who == "" {
 			w.Who = provider.Mask(c.p.Key)
 		}
-		w.Fit, w.Speaks = keyFit(c, from), c.p.KeyProtocol
+		w.Fit, w.Speaks = keyFit(c.p, c.model, from), c.p.KeyProtocol
 	default:
 		w.Kind = "provider"
 	}
