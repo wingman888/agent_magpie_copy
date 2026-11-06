@@ -120,7 +120,8 @@ func TestImportReplaceNotice(t *testing.T) {
 func TestImportKeylessPointsAtProviderKey(t *testing.T) {
 	isolate(t)
 	var out bytes.Buffer
-	link := "magpie://import?name=Keyless&chat=http://127.0.0.1:1/v1"
+	// a non-local host: local servers are ready without a key, so they get no hint
+	link := "magpie://import?name=Keyless&chat=https://relay.invalid/v1"
 	if err := importLink([]string{"-y", link}, strings.NewReader(""), &out, false); err != nil {
 		t.Fatal(err)
 	}
