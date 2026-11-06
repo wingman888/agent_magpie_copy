@@ -316,14 +316,24 @@ func restOf(id string) (Rest, bool) {
 // status code doesn't: some answer 400 or 403 with it.
 var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
 
+// modelGone matches a reply saying the model is not there for the account:
+// unknown, unsupported, not enabled, or not allowed to it.
+var modelGone = regexp.MustCompile(`(?i)model[ _]?not[ _]?found|model.{0,60}(not (found|exist|exists|supported|available|accessible|enabled|activated|allowed)|does not exist|doesn'?t exist|unsupported|no access|not have access|not authori[sz]ed|permission|unknown|invalid model)|unsupported[ _]model|模型.{0,12}(不存在|不支持|无权|未开通|未启用|不可用|不可访问)|未开通|无权访问`)
+
+// contextTooLong matches a reply saying the request is too long for the
+// model: the request's own fault, whatever quota words come with it.
+var contextTooLong = regexp.MustCompile(`(?i)context.?(length|window|size)|too long|maximum context|max.?tokens|too many tokens|token.?limit|上下文|超长|超出.{0,6}长度`)
+
 // retryable says whether another provider may do better with a request
-// that failed this way.
+// that failed this way: a status that blames the provider, or a 400 or 422
+// that names a spent quota, a rate limit, or a model the account lacks. Any
+// other 400 is the request's own fault and goes to the agent.
 func retryable(status int, body []byte) bool {
 	switch {
-	case status == 402, status == 408, status == 429, status >= 500:
+	case status == 401, status == 402, status == 403, status == 404, status == 408, status == 429, status >= 500:
 		return true
-	case status == 400, status == 401, status == 403:
-		return quotaWords.Match(body)
+	case status == 400, status == 422:
+		return !contextTooLong.Match(body) && (quotaWords.Match(body) || modelGone.Match(body) || endpointRefused(status, body))
 	}
 	return false
 }

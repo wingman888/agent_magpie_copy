@@ -872,14 +872,7 @@ func copilotProvider(app copilotApp, plan string) Provider {
 			req.Header.Set(k, v)
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
-		// a turn the user typed is billed as one; a tool's reply is not
-		req.Header.Set("X-Initiator", "agent")
-		if lastRole(body) == "user" {
-			req.Header.Set("X-Initiator", "user")
-		}
-		if bytes.Contains(body, []byte(`"image_url"`)) {
-			req.Header.Set("Copilot-Vision-Request", "true")
-		}
+		copilotHeadersFor(req.Header, protoOfPath(req.URL.Path), body)
 		return nil
 	}
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
@@ -889,7 +882,7 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
-	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
+	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
 }
 
 // lastRole is the role of the last message in a chat request.
@@ -975,6 +968,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 			Policy *struct {
 				State string `json:"state"`
 			} `json:"policy"`
+			SupportedEndpoints []string `json:"supported_endpoints"`
 		} `json:"data"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(b, &v) != nil {
@@ -989,7 +983,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		if !m.Picker && (m.Policy == nil || m.Policy.State != "enabled") {
 			continue
 		}
-		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts})
+		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: copilotAPIs(m.SupportedEndpoints)})
 	}
 	if len(out) == 0 {
 		return nil, errors.New("Copilot lists no chat model for this account")
