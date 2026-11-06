@@ -65,7 +65,13 @@ func SaveLive(provider, base string, models []Model) error {
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, nil)
+}
+
+// FetchWith is Fetch that also sends extra request headers, under their
+// names as given, after the key headers (an extra with the same name wins).
+func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -92,7 +98,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[st
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOneWith(ctx, u, key, anthropic, extra)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -109,7 +115,29 @@ func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[st
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+// SetHeaders sets extra headers on h after the auth headers, so a user's
+// value wins over a same-named one. Names are written exactly as given: an
+// http.Header Set would canonicalise X-ORG-id to X-Org-Id. A differently
+// cased copy of a name the user set is dropped, so only the user's value goes
+// upstream.
+func SetHeaders(h http.Header, extra map[string]string) {
+	for name := range extra {
+		for k := range h {
+			if k != name && strings.EqualFold(k, name) {
+				delete(h, k)
+			}
+		}
+	}
+	for name, v := range extra {
+		h[name] = []string{v}
+	}
+}
+
+func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
+	return fetchOneWith(ctx, url, key, anthropic, nil)
+}
+
+func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -125,11 +153,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	// The user's own headers, after the defaults so a private auth scheme
-	// wins. Written directly so the name keeps the exact case the user typed.
-	for k, v := range headers {
-		req.Header[k] = []string{v}
-	}
+	SetHeaders(req.Header, extra)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
