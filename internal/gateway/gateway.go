@@ -75,6 +75,9 @@ type Call struct {
 	// Fallback names the keys (and providers) that failed before this call
 	// was answered; empty when the first try worked.
 	Fallback string `json:"fallback,omitempty"`
+	// Key names the API key the answering attempt was sent with: its name,
+	// or its fingerprint when it has none. Empty for signed-in accounts.
+	Key string `json:"key,omitempty"`
 }
 
 // Server is the gateway.
@@ -367,6 +370,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	cands := s.candidates(p, model)
 	for i, c := range cands {
 		hw.reset()
+		call.Key = ""
 		labels, st, m, retry := s.attempt(hw, r, c.p, from, c.model, body, &call)
 		failed = append(failed, labels...)
 		last, status, msg = c, st, m
