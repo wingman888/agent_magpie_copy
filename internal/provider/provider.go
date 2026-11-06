@@ -52,20 +52,13 @@ type Provider struct {
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
-	// Account is set on a provider that borrows another agent's sign-in
-	// (Codex, Copilot). Such a provider holds no credentials; see account.go.
+	// Account is set on providers that borrow another agent's sign-in (see
+	// account.go). Such providers never store credentials; Key stays empty.
 	Account *Account `json:"account,omitempty"`
 }
 
 type file struct {
 	Providers []Provider `json:"providers"`
-}
-
-// selection is how a stored account provider is written: only its id and the
-// models the user chose, never an address, key, or token.
-type selection struct {
-	ID     string   `json:"id"`
-	Models []string `json:"models,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -77,18 +70,19 @@ func Path() string {
 	return filepath.Join(home, ".config", "dial", "providers.json")
 }
 
-// load reads the stored providers. An "account" field found on disk is ignored:
-// whether a provider borrows a sign-in is decided by the agent's own login
-// (see accountProviders), never by what the file says.
 func load() file {
 	var f file
 	if b, err := os.ReadFile(Path()); err == nil {
 		json.Unmarshal(b, &f)
 	}
-	for i := range f.Providers {
-		f.Providers[i].Account = nil
-	}
 	return f
+}
+
+// pick is what dial keeps for an agent account: its id and the models chosen.
+// Nothing else about the account is ever written.
+type pick struct {
+	ID     string   `json:"id"`
+	Models []string `json:"models,omitempty"`
 }
 
 func store(f file) error {
@@ -96,21 +90,17 @@ func store(f file) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	out := struct {
-		Providers []any `json:"providers"`
-	}{}
-	if f.Providers != nil {
-		out.Providers = make([]any, 0, len(f.Providers))
-	}
+	list := make([]any, 0, len(f.Providers))
 	for _, q := range f.Providers {
-		q.Account = nil // never written: identity comes from the agent's login
-		if isAccountID(q.ID) && !hasAddress(q) {
-			out.Providers = append(out.Providers, selection{ID: q.ID, Models: q.Models})
-		} else {
-			out.Providers = append(out.Providers, q)
+		if q.Account != nil || isPick(q) {
+			list = append(list, pick{ID: q.ID, Models: q.Models})
+			continue
 		}
+		list = append(list, q)
 	}
-	b, err := json.MarshalIndent(out, "", "  ")
+	b, err := json.MarshalIndent(struct {
+		Providers []any `json:"providers"`
+	}{list}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -121,18 +111,54 @@ func store(f file) error {
 }
 
 // All lists the configured providers in the order they were added, then the
-// account providers whose sign-in is present.
+// agent accounts dial offers. A stored model pick under an agent's id is not a
+// provider on its own: it shows only while that agent is still signed in.
 func All() []Provider {
-	f := load()
 	var out []Provider
-	for _, p := range f.Providers {
-		p = normalize(p)
-		if isAccountID(p.ID) && !hasAddress(p) {
-			continue // a model selection for an account; merged in below
+	for _, p := range load().Providers {
+		if isPick(p) {
+			continue
 		}
-		out = append(out, p)
+		out = append(out, normalize(p))
 	}
-	return append(out, accountsOf(f, userBuilt(f))...)
+	return append(out, Accounts()...)
+}
+
+// accountID reports whether an id is reserved for an agent account.
+func accountID(id string) bool { return id == "codex" || id == "copilot" }
+
+// signedIn reports whether the agent behind an account id is signed in.
+func signedIn(id string) bool {
+	for _, p := range Accounts() {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// isPick is a stored record under an agent account's id that has no address of
+// its own: only the models the user chose.
+func isPick(p Provider) bool {
+	return accountID(p.ID) && p.Chat == "" && p.Responses == "" && p.Anthropic == ""
+}
+
+// savePicks stores the model choice for an agent account. Its address, key and
+// name are never kept; they come from the agent. A user's own provider under
+// the same id keeps its address and only takes the new picks.
+func savePicks(id string, models []string) error {
+	if !accountID(id) {
+		return fmt.Errorf("%q is not an agent account", id)
+	}
+	f := load()
+	for i := range f.Providers {
+		if f.Providers[i].ID == id {
+			f.Providers[i].Models = cleanList(models)
+			return store(f)
+		}
+	}
+	f.Providers = append(f.Providers, Provider{ID: id, Models: cleanList(models)})
+	return store(f)
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -156,6 +182,16 @@ func Slug(name string) string {
 // Save adds or replaces a provider.
 func Save(p Provider) error {
 	p = normalize(p)
+	// An account provider (as Find returns it) saves its picks only: its address
+	// and key are ignored. A bare record under an agent's id is picks too, and so
+	// is anything saved under the id of a signed-in account when the user has no
+	// provider of their own under that id: the id belongs to the agent then.
+	if p.Account != nil || isPick(p) || (accountID(p.ID) && !ownProvider(p.ID) && signedIn(p.ID)) {
+		if p.ID == "" && p.Account != nil {
+			p.ID = p.Account.Agent
+		}
+		return savePicks(p.ID, p.Models)
+	}
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
@@ -167,12 +203,6 @@ func Save(p Provider) error {
 	}
 	if p.Name == "" {
 		p.Name = p.ID
-	}
-	if isAccountID(p.ID) {
-		done, err := saveAccount(p)
-		if done || err != nil {
-			return err
-		}
 	}
 	if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 		return errors.New("a provider needs a base URL")
@@ -191,56 +221,12 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// saveAccount stores the model selection for an account provider. The
-// address, key and anything else passed in are dropped. It reports false when
-// the id belongs to the user's own provider, which is saved as usual.
-func saveAccount(p Provider) (bool, error) {
-	f := load()
-	idx := -1
-	for i, q := range f.Providers {
-		if q.ID == p.ID {
-			if hasAddress(q) {
-				return false, nil
-			}
-			idx = i
-		}
-	}
-	if !accountSignedIn(p.ID) {
-		if hasAddress(p) {
-			return false, nil
-		}
-		return true, signedOutErr(p.ID)
-	}
-	rec := Provider{ID: p.ID, Models: cleanList(p.Models)}
-	if idx >= 0 {
-		f.Providers[idx] = rec
-	} else {
-		f.Providers = append(f.Providers, rec)
-	}
-	return true, store(f)
-}
-
-// Delete removes a provider. For an account provider that only clears the
-// model selection; the provider stays, since signing out is the agent's job.
+// Delete removes a provider. For an agent account it only clears the models
+// chosen: the account stays offered while the agent is signed in.
 func Delete(id string) error {
 	f := load()
-	if isAccountID(id) && !userBuilt(f)[id] {
-		var keep []Provider
-		for _, p := range f.Providers {
-			if p.ID != id {
-				keep = append(keep, p)
-			}
-		}
-		removed := len(keep) != len(f.Providers)
-		if removed {
-			f.Providers = keep
-			if err := store(f); err != nil {
-				return err
-			}
-		}
-		if removed || accountSignedIn(id) {
-			return nil
-		}
+	if accountID(id) && !ownProvider(id) {
+		return deletePicks(f, id)
 	}
 	keep := f.Providers[:0]
 	found := false
@@ -258,6 +244,29 @@ func Delete(id string) error {
 	return store(f)
 }
 
+// deletePicks clears the model choice of an agent account. A record left
+// behind by a sign-out is dropped entirely, so nothing half-formed remains.
+func deletePicks(f file, id string) error {
+	in := signedIn(id)
+	at := -1
+	for i := range f.Providers {
+		if f.Providers[i].ID == id {
+			at = i
+		}
+	}
+	switch {
+	case in && at >= 0:
+		f.Providers[at].Models = nil
+		return store(f)
+	case in:
+		return nil
+	case at >= 0:
+		f.Providers = append(f.Providers[:at], f.Providers[at+1:]...)
+		return store(f)
+	}
+	return fmt.Errorf("no provider %q", id)
+}
+
 // keyOptional is true for local servers, which usually have no key.
 func keyOptional(p Provider) bool {
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
@@ -267,11 +276,7 @@ func keyOptional(p Provider) bool {
 	return strings.HasPrefix(h, "localhost") || strings.HasPrefix(h, "127.0.0.1") || strings.HasPrefix(h, "0.0.0.0")
 }
 
-// normalize tidies a provider as the user typed or stored it. Account is always
-// cleared here: a request body may name any account, but only the agent's
-// sign-in decides which account providers exist.
 func normalize(p Provider) Provider {
-	p.Account = nil
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
@@ -333,16 +338,6 @@ func (p Provider) Base(proto Protocol) string {
 
 // Speaks lists the protocols the vendor serves natively, preferred first.
 func (p Provider) Speaks() []Protocol {
-	if p.Account != nil {
-		// An account speaks the one protocol its agent's backend takes.
-		switch p.Account.Agent {
-		case codexID:
-			return []Protocol{Responses}
-		case copilotID:
-			return []Protocol{Chat}
-		}
-		return nil
-	}
 	var out []Protocol
 	for _, pr := range Protocols {
 		if p.Base(pr) != "" {
@@ -383,9 +378,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool {
-	if p.Account != nil {
-		return true // the agent's own sign-in is the key
-	}
-	return p.Key != "" || keyOptional(p)
-}
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
