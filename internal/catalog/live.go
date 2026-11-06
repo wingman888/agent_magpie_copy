@@ -14,7 +14,7 @@ import (
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
-// models.dev lags and keeps legacy names around. magpie asks the vendor when
+// models.dev lags and keeps legacy names around. dial asks the vendor when
 // it has a key, remembers the answer next to the models.dev cache, and lets
 // the catalog fill in display names and reasoning levels.
 
@@ -61,17 +61,8 @@ func SaveLive(provider, base string, models []Model) error {
 
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
-// around it. The result keeps the server's order. anthropic sends the
-// Anthropic version header, which the official API requires but which a
-// dual-protocol relay like OpenRouter reads as a request for its
-// Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with extra request headers (a custom provider's own),
-// written exactly as named.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+// around it. The result keeps the server's order.
+func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -98,7 +89,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +106,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -123,21 +114,11 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "magpie")
+	req.Header.Set("User-Agent", "dial")
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("x-api-key", key)
-	}
-	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
-	}
-	for k, v := range headers {
-		for have := range req.Header {
-			if strings.EqualFold(have, k) {
-				delete(req.Header, have)
-			}
-		}
-		req.Header[k] = []string{v}
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -184,72 +165,21 @@ type liveModel struct {
 }
 
 // Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order. A "vendor/"
-// prefixed id (a relay's "deepseek/deepseek-chat") matches by the part after
-// the last slash; an id that matches nothing is kept as it is.
+// catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
-	byID := index(known)
+	byID := make(map[string]Model, len(known))
+	for _, m := range known {
+		byID[m.ID] = m
+	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := lookupIn(byID, m.ID); ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
 			m.Efforts, m.Released, m.Provider = k.Efforts, k.Released, k.Provider
-			if k.Temperature != nil {
-				m.Temperature = k.Temperature
-			}
 		}
 		out = append(out, m)
 	}
 	return out
-}
-
-// ProviderList is Provider over a comma-separated list of models.dev ids
-// ("openai,deepseek"), concatenated in the order given.
-func ProviderList(ids string) []Model {
-	var out []Model
-	for _, id := range strings.Split(ids, ",") {
-		if id = strings.TrimSpace(id); id != "" {
-			out = append(out, Provider(id)...)
-		}
-	}
-	return out
-}
-
-// Lookup finds a model by id across the given models.dev catalogs, in order.
-// The id is matched by the part after its last "/", so "deepseek/deepseek-chat"
-// finds "deepseek-chat"; a full id is tried too, for catalogs whose own ids
-// carry a vendor prefix. Nothing matched gives false.
-func Lookup(catalogs []string, id string) (Model, bool) {
-	var all []Model
-	for _, c := range catalogs {
-		all = append(all, Provider(strings.TrimSpace(c))...)
-	}
-	return lookupIn(index(all), id)
-}
-
-// index maps each model id to its first entry in list order.
-func index(ms []Model) map[string]Model {
-	byID := make(map[string]Model, len(ms))
-	for _, m := range ms {
-		if _, dup := byID[m.ID]; !dup {
-			byID[m.ID] = m
-		}
-	}
-	return byID
-}
-
-// lookupIn resolves an id in an index: the id as written first (as Decorate
-// always matched), then the part after the last "/".
-func lookupIn(byID map[string]Model, id string) (Model, bool) {
-	if m, ok := byID[id]; ok {
-		return m, true
-	}
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		if m, ok := byID[id[i+1:]]; ok {
-			return m, true
-		}
-	}
-	return Model{}, false
 }
