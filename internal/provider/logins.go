@@ -183,7 +183,7 @@ func currentLogin(agent string) (savedLogin, bool) {
 		if lr, ok := raw["last_refresh"]; ok {
 			creds["last_refresh"] = lr
 		}
-		b, _ := json.Marshal(creds)
+		blob, _ := json.Marshal(creds)
 		return savedLogin{Agent: agent, User: user,
 			Plan:  claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type"),
 			Creds: compactJSON(blob), current: true}, true
