@@ -270,13 +270,15 @@ func TestGeminiStreamWithoutContentType(t *testing.T) {
 		t.Fatalf("status %d: %s", code, body)
 	}
 	evs := events(body)
-	if len(evs) != 2 {
+	if len(evs) != 1 {
 		t.Fatalf("%d events: %s", len(evs), body)
 	}
-	if p := geminiParts(t, evs[0])[0]; p["text"] != "Hi" {
-		t.Errorf("first part: %v", p)
+	// the encoder holds a part until the stream ends, so the one event
+	// carries the text together with the finish reason and usage
+	last := evs[0]
+	if p := geminiParts(t, last)[0]; p["text"] != "Hi" {
+		t.Errorf("part: %v", p)
 	}
-	last := evs[1]
 	cand := last["candidates"].([]any)[0].(map[string]any)
 	if cand["finishReason"] != "STOP" {
 		t.Errorf("finish: %v", cand)
