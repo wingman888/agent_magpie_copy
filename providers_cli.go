@@ -35,6 +35,7 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
+		printExcluded()
 		return nil
 	}
 	uses := usesByProvider()
@@ -43,10 +44,12 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" {
+		if p.Preset == "" && p.Account == nil {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
+		case p.Account != nil:
+			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -71,7 +74,23 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
+	printExcluded()
 	return nil
+}
+
+// agentNames is how the CLI names an agent whose sign-in it talks about.
+var agentNames = map[string]string{"claude": "Claude Code", "codex": "Codex", "copilot": "Copilot"}
+
+// printExcluded ends the provider list with each sign-in dial sees but does
+// not offer, and why.
+func printExcluded() {
+	for _, ex := range provider.Excluded() {
+		name := agentNames[ex.Agent]
+		if name == "" {
+			name = ex.Agent
+		}
+		fmt.Printf("  %s is signed in but not offered: %s\n", name, ex.Why)
+	}
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -299,10 +318,17 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" {
+	if p.Preset == "" && p.Account == nil {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
+	if a := p.Account; a != nil {
+		acct := a.User
+		if a.Plan != "" {
+			acct += " · " + a.Plan
+		}
+		kv("account", acct+" · from "+a.Agent)
+	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
