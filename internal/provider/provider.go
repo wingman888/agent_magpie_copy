@@ -2,8 +2,11 @@
 // lives, which protocols it speaks, the API key the user typed in, and which
 // of its models should show up in the agents' pickers.
 //
-// Nothing here reads environment variables. A provider is exactly what the
-// user entered, kept in ~/.config/dial/providers.json (mode 0600).
+// A provider is what the user entered, kept in ~/.config/dial/providers.json
+// (mode 0600); XDG_CONFIG_HOME moves that directory. The exception is the
+// account providers (codex, copilot): they hold no key and keep only their
+// model picks here. Their logins stay in the agents' own files and are read
+// each time they are used (see account.go).
 package provider
 
 import (
@@ -51,9 +54,11 @@ type Provider struct {
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
-	// Account is set on providers that come from an agent's login (codex,
-	// copilot). It is computed on every read and never stored; see account.go.
-	Account *AccountInfo `json:"-"`
+	// Account providers only (see account.go): the agent whose login they come
+	// from, who is signed in, and the plan. Never written to the config.
+	Agent string `json:"-"`
+	Login string `json:"-"`
+	Plan  string `json:"-"`
 }
 
 type file struct {
@@ -78,49 +83,60 @@ func load() file {
 }
 
 func store(f file) error {
-	p := Path()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	recs := make([]any, 0, len(f.Providers))
+	for _, p := range f.Providers {
+		if isAccountID(p.ID) {
+			recs = append(recs, accountRecord{ID: p.ID, Models: p.Models})
+			continue
+		}
+		recs = append(recs, p)
+	}
+	path := Path()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
+	b, err := json.MarshalIndent(map[string]any{"providers": recs}, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	return os.Chmod(p, 0o600)
+	return os.Chmod(path, 0o600)
 }
 
 // All lists the configured providers in the order they were added, then the
-// agent logins that are signed in now. Claude is never listed. An account
-// whose agent is signed out is dropped, and its saved picks are ignored.
+// account providers of agents signed in that were not yet configured.
+// Account providers appear only while their agent is signed in.
 func All() []Provider {
-	accounts := signedInAccounts()
-	live := map[string]Provider{}
-	for _, a := range accounts {
-		live[a.ID] = a
+	f := load()
+	signedIn := map[string]Provider{}
+	for _, id := range accountOrder {
+		if p, ok := accountProviderFor(id); ok {
+			signedIn[id] = p
+		}
 	}
 	var out []Provider
-	for _, p := range load().Providers {
-		if p.ID == Claude {
+	seen := map[string]bool{}
+	for _, p := range f.Providers {
+		if p.ID == claudeID {
 			continue
 		}
-		if IsAccount(p.ID) {
-			a, ok := live[p.ID]
-			if !ok {
+		if isAccountID(p.ID) {
+			ap, ok := signedIn[p.ID]
+			if !ok || seen[p.ID] {
 				continue
 			}
-			a.Models = p.Models
-			out = append(out, normalize(a))
-			delete(live, p.ID)
+			seen[p.ID] = true
+			ap.Models = cleanList(p.Models)
+			out = append(out, ap)
 			continue
 		}
 		out = append(out, normalize(p))
 	}
-	for _, a := range accounts {
-		if _, ok := live[a.ID]; ok {
-			out = append(out, normalize(a))
+	for _, id := range accountOrder {
+		if ap, ok := signedIn[id]; ok && !seen[id] {
+			out = append(out, ap)
 		}
 	}
 	return out
@@ -150,17 +166,17 @@ func Save(p Provider) error {
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
-	if p.ID == Claude {
-		return errors.New(claudeRefusal)
-	}
-	if IsAccount(p.ID) {
-		return saveAccount(p)
-	}
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
 	if p.ID == "dial" {
 		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
+	}
+	if p.ID == claudeID {
+		return errors.New(claudeNotOffered)
+	}
+	if isAccountID(p.ID) {
+		return saveAccount(p.ID, p.Models)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
@@ -182,12 +198,10 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// Delete removes a provider. For an account provider that only clears the
-// user's picks: the login is never touched, and the provider stays listed
-// for as long as its agent is signed in.
+// Delete removes a provider.
 func Delete(id string) error {
-	if id == Claude {
-		return fmt.Errorf("no provider %q", id)
+	if isAccountID(id) {
+		return deleteAccount(id)
 	}
 	f := load()
 	keep := f.Providers[:0]
@@ -198,13 +212,6 @@ func Delete(id string) error {
 			continue
 		}
 		keep = append(keep, p)
-	}
-	if IsAccount(id) {
-		if !found && !signedIn(id) {
-			return fmt.Errorf("no provider %q", id)
-		}
-		f.Providers = keep
-		return store(f)
 	}
 	if !found {
 		return fmt.Errorf("no provider %q", id)
@@ -295,9 +302,6 @@ func (p Provider) Speaks() []Protocol {
 
 // Host is the vendor's API host, for display.
 func (p Provider) Host() string {
-	if p.Account != nil {
-		return p.Account.Host
-	}
 	for _, pr := range Protocols {
 		if u := p.Base(pr); u != "" {
 			return HostOf(u)
@@ -327,5 +331,4 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-// Account providers need no key: their agent's login is the credential.
-func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+func (p Provider) Ready() bool { return p.Agent != "" || p.Key != "" || keyOptional(p) }

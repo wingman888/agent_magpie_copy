@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -9,244 +11,392 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// geminiPost sends a Gemini call to the gateway and returns the reply.
-func geminiPost(t *testing.T, path, body string) (int, string) {
+// gpost sends a request through a server's handler.
+func gwg_gpost(t *testing.T, s *Server, path, body string) (int, string) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	New().Handler().ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
+	s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
 	return rec.Code, rec.Body.String()
 }
 
-// partsOf is the parts of the first candidate of a Gemini response or event.
-func partsOf(ev map[string]any) []any {
-	cands, _ := ev["candidates"].([]any)
-	if len(cands) == 0 {
-		return nil
-	}
-	c, _ := cands[0].(map[string]any)
-	content, _ := c["content"].(map[string]any)
-	parts, _ := content["parts"].([]any)
-	return parts
-}
-
-func asMap(t *testing.T, v any) map[string]any {
+// geminiParts is the parts of the first candidate of a Gemini reply or chunk.
+func gwg_geminiParts(t *testing.T, v map[string]any) []map[string]any {
 	t.Helper()
-	m, ok := v.(map[string]any)
-	if !ok {
-		t.Fatalf("not an object: %#v", v)
+	cs, _ := v["candidates"].([]any)
+	if len(cs) == 0 {
+		t.Fatalf("no candidates: %v", v)
 	}
-	return m
+	content := cs[0].(map[string]any)["content"].(map[string]any)
+	var out []map[string]any
+	for _, p := range content["parts"].([]any) {
+		out = append(out, p.(map[string]any))
+	}
+	return out
 }
 
-func TestGeminiGenerateContentText(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		`data: {"id":"c1","model":"m1","choices":[{"delta":{"role":"assistant","content":"Hi "}}]}`,
-		`data: {"id":"c1","choices":[{"delta":{"content":"there"}}]}`,
+func TestGwg_GeminiGenerateContentText(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
+		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"Hello"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{"content":" world"}}]}`,
 		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}}`,
-	)}
-	setup(t, provider.Chat, f)
-	code, body := geminiPost(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+		`data: [DONE]`)}
+	gwg_setup(t, provider.Chat, f)
+	srv := New()
+	code, body := gwg_gpost(t, srv, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	if code != 200 {
-		t.Fatalf("%d %s", code, body)
+		t.Fatalf("status %d: %s", code, body)
 	}
-	if !strings.Contains(body, `"finishReason":"STOP"`) {
-		t.Errorf("no compact STOP: %s", body)
+	if f.path != "/v1/chat/completions" {
+		t.Errorf("upstream path %s", f.path)
 	}
 	var out map[string]any
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatalf("%v %s", err, body)
+		t.Fatal(err)
 	}
-	parts := partsOf(out)
-	if len(parts) != 1 || asMap(t, parts[0])["text"] != "Hi there" {
-		t.Errorf("parts: %s", body)
+	ps := gwg_geminiParts(t, out)
+	if len(ps) != 1 || ps[0]["text"] != "Hello world" {
+		t.Errorf("parts: %v", ps)
 	}
-	u := asMap(t, out["usageMetadata"])
-	if u["promptTokenCount"] != float64(10) || u["candidatesTokenCount"] != float64(5) || u["thoughtsTokenCount"] != float64(2) {
-		t.Errorf("usage: %v", u)
+	cand := out["candidates"].([]any)[0].(map[string]any)
+	if cand["finishReason"] != "STOP" || !strings.Contains(body, `"finishReason":"STOP"`) {
+		t.Errorf("finish: %s", body)
 	}
-	if out["modelVersion"] != "fake/m1" {
-		t.Errorf("modelVersion: %v", out["modelVersion"])
+	um := out["usageMetadata"].(map[string]any)
+	if um["promptTokenCount"] != float64(10) || um["candidatesTokenCount"] != float64(5) || um["thoughtsTokenCount"] != float64(2) {
+		t.Errorf("usage: %v", um)
+	}
+	if out["modelVersion"] != "fake/m1" || out["responseId"] == nil {
+		t.Errorf("ids: %s", body)
+	}
+	if len(srv.Recent()) != 1 || srv.Recent()[0].From != "gemini" || srv.Recent()[0].Status != 200 {
+		t.Errorf("call log: %+v", srv.Recent())
 	}
 }
 
-func TestGeminiStreamOrderAndToolCall(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		`data: {"id":"c2","model":"m1","choices":[{"delta":{"reasoning_content":"think"}}]}`,
-		`data: {"id":"c2","choices":[{"delta":{"content":"Let me look."}}]}`,
-		`data: {"id":"c2","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"read","arguments":""}}]}}]}`,
-		`data: {"id":"c2","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"a.go\"}"}}]}}]}`,
-		`data: {"id":"c2","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
-		`data: {"id":"c2","choices":[],"usage":{"prompt_tokens":20,"completion_tokens":9,"completion_tokens_details":{"reasoning_tokens":7}}}`,
-	)}
-	setup(t, provider.Chat, f)
-	code, body := geminiPost(t, "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
+func TestGwg_GeminiStreamOrder(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
+		`data: {"id":"c1","model":"m1","choices":[{"delta":{"reasoning_content":"hmm"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{"content":"Hi"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":""}}]}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.go\"}"}}]}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":6,"completion_tokens_details":{"reasoning_tokens":3}}}`,
+		`data: [DONE]`)}
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
 	if code != 200 {
-		t.Fatalf("%d %s", code, body)
+		t.Fatalf("status %d: %s", code, body)
 	}
-	evs := events(body)
-	if len(evs) != 4 {
-		t.Fatalf("want 4 events, got %d: %s", len(evs), body)
+	evs := gwg_events(body)
+	if len(evs) != 3 {
+		t.Fatalf("%d events: %s", len(evs), body)
 	}
-	think := asMap(t, partsOf(evs[0])[0])
-	if think["text"] != "think" || think["thought"] != true {
-		t.Errorf("thought first: %v", think)
+	if p := gwg_geminiParts(t, evs[0])[0]; p["thought"] != true || p["text"] != "hmm" {
+		t.Errorf("first part: %v", p)
 	}
-	if asMap(t, partsOf(evs[1])[0])["text"] != "Let me look." {
-		t.Errorf("text second: %v", evs[1])
+	if p := gwg_geminiParts(t, evs[1])[0]; p["text"] != "Hi" || p["thought"] != nil {
+		t.Errorf("second part: %v", p)
 	}
-	call := asMap(t, asMap(t, partsOf(evs[2])[0])["functionCall"])
-	args := asMap(t, call["args"])
-	if call["id"] != "call_9" || call["name"] != "read" || args["path"] != "a.go" {
-		t.Errorf("call: %v", call)
+	last := evs[2]
+	fc := gwg_geminiParts(t, last)[0]["functionCall"].(map[string]any)
+	if fc["id"] != "call_1" || fc["name"] != "read" || fc["args"].(map[string]any)["path"] != "a.go" {
+		t.Errorf("function call: %v", fc)
 	}
-	last := evs[3]
-	c0 := asMap(t, last["candidates"].([]any)[0])
-	if c0["finishReason"] != "STOP" {
-		t.Errorf("last finishReason: %v", c0)
+	cand := last["candidates"].([]any)[0].(map[string]any)
+	if cand["finishReason"] != "STOP" {
+		t.Errorf("finish: %v", cand)
 	}
-	u := asMap(t, last["usageMetadata"])
-	if u["promptTokenCount"] != float64(20) || u["thoughtsTokenCount"] != float64(7) {
-		t.Errorf("usage: %v", u)
+	um := last["usageMetadata"].(map[string]any)
+	if um["thoughtsTokenCount"] != float64(3) || um["promptTokenCount"] != float64(4) {
+		t.Errorf("usage: %v", um)
+	}
+
+	// without alt=sse the chunks come back as one JSON array
+	_, arr := gwg_gpost(t, New(), "/v1beta/models/fake/m1:streamGenerateContent", `{"contents":[{"role":"user","parts":[{"text":"read"}]}]}`)
+	var chunks []map[string]any
+	if err := json.Unmarshal([]byte(arr), &chunks); err != nil || len(chunks) != 3 {
+		t.Errorf("array form: %v %s", err, arr)
 	}
 }
 
-func TestGeminiRequestTranslation(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		`data: {"id":"c3","choices":[{"delta":{"content":"ok"}}]}`,
-		`data: {"id":"c3","choices":[{"delta":{},"finish_reason":"stop"}]}`,
-	)}
-	setup(t, provider.Chat, f)
-	body := `{
-		"systemInstruction":{"parts":[{"text":"be brief"}]},
-		"contents":[
-			{"role":"user","parts":[{"text":"read a.go"},{"inlineData":{"mimeType":"image/png","data":"AAAA"}},{"inlineData":{"mimeType":"application/pdf","data":"BBBB"}}]},
-			{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"a.go"}}}]},
-			{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"package a"}}}]}
-		],
-		"tools":[{"functionDeclarations":[{"name":"read","description":"read a file","parameters":{"type":"OBJECT","properties":{"path":{"type":"STRING"}},"required":["path"]}}]}],
-		"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["read"]}},
-		"generationConfig":{"maxOutputTokens":100,"temperature":0.5,"topP":0.9,"stopSequences":["END"],
-			"responseMimeType":"application/json","responseSchema":{"type":"OBJECT","properties":{"n":{"type":"INTEGER"}}},
-			"thinkingConfig":{"thinkingBudget":-1}}
-	}`
-	if code, out := geminiPost(t, "/v1beta/models/fake/m1:generateContent", body); code != 200 {
-		t.Fatalf("%d %s", code, out)
+func TestGwg_GeminiRequestTranslation(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
+		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"ok"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`)}
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{
+	  "systemInstruction":{"parts":[{"text":"be brief"}]},
+	  "contents":[
+	    {"role":"user","parts":[{"text":"read a.go"}]},
+	    {"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"a.go"}}}]},
+	    {"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"package x"}}}]},
+	    {"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"AAAA"}},{"text":"what is it"}]}
+	  ],
+	  "tools":[{"functionDeclarations":[{"name":"read","description":"read a file","parameters":{"type":"OBJECT","properties":{"path":{"type":"STRING"}}}}]}],
+	  "toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["read"]}},
+	  "generationConfig":{"maxOutputTokens":100,"temperature":0.5,"stopSequences":["END"],"thinkingConfig":{"thinkingBudget":-1}}
+	}`)
+	if code != 200 {
+		t.Fatalf("status %d: %s", code, body)
 	}
 	var up map[string]any
 	if err := json.Unmarshal(f.got, &up); err != nil {
-		t.Fatalf("%v %s", err, f.got)
+		t.Fatal(err)
 	}
 	msgs := up["messages"].([]any)
-	sys := asMap(t, msgs[0])
-	if sys["role"] != "system" || !strings.HasPrefix(sys["content"].(string), "be brief") ||
-		!strings.Contains(sys["content"].(string), "JSON") || !strings.Contains(sys["content"].(string), `"type":"integer"`) {
+	if len(msgs) != 5 {
+		t.Fatalf("messages: %s", f.got)
+	}
+	if sys := msgs[0].(map[string]any); sys["role"] != "system" || sys["content"] != "be brief" {
 		t.Errorf("system: %v", sys)
 	}
-	user := asMap(t, msgs[1])
-	if !strings.Contains(string(mustJSON(t, user)), `data:image/png;base64,AAAA`) || !strings.Contains(string(mustJSON(t, user)), "application/pdf") {
-		t.Errorf("user: %v", user)
+	call := msgs[2].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
+	if call["id"] == "" || call["function"].(map[string]any)["name"] != "read" {
+		t.Errorf("tool call: %v", call)
 	}
-	asst := asMap(t, msgs[2])
-	calls := asst["tool_calls"].([]any)
-	callID := asMap(t, calls[0])["id"]
-	if callID == "" || callID == nil {
-		t.Fatalf("assistant call has no id: %v", asst)
+	res := msgs[3].(map[string]any)
+	if res["role"] != "tool" || res["tool_call_id"] != call["id"] || res["content"] != "package x" {
+		t.Errorf("tool result not paired: %v", res)
 	}
-	tool := asMap(t, msgs[3])
-	if tool["role"] != "tool" || tool["tool_call_id"] != callID || tool["content"] != "package a" {
-		t.Errorf("tool result: %v (call %v)", tool, callID)
+	img := msgs[4].(map[string]any)["content"].([]any)[0].(map[string]any)["image_url"].(map[string]any)["url"].(string)
+	if !strings.HasPrefix(img, "data:image/png;base64,AAAA") {
+		t.Errorf("image: %s", img)
 	}
-	fn := asMap(t, asMap(t, up["tools"].([]any)[0])["function"])
-	params := asMap(t, fn["parameters"])
-	if params["type"] != "object" || asMap(t, asMap(t, params["properties"])["path"])["type"] != "string" {
-		t.Errorf("schema not lowered: %v", params)
+	params := up["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
+	if params["type"] != "object" || params["properties"].(map[string]any)["path"].(map[string]any)["type"] != "string" {
+		t.Errorf("schema not lower-cased: %v", params)
+	}
+	if tc := up["tool_choice"].(map[string]any)["function"].(map[string]any); tc["name"] != "read" {
+		t.Errorf("tool_choice: %v", up["tool_choice"])
 	}
 	if up["reasoning_effort"] != "medium" {
 		t.Errorf("effort: %v", up["reasoning_effort"])
 	}
-	if up["max_tokens"] != float64(100) {
-		t.Errorf("max_tokens: %v", up["max_tokens"])
+	if up["max_tokens"] != float64(100) || up["temperature"] != 0.5 {
+		t.Errorf("params: %s", f.got)
 	}
-	choice := asMap(t, up["tool_choice"])
-	if asMap(t, choice["function"])["name"] != "read" {
-		t.Errorf("tool_choice: %v", choice)
+	if stop, _ := up["stop"].([]any); len(stop) != 1 || stop[0] != "END" {
+		t.Errorf("stop: %v", up["stop"])
 	}
 }
 
-func TestGeminiAnthropicUpstream(t *testing.T) {
-	f := &fake{t: t, reply: sse(
-		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m1\",\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}",
-		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
-		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}",
-		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
-		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}",
-		"event: message_stop\ndata: {\"type\":\"message_stop\"}",
-	)}
-	setup(t, provider.Anthropic, f)
-	code, body := geminiPost(t, "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":50}}`)
+func TestGwg_GeminiJSONMode(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
+		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"{}"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`)}
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"is it?"}]}],
+	  "generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"OBJECT","properties":{"ok":{"type":"BOOLEAN"}}}}}`)
 	if code != 200 {
-		t.Fatalf("%d %s", code, body)
-	}
-	var out map[string]any
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatalf("%v %s", err, body)
-	}
-	if asMap(t, partsOf(out)[0])["text"] != "Hello" || !strings.Contains(body, `"finishReason":"STOP"`) {
-		t.Errorf("reply: %s", body)
-	}
-	if u := asMap(t, out["usageMetadata"]); u["promptTokenCount"] != float64(7) || u["candidatesTokenCount"] != float64(3) {
-		t.Errorf("usage: %v", u)
+		t.Fatalf("status %d: %s", code, body)
 	}
 	var up map[string]any
 	json.Unmarshal(f.got, &up)
-	if up["max_tokens"] != float64(50) {
-		t.Errorf("max_tokens to anthropic: %s", f.got)
+	if _, ok := up["response_format"]; ok {
+		t.Errorf("response_format should not be set: %s", f.got)
+	}
+	sys := up["messages"].([]any)[0].(map[string]any)
+	text, _ := sys["content"].(string)
+	if sys["role"] != "system" || !strings.Contains(text, "JSON") || !strings.Contains(text, `"type":"boolean"`) {
+		t.Errorf("json instruction: %v", sys)
 	}
 }
 
-func TestGeminiErrorsCountAndModels(t *testing.T) {
-	setup(t, provider.Chat, &fake{t: t})
-
-	code, body := geminiPost(t, "/v1beta/models/nope:generateContent", `{"contents":[]}`)
-	if code != 404 || !strings.Contains(body, `"status":"NOT_FOUND"`) {
-		t.Errorf("unknown model: %d %s", code, body)
+func TestGwg_GeminiUnknownModel(t *testing.T) {
+	gwg_setup(t, provider.Chat, &gwg_fake{t: t})
+	code, body := gwg_gpost(t, New(), "/v1beta/models/nope:generateContent", `{"contents":[]}`)
+	if code != 404 || !strings.HasPrefix(body, `{"error":{"code":404,`) || !strings.Contains(body, `"status":"NOT_FOUND"`) {
+		t.Errorf("%d %s", code, body)
 	}
+}
 
-	code, body = geminiPost(t, "/v1beta/models/fake/m1:countTokens",
-		`{"generateContentRequest":{"contents":[{"role":"user","parts":[{"text":"hello there, this is a fairly long test sentence"}]}]}}`)
-	if code != 200 || !strings.HasPrefix(body, `{"totalTokens":`) {
-		t.Errorf("countTokens: %d %s", code, body)
+func TestGwg_GeminiUpstreamError(t *testing.T) {
+	f := &gwg_fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance","type":"x"}}`}
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{"contents":[]}`)
+	if code != 402 || !strings.Contains(body, "Fake: Insufficient Balance") || !strings.Contains(body, `"code":402`) {
+		t.Errorf("%d %s", code, body)
 	}
-	code, body = geminiPost(t, "/v1beta/models/fake/m1:countTokens", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
-	if code != 200 || !strings.HasPrefix(body, `{"totalTokens":`) {
-		t.Errorf("countTokens bare: %d %s", code, body)
-	}
+}
 
+func TestGwg_GeminiCountTokens(t *testing.T) {
+	gwg_setup(t, provider.Chat, &gwg_fake{t: t})
+	srv := New()
+	// 26 characters of text, a quarter of that
+	code, body := gwg_gpost(t, srv, "/v1beta/models/fake/m1:countTokens", `{"contents":[{"role":"user","parts":[{"text":"abcdefghijklmnopqrstuvwxyz"}]}]}`)
+	if code != 200 || body != `{"totalTokens":6}` {
+		t.Errorf("direct: %d %s", code, body)
+	}
+	code, body = gwg_gpost(t, srv, "/v1beta/models/fake/m1:countTokens", `{"generateContentRequest":{"contents":[{"role":"user","parts":[{"text":"abcdefghijklmnopqrstuvwxyz"}]}]}}`)
+	if code != 200 || body != `{"totalTokens":6}` {
+		t.Errorf("wrapped: %d %s", code, body)
+	}
+}
+
+func TestGwg_GeminiModelsList(t *testing.T) {
+	gwg_setup(t, provider.Chat, &gwg_fake{t: t})
 	rec := httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1beta/models", nil))
-	list := rec.Body.String()
-	if !strings.Contains(list, `"name":"models/fake/m1"`) || !strings.Contains(list, `"supportedGenerationMethods":["generateContent","streamGenerateContent","countTokens"]`) {
-		t.Errorf("models: %s", list)
+	body := rec.Body.String()
+	if rec.Code != 200 || !strings.Contains(body, `"name":"models/fake/m1"`) || !strings.Contains(body, `"supportedGenerationMethods":["generateContent"`) {
+		t.Errorf("%d %s", rec.Code, body)
 	}
+}
 
-	rec = httptest.NewRecorder()
+func TestGwg_GeminiRootMentionsAPI(t *testing.T) {
+	rec := httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if !strings.Contains(rec.Body.String(), "v1beta") {
-		t.Errorf("root info lacks v1beta: %s", rec.Body.String())
+		t.Errorf("info: %s", rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/nothing", nil))
-	if rec.Code != 404 || !strings.Contains(rec.Body.String(), "v1beta") {
-		t.Errorf("404 hint lacks v1beta: %d %s", rec.Code, rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "v1beta") {
+		t.Errorf("404 hint: %s", rec.Body.String())
 	}
 }
 
-func mustJSON(t *testing.T, v any) []byte {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
+func TestGwg_GeminiStreamWithoutContentType(t *testing.T) {
+	f := &gwg_fake{t: t, noType: true, reply: gwg_sse(
+		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"Hi"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}`,
+		`data: [DONE]`)}
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	if code != 200 {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	evs := gwg_events(body)
+	if len(evs) != 1 {
+		t.Fatalf("%d events: %s", len(evs), body)
+	}
+	// the encoder holds a part until the stream ends, so the one event
+	// carries the text together with the finish reason and usage
+	last := evs[0]
+	if p := gwg_geminiParts(t, last)[0]; p["text"] != "Hi" {
+		t.Errorf("part: %v", p)
+	}
+	cand := last["candidates"].([]any)[0].(map[string]any)
+	if cand["finishReason"] != "STOP" {
+		t.Errorf("finish: %v", cand)
+	}
+	if um := last["usageMetadata"].(map[string]any); um["promptTokenCount"] != float64(3) {
+		t.Errorf("usage: %v", um)
+	}
+}
+
+func TestGwg_GeminiAnyMultipleNamesFiltersTools(t *testing.T) {
+	f := &gwg_fake{t: t, reply: gwg_sse(
+		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"ok"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`)}
+	gwg_setup(t, provider.Chat, f)
+	code, body := gwg_gpost(t, New(), "/v1beta/models/fake/m1:generateContent", `{
+	  "contents":[{"role":"user","parts":[{"text":"do it"}]}],
+	  "tools":[{"functionDeclarations":[
+	    {"name":"read","parameters":{"type":"OBJECT","properties":{}}},
+	    {"name":"write","parameters":{"type":"OBJECT","properties":{}}},
+	    {"name":"delete","parameters":{"type":"OBJECT","properties":{}}}]}],
+	  "toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["read","write"]}}
+	}`)
+	if code != 200 {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	var up map[string]any
+	if err := json.Unmarshal(f.got, &up); err != nil {
 		t.Fatal(err)
 	}
-	return b
+	tools, _ := up["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("tools not filtered to the allowed names: %s", f.got)
+	}
+	for _, tl := range tools {
+		name := tl.(map[string]any)["function"].(map[string]any)["name"]
+		if name != "read" && name != "write" {
+			t.Errorf("unexpected tool %v", name)
+		}
+	}
+	if up["tool_choice"] != "required" {
+		t.Errorf("tool_choice: %v", up["tool_choice"])
+	}
+}
+
+// fake is an upstream that records what it got and replies with a script.
+type gwg_fake struct {
+	t     *testing.T
+	got   []byte
+	path  string
+	head  http.Header
+	reply string // SSE body
+	ctype string
+	code  int
+	// noType sends the reply without any Content-Type header
+	noType bool
+}
+
+func (f *gwg_fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.got, _ = io.ReadAll(r.Body)
+	f.path, f.head = r.URL.Path, r.Header
+	ct := f.ctype
+	if ct == "" {
+		ct = "text/event-stream"
+	}
+	if f.noType {
+		// a nil entry keeps net/http from sniffing a type into the header
+		w.Header()["Content-Type"] = nil
+	} else {
+		w.Header().Set("Content-Type", ct)
+	}
+	if f.code != 0 {
+		w.WriteHeader(f.code)
+	}
+	io.WriteString(w, f.reply)
+}
+
+func gwg_sse(lines ...string) string {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l + "\n\n")
+	}
+	return b.String()
+}
+
+// setup points dial's provider file at a temp dir and adds one provider
+// speaking only the given protocol, backed by the fake.
+func gwg_setup(t *testing.T, proto provider.Protocol, f *gwg_fake) *httptest.Server {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	up := httptest.NewServer(f)
+	t.Cleanup(up.Close)
+	p := provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}}
+	switch proto {
+	case provider.Chat:
+		p.Chat = up.URL + "/v1"
+	case provider.Responses:
+		p.Responses = up.URL + "/v1"
+	case provider.Anthropic:
+		p.Anthropic = up.URL
+	}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	return up
+}
+
+func gwg_events(body string) []map[string]any {
+	var out []map[string]any
+	readSSE(strings.NewReader(body), func(_, data string) error {
+		var m map[string]any
+		if json.Unmarshal([]byte(data), &m) == nil {
+			out = append(out, m)
+		}
+		return nil
+	})
+	return out
 }

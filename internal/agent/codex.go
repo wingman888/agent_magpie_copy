@@ -130,7 +130,9 @@ func codex(home string) *Agent {
 					if p := get("model_provider"); p != "" && p != dialID {
 						own = group(p, own)
 					}
-					return append(own, viaDial("")...)
+					// Codex's own account models are not listed again: going
+					// through dial would only add a hop.
+					return append(own, viaDialExcept("", "codex")...)
 				},
 			},
 			{
