@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -81,25 +80,41 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 		pools = append(pools, ms)
 	}
 	pools = append(pools, p.Available())
-	// A model whose list declares its APIs is only probed on one of them;
-	// a model with no declared APIs (list absent) is as good as any.
-	onProto := func(id string) bool {
-		apis := p.APIs(id)
-		return len(apis) == 0 || slices.Contains(apis, proto)
+	// A model the vendor's list says is served over proto comes first.
+	wants := []func(string) bool{
+		func(id string) bool { return p.declares(id, proto) && (proto != Anthropic || isClaude(id)) },
+		func(id string) bool { return p.declares(id, proto) },
 	}
-	for _, want := range []func(string) bool{
-		func(id string) bool { return proto != Anthropic || isClaude(id) },
-		func(string) bool { return true },
-	} {
+	// Once the list declares endpoints for any model, only declared models are
+	// probed; the undeclared fallbacks apply only when the list says nothing.
+	if !listsAPIs(p, pools) {
+		wants = append(wants,
+			func(id string) bool { return proto != Anthropic || isClaude(id) },
+			func(string) bool { return true })
+	}
+	for _, want := range wants {
 		for _, pool := range pools {
 			for _, m := range pool {
-				if want(m.ID) && onProto(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
+				if want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
 					return m.ID
 				}
 			}
 		}
 	}
 	return ""
+}
+
+// listsAPIs reports whether the vendor's list declares endpoints for any of
+// the models in pools.
+func listsAPIs(p Provider, pools [][]catalog.Model) bool {
+	for _, pool := range pools {
+		for _, m := range pool {
+			if p.APIs(m.ID) != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isClaude(id string) bool {
