@@ -79,9 +79,8 @@ type Provider struct {
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
 
-	// KeyProtocol limits the first key (Key) to one protocol's endpoint;
-	// empty means it works on all of them. Saved keys carry their own
-	// (KeyAccount.Protocol), and it moves with the key (see keys.go).
+	// KeyProtocol limits the key in use to one protocol's endpoint; empty
+	// means the key works on every endpoint (see keys.go).
 	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
 }
 

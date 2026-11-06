@@ -33,13 +33,6 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
-		// the key that may speak this endpoint; an endpoint none may is skipped
-		k, ok := p.keyFor(proto)
-		if !ok {
-			continue
-		}
-		q := p
-		q.Key, q.KeyName, q.KeyProtocol = k.Key, k.Name, k.Protocol
 		var url, body string
 		switch proto {
 		case Chat:
@@ -52,7 +45,7 @@ func (p Provider) Test(ctx context.Context) []Result {
 			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		}
-		out = append(out, probe(ctx, q, proto, url, q.Prepare([]byte(body)), model))
+		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
 	}
 	return out
 }

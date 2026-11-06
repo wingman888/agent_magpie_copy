@@ -222,15 +222,27 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if q, usable := anthropicView(p); ok && usable {
-		res, err := s.forward(r.Context(), q, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-		if err == nil {
-			defer res.Body.Close()
-			if res.StatusCode < 400 {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(res.StatusCode)
-				io.Copy(w, res.Body)
-				return
+	if ok {
+		// only a key that may reach the Anthropic endpoint counts tokens there
+		if cands, fellBack := perKey(p, model, provider.Anthropic); !fellBack {
+			if p.Account != nil {
+				cands = cands[:1]
+			}
+			for _, c := range cands {
+				if c.p.Anthropic == "" {
+					continue
+				}
+				res, err := s.forward(r.Context(), c.p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+				if err == nil {
+					defer res.Body.Close()
+					if res.StatusCode < 400 {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(res.StatusCode)
+						io.Copy(w, res.Body)
+						return
+					}
+				}
+				break
 			}
 		}
 	}
@@ -351,7 +363,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands := s.plan(p, model, from)
+	cands := s.candidates(p, model, from)
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
