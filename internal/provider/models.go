@@ -170,6 +170,30 @@ func (p Provider) Serves(k KeyAccount, model string) bool {
 	return true
 }
 
+// APIs lists, in the order declared, the protocols the provider's last model
+// list says serve model (chat, responses, anthropic). nil when unknown: no
+// list, the model is not in it, or it declares no usable API.
+func (p Provider) APIs(model string) []Protocol {
+	live, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return nil
+	}
+	for _, m := range live {
+		if m.ID != model {
+			continue
+		}
+		var out []Protocol
+		for _, a := range m.APIs {
+			pr := Protocol(a)
+			if slices.Contains(Protocols, pr) && !slices.Contains(out, pr) {
+				out = append(out, pr)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // Exposed lists the models magpie offers to agents for this provider: the
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
