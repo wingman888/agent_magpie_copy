@@ -14,5 +14,15 @@
 	<key>LSUIElement</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
 	<key>NSHumanReadableCopyright</key><string>yetone</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key><string>com.yetone.magpie.import</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>magpie</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

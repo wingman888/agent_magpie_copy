@@ -177,6 +177,88 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 `auth` to API key with the gateway token, and names the model in
 `settings.json`; a native model puts the previous auth back.
 
+## Import links
+
+A provider can be shared as a link. A `magpie://import?…` link describes
+one provider, either a preset or a custom one, and magpie adds it only after
+you confirm. Opening the link (the OS hands it to magpie as its first
+argument) or running `magpie import` with it shows what would be added;
+nothing is saved until you agree.
+
+```sh
+magpie import 'magpie://import?preset=deepseek&key=sk-…'
+magpie import -y 'magpie://import?preset=deepseek&key=sk-…'   # skip the question
+```
+
+```
+magpie import 'magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&anthropic=https://api.acme.example&key=sk-…&models=gpt-5.5,claude-sonnet-5'
+```
+
+Every value is URL-encoded. These spellings are equivalent:
+`magpie://import?…`, `magpie:import?…`, `magpie:///import?…` and
+`MAGPIE://import/?…` (the scheme is case-insensitive; a trailing slash after
+`import` is allowed).
+
+| Parameter   | Meaning |
+| ----------- | ------- |
+| `preset`    | A preset id (see `magpie presets`); its endpoints are used. |
+| `region`    | One of the preset's regions, for presets that have several. An unknown region is an error. |
+| `name`      | Provider name. Required without `preset`; with `preset` it replaces the preset's name. Longer than 80 characters is truncated. |
+| `id`        | Provider id. Derived from the name when missing (with `preset`, the preset's id). |
+| `key`       | API key. Without it, add the key later (see below). |
+| `chat`      | OpenAI Chat Completions base URL, ending in `/v1`. |
+| `responses` | OpenAI Responses base URL, ending in `/v1`. |
+| `anthropic` | Anthropic Messages base URL, the root without `/v1`. |
+| `models`    | Model ids to expose, comma-separated. Empty items and surrounding spaces are ignored; at most 200. |
+| `catalog`   | A models.dev provider id, for model names and reasoning efforts. An invalid value is ignored. |
+| `website`   | The vendor's website. Only `https` is kept; anything else is ignored. |
+| `keys`      | The page where keys are issued. Only `https` is kept; anything else is ignored. |
+
+With `preset`, the endpoints come from the preset (and the chosen region), so
+`chat`, `responses`, `anthropic`, `catalog`, `website` and `keys` have no
+effect. Without `preset`, give `name` and at least one of `chat`,
+`responses` or `anthropic`.
+
+Base URLs must be `https`. The exception is a server on your own machine or
+network: `http://localhost`, a loopback address, a private-network IP
+(`10.x`, `172.16–31.x`, `192.168.x`) or a `.local` name. A base URL may not
+contain a username or password, a query string or a fragment, and no other
+scheme (such as `file:`) is accepted. Links that break these rules, an
+unknown preset or region, an empty id, or a key with control characters or
+longer than 4096 bytes are refused and nothing is saved. A trailing `/` on a
+base URL is removed.
+
+### Confirmation
+
+`magpie import` prints a summary before it asks anything: the provider's name
+and id, the host each endpoint sends your prompts to (and your key, when the
+link has one), and the models. Answer `y` to add it; any other answer, or
+pressing Enter, adds nothing and exits with "nothing added".
+
+- If the id matches a provider you already have, the summary says that the
+  import will replace it, before the question.
+- `-y` or `--yes` skips the question. Without it, a standard input that is not
+  a terminal (scripts, pipes) is refused rather than treated as a yes.
+- A link without `key` adds the provider, and magpie tells you how to finish:
+  `magpie provider key <id> <key>`, if the provider is not usable yet.
+- Saving works like `magpie provider add`: magpie stores the provider and
+  fetches its model list.
+
+### Sharing a link from a web page
+
+Put the parameters after `#` and serve the page from
+`https://usemagpie.ai/import#<the same parameters>`, for example
+`https://usemagpie.ai/import#preset=deepseek&key=sk-…`. Browsers do not send
+the part after `#` to the server, so the key stays out of the page's server
+logs. Use this form when a web page is easier to share than a `magpie://` link.
+
+### Protocol registration
+
+The macOS app declares the `magpie` scheme in its `Info.plist`, and the Linux
+desktop entry that `install.sh` writes declares `x-scheme-handler/magpie`. A
+running desktop app is not a requirement: without a window, `magpie <link>`
+takes the terminal path described above.
+
 ## Install
 
 Download the app for macOS, Windows or Linux from
