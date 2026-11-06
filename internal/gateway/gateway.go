@@ -300,17 +300,8 @@ func estimate(req *Request) int {
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
 	start := time.Now()
 	call := Call{Time: start, From: from, Model: modelOf(body), Agent: usage.AgentOf(r.Header.Get("User-Agent"))}
-	p, model, ok := resolveAccount(call.Model)
+	p, model, ok := resolve(from, call.Model)
 	if !ok {
-		p, model, ok = provider.Resolve(call.Model)
-	}
-	if !ok {
-		if msg, out := signedOut(call.Model); out {
-			call.Status, call.Error = 401, msg
-			s.record(call)
-			writeError(w, from, 401, msg)
-			return
-		}
 		call.Status, call.Error = 404, "unknown model"
 		s.record(call)
 		msg := fmt.Sprintf("dial knows no model %q", call.Model)
@@ -323,8 +314,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	if p.Account != nil {
-		call.To, call.Status, call.Error = s.serveAccount(w, r, p, from, model, body, &call.Usage)
+	if p.Account != nil && p.Account.Agent == "codex" && from == provider.Responses {
+		call.To = provider.Responses
+		call.Status, call.Error = s.codexResponses(w, r, p, call.Model, model, body, &call.Usage)
 	} else if p.Base(from) != "" {
 		call.To = from
 		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
@@ -346,9 +338,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 
 // forward sends a request to the provider.
 func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
-	if p.Account != nil {
-		return s.forwardAccount(ctx, p, to, body)
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -376,7 +365,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), rewriteModel(body, model), r.Header)
 	if err != nil {
-		return writeError(w, proto, failStatus(err), p.Name+": "+err.Error()), err.Error()
+		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
@@ -429,7 +418,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	req.Stream = true
 	res, err := s.forward(r.Context(), p, to, pathOf(to), build(to, req, model, p.Host()), r.Header)
 	if err != nil {
-		return writeError(w, from, failStatus(err), p.Name+": "+err.Error()), err.Error()
+		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
