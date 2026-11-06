@@ -1,1 +1,1 @@
-./internal/netproxy
+./. ./internal/agent ./internal/catalog ./internal/gateway ./internal/provider ./internal/usage
