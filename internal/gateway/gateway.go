@@ -177,8 +177,12 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 }
 
 func modelObject(e provider.Entry) map[string]any {
+	owner := e.Provider.ID
+	if e.Kind == provider.KindGroup {
+		owner = "magpie" // a routing group belongs to no provider
+	}
 	return map[string]any{"id": e.ID, "object": "model", "type": "model", "created": 0, "created_at": "2025-01-01T00:00:00Z",
-		"owned_by": e.Provider.ID, "display_name": e.Name}
+		"owned_by": owner, "display_name": e.Name}
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +199,10 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if isGroupID(id) {
+		s.groupModelObject(w, id)
+		return
+	}
 	for _, e := range provider.Catalog() {
 		if e.ID == id {
 			writeJSON(w, 200, modelObject(e))
@@ -349,25 +357,25 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	cv := convoOf(r.Header, body, call.Model)
-	var cands []candidate
-	var pl planned
-	var model, route string
-	if id, ok := groupOf(call.Model); ok {
-		g, ms, found := provider.FindGroup(id)
-		if !found || len(ms) == 0 {
-			msg := fmt.Sprintf("group/%s 没有模型就绪：它的模型都没有可用的提供方", id)
-			if !found {
-				msg = fmt.Sprintf("magpie knows no group %q", id)
-			}
-			call.Status, call.Error = 404, msg
-			writeError(w, from, 404, msg)
+	rc := newRouteCtx(r.Header, body, from, call.Model)
+	var (
+		model, pid, mode string
+		cands            []candidate
+		pl               planned
+		gt               *GroupTrace
+	)
+	if isGroupID(call.Model) {
+		// a routing group: all of its members' keys and accounts, routed together
+		g, ms, found := provider.FindGroup(call.Model)
+		if !found {
+			call.Status, call.Error = 404, groupNotReady(call.Model)
+			writeError(w, from, 404, call.Error)
 			finishCapture()
 			s.record(call)
 			return
 		}
-		cands, pl = s.planGroup(g, ms, from, cv)
-		route = groupPrefix + g.ID
+		cands, pl = planGroup(g, ms, from, rc)
+		pid, mode, gt = "group/"+g.ID, groupAffinity(g, ms), groupTraceOf(g, ms)
 	} else {
 		p, m, ok := provider.Resolve(call.Model)
 		if !ok {
@@ -383,13 +391,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			s.record(call)
 			return
 		}
-		model, route = m, p.ID
+		model, pid, mode = m, p.ID, p.Affinity
 		// the primary, then its fallbacks while it can't take the request and
 		// nothing has been sent yet
-		cands, pl = planRoute(p, model, from, cv)
+		cands, pl = s.planCtx(p, model, from, rc)
 	}
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: route, Order: pl.order, Left: pl.left,
-		Group: pl.group, Affinity: pl.affinity})
+	// a conversation's last answerer goes first when its affinity allows
+	cands, pl, af := keepAffine(cands, pl, mode, rc, start)
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: pid, Order: pl.order, Left: pl.left, Group: gt, Affinity: af})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
@@ -410,7 +419,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			recordAnswer(cv, c.rest, call.Usage.CacheRead)
+			remember(rc.key, c, call.Usage.CacheRead, time.Now())
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}

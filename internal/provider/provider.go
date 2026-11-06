@@ -63,7 +63,7 @@ type Provider struct {
 	// Routing is how requests spread over the keys or accounts it has on:
 	// "" smart, the first while it has quota to spare, then whichever has
 	// the most; "order" in order, the next one only when the one before
-	// can't take it; "rotate" each in turn; "usage" the least used first.
+	// can't take it; "rotate" each in turn; "least-used" the least used first.
 	// Whichever it is, one out of credit, out of quota, rate limited or
 	// failing is passed over for as long as that lasts.
 	Routing string `json:"routing,omitempty"`
@@ -104,17 +104,16 @@ type Provider struct {
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
 
-	// Affinity is whether a conversation stays on the key or account that
-	// answered it last, so the vendor's prompt cache can hit: "" automatic,
-	// "session" the whole conversation, "turn" only within one user turn,
-	// "off" never (see groups.go).
+	// Affinity is how a conversation stays on the key or account that last
+	// answered it, so the vendor's prompt cache can hit: "" automatic,
+	// "session" the whole conversation, "turn" within a turn only, "off".
 	Affinity string `json:"affinity,omitempty"`
 }
 
 type file struct {
 	Providers []Provider `json:"providers"`
-	// Groups are the routing groups the user made or changed, and
-	// HiddenGroups the automatic ones the user removed (see groups.go).
+	// Groups are the routing groups the user made (see group.go), and
+	// HiddenGroups the discovered ones the user removed.
 	Groups       []Group  `json:"groups,omitempty"`
 	HiddenGroups []string `json:"hiddenGroups,omitempty"`
 }
@@ -171,8 +170,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback, a.Routing = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing
-		a.Affinity = picks[a.ID].Affinity
+		a.Models, a.Fallback, a.Routing, a.Affinity = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing, picks[a.ID].Affinity
 		out = append(out, a)
 	}
 	return out
@@ -231,7 +229,7 @@ func Save(p Provider) error {
 	if p.ID == "magpie" {
 		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
-	if p.ID == "group" {
+	if p.ID == GroupPrefix {
 		return errors.New(`"group" is how routing groups are named (group/<id>); pick another id`)
 	}
 	if p.Name == "" {
@@ -341,12 +339,8 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
-		p.Routing = ""
-	}
-	if !validAffinity(p.Affinity) {
-		p.Affinity = ""
-	}
+	p.Routing = NormalizeRouting(p.Routing)
+	p.Affinity = NormalizeAffinity(p.Affinity)
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {

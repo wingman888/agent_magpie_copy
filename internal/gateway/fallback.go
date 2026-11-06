@@ -31,7 +31,9 @@ type candidate struct {
 	p     provider.Provider
 	model string
 	rest  string // what rests after a failure: the provider, or one of its keys
-	aside bool   // a key made for another protocol than the request's: tried only after the rest
+	// aside is a key made for another protocol than the request's, tried
+	// only after the keys that suit it (see protocolPool).
+	aside bool
 }
 
 // label names a candidate in a call's record: the provider, and the key
@@ -106,52 +108,43 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, l
 	if len(out) == 0 {
 		return []candidate{{p: p, model: model, rest: p.ID}}, nil
 	}
-	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
-	return splitTiers(out, model, from), unlisted
+	main, aside := protocolPool(out, suitedTo(model, from))
+	sort.SliceStable(main, func(i, j int) bool { return keyFit(main[i].p, model, from) < keyFit(main[j].p, model, from) })
+	return append(main, aside...), unlisted
 }
 
-// keyTier ranks how well a key's protocol suits a request, best first: 0 is
-// the protocol the request is for, 1 a key that names none, 2 another one.
-// The request's protocol is the one the model is at home in when its name
-// says (see modelFamily), else the one the request came in.
-func keyTier(q provider.Provider, model string, from provider.Protocol) int {
-	want := modelFamily(model)
-	if want == "" {
-		want = from
+// suitedTo is the protocol a request's keys are chosen for: the one the
+// model is at home in when its name says (Claude's Anthropic, GPT's Chat), so
+// a Claude model asked over Chat still goes to the Anthropic key; else the
+// protocol the request came in on.
+func suitedTo(model string, from provider.Protocol) provider.Protocol {
+	if f := modelFamily(model); f != "" {
+		return f
 	}
-	switch q.KeyProtocol {
-	case "":
-		return 1
-	case want:
-		return 0
-	}
-	return 2
+	return from
 }
 
-// splitTiers keeps the keys that suit the request best as the pool routing
-// works on, and puts the others behind it, marked aside: unnamed ones
-// first, then those made for another protocol.
-func splitTiers(cs []candidate, model string, from provider.Protocol) []candidate {
-	if len(cs) == 0 {
-		return cs
-	}
-	best := 3
+// protocolPool splits a provider's keys by how well each suits the protocol
+// the request is for (provider.RankKeysByProtocol): the best tier present is
+// the pool routing works in; the others follow it, marked aside, the one that
+// fits better first. A candidate's key protocol is its provider's
+// KeyProtocol, which WithKey has set to the key's own.
+func protocolPool(cs []candidate, want provider.Protocol) (main, aside []candidate) {
+	fit := func(c candidate) int { return provider.KeyFit(provider.KeyAccount{Protocol: c.p.KeyProtocol}, want) }
+	best := provider.FitOther
 	for _, c := range cs {
-		best = min(best, keyTier(c.p, model, from))
+		best = min(best, fit(c))
 	}
-	var pool, aside []candidate
 	for _, c := range cs {
-		if keyTier(c.p, model, from) == best {
-			pool = append(pool, c)
+		if fit(c) == best {
+			main = append(main, c)
 		} else {
 			c.aside = true
 			aside = append(aside, c)
 		}
 	}
-	sort.SliceStable(aside, func(i, j int) bool {
-		return keyTier(aside[i].p, model, from) < keyTier(aside[j].p, model, from)
-	})
-	return append(pool, aside...)
+	sort.SliceStable(aside, func(i, j int) bool { return fit(aside[i]) < fit(aside[j]) })
+	return main, aside
 }
 
 // keyFit ranks how well a key suits a request, best first: 0 fits, 1 needs
@@ -205,17 +198,15 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 // plan is candidates, and for the routing trace what each stood where it
 // did by, and those left out.
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
-	return planRoute(p, model, from, nil)
+	return s.planCtx(p, model, from, routeCtx{})
 }
 
-// planRoute is plan for the conversation a request belongs to, when cv is
-// set: rotation then moves by turns, and affinity keeps the conversation on
-// the key or account that answered it last (see group.go).
-func planRoute(p provider.Provider, model string, from provider.Protocol, cv *convo) ([]candidate, planned) {
+// planCtx is plan for a request within its conversation (see routeCtx).
+func (s *Server) planCtx(p provider.Provider, model string, from provider.Protocol, rc routeCtx) ([]candidate, planned) {
 	var pl planned
 	add := func(q provider.Provider, m string, fallback bool) []candidate {
 		cs, left := perKeyOf(q, m, from)
-		cs, wg := weighWith(q.Routing, q.ID, cs, m, from, cv, q.Account == nil)
+		cs, wg := weighCtx(q, cs, m, from, rc)
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
 			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
@@ -229,8 +220,6 @@ func planRoute(p provider.Provider, model string, from provider.Protocol, cv *co
 		return cs
 	}
 	out := add(p, model, false)
-	// affinity is about the model asked for: it reorders only its own keys
-	out = applyAffinity(out, &pl, cv, p.Affinity)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -240,40 +229,24 @@ func planRoute(p provider.Provider, model string, from provider.Protocol, cv *co
 		seen[fp.ID+"/"+fm] = true
 		out = append(out, add(fp, fm, true)...)
 	}
-	return settle(out, pl)
-}
-
-// settle puts those resting after a recent failure behind the rest, and the
-// keys set aside for another protocol behind the pool, keeping the trace's
-// order in step with the candidates.
-func settle(out []candidate, pl planned) ([]candidate, planned) {
 	if len(out) == 1 {
 		if r, ok := restOf(out[0].rest); ok {
 			pl.order[0].Rest = &r // tried all the same: there is no other
 		}
 		return out, pl
 	}
-	// ready ones first, those resting after; keys set aside behind the pool
-	var groups [4][]candidate // ready, resting, ready aside, resting aside
-	var wGroups [4][]Weighed
+	var ready, resting []candidate
+	var wReady, wResting []Weighed
 	for i, c := range out {
-		g := 0
-		if c.aside {
-			g += 2
-		}
 		if r, ok := restOf(c.rest); ok {
 			pl.order[i].Rest = &r
-			g++
+			resting, wResting = append(resting, c), append(wResting, pl.order[i])
+		} else {
+			ready, wReady = append(ready, c), append(wReady, pl.order[i])
 		}
-		groups[g], wGroups[g] = append(groups[g], c), append(wGroups[g], pl.order[i])
 	}
-	var ordered []candidate
-	pl.order = nil
-	for g := range groups {
-		ordered = append(ordered, groups[g]...)
-		pl.order = append(pl.order, wGroups[g]...)
-	}
-	return ordered, pl
+	pl.order = append(wReady, wResting...)
+	return append(ready, resting...), pl
 }
 
 var restingUntil = struct {
