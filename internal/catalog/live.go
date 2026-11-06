@@ -14,7 +14,7 @@ import (
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
-// models.dev lags and keeps legacy names around. magpie asks the vendor when
+// models.dev lags and keeps legacy names around. dial asks the vendor when
 // it has a key, remembers the answer next to the models.dev cache, and lets
 // the catalog fill in display names and reasoning levels.
 
@@ -61,18 +61,8 @@ func SaveLive(provider, base string, models []Model) error {
 
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
-// around it. The result keeps the server's order. anthropic sends the
-// Anthropic version header, which the official API requires but which a
-// dual-protocol relay like OpenRouter reads as a request for its
-// Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with extra request headers (a custom vendor's own
-// headers). They go on after the auth headers, so they can override them;
-// their names keep the case the user typed.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
+// around it. The result keeps the server's order.
+func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -99,7 +89,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOneWith(ctx, u, key, anthropic, extra)
+		ms, err := fetchOne(ctx, u, key)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -116,11 +106,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
-	return fetchOneWith(ctx, url, key, anthropic, nil)
-}
-
-func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -128,15 +114,12 @@ func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra ma
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "magpie")
+	req.Header.Set("User-Agent", "dial")
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("x-api-key", key)
-	}
-	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	SetRawHeaders(req.Header, extra)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -181,52 +164,20 @@ type liveModel struct {
 	DisplayName string `json:"display_name"`
 }
 
-// SetRawHeaders puts extra headers on h with their names exactly as given:
-// net/http would canonicalise a name set through Set ("x-org-id" becomes
-// "X-Org-Id"), so the entry is written straight into the map. Any header
-// already there under the same name, in any case, is replaced, so an extra
-// header overrides a default one. Empty names are skipped.
-func SetRawHeaders(h http.Header, extra map[string]string) {
-	for name, value := range extra {
-		if name == "" {
-			continue
-		}
-		for k := range h {
-			if strings.EqualFold(k, name) {
-				delete(h, k)
-			}
-		}
-		h[name] = []string{value}
-	}
-}
-
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
-		if _, dup := byID[m.ID]; !dup {
-			byID[m.ID] = m // the first catalog in the list wins
-		}
+		byID[m.ID] = m
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if !ok {
-			// a relay that namespaces its ids ("deepseek/deepseek-chat")
-			// is matched on the part after the last slash.
-			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
-				k, ok = byID[m.ID[i+1:]]
-			}
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
 			m.Efforts, m.Released, m.Provider = k.Efforts, k.Released, k.Provider
-			if k.Temperature != nil {
-				m.Temperature = k.Temperature
-			}
 		}
 		out = append(out, m)
 	}
