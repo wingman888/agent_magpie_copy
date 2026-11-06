@@ -18,36 +18,18 @@ import (
 const dialID = "dial"
 
 // viaDial lists the catalog for a picker, one group per provider.
-func viaDial(prefix string) []Option { return viaDialFor("", prefix) }
+func viaDial(prefix string) []Option { return viaDialExcept(prefix, "") }
 
-// viaDialFor is viaDial as seen by one agent (see catalogFor).
-func viaDialFor(agentID, prefix string) []Option {
+// viaDialExcept is viaDial without the models of one account sign-in
+// (see dialModelsExcept).
+func viaDialExcept(prefix, agentID string) []Option {
 	var out []Option
-	for _, e := range catalogFor(agentID) {
-		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: noteOf(e.Provider) + " · via dial",
-			Icon: e.Provider.Icon, Group: e.Provider.Name})
-	}
-	return out
-}
-
-// noteOf is what a catalog model says about where it comes from: the signed-in
-// user for an agent account, else the provider's name.
-func noteOf(p provider.Provider) string {
-	if p.Account != nil {
-		return p.Account.User
-	}
-	return p.Name
-}
-
-// catalogFor is the catalog as one agent sees it. Codex CLI already reaches
-// its own ChatGPT account, so the codex account's models are left out for it.
-func catalogFor(agentID string) []provider.Entry {
-	var out []provider.Entry
 	for _, e := range provider.Catalog() {
-		if agentID == "codex" && e.Provider.Account != nil && e.Provider.Account.Agent == "codex" {
+		if agentID != "" && e.Provider.Account != nil && e.Provider.Account.Agent == agentID {
 			continue
 		}
-		out = append(out, e)
+		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: e.Provider.Name + " · via dial",
+			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
 	return out
 }
@@ -60,13 +42,23 @@ func isDial(v string) bool {
 
 // dialModels is the catalog as catalog.Models, for agents that keep their
 // own model files.
-func dialModels() []catalog.Model { return dialModelsFor("") }
+func dialModels() []catalog.Model { return dialModelsExcept("") }
 
-// dialModelsFor is dialModels as seen by one agent (see catalogFor).
-func dialModelsFor(agentID string) []catalog.Model {
+// dialModelsExcept is dialModels without the models of one account sign-in.
+// Codex's own models are left out of Codex's file: routing them back through
+// dial would only go around in a circle. An account's models are noted with
+// the signed-in user, not the provider's name.
+func dialModelsExcept(agentID string) []catalog.Model {
 	var out []catalog.Model
-	for _, e := range catalogFor(agentID) {
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + noteOf(e.Provider), Provider: e.Provider.Catalog, Efforts: e.Efforts})
+	for _, e := range provider.Catalog() {
+		if agentID != "" && e.Provider.Account != nil && e.Provider.Account.Agent == agentID {
+			continue
+		}
+		note := e.Provider.Name
+		if e.Provider.Account != nil && e.Provider.Account.User != "" {
+			note = e.Provider.Account.User
+		}
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + note, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }

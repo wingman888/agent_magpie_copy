@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,132 +11,201 @@ import (
 	"github.com/yetone/dial/internal/provider"
 )
 
-// cliSandbox points HOME, dial's config and Claude Code's config at a fresh tree.
-func cliSandbox(t *testing.T) string {
+// acctHome points every sign-in and dial's own files at a temp directory.
+func acctHome(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
+	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
 	return home
 }
 
-// cliCodexSignIn writes a ChatGPT-mode Codex login with a plan under home.
-func cliCodexSignIn(t *testing.T, home string) {
+func acctPut(t *testing.T, path, s string) {
 	t.Helper()
-	claims, err := json.Marshal(map[string]any{
-		"email":                       "dev@example.com",
-		"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "pro"},
-	})
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	idToken := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`)) + "." +
-		base64.RawURLEncoding.EncodeToString(claims) + ".sig"
-	body, err := json.Marshal(map[string]any{
-		"auth_mode": "chatgpt",
-		"tokens":    map[string]any{"id_token": idToken, "access_token": "tok", "account_id": "acct"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), body, 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// cliClaudeSignIn writes a Claude Code credentials file, which dial only detects.
-func cliClaudeSignIn(t *testing.T) {
+// acctCodex writes a ChatGPT-mode Codex sign-in for dev@example.com on the pro plan.
+func acctCodex(t *testing.T, home string) {
 	t.Helper()
-	dir := os.Getenv("CLAUDE_CONFIG_DIR")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(`{}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	payload := `{"email":"dev@example.com","https://api.openai.com/auth":{"chatgpt_plan_type":"pro","chatgpt_account_id":"acct-1"}}`
+	id := "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+	acctPut(t, filepath.Join(home, ".codex", "auth.json"),
+		`{"auth_mode":"chatgpt","tokens":{"id_token":"`+id+`","access_token":"ACCESS","refresh_token":"R","account_id":"acct-1"}}`)
 }
 
-// cliStdout runs a command and returns what it printed.
-func cliStdout(t *testing.T, fn func() error) (string, error) {
+// acctCopilot writes a GitHub Copilot sign-in for octocat.
+func acctCopilot(t *testing.T, home string) {
+	t.Helper()
+	acctPut(t, filepath.Join(home, "config", "github-copilot", "hosts.json"),
+		`{"github.com":{"user":"octocat","oauth_token":"gho_x"}}`)
+}
+
+// acctClaude writes a Claude Code credentials file; its content is never read by dial.
+func acctClaude(t *testing.T, home string) {
+	t.Helper()
+	acctPut(t, filepath.Join(home, "claude", ".credentials.json"), `{"claudeAiOauth":{"accessToken":"C"}}`)
+}
+
+// acctOutput runs f with stdout captured and returns what it printed.
+func acctOutput(t *testing.T, f func() error) (string, error) {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer r.Close()
 	old := os.Stdout
 	os.Stdout = w
-	runErr := fn()
+	done := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	ferr := f()
 	os.Stdout = old
 	w.Close()
-	b, _ := io.ReadAll(r)
-	r.Close()
-	return string(b), runErr
+	return <-done, ferr
 }
 
-func TestProvidersListShowsAccountAndExclusion(t *testing.T) {
-	home := cliSandbox(t)
-	cliCodexSignIn(t, home)
-	cliClaudeSignIn(t)
-
-	out, err := cliStdout(t, providers)
+func TestProvidersListAccountsAndClaudeExclusion(t *testing.T) {
+	home := acctHome(t)
+	acctCodex(t, home)
+	acctCopilot(t, home)
+	acctClaude(t, home)
+	out, err := acctOutput(t, providers)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "signed in as dev@example.com") {
-		t.Errorf("list lacks the account line:\n%s", out)
+	if !strings.Contains(out, "signed in as dev@example.com") || !strings.Contains(out, "signed in as octocat") {
+		t.Fatalf("account rows should say who is signed in:\n%s", out)
 	}
-	for _, l := range strings.Split(out, "\n") {
-		if strings.Contains(l, "signed in as") && strings.Contains(l, "custom") {
-			t.Errorf("account row is marked custom: %q", l)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "signed in as") && strings.Contains(line, "custom") {
+			t.Fatalf("account row must not be marked custom: %q", line)
 		}
 	}
-	if !strings.Contains(out, "\n  Claude Code is signed in but not offered: ") {
-		t.Errorf("list lacks the Claude Code exclusion line:\n%s", out)
-	}
-	for _, l := range strings.Split(out, "\n") {
-		if strings.Contains(l, "signed in as") && strings.HasPrefix(strings.TrimSpace(l), "claude") {
-			t.Errorf("Claude Code offered as a provider: %q", l)
-		}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "Claude Code is signed in but not offered: ") || !strings.Contains(last, "Anthropic") {
+		t.Fatalf("the Claude exclusion line must close the list:\n%s", out)
 	}
 }
 
-func TestProvidersListWithoutClaudeHasNoExclusionLine(t *testing.T) {
-	home := cliSandbox(t)
-	cliCodexSignIn(t, home)
-
-	out, err := cliStdout(t, providers)
+func TestProvidersNoExclusionLineWithoutClaudeLogin(t *testing.T) {
+	home := acctHome(t)
+	acctCodex(t, home)
+	out, err := acctOutput(t, providers)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out, "is signed in but not offered") {
-		t.Errorf("exclusion line without a Claude Code sign-in:\n%s", out)
+		t.Fatalf("no Claude login, no exclusion line:\n%s", out)
 	}
 }
 
-func TestProviderDetailShowsAccount(t *testing.T) {
-	home := cliSandbox(t)
-	cliCodexSignIn(t, home)
-
+func TestProviderDetailShowsAccountLine(t *testing.T) {
+	home := acctHome(t)
+	acctCodex(t, home)
 	p, err := provider.Find("codex")
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := cliStdout(t, func() error { return showProvider(*p) })
+	out, err := acctOutput(t, func() error { return showProvider(*p) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"account", "dev@example.com", "pro", "from codex"} {
+	if !strings.Contains(out, "account") || !strings.Contains(out, "dev@example.com (plan pro, from codex)") {
+		t.Fatalf("detail should carry an account line:\n%s", out)
+	}
+}
+
+func TestAccountModelsListNamesTheUser(t *testing.T) {
+	home := acctHome(t)
+	acctCodex(t, home)
+	acctCopilot(t, home)
+	out, err := acctOutput(t, models)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Copilot · signed in as octocat", "Codex · signed in as dev@example.com", "copilot/claude-sonnet-4.5"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("detail lacks %q:\n%s", want, out)
+			t.Fatalf("models list missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "custom") {
-		t.Errorf("account detail is marked custom:\n%s", out)
+	if strings.Contains(out, "copilot/auto") {
+		t.Fatalf("the built-in Copilot list must not offer auto:\n%s", out)
+	}
+}
+
+func TestAccountSaveKeepsOnlyTheModelChoice(t *testing.T) {
+	home := acctHome(t)
+	acctCopilot(t, home)
+	out, err := acctOutput(t, func() error {
+		return providerCmd([]string{"provider", "key", "copilot", "sk-SECRET"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "sk-SECRET") || !strings.Contains(out, "no key is kept") {
+		t.Fatalf("key for an account must be ignored and not echoed:\n%s", out)
+	}
+	if err := provider.Save(provider.Provider{ID: "copilot", Chat: "https://evil.example/v1", Key: "sk-SECRET",
+		Models: []string{"claude-sonnet-4.5"}}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(provider.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, bad := range []string{"sk-SECRET", "evil.example", `"chat"`, `"key"`} {
+		if strings.Contains(s, bad) {
+			t.Fatalf("stored account must not hold %q:\n%s", bad, s)
+		}
+	}
+	if !strings.Contains(s, "claude-sonnet-4.5") {
+		t.Fatalf("the model choice must be stored:\n%s", s)
+	}
+	p, err := provider.Find("copilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Chat != "" || p.Key != "" || len(p.Models) != 1 || p.Models[0] != "claude-sonnet-4.5" {
+		t.Fatalf("reloaded account should expose only the choice: %+v", p)
+	}
+	if ex := p.Exposed(); len(ex) != 1 || ex[0].ID != "claude-sonnet-4.5" {
+		t.Fatalf("exposed models should be the choice only: %+v", ex)
+	}
+}
+
+func TestAccountRemoveClearsChoiceButKeepsProvider(t *testing.T) {
+	home := acctHome(t)
+	acctCopilot(t, home)
+	if err := provider.Save(provider.Provider{ID: "copilot", Models: []string{"claude-sonnet-4.5"}}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := acctOutput(t, func() error {
+		return providerCmd([]string{"provider", "rm", "copilot"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "cleared the model choice") {
+		t.Fatalf("remove on an account should say it only cleared the choice:\n%s", out)
+	}
+	p, err := provider.Find("copilot")
+	if err != nil {
+		t.Fatalf("account provider must remain after remove: %v", err)
+	}
+	if len(p.Models) != 0 {
+		t.Fatalf("choice should be cleared: %+v", p.Models)
 	}
 }
