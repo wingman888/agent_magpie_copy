@@ -78,16 +78,13 @@ func (a *Agent) Detected() bool {
 	return false
 }
 
-// Field looks a field up by key. For gemini, which is the agent whose fields
-// are also named by their label, a miss on the key falls back to the label.
+// Field looks a field up by key, or, failing that, by the label it shows.
+// The key always wins, so existing lookups are unchanged.
 func (a *Agent) Field(key string) *Field {
 	for i := range a.Fields {
 		if a.Fields[i].Key == key {
 			return &a.Fields[i]
 		}
-	}
-	if a.ID != "gemini" {
-		return nil
 	}
 	for i := range a.Fields {
 		if a.Fields[i].Label == key {
