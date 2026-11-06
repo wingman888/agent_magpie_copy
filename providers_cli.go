@@ -296,7 +296,7 @@ func providerCmd(args []string) error {
 
 const fallbackUsage = "magpie provider fallback <id> [<provider/model>… | none]"
 
-// fallbackCmd: `magpie provider fallback <id> [provider/model… | none]`.
+// fallbackCmd: `magpie provider fallback <id> [<provider/model>… | none]`.
 // With no models it shows the current chain; `none` clears it; otherwise the
 // given models replace the chain in order. Nothing is saved unless every
 // model is one magpie knows.

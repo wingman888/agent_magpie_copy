@@ -1,1 +1,1 @@
-./internal/agent ./internal/catalog ./internal/edit ./internal/gui ./internal/netproxy ./internal/settings ./internal/update ./internal/usage
+./. ./internal/gateway ./internal/provider
