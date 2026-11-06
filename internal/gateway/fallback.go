@@ -31,9 +31,6 @@ type candidate struct {
 	p     provider.Provider
 	model string
 	rest  string // what rests after a failure: the provider, or one of its keys
-	// aside is a key made for another protocol than the request's, tried
-	// only after the keys that suit it (see protocolPool).
-	aside bool
 }
 
 // label names a candidate in a call's record: the provider, and the key
@@ -66,9 +63,9 @@ func perKey(p provider.Provider, model string, from provider.Protocol) []candida
 // the model.
 func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, left []candidate) {
 	if p.Account != nil {
-		all := []candidate{{p: p, model: model, rest: p.ID}}
+		all := []candidate{{p, model, p.ID}}
 		for _, q := range p.AlsoOn() {
-			all = append(all, candidate{p: q, model: model, rest: p.ID + "@" + q.Account.User})
+			all = append(all, candidate{q, model, p.ID + "@" + q.Account.User})
 		}
 		// an account whose plan lacks the model (a Free one behind a Plus)
 		// would only answer 400; it is tried only when none lists it
@@ -97,54 +94,19 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, l
 		}
 		if !p.Serves(k, model) {
 			// the vendor lists the model to another key only
-			unlisted = append(unlisted, candidate{p: q, model: model, rest: rest})
+			unlisted = append(unlisted, candidate{q, model, rest})
 			continue
 		}
-		out = append(out, candidate{p: q, model: model, rest: rest})
+		out = append(out, candidate{q, model, rest})
 	}
 	if len(out) == 0 {
 		out, unlisted = unlisted, nil // no key lists it: try them all the same
 	}
 	if len(out) == 0 {
-		return []candidate{{p: p, model: model, rest: p.ID}}, nil
+		return []candidate{{p, model, p.ID}}, nil
 	}
-	main, aside := protocolPool(out, suitedTo(model, from))
-	sort.SliceStable(main, func(i, j int) bool { return keyFit(main[i].p, model, from) < keyFit(main[j].p, model, from) })
-	return append(main, aside...), unlisted
-}
-
-// suitedTo is the protocol a request's keys are chosen for: the one the
-// model is at home in when its name says (Claude's Anthropic, GPT's Chat), so
-// a Claude model asked over Chat still goes to the Anthropic key; else the
-// protocol the request came in on.
-func suitedTo(model string, from provider.Protocol) provider.Protocol {
-	if f := modelFamily(model); f != "" {
-		return f
-	}
-	return from
-}
-
-// protocolPool splits a provider's keys by how well each suits the protocol
-// the request is for (provider.RankKeysByProtocol): the best tier present is
-// the pool routing works in; the others follow it, marked aside, the one that
-// fits better first. A candidate's key protocol is its provider's
-// KeyProtocol, which WithKey has set to the key's own.
-func protocolPool(cs []candidate, want provider.Protocol) (main, aside []candidate) {
-	fit := func(c candidate) int { return provider.KeyFit(provider.KeyAccount{Protocol: c.p.KeyProtocol}, want) }
-	best := provider.FitOther
-	for _, c := range cs {
-		best = min(best, fit(c))
-	}
-	for _, c := range cs {
-		if fit(c) == best {
-			main = append(main, c)
-		} else {
-			c.aside = true
-			aside = append(aside, c)
-		}
-	}
-	sort.SliceStable(aside, func(i, j int) bool { return fit(aside[i]) < fit(aside[j]) })
-	return main, aside
+	sort.SliceStable(out, func(i, j int) bool { return keyFit(out[i].p, model, from) < keyFit(out[j].p, model, from) })
+	return out, unlisted
 }
 
 // keyFit ranks how well a key suits a request, best first: 0 fits, 1 needs
@@ -198,15 +160,10 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 // plan is candidates, and for the routing trace what each stood where it
 // did by, and those left out.
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
-	return s.planCtx(p, model, from, routeCtx{})
-}
-
-// planCtx is plan for a request within its conversation (see routeCtx).
-func (s *Server) planCtx(p provider.Provider, model string, from provider.Protocol, rc routeCtx) ([]candidate, planned) {
 	var pl planned
 	add := func(q provider.Provider, m string, fallback bool) []candidate {
 		cs, left := perKeyOf(q, m, from)
-		cs, wg := weighCtx(q, cs, m, from, rc)
+		cs, wg := weigh(q, cs, m, from)
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
 			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1

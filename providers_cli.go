@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"slices"
@@ -145,56 +144,31 @@ func presets() error {
 
 // models: `magpie models` — the catalog every agent sees
 func models() error {
-	return listModels(os.Stdout, provider.Catalog())
-}
-
-// listModels prints the catalog: the routing groups in a section of their
-// own, before the providers, each provider's models under its name.
-func listModels(out io.Writer, entries []provider.Entry) error {
+	entries := provider.Catalog()
 	if len(entries) == 0 {
-		fmt.Fprintln(out, muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
+		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
-	}
-	var groups, models []provider.Entry
-	for _, e := range entries {
-		if e.Kind == provider.KindGroup {
-			groups = append(groups, e)
-		} else {
-			models = append(models, e)
-		}
 	}
 	w := 0
 	for _, e := range entries {
 		w = max(w, len(e.ID))
 	}
-	line := func(e provider.Entry) {
-		l := "  " + pad(e.ID, w)
-		if e.Name != "" && e.Name != e.Model {
-			l += "  " + muted.Render(e.Name)
-		}
-		if len(e.Efforts) > 0 {
-			l += faint.Render("  " + strings.Join(e.Efforts, "/"))
-		}
-		fmt.Fprintln(out, l)
-	}
-	if len(groups) > 0 {
-		fmt.Fprintln(out, faint.Render("  Routing groups"))
-		for _, e := range groups {
-			line(e)
-		}
-		if len(models) > 0 {
-			fmt.Fprintln(out)
-		}
-	}
 	last := ""
-	for _, e := range models {
+	for _, e := range entries {
 		if e.Provider.ID != last {
 			last = e.Provider.ID
-			fmt.Fprintln(out, faint.Render("  "+e.Provider.Name))
+			fmt.Println(faint.Render("  " + e.Provider.Name))
 		}
-		line(e)
+		line := "  " + pad(e.ID, w)
+		if e.Name != "" && e.Name != e.Model {
+			line += "  " + muted.Render(e.Name)
+		}
+		if len(e.Efforts) > 0 {
+			line += faint.Render("  " + strings.Join(e.Efforts, "/"))
+		}
+		fmt.Println(line)
 	}
-	fmt.Fprintln(out, faint.Render("  "+gateway.URL()+"/v1"))
+	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
 	return nil
 }
 

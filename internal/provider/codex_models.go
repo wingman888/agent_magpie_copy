@@ -28,7 +28,7 @@ const codexClientVersion = "0.154.0"
 // models_cache.json, but that one is of whichever account Codex CLI last
 // asked with, if it ran at all.
 func codexModels(ctx context.Context, sign func(context.Context, *http.Request, []byte) error) ([]catalog.Model, error) {
-	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexRequestVersion(ctx))
+	u := CodexBase + "/models?client_version=" + url.QueryEscape(codexCacheVersion())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err

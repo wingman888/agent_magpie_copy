@@ -237,28 +237,20 @@ type Entry struct {
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`
-	// Kind is "" for a provider's model, KindGroup for a routing group; a
-	// group has no Provider or Model, and lists its Members ("provider/model").
-	Kind    string   `json:"kind,omitempty"`
-	Members []string `json:"members,omitempty"`
-	Auto    bool     `json:"auto,omitempty"` // a group magpie discovered
 }
 
-// Catalog lists every exposed model of every ready provider, then the
-// routing groups (see group.go).
+// Catalog lists every exposed model of every ready provider.
 func Catalog() []Entry {
 	var out []Entry
-	var ready []Provider
 	for _, p := range All() {
 		if !p.Ready() {
 			continue
 		}
-		ready = append(ready, p)
 		for _, m := range p.Exposed() {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
 		}
 	}
-	return append(out, groupEntries(ready)...)
+	return out
 }
 
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
@@ -266,13 +258,7 @@ func Catalog() []Entry {
 // and the bare model id when exactly one provider serves it.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
-	// routing groups are resolved by the gateway (FindGroup), not here
-	var entries []Entry
-	for _, e := range Catalog() {
-		if e.Kind != KindGroup {
-			entries = append(entries, e)
-		}
-	}
+	entries := Catalog()
 	for _, e := range entries {
 		if e.ID == id {
 			return e.Provider, e.Model, true

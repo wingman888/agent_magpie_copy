@@ -35,9 +35,6 @@ type Route struct {
 	Error    string    `json:"error,omitempty"`
 	Millis   int64     `json:"ms,omitempty"`
 	Tokens   int       `json:"tokens,omitempty"`
-
-	Group    *GroupTrace    `json:"group,omitempty"`    // the routing group the model named, if any
-	Affinity *AffinityTrace `json:"affinity,omitempty"` // how the conversation's affinity went, when there was a choice
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -52,7 +49,7 @@ type Weighed struct {
 	Agent    string            `json:"agent,omitempty"`
 	Plan     string            `json:"plan,omitempty"`
 	Model    string            `json:"model"`
-	Routing  string            `json:"routing"` // its provider's: "", order, rotate, least-used
+	Routing  string            `json:"routing"` // its provider's: "", order, rotate, usage
 	Fallback bool              `json:"fallback,omitempty"`
 	Shared   bool              `json:"shared,omitempty"` // its provider has more than one on
 	Known    bool              `json:"known,omitempty"`  // the vendor said what the account has left
@@ -64,7 +61,6 @@ type Weighed struct {
 	Speaks   provider.Protocol `json:"speaks,omitempty"` // a key made for one protocol only
 	Rest     *Rest             `json:"rest,omitempty"`   // resting after a failure, when the request came
 	Unlisted bool              `json:"unlisted,omitempty"`
-	Aside    bool              `json:"aside,omitempty"` // a key made for another protocol: tried only after those that suit the request
 }
 
 // Try is one candidate trying the request.
@@ -98,7 +94,6 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	default:
 		w.Kind = "provider"
 	}
-	w.Aside = c.aside
 	if l, ok := wg.lefts[c.rest]; ok {
 		w.Known, w.Used, w.Renews = true, l.used, l.renews
 	}
