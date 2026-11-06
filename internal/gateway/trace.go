@@ -88,11 +88,14 @@ type Try struct {
 	Fail   string    `json:"fail,omitempty"` // why it failed, as rest tells it
 	Error  string    `json:"error,omitempty"`
 	Rest   *Rest     `json:"rest,omitempty"` // how long it now sits out; none when it was the last to try
-	// Kind tells the three things that happen to a try besides an answer:
-	// "moved" on to the next candidate after its failure, "retry" of the
-	// last candidate after a wait (Wait, in ms), or "canceled" by the agent.
-	Kind string `json:"kind,omitempty"`
-	Wait int64  `json:"wait,omitempty"`
+	Retry  *Retry    `json:"retry,omitempty"`
+}
+
+// Retry is a wait before the same candidate is tried again, after a failure
+// that may mend by itself.
+type Retry struct {
+	Attempt int   `json:"attempt"` // the retry this wait leads to: 1, then 2
+	Wait    int64 `json:"waitMs"`  // how long it waits, in milliseconds
 }
 
 type planned struct {
