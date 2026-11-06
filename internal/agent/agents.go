@@ -340,10 +340,12 @@ func copilot(home string) *Agent {
 			Get: jsonGet(path, "model"),
 			Set: jsonSet(path, "model"),
 			Options: func(map[string]string) []Option {
-				// "auto" is intentionally absent from the catalog (it must not be
-				// offered as a provider model); Copilot CLI still offers it.
-				out := []Option{{Value: "auto", Note: "Let Copilot pick", Icon: "githubcopilot"}}
-				out = append(out, options(catalog.Builtin("copilot"), "")...)
+				out := options(catalog.Builtin("copilot"), "")
+				for i := range out {
+					if out[i].Value == "auto" {
+						out[i].Icon = "githubcopilot"
+					}
+				}
 				return out
 			},
 		}},

@@ -47,6 +47,7 @@ type providerJSON struct {
 	Fetched   string          `json:"fetched"` // "3h ago" when the list came from the vendor
 	Agents    []providerAgent `json:"agents"`  // detected agents, current ones flagged
 	Sponsored bool            `json:"sponsored"`
+	Account   string          `json:"account,omitempty"` // signed-in user, for account providers
 }
 
 type providerAgent struct {
@@ -74,6 +75,7 @@ type providersJSON struct {
 	Providers []providerJSON `json:"providers"`
 	Presets   []presetJSON   `json:"presets"`
 	Gateway   gatewayJSON    `json:"gateway"`
+	Notes     []string       `json:"notes,omitempty"` // logins seen but not offered, and why
 }
 
 // currentProvider reads which provider (and model) an agent is routed to now.
@@ -103,6 +105,9 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 	if pr := provider.Preset(p.Preset); pr != nil {
 		out.Sponsored = pr.Sponsored
 		out.Key.Optional = pr.NoKey
+	}
+	if p.Account != nil {
+		out.Account = p.Account.User
 	}
 	out.Key.Set = p.Key != ""
 	out.Key.Masked = provider.Mask(p.Key)
@@ -147,6 +152,7 @@ func providersState(gw *gateway.Server) providersJSON {
 		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID]})
 	}
 	s.Gateway = gatewayJSON{URL: gateway.URL(), Models: len(provider.Catalog()), Calls: []gateway.Call{}}
+	s.Notes = provider.Notes()
 	if gw != nil {
 		s.Gateway.Running, s.Gateway.Mine = true, true
 		s.Gateway.Calls = gw.Recent()

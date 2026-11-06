@@ -21,8 +21,6 @@ type fake struct {
 	reply string // SSE body
 	ctype string
 	code  int
-	// noType sends the reply without any Content-Type header
-	noType bool
 }
 
 func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -32,12 +30,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ct == "" {
 		ct = "text/event-stream"
 	}
-	if f.noType {
-		// a nil entry keeps net/http from sniffing a type into the header
-		w.Header()["Content-Type"] = nil
-	} else {
-		w.Header().Set("Content-Type", ct)
-	}
+	w.Header().Set("Content-Type", ct)
 	if f.code != 0 {
 		w.WriteHeader(f.code)
 	}

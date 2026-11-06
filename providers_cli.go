@@ -35,7 +35,6 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		printUnavailable()
 		return nil
 	}
 	uses := usesByProvider()
@@ -44,15 +43,12 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Agent != "" {
-			r.host = muted.Render("由账号会话决定")
-		}
-		if p.Preset == "" && p.Agent == "" {
+		if p.Preset == "" && p.Account == nil {
 			r.name += " " + faint.Render("custom")
 		}
 		switch {
-		case p.Agent != "":
-			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Login)
+		case p.Account != nil:
+			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
 		case p.Key != "":
 			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 		case p.Ready():
@@ -77,15 +73,10 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	printUnavailable()
-	return nil
-}
-
-// printUnavailable says which signed-in agents are not offered as providers, and why.
-func printUnavailable() {
-	for _, u := range provider.UnavailableAgents() {
-		fmt.Println(faint.Render("  " + u.Name + " " + u.Reason))
+	for _, n := range provider.Notes() {
+		fmt.Println(amber.Render("!"), muted.Render(n))
 	}
+	return nil
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -178,9 +169,6 @@ func providerCmd(args []string) error {
 		p, err := provider.Find(rest[0])
 		if err != nil {
 			return err
-		}
-		if p.Agent != "" {
-			return fmt.Errorf("%s is an account provider: it signs in through %s and needs no key", p.Name, p.Agent)
 		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
@@ -316,29 +304,23 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" && p.Agent == "" {
+	if p.Preset == "" && p.Account == nil {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
-	if p.Agent == "" {
-		kv("chat", p.Chat)
-		kv("responses", p.Responses)
-		kv("anthropic", p.Anthropic)
-	} else {
-		kv("endpoint", muted.Render("由账号会话决定"))
-	}
-	if p.Agent != "" {
-		who := p.Login
-		if p.Plan != "" {
-			who += " · " + p.Plan + " plan"
+	kv("chat", p.Chat)
+	kv("responses", p.Responses)
+	kv("anthropic", p.Anthropic)
+	if a := p.Account; a != nil {
+		acct := a.User
+		if a.Plan != "" {
+			acct += " · " + a.Plan
 		}
-		kv("account", who+muted.Render(" · from the "+p.Name+" sign-in"))
+		kv("account", acct+muted.Render(" · from "+a.Source))
 	}
 	switch {
 	case p.Key != "":
 		kv("key", muted.Render(provider.Mask(p.Key)))
-	case p.Agent != "":
-		kv("key", muted.Render("none needed · signed in"))
 	case p.Ready():
 		kv("key", muted.Render("none needed"))
 	default:
