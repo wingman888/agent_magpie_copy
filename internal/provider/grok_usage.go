@@ -15,6 +15,9 @@ var grokBase = "https://cli-chat-proxy.grok.com/v1"
 
 func grokSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "grok", Name: "Grok", Icon: "xai", Windows: []QuotaWindow{}}
+	if c, ok := readGrokCredential(GrokHome()); ok {
+		q.User = c.Email
+	}
 	c, err := grokAccessToken(GrokHome(), GrokExecutable(), false)
 	if err == nil {
 		q.Windows, err = grokWindows(ctx, c.Key)
@@ -52,13 +55,13 @@ func grokWindows(ctx context.Context, token string) ([]QuotaWindow, error) {
 	if p := cfg.CurrentPeriod; p != nil {
 		name, end = grokPeriodName(p.Type), p.End
 	}
-	w := QuotaWindow{Name: name, Used: cfg.CreditUsagePercent}
+	w := QuotaWindow{Name: name, Used: cfg.CreditUsagePercent, Span: grokPeriodSpan[name]}
 	if t, err := time.Parse(time.RFC3339Nano, end); err == nil {
 		w.ResetsAt = &t
 	}
 	out := []QuotaWindow{w}
 	if cfg.OnDemandCap.Val > 0 {
-		out = append(out, QuotaWindow{Name: "On-demand", Used: 100 * cfg.OnDemandUsed.Val / cfg.OnDemandCap.Val, ResetsAt: w.ResetsAt})
+		out = append(out, QuotaWindow{Name: "On-demand", Used: 100 * cfg.OnDemandUsed.Val / cfg.OnDemandCap.Val, ResetsAt: w.ResetsAt, Aside: true})
 	}
 	return out, nil
 }
@@ -76,3 +79,6 @@ func grokPeriodName(t string) string {
 	}
 	return "Allowance"
 }
+
+// grokPeriodSpan is how long each of grokPeriodName's periods runs.
+var grokPeriodSpan = map[string]time.Duration{"1 day": 24 * time.Hour, "7 days": 7 * 24 * time.Hour, "Month": 30 * 24 * time.Hour}
