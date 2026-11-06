@@ -1,1 +1,1 @@
-./. ./internal/catalog ./internal/edit ./internal/gateway ./internal/provider ./internal/agent ./internal/update ./internal/usage ./internal/settings
+./. ./internal/provider
