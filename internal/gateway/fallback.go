@@ -108,18 +108,29 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, l
 	if len(out) == 0 {
 		return []candidate{{p: p, model: model, rest: p.ID}}, nil
 	}
-	main, aside := protocolPool(out, from)
+	main, aside := protocolPool(out, suitedTo(model, from))
 	sort.SliceStable(main, func(i, j int) bool { return keyFit(main[i].p, model, from) < keyFit(main[j].p, model, from) })
 	return append(main, aside...), unlisted
 }
 
-// protocolPool splits a provider's keys by how well each suits the request's
-// protocol (provider.RankKeysByProtocol): the best tier present is the pool
-// routing works in; the others follow it, marked aside, the one that fits
-// better first. A candidate's key protocol is its provider's KeyProtocol,
-// which WithKey has set to the key's own.
-func protocolPool(cs []candidate, from provider.Protocol) (main, aside []candidate) {
-	fit := func(c candidate) int { return provider.KeyFit(provider.KeyAccount{Protocol: c.p.KeyProtocol}, from) }
+// suitedTo is the protocol a request's keys are chosen for: the one the
+// model is at home in when its name says (Claude's Anthropic, GPT's Chat), so
+// a Claude model asked over Chat still goes to the Anthropic key; else the
+// protocol the request came in on.
+func suitedTo(model string, from provider.Protocol) provider.Protocol {
+	if f := modelFamily(model); f != "" {
+		return f
+	}
+	return from
+}
+
+// protocolPool splits a provider's keys by how well each suits the protocol
+// the request is for (provider.RankKeysByProtocol): the best tier present is
+// the pool routing works in; the others follow it, marked aside, the one that
+// fits better first. A candidate's key protocol is its provider's
+// KeyProtocol, which WithKey has set to the key's own.
+func protocolPool(cs []candidate, want provider.Protocol) (main, aside []candidate) {
+	fit := func(c candidate) int { return provider.KeyFit(provider.KeyAccount{Protocol: c.p.KeyProtocol}, want) }
 	best := provider.FitOther
 	for _, c := range cs {
 		best = min(best, fit(c))

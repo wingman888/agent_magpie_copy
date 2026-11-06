@@ -57,9 +57,13 @@ func TestProtocolPoolUnspecifiedBeforeOther(t *testing.T) {
 	p := provider.Provider{ID: "pool-un", Name: "Pool", Chat: "https://pool.test/v1", Anthropic: "https://pool.test",
 		Key: "k-ant", KeyProtocol: provider.Anthropic,
 		Keys: []provider.KeyAccount{{Key: "k-any"}, {Key: "k-chat", Protocol: provider.Chat}}}
-	cs := perKey(p, "gpt-5.5", provider.Anthropic)
+	cs := perKey(p, "m", provider.Anthropic)
 	if len(cs) != 3 || cs[0].aside || !cs[1].aside || cs[1].p.KeyProtocol != "" || !cs[2].aside || cs[2].p.KeyProtocol != provider.Chat {
 		t.Fatalf("order %q", restsOf(cs))
+	}
+	// a GPT model is at home on the Chat key, whatever protocol it came in on
+	if g := perKey(p, "gpt-5.5", provider.Anthropic); g[0].p.KeyProtocol != provider.Chat || !g[len(g)-1].aside {
+		t.Fatalf("for gpt: %q", restsOf(g))
 	}
 	if w := weighed(cs[2], cs[2].p, weighing{}, false, provider.Anthropic); !w.Aside {
 		t.Fatal("the trace doesn't say aside")
