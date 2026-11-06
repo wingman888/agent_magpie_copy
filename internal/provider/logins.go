@@ -186,7 +186,7 @@ func currentLogin(agent string) (savedLogin, bool) {
 		b, _ := json.Marshal(creds)
 		return savedLogin{Agent: agent, User: user,
 			Plan:  claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type"),
-			Creds: compactJSON(b), current: true}, true
+			Creds: compactJSON(blob), current: true}, true
 	}
 	return savedLogin{}, false
 }
