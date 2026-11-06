@@ -1,290 +1,224 @@
-// Package backup packs what the user set up in magpie into one file, sealed
-// with a passphrase, to carry to another machine: the providers (their keys
-// too, unless left out), the pictures picked for them, the settings, the
-// profiles and every agent's model. Subscriptions are not in it: each is
-// the sign-in of an agent on this machine, so each machine signs in on its
-// own.
+// Package backup packs magpie's configuration into one encrypted file and
+// unpacks it again.
 //
-// The file is JSON: a header naming how it is sealed, and the bundle
-// encrypted with AES-256-GCM under a key derived from the passphrase with
-// PBKDF2-SHA256. Nothing in it can be read without the passphrase.
+// File layout: one line of plain JSON (the header), a newline, then the
+// base64 of the AES-256-GCM ciphertext. The header bytes are the GCM additional
+// authenticated data, so changing any byte of the header, the iteration count
+// included, makes decryption fail. The key is derived from the secret with
+// PBKDF2-SHA256.
 package backup
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
-	"os"
-	"path/filepath"
-	"regexp"
-	"slices"
-	"strings"
-	"time"
 
-	"github.com/yetone/magpie/internal/agent"
-	"github.com/yetone/magpie/internal/edit"
-	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/settings"
 )
 
-// Ext is the extension backups are saved with.
+// Ext is the extension of a backup file.
 const Ext = ".magpie-backup"
 
 const (
-	format     = "magpie-backup"
-	iterations = 600_000
+	formatName = "magpie-backup"
+	// version is the newest file version this build reads and writes.
+	version = 1
+	kdfName = "pbkdf2-sha256"
+	// defaultIterations is what Seal writes. Open refuses anything below
+	// minIterations, and anything above maxIterations as a guard against
+	// a header that would make Open spin for minutes.
+	defaultIterations = 600000
+	minIterations     = 100000
+	maxIterations     = 10000000
+	saltLen           = 16
+	nonceLen          = 12
+	keyLen            = 32
 )
 
-// Bundle is what a backup holds.
+// ErrPassphrase means the secret is wrong or the file was modified after it
+// was written. Check it with errors.Is.
+var ErrPassphrase = errors.New("wrong secret, or the backup file was modified")
+
+// ErrNotBackup means the data is not a magpie backup at all.
+var ErrNotBackup = errors.New("不是 magpie 备份文件")
+
+// ErrNewer means the backup was written by a newer magpie than this one.
+var ErrNewer = errors.New("备份由更新版本的 magpie 生成，请先升级 magpie")
+
+// Bundle is everything a backup carries. Version is 1 for now.
 type Bundle struct {
-	Version   int                        `json:"version"`
-	Created   time.Time                  `json:"created"`
-	App       string                     `json:"app,omitempty"` // the magpie that made it
-	Keys      bool                       `json:"keys"`          // whether the providers carry their keys
-	Providers []provider.Provider        `json:"providers"`
-	Icons     map[string][]byte          `json:"icons,omitempty"` // pictures picked for providers, by file name
-	Settings  *settings.Settings         `json:"settings,omitempty"`
-	Profiles  map[string]profile.Profile `json:"profiles,omitempty"`
-	Agents    profile.Profile            `json:"agents,omitempty"` // every agent's fields as they are now
+	Version   int                 `json:"version"`
+	App       string              `json:"app,omitempty"` // the magpie version that wrote it
+	Providers []provider.Provider `json:"providers"`
+	// Icons maps a file name in the icons directory to its content.
+	Icons map[string][]byte `json:"icons,omitempty"`
+	// Settings is the settings document; empty means the backup has none.
+	Settings json.RawMessage `json:"settings,omitempty"`
+	// Profiles is the saved profiles document; empty means none.
+	Profiles json.RawMessage `json:"profiles,omitempty"`
+	// Agents is the per-agent model settings; empty means none.
+	Agents json.RawMessage `json:"agents,omitempty"`
 }
 
-type envelope struct {
+// header is the plain JSON line at the top of a backup file.
+type header struct {
 	Format     string `json:"format"`
 	Version    int    `json:"version"`
 	KDF        string `json:"kdf"`
 	Iterations int    `json:"iterations"`
-	Salt       []byte `json:"salt"`
-	Nonce      []byte `json:"nonce"`
-	Data       []byte `json:"data"`
+	Salt       string `json:"salt"`
+	Nonce      string `json:"nonce"`
 }
 
-// ErrPassphrase is a passphrase that does not open the backup.
-var ErrPassphrase = errors.New("wrong passphrase, or the file was changed")
-
-// Collect gathers the bundle; without keys, providers carry none, nor any
-// header that looks like one.
-func Collect(keys bool, app string) (Bundle, error) {
-	b := Bundle{Version: 1, Created: time.Now().UTC(), App: app, Keys: keys}
-	for _, p := range provider.Stored() {
-		if !keys {
-			p = withoutKeys(p)
-		}
-		b.Providers = append(b.Providers, p)
-		if name, ok := strings.CutPrefix(p.Icon, "file:"); ok {
-			if f := provider.IconFile(name); f != "" {
-				if data, err := os.ReadFile(f); err == nil {
-					if b.Icons == nil {
-						b.Icons = map[string][]byte{}
-					}
-					b.Icons[name] = data
-				}
-			}
-		}
-	}
-	if _, err := os.Stat(settings.Path()); err == nil {
-		s := settings.Load()
-		b.Settings = &s
-	}
-	ps, err := profile.Load()
-	if err != nil {
-		return b, err
-	}
-	if len(ps) > 0 {
-		b.Profiles = ps
-	}
-	if snap := profile.Snapshot(); len(snap) > 0 {
-		b.Agents = snap
-	}
-	return b, nil
+func deriveKey(pass string, salt []byte, iterations int) ([]byte, error) {
+	return pbkdf2.Key(sha256.New, pass, salt, iterations, keyLen)
 }
 
-var secretHeader = regexp.MustCompile(`(?i)auth|key|token|secret|cookie|session|password`)
-
-func withoutKeys(p provider.Provider) provider.Provider {
-	p.Key, p.KeyName, p.Keys, p.KeyProtocol = "", "", nil, ""
-	if len(p.Headers) > 0 {
-		h := map[string]string{}
-		for k, v := range p.Headers {
-			if !secretHeader.MatchString(k) {
-				h[k] = v
-			}
-		}
-		p.Headers = h
-	}
-	return p
-}
-
-// Seal encrypts the bundle under the passphrase.
+// Seal encrypts the bundle with the secret and returns the file contents.
+// The secret must not be empty.
 func Seal(b Bundle, pass string) ([]byte, error) {
 	if pass == "" {
-		return nil, errors.New("a backup needs a passphrase")
+		return nil, errors.New("the backup secret must not be empty")
+	}
+	if b.Version == 0 {
+		b.Version = version
 	}
 	plain, err := json.Marshal(b)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encode backup: %w", err)
 	}
-	e := envelope{Format: format, Version: 1, KDF: "pbkdf2-sha256", Iterations: iterations,
-		Salt: make([]byte, 16), Nonce: make([]byte, 12)}
-	rand.Read(e.Salt)
-	rand.Read(e.Nonce)
-	gcm, err := aead(pass, e)
+	salt := make([]byte, saltLen)
+	nonce := make([]byte, nonceLen)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, fmt.Errorf("random salt: %w", err)
+	}
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("random nonce: %w", err)
+	}
+	// The values are base64 and fixed ASCII names, so they need no escaping.
+	head := fmt.Sprintf(`{"format": "%s", "version": %d, "kdf": "%s", "iterations": %d, "salt": "%s", "nonce": "%s"}`,
+		formatName, version, kdfName, defaultIterations,
+		base64.StdEncoding.EncodeToString(salt), base64.StdEncoding.EncodeToString(nonce))
+
+	key, err := deriveKey(pass, salt, defaultIterations)
+	if err != nil {
+		return nil, fmt.Errorf("derive key: %w", err)
+	}
+	gcm, err := newGCM(key)
 	if err != nil {
 		return nil, err
 	}
-	e.Data = gcm.Seal(nil, e.Nonce, plain, header(e))
-	return json.MarshalIndent(e, "", "  ")
+	ct := gcm.Seal(nil, nonce, plain, []byte(head))
+
+	var out bytes.Buffer
+	out.WriteString(head)
+	out.WriteByte('\n')
+	out.WriteString(base64.StdEncoding.EncodeToString(ct))
+	out.WriteByte('\n')
+	return out.Bytes(), nil
 }
 
-// Open decrypts a backup.
+// Open decrypts a backup file. It checks the format first, then the version,
+// and only then the secret: a wrong secret or a changed file yields ErrPassphrase.
 func Open(data []byte, pass string) (Bundle, error) {
-	var e envelope
-	if json.Unmarshal(data, &e) != nil || e.Format != format {
-		return Bundle{}, errors.New("not a magpie backup")
+	var none Bundle
+	data = bytes.TrimLeft(data, " \t\r\n")
+	if len(data) == 0 {
+		return none, ErrNotBackup
 	}
-	if e.Version != 1 || e.KDF != "pbkdf2-sha256" {
-		return Bundle{}, errors.New("this backup was made by a newer magpie; update magpie to open it")
+	head, rest, _ := bytes.Cut(data, []byte("\n"))
+
+	var probe struct {
+		Format  string          `json:"format"`
+		Version json.RawMessage `json:"version"`
 	}
-	if e.Iterations < 100_000 || e.Iterations > 10_000_000 || len(e.Nonce) != 12 || len(e.Salt) < 16 {
-		return Bundle{}, errors.New("not a magpie backup")
+	if json.Unmarshal(head, &probe) != nil {
+		// The first line is not a whole JSON document. If the data still
+		// looks like a magpie header, the header was split or altered.
+		if looksLikeHeader(data) {
+			return none, ErrPassphrase
+		}
+		return none, ErrNotBackup
 	}
-	gcm, err := aead(pass, e)
+	if probe.Format != formatName {
+		return none, ErrNotBackup
+	}
+	var ver int
+	if json.Unmarshal(probe.Version, &ver) != nil || ver < 1 {
+		// The format is right but the version is not a usable number:
+		// the header was altered.
+		return none, ErrPassphrase
+	}
+	if ver > version {
+		return none, ErrNewer
+	}
+
+	var h header
+	if json.Unmarshal(head, &h) != nil {
+		return none, ErrPassphrase
+	}
+	if h.KDF != kdfName || h.Iterations < minIterations || h.Iterations > maxIterations {
+		return none, ErrPassphrase
+	}
+	salt, err := base64.StdEncoding.DecodeString(h.Salt)
+	if err != nil || len(salt) != saltLen {
+		return none, ErrPassphrase
+	}
+	nonce, err := base64.StdEncoding.DecodeString(h.Nonce)
+	if err != nil || len(nonce) != nonceLen {
+		return none, ErrPassphrase
+	}
+	ct, err := base64.StdEncoding.DecodeString(string(bytes.TrimSpace(rest)))
 	if err != nil {
-		return Bundle{}, err
+		return none, ErrPassphrase
 	}
-	plain, err := gcm.Open(nil, e.Nonce, e.Data, header(e))
+	if pass == "" {
+		return none, ErrPassphrase
+	}
+
+	key, err := deriveKey(pass, salt, h.Iterations)
 	if err != nil {
-		return Bundle{}, ErrPassphrase
+		return none, ErrPassphrase
+	}
+	gcm, err := newGCM(key)
+	if err != nil {
+		return none, err
+	}
+	plain, err := gcm.Open(nil, nonce, ct, head)
+	if err != nil {
+		return none, ErrPassphrase
 	}
 	var b Bundle
 	if err := json.Unmarshal(plain, &b); err != nil {
-		return Bundle{}, err
+		return none, fmt.Errorf("backup contents are damaged: %w", err)
 	}
+	b.Version = ver
 	return b, nil
 }
 
-// header is what the sealing covers besides the bundle: the envelope's
-// own fields, so none of them can be changed unnoticed.
-func header(e envelope) []byte {
-	return fmt.Appendf(nil, "%s/%d/%s/%d/%x", e.Format, e.Version, e.KDF, e.Iterations, e.Salt)
+// looksLikeHeader reports whether data begins like a magpie header, even if
+// that header no longer parses as JSON.
+func looksLikeHeader(data []byte) bool {
+	return len(data) > 0 && data[0] == '{' &&
+		bytes.Contains(data, []byte(`"format"`)) &&
+		bytes.Contains(data, []byte(formatName))
 }
 
-func aead(pass string, e envelope) (cipher.AEAD, error) {
-	key, err := pbkdf2.Key(sha256.New, pass, e.Salt, e.Iterations, 32)
-	if err != nil {
-		return nil, err
-	}
+func newGCM(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cipher: %w", err)
 	}
-	return cipher.NewGCM(block)
-}
-
-// Parts picks what a restore puts back.
-type Parts struct {
-	Providers, Settings, Profiles, Agents bool
-}
-
-// All is every part.
-var All = Parts{true, true, true, true}
-
-// Result says what a restore did.
-type Result struct {
-	Added, Replaced int      // providers
-	NeedKey         []string // providers that came without a key and have none here
-	Settings        bool
-	Profiles        int
-	Agents          int      // agent fields changed
-	Skipped         []string // agent fields left alone: the agent is not on this machine, or the value failed
-}
-
-// Restore puts the chosen parts of the bundle in. Providers come first, so
-// the agents' models that go through them resolve. Only agents on this
-// machine are set.
-func Restore(b Bundle, parts Parts) (Result, error) {
-	var r Result
-	if parts.Providers {
-		for name, data := range b.Icons {
-			if f := provider.IconFile(name); f != "" && len(data) <= provider.MaxIcon {
-				if _, err := os.Stat(f); err != nil {
-					os.MkdirAll(filepath.Dir(f), 0o755)
-					edit.WriteAtomic(f, data)
-				}
-			}
-		}
-		var err error
-		if r.Added, r.Replaced, err = provider.Restore(b.Providers); err != nil {
-			return r, err
-		}
-		for _, p := range provider.Stored() {
-			if !p.Ready() && slices.ContainsFunc(b.Providers, func(q provider.Provider) bool { return q.ID == p.ID }) {
-				r.NeedKey = append(r.NeedKey, p.Name)
-			}
-		}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("cipher: %w", err)
 	}
-	if parts.Settings && b.Settings != nil {
-		if err := settings.Save(*b.Settings); err != nil {
-			return r, err
-		}
-		r.Settings = true
-	}
-	if parts.Profiles && len(b.Profiles) > 0 {
-		for name, p := range b.Profiles {
-			if err := profile.Save(name, p); err != nil {
-				return r, err
-			}
-			r.Profiles++
-		}
-	}
-	if parts.Agents && len(b.Agents) > 0 {
-		here := map[string]bool{}
-		for _, a := range agent.Detected() {
-			here[a.ID] = true
-		}
-		// one value at a time, so one that fails (a model of a subscription
-		// not signed in here) leaves the rest to go in
-		for _, k := range profileKeys(b.Agents) {
-			id, _, _ := strings.Cut(k, ".")
-			if !here[id] {
-				r.Skipped = append(r.Skipped, k)
-				continue
-			}
-			n, err := profile.Apply(profile.Profile{k: b.Agents[k]})
-			if err != nil {
-				r.Skipped = append(r.Skipped, k)
-				continue
-			}
-			r.Agents += n
-		}
-	}
-	return r, nil
-}
-
-// profileKeys orders a profile's keys the way Apply does: providers, then
-// models, then the rest.
-func profileKeys(p profile.Profile) []string {
-	rank := func(k string) int {
-		switch {
-		case strings.HasSuffix(k, ".provider"):
-			return 0
-		case strings.HasSuffix(k, ".model"):
-			return 1
-		}
-		return 2
-	}
-	keys := slices.Collect(maps.Keys(p))
-	slices.SortFunc(keys, func(a, b string) int {
-		if ra, rb := rank(a), rank(b); ra != rb {
-			return ra - rb
-		}
-		return strings.Compare(a, b)
-	})
-	return keys
+	return gcm, nil
 }

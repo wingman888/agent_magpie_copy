@@ -3,8 +3,6 @@
 One place to pick every agent's model: Codex on DeepSeek, Claude Code
 on Kimi, Gemini CLI on GLM, from the menu bar. [usemagpie.ai](https://usemagpie.ai)
 
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/vGSnD3ZKQF)
-
 `magpie` is a single screen that lists each AI agent on your machine and
 the model it is set to. Click a value, pick a model. That is the whole app.
 
@@ -74,10 +72,8 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
 | DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
-| Command Code | `~/.commandcode/settings.json` (+ `providers.json`) | model |
-| omp (oh-my-pi) | `~/.omp/agent/config.yml` (+ `models.yml`) | model |
 
-Provider-scoped agents (OpenCode, Pi, Goose, Crush, omp) take `provider/model`.
+Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
 
 ## Providers and the gateway
@@ -329,24 +325,35 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
-### Moving to another machine
+### Backup and restore
+
+Move your setup to another machine in one encrypted file:
 
 ```sh
-magpie backup                   # writes magpie.magpie-backup, asks for a passphrase twice
-magpie backup --no-keys ~/b.magpie-backup   # the same with no API keys in it
-magpie restore magpie.magpie-backup         # on the other machine
-magpie restore --no-agents b.magpie-backup  # providers, settings, profiles; agents left as they are
+magpie backup                       # asks for a passphrase twice, writes magpie.magpie-backup
+magpie backup --no-keys ~/b.magpie-backup   # no API keys or credential headers inside
+magpie restore magpie.magpie-backup         # asks for the passphrase once
+magpie restore --no-agents b.magpie-backup  # providers, settings, profiles only
+echo "pw" | magpie backup           # passphrase from stdin (scripts)
+echo "pw" | magpie restore magpie.magpie-backup
 ```
 
-A backup holds your providers (with their keys, unless `--no-keys`), the
-pictures picked for them, the settings, the profiles and every agent's model.
-It is encrypted on your machine (AES-256-GCM, the key derived from the
-passphrase with PBKDF2-SHA256); nothing in it can be read without the
-passphrase. Restoring replaces providers with the same id and adds the rest;
-one that came without a key keeps the key already there. Agent models are set
-only for agents installed on that machine. Subscriptions are not in it: sign
-in to them on each machine. Piped in, the passphrase is the first line of
-stdin.
+A backup holds your providers with their keys (including several keys per
+provider and custom request headers), the icons you picked, settings, every
+saved profile and each agent's current model. It is encrypted with
+AES-256-GCM under a key derived from the passphrase with PBKDF2-SHA256, and
+the file is readable only by you. If you lose the passphrase, the file cannot
+be opened.
+
+Restoring replaces providers with the same id and adds the rest; a provider
+that comes without keys keeps this machine's own keys. Settings are replaced,
+and profiles with the same name are overwritten while others are kept. Agent
+models are set only for agents installed here; anything skipped is listed
+with the reason. Providers that end up without a key are listed so you can
+run `magpie provider key <id>`.
+
+Subscription logins (Claude Code or Codex signed in on the agent) are never
+part of a backup. Sign in again on the new machine with `magpie accounts add`.
 
 ## Files
 
@@ -358,12 +365,6 @@ stdin.
 - `~/.cache/magpie/models/<provider>.json` — model lists fetched from vendors
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are respected.
-
-## Community
-
-Questions, setups worth sharing, ideas, bugs: come talk to us and other
-magpie users on [Discord](https://discord.gg/vGSnD3ZKQF). Issues and pull
-requests are welcome here too.
 
 ## License
 
