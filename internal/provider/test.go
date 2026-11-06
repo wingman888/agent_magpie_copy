@@ -46,10 +46,6 @@ func (p Provider) Test(ctx context.Context) []Result {
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 			headers = AuthHeaders(p, Anthropic)
 		}
-		if p.Account != nil {
-			out = append(out, probeSigned(ctx, p, proto, body, model))
-			continue
-		}
 		out = append(out, probe(ctx, proto, url, body, model, headers))
 	}
 	return out
@@ -68,39 +64,6 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 		return map[string]string{"x-api-key": p.Key, "Authorization": "Bearer " + p.Key}
 	}
 	return map[string]string{"Authorization": "Bearer " + p.Key}
-}
-
-// probeSigned tests an account provider: the request is signed with the
-// agent's own sign-in and adjusted the way its backend requires.
-func probeSigned(ctx context.Context, p Provider, proto Protocol, body, model string) Result {
-	r := Result{Protocol: proto, Model: model}
-	if model == "" {
-		r.Error = "no model to try: expose one, or refresh the model list"
-		return r
-	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	req, err := p.SignedRequest(ctx, proto, []byte(body))
-	if err != nil {
-		r.Error = err.Error()
-		return r
-	}
-	start := time.Now()
-	res, err := http.DefaultClient.Do(req)
-	r.Millis = time.Since(start).Milliseconds()
-	if err != nil {
-		r.Error = err.Error()
-		return r
-	}
-	defer res.Body.Close()
-	r.Status = res.StatusCode
-	if res.StatusCode >= 200 && res.StatusCode < 300 {
-		r.OK = true
-		return r
-	}
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-	r.Error = APIError(b, res.Status)
-	return r
 }
 
 func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string) Result {
