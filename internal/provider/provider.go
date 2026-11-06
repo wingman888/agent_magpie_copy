@@ -78,6 +78,10 @@ type Provider struct {
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
+
+	// KeyProtocol limits the key in use to one protocol's endpoint; empty
+	// means the key works on every endpoint (see keys.go).
+	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
 }
 
 type file struct {

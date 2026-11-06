@@ -222,16 +222,32 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok && p.Anthropic != "" {
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-		if err == nil {
-			defer res.Body.Close()
-			if res.StatusCode < 400 {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(res.StatusCode)
-				io.Copy(w, res.Body)
-				return
+	if ok {
+		cands, fellBack := perKeyFrom(p, model, provider.Anthropic)
+		if fellBack {
+			// every key is limited to an endpoint the provider lacks: the
+			// provider is used as it always was
+			cands = []candidate{{p, model, p.ID}}
+		}
+		if p.Account != nil {
+			cands = cands[:1]
+		}
+		for _, c := range cands {
+			// a key limited to another protocol never counts tokens on Anthropic
+			if c.p.Anthropic == "" {
+				continue
 			}
+			res, err := s.forward(r.Context(), c.p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+			if err == nil {
+				defer res.Body.Close()
+				if res.StatusCode < 400 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(res.StatusCode)
+					io.Copy(w, res.Body)
+					return
+				}
+			}
+			break
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -351,7 +367,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands := s.candidates(p, model)
+	cands := s.candidatesFrom(p, model, from)
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil

@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"net/http"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -45,16 +46,54 @@ func (c candidate) label() string {
 	return c.p.ID + " (" + provider.Mask(c.p.Key) + ")"
 }
 
-// perKey is a provider once per key it has on, in order — or, for a
-// signed-in agent, once per account it has on, its own first.
+// perKey is perKeyFrom for a caller that does not know the client protocol.
 func perKey(p provider.Provider, model string) []candidate {
+	out, _ := perKeyFrom(p, model, "")
+	return out
+}
+
+// perKeyFrom is a provider once per key it can use for a request from client
+// protocol from, the best suited first (see fit), each limited to the
+// endpoints its key may reach. For a signed-in agent it is once per account
+// it has on, its own first. fellBack reports that every key was limited to
+// an endpoint the provider lacks, so the keys are tried as they always were.
+func perKeyFrom(p provider.Provider, model string, from provider.Protocol) ([]candidate, bool) {
 	if p.Account != nil {
 		out := []candidate{{p, model, p.ID}}
 		for _, q := range p.AlsoOn() {
 			out = append(out, candidate{q, model, p.ID + "@" + q.Account.User})
 		}
-		return out
+		return out, false
 	}
+	keys := p.KeysOn()
+	if len(keys) == 0 {
+		return []candidate{{p, model, p.ID}}, false
+	}
+	var use []provider.KeyAccount
+	for _, k := range keys {
+		if usable(p, k) {
+			use = append(use, k)
+		}
+	}
+	if len(use) == 0 {
+		return allKeys(p, model), true
+	}
+	sort.SliceStable(use, func(i, j int) bool {
+		return fit(p, use[i], model, from) < fit(p, use[j], model, from)
+	})
+	if len(keys) < 2 {
+		return []candidate{{p.WithKey(use[0]), model, p.ID}}, false
+	}
+	out := make([]candidate, 0, len(use))
+	for _, k := range use {
+		out = append(out, candidate{p.WithKey(k), model, p.ID + "#" + provider.KeyID(k.Key)})
+	}
+	return out, false
+}
+
+// allKeys is every key of a provider once each, in order, each on all of the
+// provider's endpoints: how candidates were built before keys could be limited.
+func allKeys(p provider.Provider, model string) []candidate {
 	keys := p.KeysOn()
 	if len(keys) < 2 {
 		return []candidate{{p, model, p.ID}}
@@ -62,16 +101,22 @@ func perKey(p provider.Provider, model string) []candidate {
 	out := make([]candidate, 0, len(keys))
 	for _, k := range keys {
 		q := p
-		q.Key, q.KeyName = k.Key, k.Name
+		q.Key, q.KeyName, q.KeyProtocol = k.Key, k.Name, k.Protocol
 		out = append(out, candidate{q, model, p.ID + "#" + provider.KeyID(k.Key)})
 	}
 	return out
 }
 
-// candidates is the primary and then its fallbacks, those resting after a
-// recent failure moved behind the rest.
+// candidates is candidatesFrom for a caller that does not know the client
+// protocol.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := perKey(p, model)
+	return s.candidatesFrom(p, model, "")
+}
+
+// candidatesFrom is the primary and then its fallbacks, those resting after a
+// recent failure moved behind the rest.
+func (s *Server) candidatesFrom(p provider.Provider, model string, from provider.Protocol) []candidate {
+	out, _ := perKeyFrom(p, model, from)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -79,7 +124,8 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, perKey(fp, fm)...)
+		fc, _ := perKeyFrom(fp, fm, from)
+		out = append(out, fc...)
 	}
 	if len(out) == 1 {
 		return out

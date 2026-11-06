@@ -383,7 +383,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 		var err error
 		switch r.PathValue("action") {
 		case "add":
-			err = provider.AddKey(in.ID, in.Name, in.Key)
+			err = provider.AddKey(in.ID, in.Name, in.Key, "")
 		case "use":
 			err = provider.UseKey(in.ID, in.Ref)
 		case "remove":
