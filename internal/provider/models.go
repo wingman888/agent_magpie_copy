@@ -53,7 +53,7 @@ func (p Provider) knownModels() []catalog.Model {
 // lookupModel finds id's entry in known, with its name and reasoning levels.
 // An id a gateway prefixes ("vendor/model") is matched by the part after its
 // last "/", as the vendor's own list is. The entry keeps the id as given.
-func lookupModel(id string, known []catalog.Model) (catalog.Model, bool) {
+func rsiLookupModel(id string, known []catalog.Model) (catalog.Model, bool) {
 	bare := id
 	if i := strings.LastIndex(id, "/"); i >= 0 {
 		bare = id[i+1:]
@@ -129,7 +129,7 @@ func (p Provider) Exposed() []catalog.Model {
 		for _, id := range ids {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
-			} else if m, ok := lookupModel(id, p.knownModels()); ok {
+			} else if m, ok := rsiLookupModel(id, p.knownModels()); ok {
 				out = append(out, m)
 			} else {
 				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})

@@ -219,10 +219,10 @@ func Save(p Provider) error {
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
-		if err := checkHeaders(p.Headers); err != nil {
+		if err := rsiCheckHeaders(p.Headers); err != nil {
 			return err
 		}
-		if err := checkKeys(p); err != nil {
+		if err := rsiCheckKeys(p); err != nil {
 			return err
 		}
 	}
@@ -241,18 +241,18 @@ func Save(p Provider) error {
 	if err := store(f); err != nil {
 		return err
 	}
-	pruneIcons(f)
+	rsiPruneIcons(f)
 	return nil
 }
 
 // tokenRe is what an HTTP header name may contain (RFC 9110 "token").
-var tokenRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+var rsiTokenRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 // checkHeaders refuses header names HTTP cannot carry and values with line
 // breaks, which would let one header smuggle another.
-func checkHeaders(m map[string]string) error {
+func rsiCheckHeaders(m map[string]string) error {
 	for k, v := range m {
-		if !tokenRe.MatchString(k) {
+		if !rsiTokenRe.MatchString(k) {
 			return fmt.Errorf("header name %q is not a valid HTTP header name", k)
 		}
 		if strings.ContainsAny(v, "\r\n\x00") {
@@ -264,7 +264,7 @@ func checkHeaders(m map[string]string) error {
 
 // cleanHeaders trims names and values and drops entries with no name. An
 // empty map is nil, so providers.json does not carry it.
-func cleanHeaders(m map[string]string) map[string]string {
+func rsiCleanHeaders(m map[string]string) map[string]string {
 	var out map[string]string
 	for k, v := range m {
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
@@ -314,12 +314,12 @@ func IconDir() string { return filepath.Join(filepath.Dir(Path()), "icons") }
 
 // iconName is what a stored icon is called: 16 lowercase hex digits (the
 // first 8 bytes of the content's SHA-256) and a known extension.
-var iconName = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
+var rsiIconName = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
 
 // IconFile turns a stored icon's file name into its path on disk. Anything
 // that is not exactly a name StoreIcon could have written gives "".
 func IconFile(name string) string {
-	if !iconName.MatchString(name) {
+	if !rsiIconName.MatchString(name) {
 		return ""
 	}
 	return filepath.Join(IconDir(), name)
@@ -335,7 +335,7 @@ func StoreIcon(data []byte) (string, error) {
 	if len(data) > MaxIcon {
 		return "", fmt.Errorf("the image is larger than %d KB", MaxIcon>>10)
 	}
-	ext := sniffIcon(data)
+	ext := rsiSniffIcon(data)
 	if ext == "" {
 		return "", errors.New("not an image magpie can show: PNG, JPEG, GIF, WebP, ICO or SVG")
 	}
@@ -359,7 +359,7 @@ func StoreIcon(data []byte) (string, error) {
 
 // sniffIcon names the format of a picture by its content, or "" when it is
 // none of the formats magpie shows.
-func sniffIcon(b []byte) string {
+func rsiSniffIcon(b []byte) string {
 	switch {
 	case bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")):
 		return ".png"
@@ -371,7 +371,7 @@ func sniffIcon(b []byte) string {
 		return ".webp"
 	case bytes.HasPrefix(b, []byte{0, 0, 1, 0}):
 		return ".ico"
-	case isSVG(b):
+	case rsiIsSVG(b):
 		return ".svg"
 	}
 	return ""
@@ -380,7 +380,7 @@ func sniffIcon(b []byte) string {
 // isSVG is true when the document is an SVG picture: after any leading space
 // and byte-order mark it opens with an XML declaration, a doctype, a comment or
 // <svg>, and its first element is <svg>. Text that only mentions <svg> is not.
-func isSVG(b []byte) bool {
+func rsiIsSVG(b []byte) bool {
 	s := bytes.TrimLeft(b, " \t\r\n")
 	s = bytes.TrimLeft(bytes.TrimPrefix(s, []byte("\xEF\xBB\xBF")), " \t\r\n")
 	opens := false
@@ -409,7 +409,7 @@ func isSVG(b []byte) bool {
 // pruneIcons deletes stored icons that no provider refers to and that are
 // over an hour old. The hour lets the user save a provider after choosing
 // its picture.
-func pruneIcons(f file) {
+func rsiPruneIcons(f file) {
 	used := map[string]bool{}
 	for _, p := range f.Providers {
 		if n, ok := strings.CutPrefix(p.Icon, "file:"); ok {
@@ -490,7 +490,7 @@ func normalize(p Provider) Provider {
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
 	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p.Keys)
+	p.Keys = rsiCleanKeys(p.Keys)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -500,7 +500,7 @@ func normalize(p Provider) Provider {
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
 	p.Catalog = strings.Join(p.Catalogs(), ",")
-	p.Headers = cleanHeaders(p.Headers)
+	p.Headers = rsiCleanHeaders(p.Headers)
 	if p.Preset != "" {
 		p.Headers = nil // presets speak for themselves; extra headers are ignored
 	}

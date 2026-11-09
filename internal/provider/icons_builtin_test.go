@@ -25,7 +25,7 @@ func TestBuiltinIconsMatchGUIAssets(t *testing.T) {
 			t.Errorf("GUI icon %q is missing from builtinIcons", name)
 		}
 	}
-	for name := range builtinIcons {
+	for name := range rsiBuiltinIcons {
 		if !files[name] {
 			t.Errorf("builtinIcons lists %q, which the GUI does not ship", name)
 		}

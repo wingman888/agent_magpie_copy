@@ -22,7 +22,7 @@ import (
 )
 
 // savedLogin is one entry of accounts.json. Its tokens are not in it.
-type savedLogin struct {
+type rsiSavedLogin struct {
 	Agent string `json:"agent"`
 	User  string `json:"user"`
 	Plan  string `json:"plan,omitempty"`
@@ -32,8 +32,8 @@ type savedLogin struct {
 	On bool `json:"on,omitempty"`
 }
 
-type loginFile struct {
-	Logins []savedLogin `json:"logins"`
+type rsiLoginFile struct {
+	Logins []rsiSavedLogin `json:"logins"`
 }
 
 // Login is a saved login as the user sees it.
@@ -47,11 +47,11 @@ type Login struct {
 
 // codexLoginFields are the keys of ~/.codex/auth.json that hold a sign-in;
 // the rest of the file belongs to Codex CLI and is left alone.
-var codexLoginFields = []string{"auth_mode", "tokens", "last_refresh"}
+var rsiCodexLoginFields = []string{"auth_mode", "tokens", "last_refresh"}
 
 // agentLogin runs the agent's own sign-in, which opens the vendor's login page
 // and returns once the user has signed in. A var so tests can stand in for it.
-var agentLogin = func(agent string) error {
+var rsiAgentLogin = func(agent string) error {
 	bin, args := "claude", []string{"auth", "login"}
 	if agent == "codex" {
 		bin, args = "codex", []string{"login"}
@@ -75,48 +75,48 @@ func LoginAgent(name string) (string, bool) {
 	return "", false
 }
 
-func unknownAgent(name string) error {
+func rsiUnknownAgent(name string) error {
 	return fmt.Errorf("unknown agent %q: sign-ins are kept for claude (cc) and codex", name)
 }
 
-func loginsPath() string { return filepath.Join(filepath.Dir(Path()), "accounts.json") }
+func rsiLoginsPath() string { return filepath.Join(filepath.Dir(Path()), "accounts.json") }
 
 // loginDir is where magpie keeps a saved login's tokens.
-func loginDir(agent, user string) string {
+func rsiLoginDir(agent, user string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(user))))
 	return filepath.Join(filepath.Dir(Path()), "accounts", agent, hex.EncodeToString(sum[:8]))
 }
 
 // loginTokens is the file holding a saved login's tokens, named as the agent
 // names its own, so Claude Code can read a login kept in loginDir.
-func loginTokens(agent, user string) string {
+func rsiLoginTokens(agent, user string) string {
 	name := "auth.json"
 	if agent == "claude" {
 		name = ".credentials.json"
 	}
-	return filepath.Join(loginDir(agent, user), name)
+	return filepath.Join(rsiLoginDir(agent, user), name)
 }
 
 // codexAuthPath is the file Codex CLI keeps its sign-in in.
-func codexAuthPath() string {
+func rsiCodexAuthPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".codex", "auth.json")
 }
 
-func loadLogins() []savedLogin {
-	var f loginFile
-	if b, err := os.ReadFile(loginsPath()); err == nil {
+func rsiLoadLogins() []rsiSavedLogin {
+	var f rsiLoginFile
+	if b, err := os.ReadFile(rsiLoginsPath()); err == nil {
 		json.Unmarshal(b, &f)
 	}
 	return f.Logins
 }
 
-func storeLogins(ls []savedLogin) error {
-	return writePrivate(loginsPath(), loginFile{Logins: ls})
+func rsiStoreLogins(ls []rsiSavedLogin) error {
+	return rsiWritePrivate(rsiLoginsPath(), rsiLoginFile{Logins: ls})
 }
 
 // writePrivate writes a JSON file readable by the user only.
-func writePrivate(path string, v any) error {
+func rsiWritePrivate(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -130,7 +130,7 @@ func writePrivate(path string, v any) error {
 	return os.Chmod(path, 0o600)
 }
 
-func findLogin(ls []savedLogin, agent, user string) int {
+func rsiFindLogin(ls []rsiSavedLogin, agent, user string) int {
 	user = strings.TrimSpace(user)
 	for i, l := range ls {
 		if l.Agent == agent && strings.EqualFold(l.User, user) {
@@ -141,41 +141,41 @@ func findLogin(ls []savedLogin, agent, user string) int {
 }
 
 // currentLogin is the login the agent is signed in to.
-func currentLogin(agent string) (Provider, bool) {
+func rsiCurrentLogin(agent string) (Provider, bool) {
 	if agent == "claude" {
-		return claudeSelf()
+		return rsiClaudeSelf()
 	}
 	home, _ := os.UserHomeDir()
-	return codexSelf(home)
+	return rsiCodexSelf(home)
 }
 
 // currentUser is who the agent is signed in as, or "" when it is signed out.
-func currentUser(agent string) string {
-	if p, ok := currentLogin(agent); ok && p.Account != nil {
+func rsiCurrentUser(agent string) string {
+	if p, ok := rsiCurrentLogin(agent); ok && p.Account != nil {
 		return p.Account.User
 	}
 	return ""
 }
 
 // isCurrent is true when user is the login the agent is signed in to.
-func isCurrent(agent, user string) bool {
-	cur := currentUser(agent)
+func rsiIsCurrent(agent, user string) bool {
+	cur := rsiCurrentUser(agent)
 	return cur != "" && strings.EqualFold(cur, strings.TrimSpace(user))
 }
 
 // recordLogin remembers a login. One seen for the first time gets on; one
 // already remembered keeps its on flag and takes a newer plan.
-func recordLogin(agent, user, plan string, on bool) error {
-	ls := loadLogins()
-	if i := findLogin(ls, agent, user); i >= 0 {
+func rsiRecordLogin(agent, user, plan string, on bool) error {
+	ls := rsiLoadLogins()
+	if i := rsiFindLogin(ls, agent, user); i >= 0 {
 		if plan == "" || ls[i].Plan == plan {
 			return nil
 		}
 		ls[i].Plan = plan
-		return storeLogins(ls)
+		return rsiStoreLogins(ls)
 	}
-	ls = append(ls, savedLogin{Agent: agent, User: strings.TrimSpace(user), Plan: plan, On: on})
-	return storeLogins(ls)
+	ls = append(ls, rsiSavedLogin{Agent: agent, User: strings.TrimSpace(user), Plan: plan, On: on})
+	return rsiStoreLogins(ls)
 }
 
 // rememberCurrent records the login each agent is signed in to, so it can be
@@ -183,22 +183,22 @@ func recordLogin(agent, user, plan string, on bool) error {
 // newest tokens. Once the agent signs in to another login outside magpie, its
 // own file no longer holds these tokens, so only the copy can bring this login
 // back. The copy is never used for requests while its login is the current one.
-func rememberCurrent() {
+func rsiRememberCurrent() {
 	for _, agent := range []string{"claude", "codex"} {
-		if p, ok := currentLogin(agent); ok && p.Account != nil && p.Account.User != "" {
-			recordLogin(agent, p.Account.User, p.Account.Plan, false)
-			saveOutgoing(agent, p.Account.User) // best effort: the agent's store is untouched
+		if p, ok := rsiCurrentLogin(agent); ok && p.Account != nil && p.Account.User != "" {
+			rsiRecordLogin(agent, p.Account.User, p.Account.Plan, false)
+			rsiSaveOutgoing(agent, p.Account.User) // best effort: the agent's store is untouched
 		}
 	}
 }
 
 // savedProvider is a saved login as a provider that can take requests.
-func savedProvider(l savedLogin) (Provider, bool) {
+func rsiSavedProvider(l rsiSavedLogin) (Provider, bool) {
 	switch l.Agent {
 	case "claude":
-		return claudeProvider(loginDir(l.Agent, l.User), l.User, l.Plan), true
+		return rsiClaudeProvider(rsiLoginDir(l.Agent, l.User), l.User, l.Plan), true
 	case "codex":
-		return codexProvider(loginTokens(l.Agent, l.User), l.User, l.Plan), true
+		return rsiCodexProvider(rsiLoginTokens(l.Agent, l.User), l.User, l.Plan), true
 	}
 	return Provider{}, false
 }
@@ -206,17 +206,17 @@ func savedProvider(l savedLogin) (Provider, bool) {
 // withAlternates attaches the saved logins that are on at the same time to
 // the login the agent is signed in to. They are tried after it, in the order
 // they were saved. A login whose tokens are missing is left out.
-func withAlternates(cur Provider) Provider {
+func rsiWithAlternates(cur Provider) Provider {
 	acct := *cur.Account
 	acct.also = nil
-	for _, l := range loadLogins() {
+	for _, l := range rsiLoadLogins() {
 		if l.Agent != acct.Agent || !l.On || strings.EqualFold(l.User, acct.User) {
 			continue
 		}
-		if _, err := os.Stat(loginTokens(l.Agent, l.User)); err != nil {
+		if _, err := os.Stat(rsiLoginTokens(l.Agent, l.User)); err != nil {
 			continue
 		}
-		if p, ok := savedProvider(l); ok {
+		if p, ok := rsiSavedProvider(l); ok {
 			acct.also = append(acct.also, p)
 		}
 	}
@@ -227,15 +227,15 @@ func withAlternates(cur Provider) Provider {
 // Logins lists the saved logins of one agent, or of both when agent is "".
 // Within an agent the login the agent is signed in to comes first.
 func Logins(agent string) []Login {
-	rememberCurrent()
+	rsiRememberCurrent()
 	agents := []string{"claude", "codex"}
 	if a, ok := LoginAgent(agent); ok {
 		agents = []string{a}
 	}
-	ls := loadLogins()
+	ls := rsiLoadLogins()
 	var out []Login
 	for _, a := range agents {
-		signedIn := currentUser(a)
+		signedIn := rsiCurrentUser(a)
 		var first, rest []Login
 		for _, l := range ls {
 			if l.Agent != a {
@@ -257,8 +257,8 @@ func Logins(agent string) []Login {
 
 // saveOutgoing keeps the login the agent is signed in to in magpie's own
 // store, with the newest tokens the agent has.
-func saveOutgoing(agent, user string) error {
-	if err := os.MkdirAll(loginDir(agent, user), 0o700); err != nil {
+func rsiSaveOutgoing(agent, user string) error {
+	if err := os.MkdirAll(rsiLoginDir(agent, user), 0o700); err != nil {
 		return err
 	}
 	if agent == "claude" {
@@ -267,23 +267,23 @@ func saveOutgoing(agent, user string) error {
 			return errors.New("Claude Code is signed out")
 		}
 		out := claudeCredentials{raw: map[string]any{"claudeAiOauth": c.raw["claudeAiOauth"]}, OAuth: c.OAuth}
-		return writeClaudeCredential(claudeCredentialLocation{path: loginTokens(agent, user)}, out)
+		return rsiWriteClaudeCredential(claudeCredentialLocation{path: rsiLoginTokens(agent, user)}, out)
 	}
 	var raw map[string]any
-	if !readJSON(codexAuthPath(), &raw) {
+	if !readJSON(rsiCodexAuthPath(), &raw) {
 		return errors.New("Codex is signed out")
 	}
 	out := map[string]any{}
-	for _, k := range codexLoginFields {
+	for _, k := range rsiCodexLoginFields {
 		if v, ok := raw[k]; ok {
 			out[k] = v
 		}
 	}
-	return writePrivate(loginTokens(agent, user), out)
+	return rsiWritePrivate(rsiLoginTokens(agent, user), out)
 }
 
 // claudeDefaultLocation is where Claude Code keeps its login when it has none.
-func claudeDefaultLocation() claudeCredentialLocation {
+func rsiClaudeDefaultLocation() claudeCredentialLocation {
 	if claudeKeychain {
 		return claudeCredentialLocation{keychain: true, account: os.Getenv("USER")}
 	}
@@ -297,8 +297,8 @@ func claudeDefaultLocation() claudeCredentialLocation {
 
 // takeIn makes a saved login the one the agent is signed in to. Only the
 // sign-in fields of the agent's own file change; everything else stays.
-func takeIn(agent string, l savedLogin) error {
-	b, err := os.ReadFile(loginTokens(agent, l.User))
+func rsiTakeIn(agent string, l rsiSavedLogin) error {
+	b, err := os.ReadFile(rsiLoginTokens(agent, l.User))
 	if err != nil {
 		return fmt.Errorf("no saved sign-in for %s: %v", l.User, err)
 	}
@@ -309,7 +309,7 @@ func takeIn(agent string, l savedLogin) error {
 		}
 		cur, loc, ok := readClaudeCredential()
 		if !ok {
-			loc = claudeDefaultLocation()
+			loc = rsiClaudeDefaultLocation()
 			cur = claudeCredentials{}
 			if !loc.keychain {
 				if old, err := os.ReadFile(loc.path); err == nil && json.Unmarshal(old, &cur.raw) != nil {
@@ -329,19 +329,19 @@ func takeIn(agent string, l savedLogin) error {
 		return errors.New("the saved Codex sign-in is unreadable")
 	}
 	raw := map[string]any{}
-	path := codexAuthPath()
+	path := rsiCodexAuthPath()
 	if old, err := os.ReadFile(path); err == nil && json.Unmarshal(old, &raw) != nil {
 		return errors.New("Codex's auth file is unreadable; not overwriting it")
 	}
 	if raw == nil {
 		raw = map[string]any{}
 	}
-	for _, k := range codexLoginFields {
+	for _, k := range rsiCodexLoginFields {
 		if v, ok := in[k]; ok {
 			raw[k] = v
 		}
 	}
-	return writePrivate(path, raw)
+	return rsiWritePrivate(path, raw)
 }
 
 // SwitchLogin signs the agent in to a saved login. The login it was signed in
@@ -350,38 +350,38 @@ func takeIn(agent string, l savedLogin) error {
 func SwitchLogin(agent, user string) (bool, error) {
 	a, ok := LoginAgent(agent)
 	if !ok {
-		return false, unknownAgent(agent)
+		return false, rsiUnknownAgent(agent)
 	}
-	rememberCurrent()
-	ls := loadLogins()
-	i := findLogin(ls, a, user)
+	rsiRememberCurrent()
+	ls := rsiLoadLogins()
+	i := rsiFindLogin(ls, a, user)
 	if i < 0 {
 		return false, fmt.Errorf("no saved %s login %q; magpie accounts %s lists them", a, user, a)
 	}
 	target := ls[i]
-	outgoing := currentUser(a)
+	outgoing := rsiCurrentUser(a)
 	if outgoing != "" && strings.EqualFold(outgoing, target.User) {
 		return false, nil
 	}
 	if outgoing != "" {
-		if err := saveOutgoing(a, outgoing); err != nil {
+		if err := rsiSaveOutgoing(a, outgoing); err != nil {
 			return false, err
 		}
-		if j := findLogin(ls, a, outgoing); j >= 0 {
+		if j := rsiFindLogin(ls, a, outgoing); j >= 0 {
 			ls[j].On = target.On
 		}
 	}
-	if err := takeIn(a, target); err != nil {
+	if err := rsiTakeIn(a, target); err != nil {
 		if outgoing != "" {
 			// the agent still holds the outgoing login; drop the copy
-			os.RemoveAll(loginDir(a, outgoing))
+			os.RemoveAll(rsiLoginDir(a, outgoing))
 		}
 		return false, err
 	}
-	os.RemoveAll(loginDir(a, target.User))
+	os.RemoveAll(rsiLoginDir(a, target.User))
 	forgetClaudeCredential()
 	forgetClaudeStatus()
-	return true, storeLogins(ls)
+	return true, rsiStoreLogins(ls)
 }
 
 // ForgetLogin drops a saved login and its tokens. The login the agent is
@@ -389,20 +389,20 @@ func SwitchLogin(agent, user string) (bool, error) {
 func ForgetLogin(agent, user string) error {
 	a, ok := LoginAgent(agent)
 	if !ok {
-		return unknownAgent(agent)
+		return rsiUnknownAgent(agent)
 	}
-	rememberCurrent()
-	ls := loadLogins()
-	i := findLogin(ls, a, user)
+	rsiRememberCurrent()
+	ls := rsiLoadLogins()
+	i := rsiFindLogin(ls, a, user)
 	if i < 0 {
 		return fmt.Errorf("no saved %s login %q; magpie accounts %s lists them", a, user, a)
 	}
-	if isCurrent(a, ls[i].User) {
+	if rsiIsCurrent(a, ls[i].User) {
 		return fmt.Errorf("%s is the login %s is signed in to; switch to another login first, then forget it", ls[i].User, a)
 	}
-	os.RemoveAll(loginDir(a, ls[i].User))
+	os.RemoveAll(rsiLoginDir(a, ls[i].User))
 	ls = append(ls[:i], ls[i+1:]...)
-	return storeLogins(ls)
+	return rsiStoreLogins(ls)
 }
 
 // AddLogin runs the agent's own sign-in and saves the login it leaves behind.
@@ -412,19 +412,19 @@ func ForgetLogin(agent, user string) error {
 func AddLogin(agent string) (string, error) {
 	a, ok := LoginAgent(agent)
 	if !ok {
-		return "", unknownAgent(agent)
+		return "", rsiUnknownAgent(agent)
 	}
-	rememberCurrent()
-	prev := currentUser(a)
+	rsiRememberCurrent()
+	prev := rsiCurrentUser(a)
 	if prev != "" {
-		if err := saveOutgoing(a, prev); err != nil {
+		if err := rsiSaveOutgoing(a, prev); err != nil {
 			return "", err
 		}
 	}
-	loginErr := agentLogin(a)
+	loginErr := rsiAgentLogin(a)
 	forgetClaudeCredential()
 	forgetClaudeStatus()
-	now, signedIn := currentLogin(a)
+	now, signedIn := rsiCurrentLogin(a)
 	nowUser := ""
 	if signedIn && now.Account != nil {
 		nowUser = now.Account.User
@@ -432,13 +432,13 @@ func AddLogin(agent string) (string, error) {
 	if nowUser == "" {
 		if prev != "" {
 			// the sign-in did not finish: the earlier login goes back
-			ls := loadLogins()
-			if j := findLogin(ls, a, prev); j >= 0 {
-				if err := takeIn(a, ls[j]); err != nil {
+			ls := rsiLoadLogins()
+			if j := rsiFindLogin(ls, a, prev); j >= 0 {
+				if err := rsiTakeIn(a, ls[j]); err != nil {
 					return "", err
 				}
 			}
-			os.RemoveAll(loginDir(a, prev))
+			os.RemoveAll(rsiLoginDir(a, prev))
 			forgetClaudeCredential()
 			forgetClaudeStatus()
 		}
@@ -448,9 +448,9 @@ func AddLogin(agent string) (string, error) {
 		return "", fmt.Errorf("the %s sign-in did not finish", a)
 	}
 	// the new login is the agent's now, so its tokens have one holder
-	os.RemoveAll(loginDir(a, nowUser))
-	ls := loadLogins()
-	if j := findLogin(ls, a, nowUser); j >= 0 {
+	os.RemoveAll(rsiLoginDir(a, nowUser))
+	ls := rsiLoadLogins()
+	if j := rsiFindLogin(ls, a, nowUser); j >= 0 {
 		if now.Account.Plan != "" {
 			ls[j].Plan = now.Account.Plan
 		}
@@ -461,9 +461,9 @@ func AddLogin(agent string) (string, error) {
 				others++
 			}
 		}
-		ls = append(ls, savedLogin{Agent: a, User: nowUser, Plan: now.Account.Plan, On: others > 0})
+		ls = append(ls, rsiSavedLogin{Agent: a, User: nowUser, Plan: now.Account.Plan, On: others > 0})
 	}
-	if err := storeLogins(ls); err != nil {
+	if err := rsiStoreLogins(ls); err != nil {
 		return "", err
 	}
 	return nowUser, nil
@@ -474,22 +474,22 @@ func AddLogin(agent string) (string, error) {
 func SetLoginOn(agent, user string, on bool) error {
 	a, ok := LoginAgent(agent)
 	if !ok {
-		return unknownAgent(agent)
+		return rsiUnknownAgent(agent)
 	}
-	rememberCurrent()
-	ls := loadLogins()
-	i := findLogin(ls, a, user)
+	rsiRememberCurrent()
+	ls := rsiLoadLogins()
+	i := rsiFindLogin(ls, a, user)
 	if i < 0 {
 		return fmt.Errorf("no saved %s login %q; magpie accounts %s lists them", a, user, a)
 	}
-	if !on && isCurrent(a, ls[i].User) {
+	if !on && rsiIsCurrent(a, ls[i].User) {
 		return fmt.Errorf("%s is the login %s is signed in to, so it stays on", ls[i].User, a)
 	}
-	if on && !isCurrent(a, ls[i].User) {
-		if _, err := os.Stat(loginTokens(a, ls[i].User)); err != nil {
+	if on && !rsiIsCurrent(a, ls[i].User) {
+		if _, err := os.Stat(rsiLoginTokens(a, ls[i].User)); err != nil {
 			return fmt.Errorf("no saved sign-in for %s; sign in again with magpie accounts add", ls[i].User)
 		}
 	}
 	ls[i].On = on
-	return storeLogins(ls)
+	return rsiStoreLogins(ls)
 }

@@ -130,7 +130,7 @@ func run(args []string) error {
 	case "models":
 		return models()
 	case "accounts":
-		return accountsCmd(args[1:])
+		return rsiAccountsCmd(args[1:])
 	case "serve":
 		return serve()
 	case "usage":

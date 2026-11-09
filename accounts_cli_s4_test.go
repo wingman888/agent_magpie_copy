@@ -9,7 +9,7 @@ import (
 // agent a sign-in can be kept for.
 func TestS4AccountsUnknownAgentShowsUsage(t *testing.T) {
 	for _, args := range [][]string{{"gemini"}, {"switch", "gemini", "a@example.com"}, {"add", "gemini"}, {"forget", "gemini", "a@example.com"}} {
-		err := accountsCmd(args)
+		err := rsiAccountsCmd(args)
 		if err == nil {
 			t.Fatalf("accounts %v: want an error", args)
 		}

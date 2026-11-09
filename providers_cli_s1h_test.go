@@ -49,13 +49,13 @@ func TestS1HAddPairsHeadersAndIcons(t *testing.T) {
 	if err := os.WriteFile(txt, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := iconArg(txt); err == nil {
+	if _, err := rsiIconArg(txt); err == nil {
 		t.Error("a text file was accepted as an icon")
 	}
-	if _, err := iconArg("file:0123456789abcdef.png"); err == nil {
+	if _, err := rsiIconArg("file:0123456789abcdef.png"); err == nil {
 		t.Error("a file: reference was accepted as a built-in name")
 	}
-	if v, err := iconArg(""); err != nil || v != "" {
+	if v, err := rsiIconArg(""); err != nil || v != "" {
 		t.Errorf("empty icon: %q %v", v, err)
 	}
 }

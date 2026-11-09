@@ -12,7 +12,7 @@ func TestS7SVGDetectionIsStrict(t *testing.T) {
 		`<!-- icon --><svg xmlns="http://www.w3.org/2000/svg"></svg>`,
 		`<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"></svg>`,
 	} {
-		if !isSVG([]byte(doc)) {
+		if !rsiIsSVG([]byte(doc)) {
 			t.Errorf("valid SVG refused: %q", doc)
 		}
 		if _, err := StoreIcon([]byte(doc)); err != nil {
@@ -25,7 +25,7 @@ func TestS7SVGDetectionIsStrict(t *testing.T) {
 		"hello <svg>",
 		`<html><svg></svg></html>`,
 	} {
-		if isSVG([]byte(doc)) {
+		if rsiIsSVG([]byte(doc)) {
 			t.Errorf("not an SVG accepted: %q", doc)
 		}
 		if _, err := StoreIcon([]byte(doc)); err == nil {

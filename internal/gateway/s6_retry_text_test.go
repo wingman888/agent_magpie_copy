@@ -26,7 +26,7 @@ func TestS6RetryTextIsExplicit(t *testing.T) {
 		{"bad request", false},
 		{"", false},
 	} {
-		if got := retryText(c.msg); got != c.want {
+		if got := rsiRetryText(c.msg); got != c.want {
 			t.Errorf("retryText(%q) = %v, want %v", c.msg, got, c.want)
 		}
 	}
@@ -44,7 +44,7 @@ func TestS6RetryableStatuses(t *testing.T) {
 		{403, "额度已用完", true},
 		{403, "forbidden", false},
 	} {
-		if got := retryable(c.status, c.msg); got != c.want {
+		if got := rsiRetryable(c.status, c.msg); got != c.want {
 			t.Errorf("retryable(%d, %q) = %v, want %v", c.status, c.msg, got, c.want)
 		}
 	}

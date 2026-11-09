@@ -361,7 +361,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// each candidate is tried in order: the provider's enabled keys, then the
 	// fallback models. A retryable failure before the reply starts moves on to
 	// the next one; the last candidate's answer is what the client gets.
-	cands := s.keyOrder(candidates(p, from, model))
+	cands := s.keyOrder(rsiCandidates(p, from, model))
 	if len(cands) == 0 {
 		// no candidate at all: the same answer and record as a provider
 		// with no endpoint, which is what this is in every case but
@@ -392,7 +392,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			to = provider.Anthropic
 		} else {
 			var ok bool
-			to, relay, ok = route(c, from, body)
+			to, relay, ok = rsiRoute(c, from, body)
 			if !ok {
 				if last {
 					call.Provider = c.ID
@@ -408,11 +408,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					}
 					break
 				}
-				failed = append(failed, failedLabel(c))
+				failed = append(failed, rsiFailedLabel(c))
 				continue
 			}
 		}
-		g := &gate{ResponseWriter: w, probe: !last}
+		g := &rsiGate{ResponseWriter: w, probe: !last}
 		call.To = to
 		var status int
 		var msg string
@@ -428,9 +428,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// the reply opened with a retryable error; it was held back
 			status, msg = g.code, g.leadMsg
 		}
-		if g.held && !last && retryable(status, msg) {
+		if g.held && !last && rsiRetryable(status, msg) {
 			s.restKeyFor(c)
-			failed = append(failed, failedLabel(c))
+			failed = append(failed, rsiFailedLabel(c))
 			continue
 		}
 		g.release()

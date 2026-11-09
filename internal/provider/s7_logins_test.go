@@ -91,11 +91,11 @@ func TestS7SwitchBackToLoginSignedInElsewhere(t *testing.T) {
 	if len(raw) != 2 {
 		t.Fatalf("switch changed other top-level fields: %v", raw)
 	}
-	saved, _ := os.ReadFile(loginTokens("claude", "b@example.com"))
+	saved, _ := os.ReadFile(rsiLoginTokens("claude", "b@example.com"))
 	if !strings.Contains(string(saved), "tok-b2") {
 		t.Fatalf("b lost its newest tokens: %s", saved)
 	}
-	if s4Exists(loginDir("claude", "a@example.com")) {
+	if s4Exists(rsiLoginDir("claude", "a@example.com")) {
 		t.Fatal("the incoming login must have one holder: the agent's own file")
 	}
 }
@@ -138,7 +138,7 @@ func TestS7SetLoginOnNeedsSavedSignIn(t *testing.T) {
 	Logins("claude")
 	s7ClaudeElsewhere(t, cred, "tok-b")
 	Logins("claude")
-	if err := os.Remove(loginTokens("claude", "a@example.com")); err != nil {
+	if err := os.Remove(rsiLoginTokens("claude", "a@example.com")); err != nil {
 		t.Fatal(err)
 	}
 	err := SetLoginOn("claude", "a@example.com", true)
@@ -168,7 +168,7 @@ func TestS7CodexSwitchBackAfterSignInElsewhere(t *testing.T) {
 	if raw["custom"] != "keep" {
 		t.Fatalf("switch changed other fields: %v", raw)
 	}
-	saved, _ := os.ReadFile(loginTokens("codex", "b@example.com"))
+	saved, _ := os.ReadFile(rsiLoginTokens("codex", "b@example.com"))
 	if !strings.Contains(string(saved), "tok-b") {
 		t.Fatalf("b was not kept: %s", saved)
 	}

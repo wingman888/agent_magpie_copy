@@ -98,7 +98,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := rsiFetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +115,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func rsiFetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -197,7 +197,7 @@ func ApplyHeaders(req *http.Request, extra map[string]string) {
 }
 
 // bareID is a model id without its "vendor/" prefix.
-func bareID(id string) string {
+func rsiBareID(id string) string {
 	if i := strings.LastIndex(id, "/"); i >= 0 {
 		return id[i+1:]
 	}
@@ -223,7 +223,7 @@ func Decorate(live []Model, known []Model) []Model {
 	for _, m := range live {
 		k, ok := byID[m.ID]
 		if !ok {
-			k, ok = byID[bareID(m.ID)]
+			k, ok = byID[rsiBareID(m.ID)]
 		}
 		if ok {
 			if m.Name == "" || m.Name == m.ID {

@@ -80,12 +80,12 @@ func s4Claude(t *testing.T, cred, tok string) {
 // s4SignInAs makes the next agent sign-in produce the given Codex login.
 func s4SignInAs(t *testing.T, auth, email, tok string) {
 	t.Helper()
-	old := agentLogin
-	agentLogin = func(string) error {
+	old := rsiAgentLogin
+	rsiAgentLogin = func(string) error {
 		s4Codex(t, auth, email, tok)
 		return nil
 	}
-	t.Cleanup(func() { agentLogin = old })
+	t.Cleanup(func() { rsiAgentLogin = old })
 }
 
 func s4Users(ls []Login) []string {
@@ -132,10 +132,10 @@ func TestS4CodexAddSwitchForget(t *testing.T) {
 	}
 	// right after the sign-in the new login lives only in the agent's file;
 	// listing afterwards refreshes magpie's copy of it (see rememberCurrent)
-	if !s4Exists(loginTokens("codex", "a@example.com")) {
+	if !s4Exists(rsiLoginTokens("codex", "a@example.com")) {
 		t.Fatal("the earlier sign-in was not kept")
 	}
-	if s4Exists(loginDir("codex", "b@example.com")) {
+	if s4Exists(rsiLoginDir("codex", "b@example.com")) {
 		t.Fatal("the new sign-in must have one holder right after it is made")
 	}
 	ls = Logins("codex")
@@ -167,11 +167,11 @@ func TestS4CodexAddSwitchForget(t *testing.T) {
 	if _, ok := raw["OPENAI_API_KEY"]; !ok {
 		t.Fatal("switch dropped OPENAI_API_KEY")
 	}
-	saved, _ := os.ReadFile(loginTokens("codex", "b@example.com"))
+	saved, _ := os.ReadFile(rsiLoginTokens("codex", "b@example.com"))
 	if !strings.Contains(string(saved), "tok-b2") {
 		t.Fatalf("outgoing login lost its newest tokens: %s", saved)
 	}
-	if s4Exists(loginDir("codex", "a@example.com")) {
+	if s4Exists(rsiLoginDir("codex", "a@example.com")) {
 		t.Fatal("the incoming login must have one holder: the agent's own file")
 	}
 	ls = Logins("codex")
@@ -185,7 +185,7 @@ func TestS4CodexAddSwitchForget(t *testing.T) {
 	if err := ForgetLogin("codex", "b@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	if s4Exists(loginDir("codex", "b@example.com")) {
+	if s4Exists(rsiLoginDir("codex", "b@example.com")) {
 		t.Fatal("forgotten login kept its tokens")
 	}
 	if got := s4Users(Logins("codex")); len(got) != 1 || got[0] != "a@example.com" {
@@ -263,12 +263,12 @@ func TestS4ClaudeSwitchKeepsOtherFields(t *testing.T) {
 	if got := s4Users(Logins("claude")); len(got) != 1 || got[0] != "a@example.com" {
 		t.Fatalf("remembered: %v", got)
 	}
-	old := agentLogin
-	agentLogin = func(string) error {
+	old := rsiAgentLogin
+	rsiAgentLogin = func(string) error {
 		s4Claude(t, cred, "tok-b")
 		return nil
 	}
-	t.Cleanup(func() { agentLogin = old })
+	t.Cleanup(func() { rsiAgentLogin = old })
 	if user, err := AddLogin("claude"); err != nil || user != "b@example.com" {
 		t.Fatalf("AddLogin = %q, %v", user, err)
 	}
@@ -299,7 +299,7 @@ func TestS4ClaudeSwitchKeepsOtherFields(t *testing.T) {
 	if mcp == nil || mcp["srv"] == nil {
 		t.Fatalf("switch dropped mcpOAuth: %v", raw)
 	}
-	saved, _ := os.ReadFile(loginTokens("claude", "b@example.com"))
+	saved, _ := os.ReadFile(rsiLoginTokens("claude", "b@example.com"))
 	if !strings.Contains(string(saved), "tok-b2") {
 		t.Fatalf("outgoing Claude login lost its newest tokens: %s", saved)
 	}
@@ -321,7 +321,7 @@ func TestS4ClaudeSwitchKeepsOtherFields(t *testing.T) {
 	if len(cands) != 2 || cands[1].Account.User != "b@example.com" {
 		t.Fatalf("claude candidates: %d", len(cands))
 	}
-	if cands[1].Account.ConfigDir != loginDir("claude", "b@example.com") {
+	if cands[1].Account.ConfigDir != rsiLoginDir("claude", "b@example.com") {
 		t.Fatalf("saved Claude login runs from %q", cands[1].Account.ConfigDir)
 	}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/v1", nil)
@@ -331,18 +331,18 @@ func TestS4ClaudeSwitchKeepsOtherFields(t *testing.T) {
 	if got := req.Header.Get("Authorization"); got != "Bearer tok-b2" {
 		t.Fatalf("saved Claude login signed with %q", got)
 	}
-	if strings.Contains(readFileOr(cred), "tok-b") {
+	if strings.Contains(rsiReadFileOr(cred), "tok-b") {
 		t.Fatal("a login magpie keeps leaked into the agent's own credentials")
 	}
 	if err := ForgetLogin("claude", "b@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	if s4Exists(loginDir("claude", "b@example.com")) {
+	if s4Exists(rsiLoginDir("claude", "b@example.com")) {
 		t.Fatal("forgotten Claude login kept its tokens")
 	}
 }
 
-func readFileOr(path string) string {
+func rsiReadFileOr(path string) string {
 	b, _ := os.ReadFile(path)
 	return string(b)
 }
@@ -352,12 +352,12 @@ func TestS4AddFailureRestoresEarlierLogin(t *testing.T) {
 	auth := filepath.Join(home, ".codex", "auth.json")
 	s4Codex(t, auth, "a@example.com", "tok-a")
 	Logins("codex")
-	old := agentLogin
-	agentLogin = func(string) error {
+	old := rsiAgentLogin
+	rsiAgentLogin = func(string) error {
 		os.Remove(auth)
 		return errors.New("sign-in cancelled")
 	}
-	t.Cleanup(func() { agentLogin = old })
+	t.Cleanup(func() { rsiAgentLogin = old })
 	if _, err := AddLogin("codex"); err == nil {
 		t.Fatal("a sign-in that does not finish must report it")
 	}
@@ -370,7 +370,7 @@ func TestS4AddFailureRestoresEarlierLogin(t *testing.T) {
 	if tokens["access_token"] != "tok-a" {
 		t.Fatalf("restored login: %v", tokens)
 	}
-	if s4Exists(loginDir("codex", "a@example.com")) {
+	if s4Exists(rsiLoginDir("codex", "a@example.com")) {
 		t.Fatal("restored login must have one holder: the agent's own file")
 	}
 }

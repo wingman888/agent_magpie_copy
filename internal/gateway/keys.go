@@ -10,13 +10,13 @@ import (
 )
 
 // keyRest is how long a key that just failed is tried last.
-const keyRest = time.Minute
+const rsiKeyRest = time.Minute
 
 // gate sits between an upstream attempt and the client. An error status is
 // held back, not sent, so the next key or model can still answer the request;
 // anything else passes straight through, streamed as it comes. release sends
 // a held error after all.
-type gate struct {
+type rsiGate struct {
 	http.ResponseWriter
 	hdr  http.Header // the attempt's own headers, copied out when it is sent
 	code int
@@ -35,14 +35,14 @@ type gate struct {
 
 // Header is the attempt's own header map, so a discarded error leaves no
 // headers behind on the client's response.
-func (g *gate) Header() http.Header {
+func (g *rsiGate) Header() http.Header {
 	if g.hdr == nil {
 		g.hdr = make(http.Header)
 	}
 	return g.hdr
 }
 
-func (g *gate) WriteHeader(code int) {
+func (g *rsiGate) WriteHeader(code int) {
 	if g.code != 0 {
 		return
 	}
@@ -59,7 +59,7 @@ func (g *gate) WriteHeader(code int) {
 }
 
 // commit sends the status and the headers the attempt set.
-func (g *gate) commit(code int) {
+func (g *rsiGate) commit(code int) {
 	h := g.ResponseWriter.Header()
 	for k, v := range g.Header() {
 		h[k] = v
@@ -67,7 +67,7 @@ func (g *gate) commit(code int) {
 	g.ResponseWriter.WriteHeader(code)
 }
 
-func (g *gate) Write(b []byte) (int, error) {
+func (g *rsiGate) Write(b []byte) (int, error) {
 	if g.code == 0 {
 		g.WriteHeader(http.StatusOK)
 	}
@@ -82,7 +82,7 @@ func (g *gate) Write(b []byte) (int, error) {
 	return g.ResponseWriter.Write(b)
 }
 
-func (g *gate) Flush() {
+func (g *rsiGate) Flush() {
 	if g.held || g.probe {
 		return
 	}
@@ -94,13 +94,13 @@ func (g *gate) Flush() {
 // lead decides, from the events held back so far, whether the reply opens
 // with a retryable error. A reply that does is held like an error status;
 // one that does not is sent with everything held back.
-func (g *gate) lead() {
-	msg, state := leadState(g.head.Bytes())
-	if state == leadUndecided {
+func (g *rsiGate) lead() {
+	msg, state := rsiLeadState(g.head.Bytes())
+	if state == rsiLeadUndecided {
 		return
 	}
 	g.probe = false
-	if state == leadError && retryText(msg) {
+	if state == rsiLeadError && rsiRetryText(msg) {
 		g.held = true
 		g.code = http.StatusBadGateway
 		g.leadMsg = msg
@@ -114,7 +114,7 @@ func (g *gate) lead() {
 }
 
 // release sends a held error to the client, or the reply held back by probe.
-func (g *gate) release() {
+func (g *rsiGate) release() {
 	if g.probe && !g.held {
 		g.probe = false
 		if g.code != 0 {
@@ -135,7 +135,7 @@ func (g *gate) release() {
 // route decides how one candidate serves a request from client protocol from:
 // relayed as-is when it speaks that protocol, else translated to to. A key
 // limited to a protocol always goes to that protocol's endpoint.
-func route(c provider.Provider, from provider.Protocol, body []byte) (to provider.Protocol, relay, ok bool) {
+func rsiRoute(c provider.Provider, from provider.Protocol, body []byte) (to provider.Protocol, relay, ok bool) {
 	if c.KeyProtocol != "" {
 		return c.KeyProtocol, c.KeyProtocol == from, true
 	}
@@ -156,13 +156,13 @@ func route(c provider.Provider, from provider.Protocol, body []byte) (to provide
 // the next candidate: rate limits, exhausted quota (402, or a 403 that says
 // so), overload and server errors. Anything else, such as a 400, goes back to
 // the client as it is. msg is the upstream's own error text.
-func retryable(status int, msg string) bool {
+func rsiRetryable(status int, msg string) bool {
 	switch {
 	case status == 402, status == 429, status == 529, status >= 500:
 		return true
 	case status == 403:
 		m := strings.ToLower(msg)
-		for _, w := range quotaWords {
+		for _, w := range rsiQuotaWords {
 			if strings.Contains(m, w) {
 				return true
 			}
@@ -172,7 +172,7 @@ func retryable(status int, msg string) bool {
 }
 
 // failedLabel names a candidate that failed, for the call record.
-func failedLabel(c provider.Provider) string {
+func rsiFailedLabel(c provider.Provider) string {
 	if c.Account != nil {
 		return c.ID + " (" + c.Account.User + ")"
 	}
@@ -182,7 +182,7 @@ func failedLabel(c provider.Provider) string {
 	return c.ID
 }
 
-func restKey(c provider.Provider) string {
+func rsiRestKey(c provider.Provider) string {
 	if c.Account != nil {
 		// signed-in logins share an empty key; each one rests on its own
 		return c.ID + "\x00login:" + strings.ToLower(c.Account.User)
@@ -192,18 +192,18 @@ func restKey(c provider.Provider) string {
 
 // keyOrder moves candidates that failed within keyRest to the back, keeping
 // the order otherwise.
-func (s *Server) keyOrder(cands []candidate) []candidate {
+func (s *Server) keyOrder(cands []rsiCandidate) []rsiCandidate {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	var fresh, resting []candidate
+	var fresh, resting []rsiCandidate
 	for _, a := range cands {
-		t, ok := s.rested[restKey(a.c)]
+		t, ok := s.rested[rsiRestKey(a.c)]
 		switch {
 		case ok && now.Before(t):
 			resting = append(resting, a)
 		case ok:
-			delete(s.rested, restKey(a.c))
+			delete(s.rested, rsiRestKey(a.c))
 			fresh = append(fresh, a)
 		default:
 			fresh = append(fresh, a)
@@ -216,12 +216,12 @@ func (s *Server) keyOrder(cands []candidate) []candidate {
 func (s *Server) restKeyFor(c provider.Provider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.rested[restKey(c)] = time.Now().Add(keyRest)
+	s.rested[rsiRestKey(c)] = time.Now().Add(rsiKeyRest)
 }
 
 // unrestKey clears a candidate's failure mark once it has answered.
 func (s *Server) unrestKey(c provider.Provider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.rested, restKey(c))
+	delete(s.rested, rsiRestKey(c))
 }

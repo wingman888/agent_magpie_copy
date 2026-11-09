@@ -20,8 +20,8 @@ type KeyEntry struct {
 }
 
 var (
-	errLastKey = errors.New("a provider needs at least one enabled key; this change would leave none")
-	errNoKey   = errors.New("no key of this provider matches that reference")
+	rsiErrLastKey = errors.New("a provider needs at least one enabled key; this change would leave none")
+	rsiErrNoKey   = errors.New("no key of this provider matches that reference")
 )
 
 // KeyRef is a key's fingerprint: the first five bytes of its SHA-256, in
@@ -33,7 +33,7 @@ func KeyRef(key string) string {
 
 // validKeyProtocol is true for "" (any) and the three protocols a key can be
 // limited to.
-func validKeyProtocol(proto Protocol) bool {
+func rsiValidKeyProtocol(proto Protocol) bool {
 	switch proto {
 	case "", Chat, Responses, Anthropic:
 		return true
@@ -43,7 +43,7 @@ func validKeyProtocol(proto Protocol) bool {
 
 // keyRing lists the provider's keys in order: the current one first, then the
 // extra keys as stored.
-func keyRing(p Provider) []KeyEntry {
+func rsiKeyRing(p Provider) []KeyEntry {
 	var out []KeyEntry
 	if p.Key != "" {
 		out = append(out, KeyEntry{Key: p.Key, Name: p.KeyName, Protocol: p.KeyProtocol})
@@ -54,7 +54,7 @@ func keyRing(p Provider) []KeyEntry {
 // setKeyRing writes an ordered key list back into the provider. The first
 // enabled key becomes the current one; keys ahead of it (all disabled) stay
 // in the extra keys, at the front. It changes nothing when no key is enabled.
-func setKeyRing(p *Provider, ring []KeyEntry) error {
+func rsiSetKeyRing(p *Provider, ring []KeyEntry) error {
 	i := -1
 	for j, k := range ring {
 		if !k.Off {
@@ -63,7 +63,7 @@ func setKeyRing(p *Provider, ring []KeyEntry) error {
 		}
 	}
 	if i < 0 {
-		return errLastKey
+		return rsiErrLastKey
 	}
 	top := ring[i]
 	rest := make([]KeyEntry, 0, len(ring)-1)
@@ -77,7 +77,7 @@ func setKeyRing(p *Provider, ring []KeyEntry) error {
 	return nil
 }
 
-func findKey(ring []KeyEntry, ref string) int {
+func rsiFindKey(ring []KeyEntry, ref string) int {
 	ref = strings.ToLower(strings.TrimSpace(ref))
 	for i, k := range ring {
 		if KeyRef(k.Key) == ref {
@@ -89,7 +89,7 @@ func findKey(ring []KeyEntry, ref string) int {
 
 // editKeys applies change to one stored provider and saves the file. The
 // change works on a copy, so an error leaves the file as it was.
-func editKeys(id string, change func(p *Provider) error) error {
+func rsiEditKeys(id string, change func(p *Provider) error) error {
 	id = strings.ToLower(strings.TrimSpace(id))
 	f := load()
 	for i := range f.Providers {
@@ -116,30 +116,30 @@ func AddKey(id, name, key string, proto Protocol) error {
 	if key == "" {
 		return errors.New("the key is empty")
 	}
-	if !validKeyProtocol(proto) {
+	if !rsiValidKeyProtocol(proto) {
 		return fmt.Errorf("unknown protocol %q: use chat, responses or anthropic, or leave it empty", proto)
 	}
 	name = strings.TrimSpace(name)
-	return editKeys(id, func(p *Provider) error {
-		ring := keyRing(*p)
+	return rsiEditKeys(id, func(p *Provider) error {
+		ring := rsiKeyRing(*p)
 		for _, k := range ring {
 			if k.Key == key {
 				return errors.New("that key is already on this provider")
 			}
 		}
 		ring = append(ring, KeyEntry{Key: key, Name: name, Protocol: proto})
-		return setKeyRing(p, ring)
+		return rsiSetKeyRing(p, ring)
 	})
 }
 
 // UseKey makes a key the current one. The key it replaces stays enabled, right
 // after it; the other keys and their protocol limits are kept.
 func UseKey(id, keyRef string) error {
-	return editKeys(id, func(p *Provider) error {
-		ring := keyRing(*p)
-		i := findKey(ring, keyRef)
+	return rsiEditKeys(id, func(p *Provider) error {
+		ring := rsiKeyRing(*p)
+		i := rsiFindKey(ring, keyRef)
 		if i < 0 {
-			return errNoKey
+			return rsiErrNoKey
 		}
 		chosen := ring[i]
 		chosen.Off = false
@@ -147,7 +147,7 @@ func UseKey(id, keyRef string) error {
 		next = append(next, chosen)
 		next = append(next, ring[:i]...)
 		next = append(next, ring[i+1:]...)
-		return setKeyRing(p, next)
+		return rsiSetKeyRing(p, next)
 	})
 }
 
@@ -155,66 +155,66 @@ func UseKey(id, keyRef string) error {
 // current place to the next enabled key; the disabled one is kept. Refused,
 // with nothing changed, when no other key is enabled.
 func SetKeyOn(id, keyRef string, on bool) error {
-	return editKeys(id, func(p *Provider) error {
-		ring := keyRing(*p)
-		i := findKey(ring, keyRef)
+	return rsiEditKeys(id, func(p *Provider) error {
+		ring := rsiKeyRing(*p)
+		i := rsiFindKey(ring, keyRef)
 		if i < 0 {
-			return errNoKey
+			return rsiErrNoKey
 		}
 		ring[i].Off = !on
-		return setKeyRing(p, ring)
+		return rsiSetKeyRing(p, ring)
 	})
 }
 
 // RemoveKey deletes a key. The last enabled key cannot be removed; removing
 // the current key hands the current place to the next enabled one.
 func RemoveKey(id, keyRef string) error {
-	return editKeys(id, func(p *Provider) error {
-		ring := keyRing(*p)
-		i := findKey(ring, keyRef)
+	return rsiEditKeys(id, func(p *Provider) error {
+		ring := rsiKeyRing(*p)
+		i := rsiFindKey(ring, keyRef)
 		if i < 0 {
-			return errNoKey
+			return rsiErrNoKey
 		}
 		next := make([]KeyEntry, 0, len(ring)-1)
 		next = append(next, ring[:i]...)
 		next = append(next, ring[i+1:]...)
-		return setKeyRing(p, next)
+		return rsiSetKeyRing(p, next)
 	})
 }
 
 // RenameKey changes a key's name.
 func RenameKey(id, keyRef, name string) error {
 	name = strings.TrimSpace(name)
-	return editKeys(id, func(p *Provider) error {
-		ring := keyRing(*p)
-		i := findKey(ring, keyRef)
+	return rsiEditKeys(id, func(p *Provider) error {
+		ring := rsiKeyRing(*p)
+		i := rsiFindKey(ring, keyRef)
 		if i < 0 {
-			return errNoKey
+			return rsiErrNoKey
 		}
 		ring[i].Name = name
-		return setKeyRing(p, ring)
+		return rsiSetKeyRing(p, ring)
 	})
 }
 
 // SetKeyProtocol limits a key to one protocol, or lifts the limit with "".
 func SetKeyProtocol(id, keyRef string, proto Protocol) error {
-	if !validKeyProtocol(proto) {
+	if !rsiValidKeyProtocol(proto) {
 		return fmt.Errorf("unknown protocol %q: use chat, responses or anthropic, or leave it empty", proto)
 	}
-	return editKeys(id, func(p *Provider) error {
-		ring := keyRing(*p)
-		i := findKey(ring, keyRef)
+	return rsiEditKeys(id, func(p *Provider) error {
+		ring := rsiKeyRing(*p)
+		i := rsiFindKey(ring, keyRef)
 		if i < 0 {
-			return errNoKey
+			return rsiErrNoKey
 		}
 		ring[i].Protocol = proto
-		return setKeyRing(p, ring)
+		return rsiSetKeyRing(p, ring)
 	})
 }
 
 // checkKeys refuses a provider whose keys cannot be used as stored.
-func checkKeys(p Provider) error {
-	if !validKeyProtocol(p.KeyProtocol) {
+func rsiCheckKeys(p Provider) error {
+	if !rsiValidKeyProtocol(p.KeyProtocol) {
 		return fmt.Errorf("unknown key protocol %q: use chat, responses or anthropic, or leave it empty", p.KeyProtocol)
 	}
 	seen := map[string]bool{}
@@ -222,7 +222,7 @@ func checkKeys(p Provider) error {
 		seen[p.Key] = true
 	}
 	for _, k := range p.Keys {
-		if !validKeyProtocol(k.Protocol) {
+		if !rsiValidKeyProtocol(k.Protocol) {
 			return fmt.Errorf("unknown protocol %q on key %s: use chat, responses or anthropic, or leave it empty", k.Protocol, KeyRef(k.Key))
 		}
 		if seen[k.Key] {
@@ -234,7 +234,7 @@ func checkKeys(p Provider) error {
 }
 
 // cleanKeys trims the extra keys and drops empty ones.
-func cleanKeys(ks []KeyEntry) []KeyEntry {
+func rsiCleanKeys(ks []KeyEntry) []KeyEntry {
 	var out []KeyEntry
 	for _, k := range ks {
 		k.Key = strings.TrimSpace(k.Key)
@@ -280,8 +280,8 @@ func (p Provider) KeyFor(proto Protocol) (Provider, bool) {
 	if !p.hasKeys() {
 		return p, true
 	}
-	for _, k := range keyRing(p) {
-		if k.Off || !validKeyProtocol(k.Protocol) {
+	for _, k := range rsiKeyRing(p) {
+		if k.Off || !rsiValidKeyProtocol(k.Protocol) {
 			continue
 		}
 		if k.Protocol != "" && k.Protocol != proto {
@@ -317,8 +317,8 @@ func (p Provider) KeyCandidates(from Protocol, model string) []Provider {
 		rank int
 	}
 	var cs []cand
-	for _, k := range keyRing(p) {
-		if k.Off || !validKeyProtocol(k.Protocol) {
+	for _, k := range rsiKeyRing(p) {
+		if k.Off || !rsiValidKeyProtocol(k.Protocol) {
 			continue
 		}
 		if k.Protocol != "" && p.Base(k.Protocol) == "" {
@@ -327,7 +327,7 @@ func (p Provider) KeyCandidates(from Protocol, model string) []Provider {
 		if k.Protocol == "" && len(p.Speaks()) == 0 {
 			continue
 		}
-		cs = append(cs, cand{p.withKey(k), keyRank(k.Protocol, from, p, model)})
+		cs = append(cs, cand{p.withKey(k), rsiKeyRank(k.Protocol, from, p, model)})
 	}
 	sort.SliceStable(cs, func(i, j int) bool { return cs[i].rank < cs[j].rank })
 	out := make([]Provider, 0, len(cs))
@@ -338,8 +338,8 @@ func (p Provider) KeyCandidates(from Protocol, model string) []Provider {
 }
 
 // keyRank orders keys for a request: lower is tried first.
-func keyRank(kp, from Protocol, p Provider, model string) int {
-	switch modelFamily(model) {
+func rsiKeyRank(kp, from Protocol, p Provider, model string) int {
+	switch rsiModelFamily(model) {
 	case "claude":
 		switch kp {
 		case Anthropic:
@@ -365,7 +365,7 @@ func keyRank(kp, from Protocol, p Provider, model string) int {
 
 // modelFamily sorts a model id into "claude", "openai" (GPT, o-series, codex)
 // or "" (anything else). A provider prefix such as "anthropic/" is ignored.
-func modelFamily(model string) string {
+func rsiModelFamily(model string) string {
 	m := strings.ToLower(model)
 	if i := strings.LastIndex(m, "/"); i >= 0 {
 		m = m[i+1:]

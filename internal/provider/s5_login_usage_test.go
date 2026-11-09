@@ -14,9 +14,9 @@ import (
 func s5ResetUsage(t *testing.T) {
 	t.Helper()
 	reset := func() {
-		loginUsageCache.Lock()
-		loginUsageCache.byAgent = map[string]loginUsageEntry{}
-		loginUsageCache.Unlock()
+		rsiLoginUsageCache.Lock()
+		rsiLoginUsageCache.byAgent = map[string]rsiLoginUsageEntry{}
+		rsiLoginUsageCache.Unlock()
 	}
 	reset()
 	t.Cleanup(reset)
@@ -24,11 +24,11 @@ func s5ResetUsage(t *testing.T) {
 
 // s5Expire makes the cached result of agent old enough to be refreshed.
 func s5Expire(agent string) {
-	loginUsageCache.Lock()
-	e := loginUsageCache.byAgent[agent]
+	rsiLoginUsageCache.Lock()
+	e := rsiLoginUsageCache.byAgent[agent]
 	e.at = time.Now().Add(-2 * time.Minute)
-	loginUsageCache.byAgent[agent] = e
-	loginUsageCache.Unlock()
+	rsiLoginUsageCache.byAgent[agent] = e
+	rsiLoginUsageCache.Unlock()
 }
 
 // s5Usage serves codex usage per bearer token and counts the requests. A
@@ -94,13 +94,13 @@ func s5CodexAccounts(t *testing.T, u *s5Usage) {
 	s5ResetUsage(t)
 	srv := httptest.NewServer(u)
 	t.Cleanup(srv.Close)
-	old := codexUsageURL
-	codexUsageURL = srv.URL + "/wham/usage"
-	t.Cleanup(func() { codexUsageURL = old })
+	old := rsiCodexUsageURL
+	rsiCodexUsageURL = srv.URL + "/wham/usage"
+	t.Cleanup(func() { rsiCodexUsageURL = old })
 
-	s4Codex(t, codexAuthPath(), "a@x.com", "tokA")
-	s4Codex(t, loginTokens("codex", "b@x.com"), "b@x.com", "tokB")
-	if err := storeLogins([]savedLogin{{Agent: "codex", User: "b@x.com", Plan: "plus", On: true}}); err != nil {
+	s4Codex(t, rsiCodexAuthPath(), "a@x.com", "tokA")
+	s4Codex(t, rsiLoginTokens("codex", "b@x.com"), "b@x.com", "tokB")
+	if err := rsiStoreLogins([]rsiSavedLogin{{Agent: "codex", User: "b@x.com", Plan: "plus", On: true}}); err != nil {
 		t.Fatal(err)
 	}
 	u.windows = map[string][2]float64{"tokA": {10, 30}, "tokB": {50, 70}}
@@ -188,12 +188,12 @@ func TestS5LoginUsageClaudeAccount(t *testing.T) {
 		w.Write([]byte(`{"five_hour":{"utilization":25},"seven_day":{"utilization":40}}`))
 	}))
 	t.Cleanup(srv.Close)
-	old := claudeUsageURL
-	claudeUsageURL = srv.URL
-	t.Cleanup(func() { claudeUsageURL = old })
+	old := rsiClaudeUsageURL
+	rsiClaudeUsageURL = srv.URL
+	t.Cleanup(func() { rsiClaudeUsageURL = old })
 
-	s4Claude(t, loginTokens("claude", "c@x.com"), "tokC")
-	if err := storeLogins([]savedLogin{{Agent: "claude", User: "c@x.com", Plan: "pro"}}); err != nil {
+	s4Claude(t, rsiLoginTokens("claude", "c@x.com"), "tokC")
+	if err := rsiStoreLogins([]rsiSavedLogin{{Agent: "claude", User: "c@x.com", Plan: "pro"}}); err != nil {
 		t.Fatal(err)
 	}
 	got := LoginUsage(context.Background(), "claude")

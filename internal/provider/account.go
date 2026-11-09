@@ -259,7 +259,7 @@ func forgetClaudeCredential() {
 }
 
 func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) error {
-	if err := writeClaudeCredential(loc, c); err != nil {
+	if err := rsiWriteClaudeCredential(loc, c); err != nil {
 		return err
 	}
 	cacheClaudeCredential(c, loc)
@@ -268,7 +268,7 @@ func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) err
 
 // writeClaudeCredential stores a credential blob without touching the cache
 // of the agent's own login.
-func writeClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) error {
+func rsiWriteClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) error {
 	b, err := c.marshal()
 	if err != nil {
 		return err
@@ -291,7 +291,7 @@ func writeClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) er
 }
 
 // readClaudeDir reads the login kept in a config directory magpie manages.
-func readClaudeDir(dir string) (claudeCredentials, claudeCredentialLocation, bool) {
+func rsiReadClaudeDir(dir string) (claudeCredentials, claudeCredentialLocation, bool) {
 	path := filepath.Join(dir, ".credentials.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -358,15 +358,15 @@ func claudeIdentity() (user, plan string, signedOut bool) {
 // claudeAccount is the Claude Code login the agent is signed in to, with the
 // saved logins that are on at the same time behind it.
 func claudeAccount() (Provider, bool) {
-	p, ok := claudeSelf()
+	p, ok := rsiClaudeSelf()
 	if !ok {
 		return Provider{}, false
 	}
-	return withAlternates(p), true
+	return rsiWithAlternates(p), true
 }
 
 // claudeSelf is the login Claude Code itself is signed in to.
-func claudeSelf() (Provider, bool) {
+func rsiClaudeSelf() (Provider, bool) {
 	c, _, ok := claudeCredential()
 	if !ok {
 		return Provider{}, false
@@ -385,15 +385,15 @@ func claudeSelf() (Provider, bool) {
 			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
 		}
 	}
-	return claudeProvider("", user, plan), true
+	return rsiClaudeProvider("", user, plan), true
 }
 
 // claudeProvider is a Claude Code login: the agent's own when dir is "", else
 // the one magpie keeps in dir.
-func claudeProvider(dir, user, plan string) Provider {
+func rsiClaudeProvider(dir, user, plan string) Provider {
 	acct := &Account{Agent: "claude", User: user, Plan: plan, ConfigDir: dir}
 	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
-		tok, err := claudeTokenAt(ctx, dir)
+		tok, err := rsiClaudeTokenAt(ctx, dir)
 		if err != nil {
 			return err
 		}
@@ -412,7 +412,7 @@ func claudeProvider(dir, user, plan string) Provider {
 	acct.body = claudeBody
 	acct.models = func() []catalog.Model { return catalog.Provider("anthropic") }
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := claudeModelsAt(ctx, dir)
+		ms, err := rsiClaudeModelsAt(ctx, dir)
 		if err != nil {
 			return nil, err
 		}
@@ -424,15 +424,15 @@ func claudeProvider(dir, user, plan string) Provider {
 
 // claudeModels asks Anthropic's Models API with the agent's own login.
 func claudeModels(ctx context.Context) ([]catalog.Model, error) {
-	return claudeModelsAt(ctx, "")
+	return rsiClaudeModelsAt(ctx, "")
 }
 
 // claudeModelsAt asks Anthropic's Models API, authenticated with the account's
 // own OAuth token (dir as in claudeProvider), so the picker follows the vendor
 // instead of a snapshot. Nothing here is compiled in: a new model shows up the
 // moment Anthropic lists it (which is what the refresh button runs).
-func claudeModelsAt(ctx context.Context, dir string) ([]catalog.Model, error) {
-	tok, err := claudeTokenAt(ctx, dir)
+func rsiClaudeModelsAt(ctx context.Context, dir string) ([]catalog.Model, error) {
+	tok, err := rsiClaudeTokenAt(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -501,14 +501,14 @@ func claudeFresh(c claudeCredentials) bool {
 
 // claudeToken is the agent's own login's access token.
 func claudeToken(ctx context.Context) (string, error) {
-	return claudeTokenAt(ctx, "")
+	return rsiClaudeTokenAt(ctx, "")
 }
 
 // claudeTokenAt returns a usable access token for the login in dir ("" is the
 // agent's own), refreshing it through Anthropic when it is about to expire. A
 // refresh rotates the refresh token, so the new pair goes back where the login
 // was read from.
-func claudeTokenAt(ctx context.Context, dir string) (string, error) {
+func rsiClaudeTokenAt(ctx context.Context, dir string) (string, error) {
 	claudeMu.Lock()
 	defer claudeMu.Unlock()
 	var c claudeCredentials
@@ -517,7 +517,7 @@ func claudeTokenAt(ctx context.Context, dir string) (string, error) {
 	if dir == "" {
 		c, loc, ok = claudeCredential()
 	} else {
-		c, loc, ok = readClaudeDir(dir)
+		c, loc, ok = rsiReadClaudeDir(dir)
 	}
 	if !ok {
 		return "", errors.New("Claude Code is signed out; run claude auth login")
@@ -531,7 +531,7 @@ func claudeTokenAt(ctx context.Context, dir string) (string, error) {
 		if dir == "" {
 			latest, latestLoc, found = readClaudeCredential()
 		} else {
-			latest, latestLoc, found = readClaudeDir(dir)
+			latest, latestLoc, found = rsiReadClaudeDir(dir)
 		}
 		if found {
 			c, loc = latest, latestLoc
@@ -575,7 +575,7 @@ func claudeTokenAt(ctx context.Context, dir string) (string, error) {
 		if err := saveClaudeCredential(loc, c); err != nil {
 			return "", err
 		}
-	} else if err := writeClaudeCredential(loc, c); err != nil {
+	} else if err := rsiWriteClaudeCredential(loc, c); err != nil {
 		return "", err
 	}
 	return fresh.AccessToken, nil
@@ -588,7 +588,7 @@ func Accounts() []Provider {
 	if cfg == "" {
 		cfg = filepath.Join(home, ".config")
 	}
-	rememberCurrent()
+	rsiRememberCurrent()
 	var out []Provider
 	if p, ok := claudeAccount(); ok {
 		out = append(out, p)
@@ -667,15 +667,15 @@ type codexAuth struct {
 // codexAccount is the ChatGPT login Codex CLI is signed in to, with the saved
 // logins that are on at the same time behind it.
 func codexAccount(home string) (Provider, bool) {
-	p, ok := codexSelf(home)
+	p, ok := rsiCodexSelf(home)
 	if !ok {
 		return Provider{}, false
 	}
-	return withAlternates(p), true
+	return rsiWithAlternates(p), true
 }
 
 // codexSelf is the login Codex CLI itself keeps in ~/.codex/auth.json.
-func codexSelf(home string) (Provider, bool) {
+func rsiCodexSelf(home string) (Provider, bool) {
 	path := filepath.Join(home, ".codex", "auth.json")
 	var a codexAuth
 	if !readJSON(path, &a) || a.Tokens.AccessToken == "" || a.AuthMode == "apikey" {
@@ -686,11 +686,11 @@ func codexSelf(home string) (Provider, bool) {
 	if user == "" {
 		user = "ChatGPT"
 	}
-	return codexProvider(path, user, claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")), true
+	return rsiCodexProvider(path, user, claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")), true
 }
 
 // codexProvider is a ChatGPT login whose tokens live in the auth file at path.
-func codexProvider(path, user, plan string) Provider {
+func rsiCodexProvider(path, user, plan string) Provider {
 	acct := &Account{Agent: "codex", Stream: true, User: user, Plan: plan}
 	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
 		tok, accountID, err := codexToken(ctx, path)

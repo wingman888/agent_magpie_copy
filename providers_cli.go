@@ -241,7 +241,7 @@ func providerCmd(args []string) error {
 		if p.Preset != "" || p.Account != nil {
 			return fmt.Errorf("仅自定义供应商可设置图标（%s 是预设或订阅供应商）", p.Name)
 		}
-		icon, err := iconArg(rest[1])
+		icon, err := rsiIconArg(rest[1])
 		if err != nil {
 			return err
 		}
@@ -438,7 +438,7 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		if !ok {
 			return fmt.Errorf("expected key=value, got %q\n\n%s", kv, providerUsage)
 		}
-		if name, ok := headerName(k); ok {
+		if name, ok := rsiHeaderName(k); ok {
 			if name == "" {
 				return fmt.Errorf("a header needs a name: header.<Name>=value\n\n%s", providerUsage)
 			}
@@ -473,7 +473,7 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			if p.Preset != "" || p.Account != nil {
 				return fmt.Errorf("仅自定义供应商可设置图标（%s 是预设或订阅供应商）", p.Name)
 			}
-			icon, err := iconArg(v)
+			icon, err := rsiIconArg(v)
 			if err != nil {
 				return err
 			}
@@ -487,7 +487,7 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 
 // headerName reads a "header.<Name>" key, case-insensitively on the prefix;
 // the name keeps the casing the user typed. ok is false for other keys.
-func headerName(k string) (name string, ok bool) {
+func rsiHeaderName(k string) (name string, ok bool) {
 	const prefix = "header."
 	if len(k) < len(prefix) || !strings.EqualFold(k[:len(prefix)], prefix) {
 		return "", false
@@ -498,7 +498,7 @@ func headerName(k string) (name string, ok bool) {
 // iconArg turns what the user typed for an icon into the value providers.json
 // keeps: an existing file is stored as a picture and becomes "file:<name>";
 // anything else must be a built-in icon name; "" means the default icon.
-func iconArg(v string) (string, error) {
+func rsiIconArg(v string) (string, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return "", nil

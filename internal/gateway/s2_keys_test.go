@@ -226,7 +226,7 @@ func TestS2KRetryableStatuses(t *testing.T) {
 		{403, "forbidden", false},
 		{400, "bad request", false},
 	} {
-		if got := retryable(c.status, c.msg); got != c.want {
+		if got := rsiRetryable(c.status, c.msg); got != c.want {
 			t.Errorf("retryable(%d, %q) = %v", c.status, c.msg, got)
 		}
 	}

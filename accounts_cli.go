@@ -8,7 +8,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-const accountsUsage = `usage:
+const rsiAccountsUsage = `usage:
   magpie accounts [claude|codex]           list saved sign-ins; the one in use is marked
   magpie accounts switch <agent> <email>   sign the agent in to a saved sign-in
   magpie accounts forget <agent> <email>   drop a saved sign-in (not the one in use)
@@ -19,33 +19,33 @@ const accountsUsage = `usage:
 agents: claude (cc), codex`
 
 // accountsCmd handles `magpie accounts …`.
-func accountsCmd(args []string) error {
+func rsiAccountsCmd(args []string) error {
 	if len(args) == 0 {
-		return listLogins("")
+		return rsiListLogins("")
 	}
 	switch args[0] {
 	case "switch", "forget", "add", "on", "off":
 	default:
 		agent, ok := provider.LoginAgent(args[0])
 		if !ok {
-			return fmt.Errorf("unknown agent %q\n%s", args[0], accountsUsage)
+			return fmt.Errorf("unknown agent %q\n%s", args[0], rsiAccountsUsage)
 		}
 		if len(args) != 1 {
-			return fmt.Errorf("usage: magpie accounts %s\n%s", args[0], accountsUsage)
+			return fmt.Errorf("usage: magpie accounts %s\n%s", args[0], rsiAccountsUsage)
 		}
-		return listLogins(agent)
+		return rsiListLogins(agent)
 	}
 	if len(args) < 2 {
-		return fmt.Errorf("magpie accounts %s needs an agent\n%s", args[0], accountsUsage)
+		return fmt.Errorf("magpie accounts %s needs an agent\n%s", args[0], rsiAccountsUsage)
 	}
 	agent, ok := provider.LoginAgent(args[1])
 	if !ok {
-		return fmt.Errorf("unknown agent %q\n%s", args[1], accountsUsage)
+		return fmt.Errorf("unknown agent %q\n%s", args[1], rsiAccountsUsage)
 	}
 	switch args[0] {
 	case "add":
 		if len(args) != 2 {
-			return fmt.Errorf("usage: magpie accounts add <agent>\n%s", accountsUsage)
+			return fmt.Errorf("usage: magpie accounts add <agent>\n%s", rsiAccountsUsage)
 		}
 		user, err := provider.AddLogin(agent)
 		if err != nil {
@@ -53,10 +53,10 @@ func accountsCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), agent, "signed in as", user, muted.Render("(saved)"))
 		fmt.Println()
-		return listLogins(agent)
+		return rsiListLogins(agent)
 	case "forget":
 		if len(args) != 3 {
-			return fmt.Errorf("usage: magpie accounts forget <agent> <email>\n%s", accountsUsage)
+			return fmt.Errorf("usage: magpie accounts forget <agent> <email>\n%s", rsiAccountsUsage)
 		}
 		if err := provider.ForgetLogin(agent, args[2]); err != nil {
 			return err
@@ -65,7 +65,7 @@ func accountsCmd(args []string) error {
 		return nil
 	case "on", "off":
 		if len(args) != 3 {
-			return fmt.Errorf("usage: magpie accounts %s <agent> <email>\n%s", args[0], accountsUsage)
+			return fmt.Errorf("usage: magpie accounts %s <agent> <email>\n%s", args[0], rsiAccountsUsage)
 		}
 		on := args[0] == "on"
 		if err := provider.SetLoginOn(agent, args[2], on); err != nil {
@@ -80,7 +80,7 @@ func accountsCmd(args []string) error {
 	}
 	// switch
 	if len(args) != 3 {
-		return fmt.Errorf("usage: magpie accounts switch <agent> <email>\n%s", accountsUsage)
+		return fmt.Errorf("usage: magpie accounts switch <agent> <email>\n%s", rsiAccountsUsage)
 	}
 	changed, err := provider.SwitchLogin(agent, args[2])
 	if err != nil {
@@ -97,7 +97,7 @@ func accountsCmd(args []string) error {
 
 // listLogins prints the saved sign-ins of one agent, or of both when agent is "".
 // Each line ends with the account's 5-hour and weekly usage when it can be read.
-func listLogins(agent string) error {
+func rsiListLogins(agent string) error {
 	logins := provider.Logins(agent)
 	if len(logins) == 0 {
 		fmt.Println("no saved sign-ins; sign in with the agent, or run: magpie accounts add <agent>")
@@ -128,14 +128,14 @@ func listLogins(agent string) error {
 		}
 		q, have := usage[l.Agent+"\x00"+l.User]
 		fmt.Printf("%s %-7s %s%s  %s%s\n", mark, l.Agent, l.User, plan, muted.Render(state),
-			usedText(q, have))
+			rsiUsedText(q, have))
 	}
 	return nil
 }
 
 // usedText is the usage a list line ends with, or "" when the account's usage
 // could not be read (have is false, or the lookup failed).
-func usedText(q provider.SubscriptionQuota, have bool) string {
+func rsiUsedText(q provider.SubscriptionQuota, have bool) string {
 	if !have || q.Error != "" {
 		return ""
 	}

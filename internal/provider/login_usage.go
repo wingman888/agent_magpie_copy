@@ -11,24 +11,24 @@ import (
 )
 
 // loginUsageTTL is how long a LoginUsage result is reused.
-const loginUsageTTL = time.Minute
+const rsiLoginUsageTTL = time.Minute
 
 // claudeUsageURL and codexUsageURL are the usage endpoints; vars so tests can
 // point them at a local server.
 var (
-	claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
-	codexUsageURL  = "https://chatgpt.com/backend-api/wham/usage"
+	rsiClaudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
+	rsiCodexUsageURL  = "https://chatgpt.com/backend-api/wham/usage"
 )
 
-type loginUsageEntry struct {
+type rsiLoginUsageEntry struct {
 	at   time.Time
 	data map[string]SubscriptionQuota
 }
 
-var loginUsageCache = struct {
+var rsiLoginUsageCache = struct {
 	sync.Mutex
-	byAgent map[string]loginUsageEntry
-}{byAgent: map[string]loginUsageEntry{}}
+	byAgent map[string]rsiLoginUsageEntry
+}{byAgent: map[string]rsiLoginUsageEntry{}}
 
 // LoginUsage returns the 5-hour and weekly usage of each saved login of agent
 // ("claude" or "codex"), keyed by email. Results are reused for a minute. When
@@ -39,23 +39,23 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 	if !ok {
 		return map[string]SubscriptionQuota{}
 	}
-	c := &loginUsageCache
+	c := &rsiLoginUsageCache
 	c.Lock()
 	e, have := c.byAgent[a]
 	c.Unlock()
-	if have && time.Since(e.at) < loginUsageTTL {
-		return copyQuotas(e.data)
+	if have && time.Since(e.at) < rsiLoginUsageTTL {
+		return rsiCopyQuotas(e.data)
 	}
-	fresh := fetchLoginUsage(ctx, a, e.data)
+	fresh := rsiFetchLoginUsage(ctx, a, e.data)
 	c.Lock()
-	c.byAgent[a] = loginUsageEntry{at: time.Now(), data: fresh}
+	c.byAgent[a] = rsiLoginUsageEntry{at: time.Now(), data: fresh}
 	c.Unlock()
-	return copyQuotas(fresh)
+	return rsiCopyQuotas(fresh)
 }
 
 // fetchLoginUsage asks every saved login of agent at once. prev holds the last
 // known results and is used for any account that fails now.
-func fetchLoginUsage(ctx context.Context, agent string, prev map[string]SubscriptionQuota) map[string]SubscriptionQuota {
+func rsiFetchLoginUsage(ctx context.Context, agent string, prev map[string]SubscriptionQuota) map[string]SubscriptionQuota {
 	logins := Logins(agent)
 	quotas := make([]SubscriptionQuota, len(logins))
 	errs := make([]error, len(logins))
@@ -64,7 +64,7 @@ func fetchLoginUsage(ctx context.Context, agent string, prev map[string]Subscrip
 		wg.Add(1)
 		go func(i int, l Login) {
 			defer wg.Done()
-			quotas[i], errs[i] = loginUsageOne(ctx, l)
+			quotas[i], errs[i] = rsiLoginUsageOne(ctx, l)
 		}(i, l)
 	}
 	wg.Wait()
@@ -85,22 +85,22 @@ func fetchLoginUsage(ctx context.Context, agent string, prev map[string]Subscrip
 	return out
 }
 
-func loginUsageOne(ctx context.Context, l Login) (SubscriptionQuota, error) {
+func rsiLoginUsageOne(ctx context.Context, l Login) (SubscriptionQuota, error) {
 	if l.Agent == "claude" {
-		return claudeLoginUsage(ctx, l)
+		return rsiClaudeLoginUsage(ctx, l)
 	}
-	return codexLoginUsage(ctx, l)
+	return rsiCodexLoginUsage(ctx, l)
 }
 
 // claudeLoginUsage reads the usage of a Claude Code login. The agent's own
 // login is read from its store; a saved one from magpie's copy.
-func claudeLoginUsage(ctx context.Context, l Login) (SubscriptionQuota, error) {
+func rsiClaudeLoginUsage(ctx context.Context, l Login) (SubscriptionQuota, error) {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Plan: l.Plan, Windows: []QuotaWindow{}}
 	dir := ""
 	if !l.Current {
-		dir = loginDir("claude", l.User)
+		dir = rsiLoginDir("claude", l.User)
 	}
-	token, err := claudeTokenAt(ctx, dir)
+	token, err := rsiClaudeTokenAt(ctx, dir)
 	if err != nil {
 		return q, err
 	}
@@ -108,7 +108,7 @@ func claudeLoginUsage(ctx context.Context, l Login) (SubscriptionQuota, error) {
 		FiveHour *quotaWire `json:"five_hour"`
 		SevenDay *quotaWire `json:"seven_day"`
 	}
-	err = accountJSON(ctx, claudeUsageURL, token, map[string]string{
+	err = accountJSON(ctx, rsiClaudeUsageURL, token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
@@ -127,11 +127,11 @@ func claudeLoginUsage(ctx context.Context, l Login) (SubscriptionQuota, error) {
 
 // codexLoginUsage reads the usage of a Codex login. The agent's own login is
 // read from ~/.codex/auth.json; a saved one from magpie's copy.
-func codexLoginUsage(ctx context.Context, l Login) (SubscriptionQuota, error) {
+func rsiCodexLoginUsage(ctx context.Context, l Login) (SubscriptionQuota, error) {
 	q := SubscriptionQuota{Provider: "codex", Name: "Codex", Icon: "codex-color", Plan: l.Plan, Windows: []QuotaWindow{}}
-	path := codexAuthPath()
+	path := rsiCodexAuthPath()
 	if !l.Current {
-		path = loginTokens("codex", l.User)
+		path = rsiLoginTokens("codex", l.User)
 	}
 	token, accountID, err := codexToken(ctx, path)
 	if err != nil {
@@ -148,7 +148,7 @@ func codexLoginUsage(ctx context.Context, l Login) (SubscriptionQuota, error) {
 	if accountID != "" {
 		headers["chatgpt-account-id"] = accountID
 	}
-	if err := accountJSON(ctx, codexUsageURL, token, headers, &data); err != nil {
+	if err := accountJSON(ctx, rsiCodexUsageURL, token, headers, &data); err != nil {
 		return q, err
 	}
 	if data.PlanType != "" {
@@ -177,7 +177,7 @@ func codexLoginUsage(ctx context.Context, l Login) (SubscriptionQuota, error) {
 	return q, nil
 }
 
-func copyQuotas(m map[string]SubscriptionQuota) map[string]SubscriptionQuota {
+func rsiCopyQuotas(m map[string]SubscriptionQuota) map[string]SubscriptionQuota {
 	out := make(map[string]SubscriptionQuota, len(m))
 	for k, v := range m {
 		out[k] = v
