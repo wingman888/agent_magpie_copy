@@ -42,6 +42,9 @@ func (p Provider) Fetched() (time.Time, bool) {
 
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
+	if p.ID == "copilot" {
+		return fetchCopilot(ctx)
+	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
 		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key)

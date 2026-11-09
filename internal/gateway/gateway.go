@@ -249,6 +249,9 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 		if p.ID == "codex" && p.Account != nil {
 			call.To = provider.Responses
 			call.Status, call.Error = s.codex(w, r, p, from, model, body, &call.Usage)
+		} else if p.ID == "copilot" && p.Account != nil {
+			call.To = provider.Chat
+			call.Status, call.Error = s.copilot(w, r, p, from, model, body, &call.Usage)
 		} else if p.Base(from) != "" {
 			call.To = from
 			call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)

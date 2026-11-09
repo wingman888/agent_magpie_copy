@@ -72,11 +72,16 @@ func accountProvider(id string, acc Account, models []string) Provider {
 	return Provider{ID: id, Name: accountNames[id], Models: models, Account: &acc}
 }
 
-// accountModels is the model list of an account provider before any refresh:
-// the built-in list, minus "auto", which is not a model a client can pin.
+// accountModels is the model list of an account provider: the list saved by the
+// last refresh when there is one, else the built-in list, minus "auto", which
+// is not a model a client can pin.
 func accountModels(id string) []catalog.Model {
+	src := catalog.Builtin(id)
+	if live, _, ok := catalog.Live(id); ok {
+		src = catalog.Decorate(live, catalog.Builtin(id))
+	}
 	var out []catalog.Model
-	for _, m := range catalog.Builtin(id) {
+	for _, m := range src {
 		if m.ID != "auto" {
 			out = append(out, m)
 		}
@@ -197,12 +202,6 @@ func jwtClaims(tok string) map[string]any {
 	}
 	return m
 }
-
-// ---- Copilot ---------------------------------------------------------------
-
-// copilotSignedIn is a placeholder until Copilot's credentials are read.
-// Until then Copilot is never reported as signed in.
-func copilotSignedIn() (Account, bool) { return Account{}, false }
 
 // ---- Claude ----------------------------------------------------------------
 
