@@ -227,6 +227,13 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
+			// a save that leaves headers or icon out keeps the stored ones
+			if old != nil && in.Headers == nil {
+				in.Headers = old.Headers
+			}
+			if old != nil && in.Icon == "" {
+				in.Icon = old.Icon
+			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
 				return

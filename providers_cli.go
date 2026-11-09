@@ -25,7 +25,7 @@ const providerUsage = `usage:
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon
-                                                                 header.<name>=value sends an extra request header
+                                                                 header.X-Foo=value sends an extra request header (any name)
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file | name | "">  set a custom provider's icon: an image file, a built-in icon name, or "" for the default
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
@@ -376,9 +376,6 @@ func showProvider(p provider.Provider) error {
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
-	if p.Preset == "" && p.Account == nil {
-		kv("icon", p.Icon)
-	}
 	names := make([]string, 0, len(p.Headers))
 	for name := range p.Headers {
 		names = append(names, name)

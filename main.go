@@ -44,6 +44,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
+  magpie provider icon <id> <file | name | "">  set a custom provider's icon
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
 

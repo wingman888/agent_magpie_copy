@@ -66,7 +66,47 @@ func SaveLive(provider, base string, models []Model) error {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return nil, errors.New("no base URL")
+	}
+	var urls []string
+	add := func(u string) {
+		for _, x := range urls {
+			if x == u {
+				return
+			}
+		}
+		urls = append(urls, u)
+	}
+	add(base + "/models")
+	add(base + "/v1/models")
+	root := base
+	for _, suffix := range []string{"/anthropic", "/apps/anthropic", "/api/anthropic", "/v1", "/api", "/api/v1"} {
+		if strings.HasSuffix(root, suffix) {
+			root = strings.TrimSuffix(root, suffix)
+		}
+	}
+	add(root + "/v1/models")
+	add(root + "/models")
+
+	var lastErr error
+	for _, u := range urls {
+		ms, err := fetchOne(ctx, u, key, anthropic)
+		if err == nil && len(ms) > 0 {
+			return ms, nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no model list at " + base)
+	}
+	return nil, lastErr
 }
 
 // FetchWith is Fetch with extra request headers (a custom provider's own),
@@ -98,7 +138,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, extra)
+		ms, err := fetchOneWith(ctx, u, key, anthropic, extra)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +155,12 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
+// fetchOne asks one list URL with no extra headers.
+func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
+	return fetchOneWith(ctx, url, key, anthropic, nil)
+}
+
+func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -132,6 +177,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[st
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
 	ApplyHeaders(req.Header, extra)
+	ApplyHost(req, extra)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -217,5 +263,16 @@ func ApplyHeaders(h http.Header, extra map[string]string) {
 	}
 	for name, v := range extra {
 		h[name] = []string{v}
+	}
+}
+
+// ApplyHost sets req.Host when the user's extra headers include a Host
+// header. Go's client ignores a Host entry in Header, so it has to go on the
+// request itself.
+func ApplyHost(req *http.Request, extra map[string]string) {
+	for name, v := range extra {
+		if strings.EqualFold(name, "Host") {
+			req.Host = v
+		}
 	}
 }

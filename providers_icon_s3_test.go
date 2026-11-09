@@ -77,7 +77,7 @@ func TestIconS3CommandSetsAndResets(t *testing.T) {
 	}
 	logo := icoS3Write(t, t.TempDir(), "logo.png", append([]byte("\x89PNG\r\n\x1a\n"), []byte("cmd")...))
 
-	if err := providerCmd([]string{"magpie", "provider", "icon", "icos3-relay", logo}); err != nil {
+	if err := providerCmd([]string{"provider", "icon", "icos3-relay", logo}); err != nil {
 		t.Fatal(err)
 	}
 	ref := icoS3Icon(t, "icos3-relay")
@@ -88,14 +88,14 @@ func TestIconS3CommandSetsAndResets(t *testing.T) {
 		t.Errorf("stored icon missing: %v", err)
 	}
 
-	if err := providerCmd([]string{"magpie", "provider", "icon", "icos3-relay", "deepseek-color"}); err != nil {
+	if err := providerCmd([]string{"provider", "icon", "icos3-relay", "deepseek-color"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := icoS3Icon(t, "icos3-relay"); got != "deepseek-color" {
 		t.Fatalf("built-in icon = %q", got)
 	}
 
-	if err := providerCmd([]string{"magpie", "provider", "icon", "icos3-relay", ""}); err != nil {
+	if err := providerCmd([]string{"provider", "icon", "icos3-relay", ""}); err != nil {
 		t.Fatal(err)
 	}
 	if got := icoS3Icon(t, "icos3-relay"); got != "" {
@@ -117,7 +117,7 @@ func TestIconS3RejectedKeepsOldIcon(t *testing.T) {
 		"missing": filepath.Join(dir, "nope.png"),
 	}
 	for name, path := range cases {
-		if err := providerCmd([]string{"magpie", "provider", "icon", "icos3-keep", path}); err == nil {
+		if err := providerCmd([]string{"provider", "icon", "icos3-keep", path}); err == nil {
 			t.Errorf("%s: icon accepted", name)
 		}
 		if got := icoS3Icon(t, "icos3-keep"); got != "deepseek-color" {
@@ -132,7 +132,7 @@ func TestIconS3SVGInTxtAccepted(t *testing.T) {
 		t.Fatal(err)
 	}
 	svg := icoS3Write(t, t.TempDir(), "logo.txt", []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`))
-	if err := providerCmd([]string{"magpie", "provider", "icon", "icos3-svg", svg}); err != nil {
+	if err := providerCmd([]string{"provider", "icon", "icos3-svg", svg}); err != nil {
 		t.Fatal(err)
 	}
 	if ref := icoS3Icon(t, "icos3-svg"); !strings.HasSuffix(ref, ".svg") {
@@ -151,7 +151,7 @@ func TestIconS3PresetAndAccountRefuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := icoS3Icon(t, "deepseek")
-	err = providerCmd([]string{"magpie", "provider", "icon", "deepseek", "generic"})
+	err = providerCmd([]string{"provider", "icon", "deepseek", "generic"})
 	if err == nil || !strings.Contains(err.Error(), "custom") {
 		t.Fatalf("preset icon error = %v, want one mentioning custom", err)
 	}

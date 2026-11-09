@@ -57,6 +57,7 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 		req.Header.Set(k, v)
 	}
 	catalog.ApplyHeaders(req.Header, p.customHeaders())
+	catalog.ApplyHost(req, p.customHeaders())
 	return nil
 }
 
