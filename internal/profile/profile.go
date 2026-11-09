@@ -111,20 +111,11 @@ func Apply(p Profile) (int, error) {
 	for k := range p {
 		keys = append(keys, k)
 	}
-	// providers first: switching one re-settles the model behind it; then
-	// models, which settle what the other fields (Claude Code's tiers) hang on
-	rank := func(k string) int {
-		switch {
-		case strings.HasSuffix(k, ".provider"):
-			return 0
-		case strings.HasSuffix(k, ".model"):
-			return 1
-		}
-		return 2
-	}
+	// providers first: switching one re-settles the model behind it
 	sort.Slice(keys, func(i, j int) bool {
-		if ri, rj := rank(keys[i]), rank(keys[j]); ri != rj {
-			return ri < rj
+		pi, pj := strings.HasSuffix(keys[i], ".provider"), strings.HasSuffix(keys[j], ".provider")
+		if pi != pj {
+			return pi
 		}
 		return keys[i] < keys[j]
 	})
