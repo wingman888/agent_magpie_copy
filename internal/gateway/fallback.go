@@ -1,210 +1,153 @@
 package gateway
 
-// Fallback: a provider can name models to use when it can't take a request
-// — a coding plan out of quota, a rate limit, an overloaded or failing
-// vendor. The request goes to the next one only while none of the reply has
-// been sent, so an agent sees one clean answer from whoever gave it, never a
-// half from each. A provider that just failed that way waits at the back of
-// the line for a minute, rather than costing every request a doomed try.
-
 import (
-	"bytes"
+	"fmt"
 	"net/http"
-	"regexp"
-	"sync"
+	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-const fallbackCooldown = time.Minute
+// restFor is how long a provider that just failed with a retryable error is
+// moved behind its alternatives. It is kept in memory only.
+const restFor = time.Minute
 
-// candidate is one try: a provider, narrowed to one of its keys when it has
-// several enabled ones, and the model to ask it for.
-type candidate struct {
-	p     provider.Provider
-	model string
-	rest  string // what a failure rests: the provider, or one of its keys
-	label string // how a failure is named in the call record
+// quotaWords mark a 400, 401 or 403 as a money, rate or load refusal rather
+// than a bad request. Matching ignores case (the text is lowered first).
+var quotaWords = []string{
+	"quota", "insufficient", "balance", "credit", "billing", "exceeded",
+	"rate limit", "usage limit", "too many requests", "overloaded",
+	"余额", "额度", "欠费", "限流", "频率", "套餐", "用量", "上限",
 }
 
-// candidates is the primary and then its fallbacks. Each provider's keys come
-// in try order, and a key that failed recently goes behind its provider's
-// other keys. A provider whose keys have all just failed goes behind the
-// rest, so fallbacks are only reached once every key of the primary is used up.
-func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	seen := map[string]bool{p.ID + "/" + model: true}
-	groups := [][]candidate{s.keyCandidates(p, model)}
-	for _, id := range p.Fallback {
-		fp, fm, ok := provider.Resolve(id)
-		if !ok || seen[fp.ID+"/"+fm] {
-			continue
+// hasQuotaWords reports whether text says the provider is out of quota,
+// rate limited or overloaded.
+func hasQuotaWords(text string) bool {
+	low := strings.ToLower(text)
+	for _, w := range quotaWords {
+		if strings.Contains(low, w) {
+			return true
 		}
-		seen[fp.ID+"/"+fm] = true
-		groups = append(groups, s.keyCandidates(fp, fm))
-	}
-	if len(groups) == 1 {
-		return groups[0]
-	}
-	var ready, resting []candidate
-	for _, g := range groups {
-		if s.allResting(g) {
-			resting = append(resting, g...)
-		} else {
-			ready = append(ready, g...)
-		}
-	}
-	return append(ready, resting...)
-}
-
-// keyCandidates lists the tries for one provider: one per enabled key in
-// order, with the keys that are resting after the others. A provider with no
-// keys (a signed-in account, or one that needs none) is a single try, as it
-// always was.
-func (s *Server) keyCandidates(p provider.Provider, model string) []candidate {
-	on := p.KeysOn()
-	var refs []string
-	for _, k := range p.KeyList() {
-		if k.On {
-			refs = append(refs, k.ID)
-		}
-	}
-	if len(on) == 0 || len(refs) != len(on) {
-		return []candidate{{p: p, model: model, rest: p.ID, label: p.ID}}
-	}
-	var ready, resting []candidate
-	for i, k := range on {
-		kp := p
-		kp.Key, kp.KeyName, kp.Keys = k.Key, k.Name, nil
-		c := candidate{p: kp, model: model, rest: p.ID + "#" + refs[i], label: p.ID}
-		if len(on) > 1 {
-			c.label = p.ID + "(" + accountName(k) + ")"
-		}
-		if s.resting(c.rest) {
-			resting = append(resting, c)
-		} else {
-			ready = append(ready, c)
-		}
-	}
-	return append(ready, resting...)
-}
-
-// accountName names a key in the call record: its name, or its masked form
-// when it has none. The full key never goes into a record.
-func accountName(k provider.KeyEntry) string {
-	if k.Name != "" {
-		return k.Name
-	}
-	return provider.Mask(k.Key)
-}
-
-// allResting reports whether every try in a group is resting.
-func (s *Server) allResting(g []candidate) bool {
-	for _, c := range g {
-		if !s.resting(c.rest) {
-			return false
-		}
-	}
-	return true
-}
-
-var restingUntil = struct {
-	sync.Mutex
-	m map[string]time.Time
-}{m: map[string]time.Time{}}
-
-func (s *Server) resting(id string) bool {
-	restingUntil.Lock()
-	defer restingUntil.Unlock()
-	return time.Now().Before(restingUntil.m[id])
-}
-
-func (s *Server) rest(id string) {
-	restingUntil.Lock()
-	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
-	restingUntil.Unlock()
-}
-
-// quotaWords are how vendors say "out of quota" or "slow down" when their
-// status code doesn't: some answer 400 or 403 with it.
-var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
-
-// retryable says whether another provider may do better with a request
-// that failed this way.
-func retryable(status int, body []byte) bool {
-	switch {
-	case status == 402, status == 408, status == 429, status >= 500:
-		return true
-	case status == 400, status == 401, status == 403:
-		return quotaWords.Match(body)
 	}
 	return false
 }
 
-// holdWriter keeps an error reply back while another provider may still
-// answer: headers and body wait until release, or are dropped for the next
-// try. Anything else goes straight through.
-type holdWriter struct {
-	w       http.ResponseWriter
-	hold    bool
-	header  http.Header
-	status  int
-	passing bool
-	held    bytes.Buffer
+// retryable reports whether an upstream HTTP error means another provider
+// may still answer the request.
+func retryable(status int, body string) bool {
+	switch {
+	case status == 402, status == 408, status == 429, status >= 500:
+		return true
+	case status == 400, status == 401, status == 403:
+		return hasQuotaWords(body)
+	}
+	return false
 }
 
-func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
-	return &holdWriter{w: w, hold: hold, header: http.Header{}}
+// candidate is one provider and vendor model a request may be sent to.
+type candidate struct {
+	p     provider.Provider
+	model string
 }
 
-func (h *holdWriter) Header() http.Header { return h.header }
+func (c candidate) key() string { return c.p.ID + "\x00" + c.model }
 
-func (h *holdWriter) WriteHeader(code int) {
-	if h.status != 0 {
-		return
+// chain is the order a request tries: the model the agent asked for, then the
+// provider's own fallback list. Unresolvable and repeated entries are skipped.
+// Fallbacks are not expanded further.
+func chain(main provider.Provider, model string) []candidate {
+	first := candidate{main, model}
+	out := []candidate{first}
+	seen := map[string]bool{first.key(): true}
+	for _, id := range main.Fallback {
+		fp, fm, ok := provider.Resolve(id)
+		if !ok {
+			continue
+		}
+		c := candidate{fp, fm}
+		if seen[c.key()] {
+			continue
+		}
+		seen[c.key()] = true
+		out = append(out, c)
 	}
-	h.status = code
-	if h.hold && code >= 400 {
-		return
-	}
-	h.pass()
+	return out
 }
 
-func (h *holdWriter) pass() {
-	dst := h.w.Header()
-	for k, v := range h.header {
-		dst[k] = v
-	}
-	h.w.WriteHeader(h.status)
-	h.passing = true
+// restState is a provider's recent retryable failure.
+type restState struct {
+	until  time.Time
+	reason string
 }
 
-func (h *holdWriter) Write(b []byte) (int, error) {
-	if h.status == 0 {
-		h.WriteHeader(http.StatusOK)
+// order puts resting providers' candidates after the others, keeping each
+// group in chain order. It also returns the reasons of the resting providers
+// it demoted, so the call record can still name them.
+func (s *Server) order(cands []candidate) ([]candidate, map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	var up, down []candidate
+	resting := map[string]string{}
+	for _, c := range cands {
+		if r, ok := s.resting[c.p.ID]; ok && now.Before(r.until) {
+			down = append(down, c)
+			resting[c.p.ID] = r.reason
+			continue
+		}
+		up = append(up, c)
 	}
-	if !h.passing {
-		return h.held.Write(b)
-	}
-	return h.w.Write(b)
+	return append(up, down...), resting
 }
 
-func (h *holdWriter) Flush() {
-	if f, ok := h.w.(http.Flusher); ok && h.passing {
-		f.Flush()
-	}
+// setRest records that a provider just failed with a retryable error.
+func (s *Server) setRest(providerID, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resting[providerID] = restState{until: time.Now().Add(restFor), reason: reason}
 }
 
-// failed reports a held error another provider could answer instead.
-func (h *holdWriter) failed() bool {
-	return !h.passing && h.status >= 400 && retryable(h.status, h.held.Bytes())
+// priorFailures names, in chain order, the candidates before the one that
+// answered (or the last one tried) that failed. A resting provider skipped in
+// this request counts with the reason it failed with earlier.
+func priorFailures(cands []candidate, answered candidate, failed, resting map[string]string) string {
+	var parts []string
+	for _, c := range cands {
+		if c.key() == answered.key() {
+			break
+		}
+		if reason, ok := failed[c.key()]; ok {
+			parts = append(parts, c.p.ID+": "+reason)
+		} else if reason, ok := resting[c.p.ID]; ok {
+			parts = append(parts, c.p.ID+": "+reason)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
-// release sends a held reply after all: nobody else is left to try.
-func (h *holdWriter) release() {
-	if h.passing || h.status == 0 {
-		return
-	}
-	h.pass()
-	h.w.Write(h.held.Bytes())
+// attemptResult is the outcome of sending a request to one candidate.
+type attemptResult struct {
+	status int    // HTTP status the agent sees (or would see)
+	err    string // text for the call record
+	client string // error text for the agent when status >= 400; not yet written
+	retry  bool   // true when another candidate may answer
+	to     provider.Protocol
+}
+
+// failure builds the outcome of a transport error, which is retryable unless
+// the client has gone.
+func failure(p provider.Provider, err error) attemptResult {
+	return attemptResult{status: http.StatusBadGateway, err: err.Error(), client: p.Name + ": " + err.Error(), retry: true}
+}
+
+// upstreamFailure builds the outcome of an HTTP error reply.
+func upstreamFailure(status int, msg string, body []byte) attemptResult {
+	return attemptResult{status: status, err: msg, client: msg, retry: retryable(status, string(body))}
+}
+
+// reasonOf is how a failed candidate is described in the call record and in
+// the resting state.
+func reasonOf(res attemptResult) string {
+	return fmt.Sprintf("%d %s", res.status, res.err)
 }
