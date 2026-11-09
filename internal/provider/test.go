@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,8 +33,12 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
+		kp, ok := p.KeyFor(proto)
+		if !ok {
+			out = append(out, Result{Protocol: proto, Model: model, Error: "no key may speak this endpoint"})
+			continue
+		}
 		var url, body string
-		headers := map[string]string{"Authorization": "Bearer " + p.Key}
 		switch proto {
 		case Chat:
 			url = p.Chat + "/chat/completions"
@@ -44,9 +49,8 @@ func (p Provider) Test(ctx context.Context) []Result {
 		case Anthropic:
 			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
-			headers = AuthHeaders(p, Anthropic)
 		}
-		out = append(out, probe(ctx, proto, url, body, model, headers))
+		out = append(out, probe(ctx, kp, proto, url, kp.Prepare([]byte(body)), model))
 	}
 	return out
 }
@@ -66,7 +70,7 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
-func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string) Result {
+func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -74,16 +78,21 @@ func probe(ctx context.Context, proto Protocol, url, body, model string, headers
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		r.Error = err.Error()
 		return r
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	for k, v := range headers {
-		req.Header.Set(k, v)
+	if p.IsOpenCode() {
+		req.Header.Set("x-opencode-session", "magpie-test-"+randomUUID())
 	}
+	if err := p.Sign(ctx, req, proto, body); err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	p.ApplyHeaders(req)
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
 	r.Millis = time.Since(start).Milliseconds()
