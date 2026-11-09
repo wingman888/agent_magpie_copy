@@ -753,11 +753,20 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return 200, failed
 	}
 	var col collector
+	var failData string // the last error event as the upstream sent it
 	readSSE(rd, func(_, data string) error {
-		return dec(data, col.add)
+		return dec(data, func(ev Event) {
+			if ev.Kind == KError {
+				failData = data
+			}
+			col.add(ev)
+		})
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {
-		return writeError(w, from, 502, p.Name+": "+col.err), col.err
+		// a refusal before any body is the same failure as one that came as a
+		// status, so the status it stands for and its body go to the caller
+		*upstream = []byte(failData)
+		return writeError(w, from, streamErrorStatus(failData), p.Name+": "+col.err), col.err
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)

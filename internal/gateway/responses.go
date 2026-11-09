@@ -332,8 +332,14 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 			emit(Event{Kind: KToolArgs, Text: ev.Item.Arguments})
 		}
 	case "response.completed", "response.incomplete", "response.failed":
-		if ev.Response.Error != nil {
-			emit(Event{Kind: KError, Text: ev.Response.Error.Message})
+		// a failed response is an error even when it says nothing of why:
+		// it is never a reply that simply stopped
+		if ev.Response.Error != nil || ev.Type == "response.failed" {
+			text := "response failed"
+			if ev.Response.Error != nil {
+				text = ev.Response.Error.Message
+			}
+			emit(Event{Kind: KError, Text: text})
 			return nil
 		}
 		stop := "stop"

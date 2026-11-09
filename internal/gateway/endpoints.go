@@ -43,13 +43,24 @@ func servedAPIs(p provider.Provider, model string) []provider.Protocol {
 
 // translationOrder is the order APIs are tried in when a request has to be
 // translated: Responses first, then Chat, for OpenAI's own API and for OpenAI
-// models on Copilot; Chat first for every other vendor.
+// models on Copilot; Chat first for every other vendor. gpt-oss is another
+// vendor's model, though its name begins gpt-, so it is Chat first.
 func translationOrder(p provider.Provider, model string) []provider.Protocol {
 	h := p.Host()
-	if h == "api.openai.com" || (strings.HasSuffix(h, "githubcopilot.com") && modelFamily(model) == provider.Chat) {
+	if !strings.HasPrefix(bareModel(model), "gpt-oss") &&
+		(h == "api.openai.com" || (strings.HasSuffix(h, "githubcopilot.com") && modelFamily(model) == provider.Chat)) {
 		return []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
 	}
 	return []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}
+}
+
+// bareModel is the model's name without its vendor prefix, lower-cased.
+func bareModel(model string) string {
+	m := strings.ToLower(model)
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	return m
 }
 
 // endpoints are the APIs a request for model goes to, in the order to try

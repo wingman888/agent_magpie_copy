@@ -189,25 +189,31 @@ func bodyKind(k EventKind) bool {
 // streamErrorTypes maps the names vendors give their stream errors to the
 // status each stands for, when the error gives no numeric code.
 var streamErrorTypes = map[string]int{
-	"overloaded_error":      529,
-	"overloaded":            529,
-	"rate_limit_error":      429,
-	"rate_limit_exceeded":   429,
-	"insufficient_quota":    429,
-	"authentication_error":  401,
-	"permission_error":      403,
-	"not_found_error":       404,
-	"invalid_request_error": 400,
-	"api_error":             500,
-	"server_error":          500,
+	"overloaded_error":          529,
+	"overloaded":                529,
+	"rate_limit_error":          429,
+	"rate_limit_exceeded":       429,
+	"insufficient_quota":        429,
+	"authentication_error":      401,
+	"permission_error":          403,
+	"not_found_error":           404,
+	"invalid_request_error":     400,
+	"api_error":                 500,
+	"server_error":              500,
+	"model_not_found":           404,
+	"unsupported_api_for_model": 400,
+	"context_length_exceeded":   400,
 }
 
 // streamErrorStatus is the status an error event stands for: the numeric
-// code it gives, else what its type or code names, else 502.
+// code it gives, else what its type or code names, else what its message
+// says of a refused endpoint or an overlong request (a 400, as the same
+// words would come with that status), else 502.
 func streamErrorStatus(data string) int {
 	type errFields struct {
-		Type string          `json:"type"`
-		Code json.RawMessage `json:"code"`
+		Type    string          `json:"type"`
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
 	}
 	var v struct {
 		errFields
@@ -242,6 +248,13 @@ func streamErrorStatus(data string) int {
 		if st, ok := streamErrorTypes[k]; ok {
 			return st
 		}
+	}
+	text := e.Message
+	if text == "" {
+		text = data
+	}
+	if notChatModel(400, []byte(text)) || contextWords.MatchString(text) && !modelWords.MatchString(text) {
+		return 400
 	}
 	return 502
 }
