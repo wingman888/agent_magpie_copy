@@ -1,240 +1,261 @@
 package provider
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/catalog"
 )
 
-// s2kSandbox points HOME and the config at a fresh temp dir.
-func s2kSandbox(t *testing.T) {
+// magS2Env points config, cache and home at a fresh temp dir.
+func magS2Env(t *testing.T) {
 	t.Helper()
-	isolate(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
 }
 
-// s2kRelay saves a provider speaking chat and anthropic, with one key.
-func s2kRelay(t *testing.T, key string) {
+// magS2Stored returns the stored entry for id, raw from providers.json.
+func magS2Stored(t *testing.T, id string) Provider {
 	t.Helper()
-	if err := Save(Provider{ID: "s2krelay", Name: "relay", Key: key,
-		Chat: "https://relay.example/v1", Anthropic: "https://relay.example"}); err != nil {
-		t.Fatal(err)
+	for _, p := range load().Providers {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("no stored provider %q", id)
+	return Provider{}
+}
+
+func magS2Keys(p Provider) []string {
+	var out []string
+	for _, k := range p.Keys {
+		out = append(out, k.Key)
+	}
+	return out
+}
+
+func TestS2KeyRefIsFirstFiveBytesOfSHA256(t *testing.T) {
+	sum := sha256.Sum256([]byte("sk-s2-example"))
+	want := hex.EncodeToString(sum[:5])
+	if got := KeyRef("sk-s2-example"); got != want || len(got) != 10 {
+		t.Fatalf("KeyRef = %q, want %q", got, want)
 	}
 }
 
-func s2kFind(t *testing.T) Provider {
-	t.Helper()
-	p, err := Find("s2krelay")
-	if err != nil {
+func TestS2FirstKeyBecomesCurrent(t *testing.T) {
+	magS2Env(t)
+	// a local base needs no key, so the provider can exist without one
+	if err := Save(Provider{ID: "s2first", Name: "S2 First", Chat: "http://127.0.0.1:9/v1"}); err != nil {
 		t.Fatal(err)
 	}
-	return *p
-}
-
-func TestS2KAddKeyRules(t *testing.T) {
-	s2kSandbox(t)
-	s2kRelay(t, "k1")
-	if err := AddKey("s2krelay", "", "k1", ""); err == nil {
-		t.Error("a duplicate key was accepted")
-	}
-	if err := AddKey("s2krelay", "x", "k2", "gemini"); err == nil {
-		t.Error("an unknown protocol was accepted")
-	}
-	if err := AddKey("s2krelay", "team", "k2", Anthropic); err != nil {
+	if err := AddKey("s2first", "work", "sk-s2-one", ""); err != nil {
 		t.Fatal(err)
 	}
-	p := s2kFind(t)
-	if p.Key != "k1" || len(p.Keys) != 1 || p.Keys[0].Key != "k2" || p.Keys[0].Off {
-		t.Fatalf("after add: key %q keys %+v", p.Key, p.Keys)
-	}
-	if p.Keys[0].Name != "team" || p.Keys[0].Protocol != Anthropic {
-		t.Errorf("new key lost its name or protocol: %+v", p.Keys[0])
+	p := magS2Stored(t, "s2first")
+	if p.Key != "sk-s2-one" || p.KeyName != "work" || len(p.Keys) != 0 {
+		t.Fatalf("first key not current: %+v", p)
 	}
 }
 
-func TestS2KUseKeyKeepsOthers(t *testing.T) {
-	s2kSandbox(t)
-	s2kRelay(t, "k1")
-	if err := AddKey("s2krelay", "", "k2", Anthropic); err != nil {
+func TestS2AddKeyRejectsDuplicateAndUnknownProtocol(t *testing.T) {
+	magS2Env(t)
+	if err := Save(Provider{ID: "s2dup", Name: "S2 Dup", Chat: "https://relay.example/v1", Key: "sk-s2-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddKey("s2krelay", "", "k3", Chat); err != nil {
+	if err := AddKey("s2dup", "", "sk-s2-a", ""); err == nil {
+		t.Fatal("duplicate of the current key was accepted")
+	}
+	if err := AddKey("s2dup", "", "sk-s2-b", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := UseKey("s2krelay", KeyRef("k3")); err != nil {
-		t.Fatal(err)
+	if err := AddKey("s2dup", "", "sk-s2-b", Anthropic); err == nil {
+		t.Fatal("duplicate of an extra key was accepted")
 	}
-	p := s2kFind(t)
-	if p.Key != "k3" || p.KeyProtocol != Chat {
-		t.Fatalf("current key after UseKey: %q %q", p.Key, p.KeyProtocol)
+	if err := AddKey("s2dup", "", "sk-s2-c", Protocol("gemini")); err == nil {
+		t.Fatal("unknown protocol was accepted")
 	}
-	if len(p.Keys) != 2 || p.Keys[0].Key != "k1" || p.Keys[1].Key != "k2" || p.Keys[1].Protocol != Anthropic {
-		t.Fatalf("the others after UseKey: %+v", p.Keys)
-	}
-	if err := UseKey("s2krelay", KeyRef("k2")); err != nil {
-		t.Fatal(err)
-	}
-	p = s2kFind(t)
-	if p.Key != "k2" || p.KeyProtocol != Anthropic || len(p.Keys) != 2 || p.Keys[0].Key != "k3" || p.Keys[0].Protocol != Chat {
-		t.Errorf("second UseKey: key %q %q keys %+v", p.Key, p.KeyProtocol, p.Keys)
+	if err := Save(Provider{ID: "s2dup", Name: "S2 Dup", Chat: "https://relay.example/v1", Key: "sk-s2-a", KeyProtocol: "bogus"}); err == nil {
+		t.Fatal("Save accepted an unknown key protocol")
 	}
 }
 
-func TestS2KDisableRemoveRules(t *testing.T) {
-	s2kSandbox(t)
-	s2kRelay(t, "k1")
-	AddKey("s2krelay", "b", "k2", "")
-	AddKey("s2krelay", "c", "k3", "")
+func TestS2UseKeyKeepsOtherKeysAndLimits(t *testing.T) {
+	magS2Env(t)
+	if err := Save(Provider{ID: "s2use", Name: "S2 Use", Chat: "https://relay.example/v1", Key: "sk-s2-cur", KeyName: "cur"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKey("s2use", "team", "sk-s2-team", Anthropic); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKey("s2use", "spare", "sk-s2-spare", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := UseKey("s2use", KeyRef("sk-s2-team")); err != nil {
+		t.Fatal(err)
+	}
+	p := magS2Stored(t, "s2use")
+	if p.Key != "sk-s2-team" || p.KeyName != "team" || p.KeyProtocol != Anthropic {
+		t.Fatalf("current key wrong: %+v", p)
+	}
+	want := []string{"sk-s2-cur", "sk-s2-spare"}
+	if got := magS2Keys(p); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("extra keys = %v, want %v", got, want)
+	}
+	if p.Keys[0].Name != "cur" || p.Keys[0].Off {
+		t.Fatalf("old current key lost its name or was switched off: %+v", p.Keys[0])
+	}
+}
 
-	if err := SetKeyOn("s2krelay", KeyRef("k1"), false); err != nil {
+func TestS2SetKeyOnHandsOverAndLastEnabledStays(t *testing.T) {
+	magS2Env(t)
+	if err := Save(Provider{ID: "s2on", Name: "S2 On", Chat: "https://relay.example/v1", Key: "sk-s2-first"}); err != nil {
 		t.Fatal(err)
 	}
-	p := s2kFind(t)
-	if p.Key != "k2" || p.KeyName != "b" {
-		t.Fatalf("disabling the current key should hand over to k2, got %q %q", p.Key, p.KeyName)
-	}
-	if len(p.Keys) != 2 || p.Keys[0].Key != "k1" || !p.Keys[0].Off {
-		t.Fatalf("the disabled first key should stay, off: %+v", p.Keys)
-	}
-
-	if err := SetKeyOn("s2krelay", KeyRef("k2"), false); err != nil {
+	if err := AddKey("s2on", "second", "sk-s2-second", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetKeyOn("s2krelay", KeyRef("k3"), false); err == nil {
-		t.Fatal("the last enabled key was disabled")
-	}
-	if p := s2kFind(t); p.Key != "k3" {
-		t.Fatalf("refused disable changed the current key to %q", p.Key)
-	}
-
-	if err := SetKeyOn("s2krelay", KeyRef("k1"), true); err != nil {
+	if err := SetKeyOn("s2on", KeyRef("sk-s2-first"), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveKey("s2krelay", KeyRef("k3")); err != nil {
-		t.Fatal(err)
+	p := magS2Stored(t, "s2on")
+	if p.Key != "sk-s2-second" || len(p.Keys) != 1 || p.Keys[0].Key != "sk-s2-first" || !p.Keys[0].Off {
+		t.Fatalf("hand-over wrong: %+v", p)
 	}
-	p = s2kFind(t)
-	if p.Key != "k1" {
-		t.Fatalf("removing the current key should hand over to k1, got %q", p.Key)
+	if err := SetKeyOn("s2on", KeyRef("sk-s2-second"), false); err == nil {
+		t.Fatal("the last enabled key was switched off")
 	}
-	if err := RemoveKey("s2krelay", KeyRef("k1")); err == nil {
+	if err := RemoveKey("s2on", KeyRef("sk-s2-second")); err == nil {
 		t.Fatal("the last enabled key was removed")
 	}
-	if err := RemoveKey("s2krelay", KeyRef("k2")); err != nil {
+	if err := SetKeyOn("s2on", KeyRef("sk-s2-first"), true); err != nil {
 		t.Fatal(err)
 	}
-	if p := s2kFind(t); p.Key != "k1" || len(p.Keys) != 0 {
-		t.Errorf("after removing the disabled key: %q %+v", p.Key, p.Keys)
+	if p := magS2Stored(t, "s2on"); p.Keys[0].Off {
+		t.Fatal("switching a key back on did not take")
 	}
 }
 
-func TestS2KRenameAndProtocol(t *testing.T) {
-	s2kSandbox(t)
-	s2kRelay(t, "k1")
-	AddKey("s2krelay", "", "k2", "")
-	if err := RenameKey("s2krelay", KeyRef("k1"), "personal"); err != nil {
+func TestS2RemoveCurrentHandsOverAndRenameWorks(t *testing.T) {
+	magS2Env(t)
+	if err := Save(Provider{ID: "s2rm", Name: "S2 Rm", Chat: "https://relay.example/v1", Key: "sk-s2-a", KeyName: "a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := RenameKey("s2krelay", KeyRef("k2"), "team"); err != nil {
+	if err := AddKey("s2rm", "b", "sk-s2-b", ""); err != nil {
 		t.Fatal(err)
 	}
-	p := s2kFind(t)
-	if p.KeyName != "personal" || p.Keys[0].Name != "team" {
-		t.Errorf("names after rename: %q %+v", p.KeyName, p.Keys)
-	}
-	if err := SetKeyProtocol("s2krelay", KeyRef("k2"), Anthropic); err != nil {
+	if err := RenameKey("s2rm", KeyRef("sk-s2-b"), "bee"); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetKeyProtocol("s2krelay", KeyRef("k2"), "gemini"); err == nil {
-		t.Error("an unknown protocol was accepted")
-	}
-	if p := s2kFind(t); p.Keys[0].Protocol != Anthropic {
-		t.Errorf("protocol after set: %q", p.Keys[0].Protocol)
-	}
-	if err := SetKeyProtocol("s2krelay", KeyRef("k2"), ""); err != nil {
+	if err := RenameKey("s2rm", KeyRef("sk-s2-a"), "ay"); err != nil {
 		t.Fatal(err)
 	}
-	if p := s2kFind(t); p.Keys[0].Protocol != "" {
-		t.Errorf("protocol after clearing: %q", p.Keys[0].Protocol)
+	if p := magS2Stored(t, "s2rm"); p.KeyName != "ay" || p.Keys[0].Name != "bee" {
+		t.Fatalf("rename wrong: %+v", p)
 	}
-	if err := RenameKey("s2krelay", "0000000000", "x"); err == nil {
-		t.Error("an unknown key reference was accepted")
+	if err := RemoveKey("s2rm", KeyRef("sk-s2-a")); err != nil {
+		t.Fatal(err)
+	}
+	p := magS2Stored(t, "s2rm")
+	if p.Key != "sk-s2-b" || p.KeyName != "bee" || len(p.Keys) != 0 {
+		t.Fatalf("removing the current key did not hand over: %+v", p)
+	}
+	if err := RemoveKey("s2rm", KeyRef("sk-s2-b")); err == nil {
+		t.Fatal("the last key was removed")
 	}
 }
 
-func TestS2KSaveRejectsBadKeyProtocol(t *testing.T) {
-	s2kSandbox(t)
-	err := Save(Provider{ID: "s2kbad", Name: "bad", Key: "k", Chat: "https://bad.example/v1", KeyProtocol: "gemini"})
-	if err == nil {
-		t.Error("a key protocol of gemini was saved")
+func TestS2SetKeyProtocolSetsAndClears(t *testing.T) {
+	magS2Env(t)
+	if err := Save(Provider{ID: "s2pr", Name: "S2 Pr", Chat: "https://relay.example/v1", Key: "sk-s2-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKey("s2pr", "", "sk-s2-b", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetKeyProtocol("s2pr", KeyRef("sk-s2-b"), Chat); err != nil {
+		t.Fatal(err)
+	}
+	if got := magS2Stored(t, "s2pr").Keys[0].Protocol; got != Chat {
+		t.Fatalf("protocol = %q, want chat", got)
+	}
+	if err := SetKeyProtocol("s2pr", KeyRef("sk-s2-b"), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := magS2Stored(t, "s2pr").Keys[0].Protocol; got != "" {
+		t.Fatalf("protocol not cleared: %q", got)
+	}
+	if err := SetKeyProtocol("s2pr", KeyRef("sk-s2-a"), Protocol("gemini")); err == nil {
+		t.Fatal("gemini accepted as a key protocol")
+	}
+	if err := SetKeyProtocol("s2pr", "0000000000", Anthropic); err == nil {
+		t.Fatal("unknown key reference accepted")
 	}
 }
 
-func TestS2KCandidatesFollowProtocolRules(t *testing.T) {
-	p := Provider{ID: "mix", Name: "mix", Chat: "https://mix.example/v1", Anthropic: "https://mix.example",
-		Key: "any", Keys: []KeyEntry{
-			{Key: "oa", Protocol: Chat},
-			{Key: "an", Protocol: Anthropic},
-			{Key: "dis", Off: true},
+func TestS2SaveKeepsKeysItDoesNotKnow(t *testing.T) {
+	magS2Env(t)
+	if err := Save(Provider{ID: "s2keep", Name: "S2 Keep", Chat: "https://relay.example/v1", Key: "sk-s2-a", KeyName: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKey("s2keep", "b", "sk-s2-b", Anthropic); err != nil {
+		t.Fatal(err)
+	}
+	// a fresh struct, as the GUI or an import would save
+	if err := Save(Provider{ID: "s2keep", Name: "S2 Keep", Chat: "https://relay.example/v1", Key: "sk-s2-a"}); err != nil {
+		t.Fatal(err)
+	}
+	p := magS2Stored(t, "s2keep")
+	if len(p.Keys) != 1 || p.Keys[0].Key != "sk-s2-b" || p.Keys[0].Protocol != Anthropic || p.KeyName != "a" {
+		t.Fatalf("Save dropped keys: %+v", p)
+	}
+}
+
+func TestS2KeyPlansOrderByModelAndProtocol(t *testing.T) {
+	magS2Env(t)
+	p := Provider{ID: "s2plan", Name: "S2 Plan", Chat: "https://relay.example/v1",
+		Anthropic: "https://relay.example", Key: "sk-s2-any",
+		Keys: []ExtraKey{
+			{Key: "sk-s2-ant", Protocol: Anthropic},
+			{Key: "sk-s2-chat", Protocol: Chat},
+			{Key: "sk-s2-off", Protocol: Chat, Off: true},
 		}}
-	keysOf := func(cs []Provider) string {
-		var ks []string
-		for _, c := range cs {
-			ks = append(ks, c.Key)
+	order := func(from Protocol, model string) []string {
+		var out []string
+		for _, pl := range p.KeyPlans(from, model) {
+			out = append(out, pl.Provider.Key)
 		}
-		return strings.Join(ks, ",")
+		return out
 	}
-	if got := keysOf(p.KeyCandidates(Chat, "claude-sonnet-5-5")); got != "an,any,oa" {
-		t.Errorf("claude model from chat: %s", got)
+	if got := strings.Join(order(Anthropic, "claude-s2"), ","); got != "sk-s2-ant,sk-s2-any,sk-s2-chat" {
+		t.Fatalf("claude order = %s", got)
 	}
-	if got := keysOf(p.KeyCandidates(Anthropic, "gpt-5.5")); got != "oa,any,an" {
-		t.Errorf("gpt model from anthropic: %s", got)
+	if got := strings.Join(order(Chat, "gpt-s2"), ","); got != "sk-s2-chat,sk-s2-any,sk-s2-ant" {
+		t.Fatalf("gpt order = %s", got)
 	}
-	if got := keysOf(p.KeyCandidates(Chat, "anthropic/claude-x")); got != "an,any,oa" {
-		t.Errorf("prefixed claude model: %s", got)
+	if got := strings.Join(order(Chat, "deepseek-s2"), ","); got != "sk-s2-any,sk-s2-chat,sk-s2-ant" {
+		t.Fatalf("other-model order = %s", got)
 	}
-	if got := keysOf(p.KeyCandidates(Chat, "deepseek-chat")); got != "any,oa,an" {
-		t.Errorf("other model from chat: %s", got)
-	}
-
-	// a key limited to a protocol the vendor lacks does not take part
-	chatOnly := Provider{ID: "c", Name: "c", Chat: "https://c.example/v1", Key: "x", Keys: []KeyEntry{
-		{Key: "an", Protocol: Anthropic}}}
-	if got := keysOf(chatOnly.KeyCandidates(Chat, "claude-x")); got != "x" {
-		t.Errorf("anthropic key on a chat-only vendor: %s", got)
-	}
-
-	// a keyless provider is its own only candidate
-	local := Provider{ID: "l", Name: "l", Chat: "http://localhost:11434/v1"}
-	if got := local.KeyCandidates(Chat, "m"); len(got) != 1 {
-		t.Errorf("keyless provider: %d candidates", len(got))
+	for _, pl := range p.KeyPlans(Chat, "deepseek-s2") {
+		if pl.Provider.Key == "sk-s2-off" {
+			t.Fatal("an off key was planned")
+		}
+		if pl.Protocol == Anthropic && (len(pl.Upstreams) != 1 || pl.Upstreams[0] != Anthropic) {
+			t.Fatalf("anthropic key may reach %v", pl.Upstreams)
+		}
 	}
 }
 
-func TestS2KKeyForNeverCrossesProtocols(t *testing.T) {
-	p := Provider{ID: "mix", Name: "mix", Chat: "https://mix.example/v1", Anthropic: "https://mix.example",
-		Key: "oa", KeyProtocol: Chat, Keys: []KeyEntry{{Key: "an", Protocol: Anthropic}}}
-	if c, ok := p.KeyFor(Anthropic); !ok || c.Key != "an" {
-		t.Errorf("anthropic endpoint got %q %v", c.Key, ok)
-	}
-	if c, ok := p.KeyFor(Chat); !ok || c.Key != "oa" {
-		t.Errorf("chat endpoint got %q %v", c.Key, ok)
-	}
-	onlyChat := Provider{ID: "o", Name: "o", Chat: "https://o.example/v1", Anthropic: "https://o.example",
-		Key: "oa", KeyProtocol: Chat}
-	if _, ok := onlyChat.KeyFor(Anthropic); ok {
-		t.Error("an OpenAI-only key was offered to the anthropic endpoint")
-	}
-}
-
-func TestS2KRestingKeyAndKeyRef(t *testing.T) {
-	if got := KeyRef("k1"); len(got) != 10 || got != strings.ToLower(got) {
-		t.Errorf("KeyRef should be 10 lowercase hex characters, got %q", got)
-	}
-	if KeyRef("k1") == KeyRef("k2") {
-		t.Error("two keys share a reference")
+func TestS2KeyLimitedToMissingEndpointIsLeftOut(t *testing.T) {
+	magS2Env(t)
+	p := Provider{ID: "s2none", Name: "S2 None", Chat: "https://relay.example/v1", Key: "sk-s2-x", KeyProtocol: Anthropic}
+	if plans := p.KeyPlans(Chat, "gpt-s2"); len(plans) != 0 {
+		t.Fatalf("an anthropic-only key was planned on an OpenAI-only vendor: %d plans", len(plans))
 	}
 }
