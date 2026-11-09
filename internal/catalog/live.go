@@ -65,7 +65,7 @@ func SaveLive(provider, base string, models []Model) error {
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -92,7 +92,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -109,58 +109,7 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return nil, lastErr
 }
 
-// FetchWith is Fetch with extra request headers (a custom provider's own),
-// applied after the key and the version header so they win on a clash.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
-	base = strings.TrimRight(strings.TrimSpace(base), "/")
-	if base == "" {
-		return nil, errors.New("no base URL")
-	}
-	var urls []string
-	add := func(u string) {
-		for _, x := range urls {
-			if x == u {
-				return
-			}
-		}
-		urls = append(urls, u)
-	}
-	add(base + "/models")
-	add(base + "/v1/models")
-	root := base
-	for _, suffix := range []string{"/anthropic", "/apps/anthropic", "/api/anthropic", "/v1", "/api", "/api/v1"} {
-		if strings.HasSuffix(root, suffix) {
-			root = strings.TrimSuffix(root, suffix)
-		}
-	}
-	add(root + "/v1/models")
-	add(root + "/models")
-
-	var lastErr error
-	for _, u := range urls {
-		ms, err := fetchOneWith(ctx, u, key, anthropic, extra)
-		if err == nil && len(ms) > 0 {
-			return ms, nil
-		}
-		if err != nil {
-			lastErr = err
-		}
-		if ctx.Err() != nil {
-			break
-		}
-	}
-	if lastErr == nil {
-		lastErr = errors.New("no model list at " + base)
-	}
-	return nil, lastErr
-}
-
-// fetchOne asks one list URL with no extra headers.
-func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
-	return fetchOneWith(ctx, url, key, anthropic, nil)
-}
-
-func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -176,8 +125,11 @@ func fetchOneWith(ctx context.Context, url, key string, anthropic bool, extra ma
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	ApplyHeaders(req.Header, extra)
-	ApplyHost(req, extra)
+	// The user's own headers, after the defaults so a private auth scheme
+	// wins. Written directly so the name keeps the exact case the user typed.
+	for k, v := range headers {
+		req.Header[k] = []string{v}
+	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -243,36 +195,4 @@ func Decorate(live []Model, known []Model) []Model {
 		out = append(out, m)
 	}
 	return out
-}
-
-// ApplyHeaders sets the user's extra headers on h. Names are kept exactly as
-// given (no canonicalising), and any existing header whose name matches one
-// of them ignoring case is replaced, so the user's value wins. Names that
-// differ only in case are separate entries and all are sent.
-func ApplyHeaders(h http.Header, extra map[string]string) {
-	if len(extra) == 0 {
-		return
-	}
-	for k := range h {
-		for name := range extra {
-			if strings.EqualFold(k, name) {
-				delete(h, k)
-				break
-			}
-		}
-	}
-	for name, v := range extra {
-		h[name] = []string{v}
-	}
-}
-
-// ApplyHost sets req.Host when the user's extra headers include a Host
-// header. Go's client ignores a Host entry in Header, so it has to go on the
-// request itself.
-func ApplyHost(req *http.Request, extra map[string]string) {
-	for name, v := range extra {
-		if strings.EqualFold(name, "Host") {
-			req.Host = v
-		}
-	}
 }
