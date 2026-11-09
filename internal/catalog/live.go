@@ -59,22 +59,6 @@ func SaveLive(provider, base string, models []Model) error {
 	return os.WriteFile(p, b, 0o644)
 }
 
-// SetRawHeaders adds each header to the request under exactly the name given.
-// http.Header.Set would canonicalise the name (X-ORG-id becomes X-Org-Id),
-// which some gateways match case-sensitively. Any header already present
-// whose name matches case-insensitively is replaced, so the given value is
-// the only one sent.
-func SetRawHeaders(req *http.Request, headers map[string]string) {
-	for name, value := range headers {
-		for k := range req.Header {
-			if strings.EqualFold(k, name) {
-				delete(req.Header, k)
-			}
-		}
-		req.Header[name] = []string{value}
-	}
-}
-
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
 // around it. The result keeps the server's order. anthropic sends the
@@ -82,12 +66,12 @@ func SetRawHeaders(req *http.Request, headers map[string]string) {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWithHeaders(ctx, base, key, anthropic, nil)
+	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchWithHeaders is Fetch with extra request headers, sent verbatim (see
-// SetRawHeaders) after the usual ones, so they win on a name clash.
-func FetchWithHeaders(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+// FetchWith is Fetch with extra request headers (a custom provider's own),
+// applied after the key and the version header so they win on a clash.
+func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -114,7 +98,7 @@ func FetchWithHeaders(ctx context.Context, base, key string, anthropic bool, hea
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key, anthropic, extra)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -131,7 +115,7 @@ func FetchWithHeaders(ctx context.Context, base, key string, anthropic bool, hea
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -147,7 +131,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	SetRawHeaders(req, headers)
+	ApplyHeaders(req.Header, extra)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -213,4 +197,25 @@ func Decorate(live []Model, known []Model) []Model {
 		out = append(out, m)
 	}
 	return out
+}
+
+// ApplyHeaders sets the user's extra headers on h. Names are kept exactly as
+// given (no canonicalising), and any existing header whose name matches one
+// of them ignoring case is replaced, so the user's value wins. Names that
+// differ only in case are separate entries and all are sent.
+func ApplyHeaders(h http.Header, extra map[string]string) {
+	if len(extra) == 0 {
+		return
+	}
+	for k := range h {
+		for name := range extra {
+			if strings.EqualFold(k, name) {
+				delete(h, k)
+				break
+			}
+		}
+	}
+	for name, v := range extra {
+		h[name] = []string{v}
+	}
 }

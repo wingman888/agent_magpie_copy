@@ -23,15 +23,16 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, header.<name>
-                                                                 e.g. header.X-Org-Id=acme (repeat for more headers)
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon
+                                                                 header.<name>=value sends an extra request header
   magpie provider key <id> <key>          change the API key
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
-       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
+       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
+       magpie provider add "Org Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme`
 
 // providers: `magpie providers`
 func providers() error {
@@ -350,9 +351,9 @@ func showProvider(p provider.Provider) error {
 	for name := range p.Headers {
 		names = append(names, name)
 	}
-	sort.Strings(names) // byte order: uppercase sorts before lowercase
+	sort.Strings(names)
 	for _, name := range names {
-		fmt.Printf("  %s  %s: %s\n", muted.Render("header"), name, p.Headers[name])
+		fmt.Printf("  header  %s: %s\n", name, p.Headers[name])
 	}
 	ms := p.Exposed()
 	src := "models.dev"
@@ -377,9 +378,6 @@ func showProvider(p provider.Provider) error {
 	return nil
 }
 
-// headerPrefix starts a custom request header key: header.X-Org-Id=acme.
-const headerPrefix = "header."
-
 func applyPairs(p *provider.Provider, pairs []string) error {
 	for _, kv := range pairs {
 		k, v, ok := strings.Cut(kv, "=")
@@ -388,7 +386,7 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 		if len(k) >= len(headerPrefix) && strings.EqualFold(k[:len(headerPrefix)], headerPrefix) {
-			// header.<name>=<value>: the name keeps the case the user typed
+			// the name after header. keeps the case the user typed
 			if name := strings.TrimSpace(k[len(headerPrefix):]); name != "" {
 				if p.Headers == nil {
 					p.Headers = map[string]string{}
@@ -426,6 +424,9 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 	}
 	return nil
 }
+
+// headerPrefix marks a k=v pair as an extra request header: header.X-Org-Id=acme.
+const headerPrefix = "header."
 
 func ago(t time.Time) string {
 	d := time.Since(t)

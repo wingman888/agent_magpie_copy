@@ -48,9 +48,9 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Headers are extra HTTP headers sent with every request to a custom
-	// provider, under the names the user typed. Ignored for presets and
-	// signed-in accounts (see customHeaders).
+	// Headers are extra request headers sent with every request to a custom
+	// provider, after the auth headers (so they win on a clash). Names keep
+	// the case the user typed. Presets and accounts ignore them.
 	Headers map[string]string `json:"headers,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
@@ -187,11 +187,11 @@ func Save(p Provider) error {
 		// agent's own sign-in. Saving it again brings a removed one back.
 		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
+		if p.Preset != "" {
+			p.Headers = nil // presets take no custom headers
+		}
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
-		}
-		if p.Preset != "" {
-			p.Headers = nil // presets keep their own headers; the user's are for custom providers
 		}
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
@@ -287,28 +287,27 @@ func cleanList(xs []string) []string {
 	return out
 }
 
-// cleanHeaders trims header names and values and drops entries with an empty
-// name. Names keep their case: some gateways match it exactly. An empty
-// result is nil, so the field is not written out.
-func cleanHeaders(hs map[string]string) map[string]string {
+// cleanHeaders trims names and values and drops entries with no name. Names
+// differing only in case stay separate entries.
+func cleanHeaders(h map[string]string) map[string]string {
 	var out map[string]string
-	for name, value := range hs {
-		name = strings.TrimSpace(name)
-		if name == "" {
+	for k, v := range h {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" {
 			continue
 		}
 		if out == nil {
 			out = map[string]string{}
 		}
-		out[name] = strings.TrimSpace(value)
+		out[k] = v
 	}
 	return out
 }
 
-// customHeaders are the headers to send with a request to the provider: the
-// user's, for a custom provider only. Presets and signed-in accounts get none.
+// customHeaders is what a request to the vendor carries beyond its auth:
+// the user's headers on a custom provider, nothing on a preset or account.
 func (p Provider) customHeaders() map[string]string {
-	if p.Preset != "" || p.Account != nil {
+	if p.Account != nil || p.Preset != "" {
 		return nil
 	}
 	return p.Headers
