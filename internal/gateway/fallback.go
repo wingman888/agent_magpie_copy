@@ -63,7 +63,12 @@ func perKey(p provider.Provider, model string, from provider.Protocol) []candida
 	out := usableCandidates(p, model, from)
 	if len(out) == 0 {
 		// every key is limited to a protocol this provider lacks: the
-		// provider as it was
+		// provider keeps all its endpoints, but none of its keys — a limited
+		// key never goes to another protocol's endpoint. An unlimited first
+		// key keeps the provider as it was.
+		if p.KeyProtocol != "" {
+			p.Key, p.KeyName, p.KeyProtocol, p.Keys = "", "", "", nil
+		}
 		return []candidate{{p, model, p.ID}}
 	}
 	if len(keys) < 2 {

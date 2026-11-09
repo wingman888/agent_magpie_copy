@@ -270,3 +270,18 @@ func TestProtoGate_CountTokensNeedsAnthropicKey(t *testing.T) {
 		t.Fatalf("upstream saw %q", got)
 	}
 }
+
+// Scenario 9, the only key: a provider whose one key is limited to Anthropic,
+// with no Anthropic endpoint, is still asked for a GPT model. The request is
+// handled, not an error, and the Anthropic-limited key is never sent.
+func TestProtoGate_OnlyLimitedKeyNeverSent(t *testing.T) {
+	up := protoGateSetup(t, false,
+		provider.KeyAccount{Name: "Anthropic", Key: "anthropic-key", Protocol: provider.Anthropic})
+	code, body := post(t, "/v1/chat/completions", `{"model":"relay/gpt-5.5","messages":[{"role":"user","content":"hi"}]}`)
+	if code != 200 || !strings.Contains(body, `"choices"`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	if got := up.tried(); got == "" || strings.Contains(got, "anthropic-key") {
+		t.Fatalf("upstream saw %q", got)
+	}
+}
