@@ -51,13 +51,21 @@ type Provider struct {
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
-	// Account is set for providers backed by another agent's login (codex,
-	// copilot). It is derived from that login at read time and never saved.
+	// Account is set on account providers (codex, copilot): they borrow the
+	// login of an agent, need no key, and are never written to the file.
 	Account *Account `json:"-"`
 }
 
 type file struct {
 	Providers []Provider `json:"providers"`
+	// Accounts keeps only the user's model picks for account providers.
+	// Login details are never stored here.
+	Accounts []accountPicks `json:"accounts,omitempty"`
+}
+
+type accountPicks struct {
+	ID     string   `json:"id"`
+	Models []string `json:"models,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -92,29 +100,18 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added, then the
-// account providers whose agents are signed in. Stored account records only
-// carry model picks; a signed-out account's picks are ignored.
+// All lists the configured providers in the order they were added, followed
+// by the account providers whose agents are signed in. Claude is never listed.
 func All() []Provider {
+	f := load()
 	var out []Provider
-	models := map[string][]string{}
-	for _, p := range load().Providers {
-		p = normalize(p)
-		if IsAccountID(p.ID) {
-			models[p.ID] = p.Models
+	for _, p := range f.Providers {
+		if reservedID(normalize(p).ID) {
 			continue
 		}
-		if p.ID == ClaudeID {
-			continue
-		}
-		out = append(out, p)
+		out = append(out, normalize(p))
 	}
-	for _, id := range []string{CodexID, CopilotID} {
-		if a, ok := AccountOf(id); ok {
-			out = append(out, accountProvider(id, a, models[id]))
-		}
-	}
-	return out
+	return append(out, accountProviders(f)...)
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -135,7 +132,8 @@ func Slug(name string) string {
 	return strings.Trim(idRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-// Save adds or replaces a provider.
+// Save adds or replaces a provider. For an account provider only the model
+// picks are written.
 func Save(p Provider) error {
 	p = normalize(p)
 	if p.ID == "" {
@@ -144,10 +142,10 @@ func Save(p Provider) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
-	if p.ID == ClaudeID {
-		return errors.New(`"claude": Claude Code's login is not offered as a provider; dial only checks that it exists`)
+	if p.ID == claudeID {
+		return errors.New("Claude Code is not offered as a provider: " + claudeReason)
 	}
-	if IsAccountID(p.ID) {
+	if isAccountID(p.ID) {
 		return saveAccount(p)
 	}
 	if p.ID == "dial" {
@@ -173,37 +171,46 @@ func Save(p Provider) error {
 	return store(f)
 }
 
-// saveAccount keeps only the model picks of an account provider. The login
-// stays with the agent, and no token or name is written here.
+// saveAccount records the model picks of an account provider and nothing else.
 func saveAccount(p Provider) error {
-	rec := Provider{ID: p.ID, Models: cleanList(p.Models)}
+	if p.Key != "" {
+		return fmt.Errorf("%s is an account provider: it uses the agent's sign-in and takes no key", p.ID)
+	}
 	f := load()
-	for i := range f.Providers {
-		if f.Providers[i].ID == p.ID {
-			f.Providers[i] = rec
+	picks := accountPicks{ID: p.ID, Models: cleanList(p.Models)}
+	for i := range f.Accounts {
+		if f.Accounts[i].ID == p.ID {
+			f.Accounts[i] = picks
 			return store(f)
 		}
 	}
-	f.Providers = append(f.Providers, rec)
+	f.Accounts = append(f.Accounts, picks)
 	return store(f)
 }
 
-// Delete removes a provider. For an account provider that clears the model
-// picks only: the login stays with the agent, so the provider is still
-// listed while the agent is signed in.
+// Delete removes a provider. For an account provider it only clears the
+// model picks; the agent's sign-in is left alone.
 func Delete(id string) error {
-	if IsAccountID(id) {
-		f := load()
-		keep := f.Providers[:0]
-		for _, p := range f.Providers {
-			if p.ID != id {
-				keep = append(keep, p)
-			}
-		}
-		f.Providers = keep
-		return store(f)
-	}
 	f := load()
+	if isAccountID(id) {
+		keep := f.Accounts[:0]
+		found := false
+		for _, a := range f.Accounts {
+			if a.ID == id {
+				found = true
+				continue
+			}
+			keep = append(keep, a)
+		}
+		f.Accounts = keep
+		if found {
+			return store(f)
+		}
+		if hasAccount(accountProviders(f), id) {
+			return nil
+		}
+		return fmt.Errorf("no provider %q", id)
+	}
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -331,4 +338,15 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.IsAccount() || p.Key != "" || keyOptional(p) }
+// An account provider is ready while its agent is signed in.
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+
+// hasAccount reports whether a list of providers holds the one with this id.
+func hasAccount(ps []Provider, id string) bool {
+	for _, p := range ps {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}

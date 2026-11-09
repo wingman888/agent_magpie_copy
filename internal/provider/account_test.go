@@ -9,38 +9,51 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-const defaultCodexBase = "https://chatgpt.com/backend-api/codex"
-
-// acctEnv points every credential and config location at a fresh temp dir.
+// acctEnv points HOME, XDG and CLAUDE_CONFIG_DIR at a fresh temp tree.
 func acctEnv(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg-config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "xdg-cache"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdgconfig"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "xdgcache"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
 	return home
 }
 
-// acctJWT makes an unsigned token with the given payload, which is all dial reads.
+// acctJWT builds an unsigned JWT with the given payload claims.
 func acctJWT(claims map[string]any) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	b, _ := json.Marshal(claims)
 	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
-// acctWriteCodex writes Codex's auth.json with the given access-token expiry.
-func acctWriteCodex(t *testing.T, home string, exp time.Time, extra map[string]any) {
+// acctPut writes a file, creating its directory.
+func acctPut(t *testing.T, path, content string) {
 	t.Helper()
-	access := acctJWT(map[string]any{"exp": exp.Unix()})
-	id := acctJWT(map[string]any{"email": "ada@example.com", "https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"}})
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// acctCodexLogin writes a ChatGPT login for Codex with the given access exp.
+func acctCodexLogin(t *testing.T, home string, accessExp time.Time) {
+	t.Helper()
+	id := acctJWT(map[string]any{
+		"email": "dev@example.com",
+		"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"},
+	})
+	access := acctJWT(map[string]any{"exp": accessExp.Unix()})
 	doc := map[string]any{
-		"auth_mode":      "chatgpt",
-		"OPENAI_API_KEY": nil,
+		"auth_mode": "chatgpt",
+		"other":     "keep-me",
 		"tokens": map[string]any{
 			"id_token":      id,
 			"access_token":  access,
@@ -48,376 +61,261 @@ func acctWriteCodex(t *testing.T, home string, exp time.Time, extra map[string]a
 			"account_id":    "acct-123",
 		},
 	}
-	for k, v := range extra {
-		doc[k] = v
-	}
 	b, _ := json.Marshal(doc)
-	dir := filepath.Join(home, ".codex")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "auth.json"), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	acctPut(t, filepath.Join(home, ".codex", "auth.json"), string(b))
 }
 
-func acctWriteCopilot(t *testing.T) {
-	t.Helper()
-	dir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "github-copilot")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	doc := `{"github.com:Iv1.abc":{"user":"octocat","oauth_token":"gho_test"}}`
-	if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(doc), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestAcctCodexBodyRewrite(t *testing.T) {
-	in := `{"model":"codex/gpt-5.5","input":"hi","stream":false,"store":true,"temperature":0.2,"top_p":0.9,"max_output_tokens":64,"instructions":"be brief"}`
-	out, err := CodexBody([]byte(in))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(out, &m); err != nil {
-		t.Fatal(err)
-	}
-	if m["model"] != "gpt-5.5" {
-		t.Errorf("model = %v, want gpt-5.5", m["model"])
-	}
-	if m["stream"] != true || m["store"] != false {
-		t.Errorf("stream/store = %v/%v, want true/false", m["stream"], m["store"])
-	}
-	for _, k := range []string{"max_output_tokens", "temperature", "top_p"} {
-		if _, ok := m[k]; ok {
-			t.Errorf("%s should be removed, body: %s", k, out)
+func acctFind(ps []Provider, id string) (Provider, bool) {
+	for _, p := range ps {
+		if p.ID == id {
+			return p, true
 		}
 	}
-	if m["instructions"] != "be brief" {
-		t.Errorf("instructions lost: %s", out)
-	}
-	items, ok := m["input"].([]any)
-	if !ok || len(items) != 1 {
-		t.Fatalf("input not a one-item list: %s", out)
-	}
-	item := items[0].(map[string]any)
-	part := item["content"].([]any)[0].(map[string]any)
-	if item["role"] != "user" || part["type"] != "input_text" || part["text"] != "hi" {
-		t.Errorf("bad input item: %s", out)
-	}
+	return Provider{}, false
 }
 
-func TestAcctEventStreamDetection(t *testing.T) {
-	cases := []struct {
-		ct   string
-		head string
-		want bool
-	}{
-		{"text/event-stream", "", true},
-		{"text/event-stream; charset=utf-8", "{}", true},
-		{"", "event: response.created\n", true},
-		{"", "\ndata: {}", true},
-		{"", `{"error":"x"}`, false},
-		{"application/json", "data: x", false},
+func TestAcct_CodexSignedInListed(t *testing.T) {
+	home := acctEnv(t)
+	acctCodexLogin(t, home, time.Now().Add(time.Hour))
+
+	p, ok := acctFind(All(), "codex")
+	if !ok {
+		t.Fatal("codex not listed with a ChatGPT login")
 	}
-	for _, c := range cases {
-		if got := IsEventStream(c.ct, []byte(c.head)); got != c.want {
-			t.Errorf("IsEventStream(%q, %q) = %v, want %v", c.ct, c.head, got, c.want)
+	if !p.Ready() || p.Key != "" {
+		t.Errorf("codex should be ready without a key, got ready=%v key=%q", p.Ready(), p.Key)
+	}
+	if p.Account == nil || p.Account.User != "dev@example.com" || p.Account.Plan != "plus" || p.Account.Source != "Codex" {
+		t.Errorf("unexpected account: %+v", p.Account)
+	}
+	if p.Responses != CodexBase {
+		t.Errorf("codex responses base = %q, want CodexBase", p.Responses)
+	}
+	found := false
+	for _, e := range Catalog() {
+		if e.ID == "codex/gpt-5.5" {
+			found = true
 		}
 	}
-}
-
-func TestAcctCollectResponses(t *testing.T) {
-	done := `data: {"type":"response.completed","response":{"id":"r1","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":3,"output_tokens":1}}}`
-	out, err := CollectResponses([]byte(done + "\n\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	json.Unmarshal(out, &m)
-	if m["id"] != "r1" || m["status"] != "completed" {
-		t.Errorf("completed response not returned: %s", out)
-	}
-
-	noDone := `data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"hey"}]}}`
-	out, err = CollectResponses([]byte(noDone + "\n\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m = map[string]any{}
-	json.Unmarshal(out, &m)
-	if m["object"] != "response" || len(m["output"].([]any)) != 1 {
-		t.Errorf("assembled response wrong: %s", out)
-	}
-
-	failed := `data: {"type":"response.failed","response":{"status":"failed"},"error":{"message":"quota gone"}}`
-	if _, err := CollectResponses([]byte(failed + "\n\n")); err == nil || !strings.Contains(err.Error(), "quota gone") {
-		t.Errorf("failure not reported: %v", err)
+	if !found {
+		t.Error("codex/gpt-5.5 missing from the catalog")
 	}
 }
 
-func TestAcctCodexUpstreamHeadersAndSignedIn(t *testing.T) {
+func TestAcct_CodexOverrideBase(t *testing.T) {
 	home := acctEnv(t)
-	acctWriteCodex(t, home, time.Now().Add(time.Hour), nil)
-
-	CodexBase = "https://codex.example.test/backend-api/codex"
-	t.Cleanup(func() { CodexBase = defaultCodexBase })
-
-	var codex *Provider
-	for _, p := range All() {
-		if p.ID == CodexID {
-			codex = &p
-		}
-		if p.ID == ClaudeID {
-			t.Fatal("claude must never be listed")
-		}
-	}
-	if codex == nil {
-		t.Fatal("codex not listed while signed in")
-	}
-	if codex.Account == nil || codex.Account.User != "ada@example.com" || codex.Account.Plan != "plus" || codex.Account.Source != "Codex" {
-		t.Errorf("account = %+v", codex.Account)
-	}
-	if !codex.Ready() {
-		t.Error("account provider should be ready without a key")
-	}
-
-	base, headers, err := Upstream(context.Background(), *codex, Responses)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if base != CodexBase {
-		t.Errorf("base = %q, want %q", base, CodexBase)
-	}
-	if headers["chatgpt-account-id"] != "acct-123" || !strings.HasPrefix(headers["Authorization"], "Bearer ") {
-		t.Errorf("headers = %v", headers)
+	acctCodexLogin(t, home, time.Now().Add(time.Hour))
+	old := CodexBase
+	CodexBase = "http://127.0.0.1:9/fake"
+	t.Cleanup(func() { CodexBase = old })
+	p, ok := acctFind(All(), "codex")
+	if !ok || p.Responses != "http://127.0.0.1:9/fake" {
+		t.Fatalf("CodexBase override not used: %+v", p)
 	}
 }
 
-func TestAcctCodexRefreshWritesBack(t *testing.T) {
+func TestAcct_CodexAPIKeyIsNotAccount(t *testing.T) {
 	home := acctEnv(t)
-	acctWriteCodex(t, home, time.Now().Add(time.Minute), map[string]any{"keep_me": "yes"})
-
-	var sawRefresh string
-	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]string
-		json.NewDecoder(r.Body).Decode(&body)
-		sawRefresh = body["refresh_token"] + "|" + body["grant_type"] + "|" + body["client_id"]
-		json.NewEncoder(w).Encode(map[string]string{
-			"access_token":  acctJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()}),
-			"refresh_token": "rt-new",
-		})
-	}))
-	defer auth.Close()
-	oldURL := codexRefreshURL
-	codexRefreshURL = auth.URL
-	t.Cleanup(func() { codexRefreshURL = oldURL })
-
-	access, account, err := codexToken(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if account != "acct-123" || access == "" {
-		t.Fatalf("token = %q, account = %q", access, account)
-	}
-	if sawRefresh != "rt-old|refresh_token|"+codexClientID {
-		t.Errorf("refresh request = %q", sawRefresh)
-	}
-	b, err := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var doc map[string]any
-	json.Unmarshal(b, &doc)
-	tok := doc["tokens"].(map[string]any)
-	if tok["refresh_token"] != "rt-new" || tok["access_token"] != access {
-		t.Errorf("tokens not written back: %v", tok)
-	}
-	if tok["id_token"] == nil || tok["account_id"] != "acct-123" || doc["keep_me"] != "yes" || doc["auth_mode"] != "chatgpt" {
-		t.Errorf("other fields lost: %s", b)
+	acctPut(t, filepath.Join(home, ".codex", "auth.json"), `{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x"}`)
+	if _, ok := acctFind(All(), "codex"); ok {
+		t.Error("apikey login must not be an account provider")
 	}
 }
 
-func TestAcctCodexRefreshFailureSaysLoggedOut(t *testing.T) {
+func TestAcct_LoggedOutIgnoresLeftoverPicks(t *testing.T) {
 	home := acctEnv(t)
-	acctWriteCodex(t, home, time.Now().Add(-time.Minute), nil)
-	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "nope", http.StatusUnauthorized)
-	}))
-	defer auth.Close()
-	oldURL := codexRefreshURL
-	codexRefreshURL = auth.URL
-	t.Cleanup(func() { codexRefreshURL = oldURL })
-
-	_, _, err := codexToken(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "codex login") {
-		t.Fatalf("want logged-out hint, got %v", err)
-	}
-}
-
-func TestAcctSaveDeleteOnlyTouchModels(t *testing.T) {
-	home := acctEnv(t)
-	acctWriteCodex(t, home, time.Now().Add(time.Hour), nil)
-	before, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
-
-	if err := Save(Provider{ID: CodexID, Name: "Codex", Key: "sk-should-not-store", Models: []string{"gpt-5.5"}}); err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := os.ReadFile(Path())
-	if strings.Contains(string(raw), "sk-should-not-store") || strings.Contains(string(raw), "chatgpt.com") {
-		t.Errorf("config holds more than models: %s", raw)
-	}
-	if !strings.Contains(string(raw), "gpt-5.5") {
-		t.Errorf("models not saved: %s", raw)
-	}
-
-	p, err := Find(CodexID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Models) != 1 || p.Models[0] != "gpt-5.5" || p.Key != "" {
-		t.Errorf("provider = %+v", p)
-	}
-
-	if err := Delete(CodexID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Find(CodexID); err != nil {
-		t.Errorf("signed-in account should stay listed after delete: %v", err)
-	}
-	after, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
-	if string(before) != string(after) {
-		t.Error("save/delete must not touch the agent's login file")
-	}
-}
-
-func TestAcctSignedOutHidesProviderAndIgnoresPicks(t *testing.T) {
-	home := acctEnv(t)
-	acctWriteCodex(t, home, time.Now().Add(time.Hour), nil)
-	if err := Save(Provider{ID: CodexID, Models: []string{"gpt-5.5"}}); err != nil {
+	acctCodexLogin(t, home, time.Now().Add(time.Hour))
+	if err := Save(Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(home, ".codex", "auth.json")); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range All() {
-		if p.ID == CodexID {
-			t.Fatal("codex listed after logout")
-		}
+	if _, ok := acctFind(All(), "codex"); ok {
+		t.Error("logged-out codex still listed")
 	}
 	for _, e := range Catalog() {
 		if strings.HasPrefix(e.ID, "codex/") {
-			t.Fatalf("codex model %s offered after logout", e.ID)
+			t.Errorf("leftover codex pick became a catalog entry: %s", e.ID)
 		}
 	}
 }
 
-func TestAcctAPIKeyCodexIsNotAnAccount(t *testing.T) {
+func TestAcct_SaveAndDeleteOnlyTouchPicks(t *testing.T) {
 	home := acctEnv(t)
-	acctWriteCodex(t, home, time.Now().Add(time.Hour), nil)
-	b, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
-	apiKey := strings.Replace(string(b), `"auth_mode":"chatgpt"`, `"auth_mode":"apikey"`, 1)
-	apiKey = strings.Replace(apiKey, `"auth_mode": "chatgpt"`, `"auth_mode": "apikey"`, 1)
-	if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte(apiKey), 0o600); err != nil {
+	acctCodexLogin(t, home, time.Now().Add(time.Hour))
+	if err := Save(Provider{ID: "codex", Name: "Codex", Key: "", Models: []string{"gpt-5.5", "gpt-5.5"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := AccountOf(CodexID); ok {
-		t.Error("API-key Codex login must not be an account")
-	}
-}
-
-func TestAcctCodexDefaultModelsAndClaudeHidden(t *testing.T) {
-	home := acctEnv(t)
-	acctWriteCodex(t, home, time.Now().Add(time.Hour), nil)
-	if err := os.MkdirAll(filepath.Join(home, "claude"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(home, "claude", ".credentials.json"), []byte(`{"secret":"x"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if !ClaudeSignedIn() {
-		t.Error("claude login should be detected")
-	}
-	if err := Save(Provider{ID: ClaudeID, Chat: "https://example.com/v1", Key: "k"}); err == nil {
-		t.Error("saving claude as a provider must fail")
-	}
-	found := false
-	for _, m := range (Provider{ID: CodexID, Account: &Account{ID: CodexID}}).Available() {
-		if m.ID == "gpt-5.5" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("codex default list should include gpt-5.5")
-	}
-	for _, p := range All() {
-		if p.ID == ClaudeID {
-			t.Fatal("claude listed")
-		}
-	}
-}
-
-func TestAcctCopilotAccountAndBuiltinList(t *testing.T) {
-	acctEnv(t)
-	acctWriteCopilot(t)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "token gho_test" {
-			http.Error(w, "bad", http.StatusUnauthorized)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"token":     "session-tok",
-			"endpoints": map[string]string{"api": "https://api.example.test"},
-		})
-	}))
-	defer srv.Close()
-	oldURL := copilotTokenURL
-	copilotTokenURL = srv.URL
-	t.Cleanup(func() { copilotTokenURL = oldURL })
-
-	var cp *Provider
-	for _, p := range All() {
-		if p.ID == CopilotID {
-			cp = &p
-		}
-	}
-	if cp == nil || cp.Account == nil || cp.Account.User != "octocat" {
-		t.Fatalf("copilot not listed with its login: %+v", cp)
-	}
-	for _, m := range cp.Available() {
-		if m.ID == "auto" || strings.Contains(m.ID, "embed") {
-			t.Errorf("builtin copilot list must not offer %q", m.ID)
-		}
-	}
-	if len(cp.Available()) == 0 {
-		t.Error("builtin copilot list is empty")
-	}
-
-	base, headers, err := Upstream(context.Background(), *cp, Chat)
+	raw, err := os.ReadFile(Path())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if base != "https://api.example.test" || headers["Authorization"] != "Bearer session-tok" {
-		t.Errorf("upstream = %q %v", base, headers)
+	if strings.Contains(string(raw), "dev@example.com") || strings.Contains(string(raw), "acct-123") || strings.Contains(string(raw), "rt-old") {
+		t.Errorf("credentials leaked into dial config: %s", raw)
+	}
+	p, ok := acctFind(All(), "codex")
+	if !ok || len(p.Models) != 1 || p.Models[0] != "gpt-5.5" {
+		t.Fatalf("picks not saved: %+v", p)
+	}
+	if err := Delete("codex"); err != nil {
+		t.Fatal(err)
+	}
+	p, ok = acctFind(All(), "codex")
+	if !ok {
+		t.Fatal("Delete must not remove a signed-in account provider")
+	}
+	if len(p.Models) != 0 {
+		t.Errorf("Delete should clear picks, got %v", p.Models)
+	}
+	// the login file is untouched
+	b, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
+	if !strings.Contains(string(b), "rt-old") {
+		t.Error("Delete touched the Codex login file")
 	}
 }
 
-func TestAcctCopilotSessionFailure(t *testing.T) {
+func TestAcct_CopilotListAndFilter(t *testing.T) {
+	home := acctEnv(t)
+	acctPut(t, filepath.Join(home, "xdgconfig", "github-copilot", "apps.json"),
+		`{"github.com:Iv1.abc":{"user":"octo","oauth_token":"gho_secret"}}`)
+	p, ok := acctFind(All(), "copilot")
+	if !ok {
+		t.Fatal("copilot not listed with a GitHub login")
+	}
+	if p.Account == nil || p.Account.User != "octo" || p.Account.Source != "GitHub Copilot" {
+		t.Errorf("unexpected account: %+v", p.Account)
+	}
+	ms := p.Available()
+	if len(ms) == 0 {
+		t.Fatal("copilot built-in list is empty")
+	}
+	for _, m := range ms {
+		if m.ID == "auto" {
+			t.Error("auto must not be offered")
+		}
+	}
+	for _, e := range Catalog() {
+		if e.ID == "copilot/auto" {
+			t.Error("copilot/auto in catalog")
+		}
+	}
+}
+
+func TestAcct_CopilotSessionMessage(t *testing.T) {
 	acctEnv(t)
-	acctWriteCopilot(t)
+	if _, err := CopilotGitHubToken(); err == nil || !strings.Contains(err.Error(), "请重新登录 Copilot") {
+		t.Errorf("missing Copilot login should ask to sign in again, got %v", err)
+	}
+}
+
+func TestAcct_ClaudeNeverAProvider(t *testing.T) {
+	home := acctEnv(t)
+	acctPut(t, filepath.Join(home, "claude", ".credentials.json"), `{"claudeAiOauth":{"accessToken":"sk-ant-secret"}}`)
+	acctPut(t, Path(), `{"providers":[{"id":"claude","name":"Claude","key":"sk-ant-secret","anthropic":"https://api.anthropic.com"}]}`)
+
+	if _, ok := acctFind(All(), "claude"); ok {
+		t.Error("claude listed as a provider")
+	}
+	for _, e := range Catalog() {
+		if strings.HasPrefix(e.ID, "claude/") {
+			t.Errorf("claude in catalog: %s", e.ID)
+		}
+	}
+	if _, err := Find("claude"); err == nil {
+		t.Error("Find(claude) should fail")
+	}
+	if err := Save(Provider{ID: "claude", Models: []string{"x"}}); err == nil {
+		t.Error("Save(claude) should be refused")
+	}
+	ns := Notices()
+	if len(ns) != 1 || ns[0].Agent != "Claude Code" || !ns[0].Signed || !strings.Contains(ns[0].Text, "已登录但不提供") {
+		t.Errorf("expected a Claude notice, got %+v", ns)
+	}
+	// the credentials file content must never be read into a provider
+	for _, p := range All() {
+		if strings.Contains(p.Key+p.Name, "sk-ant-secret") {
+			t.Error("claude token surfaced in All()")
+		}
+	}
+}
+
+func TestAcct_ClaudeNoticeAbsentWhenLoggedOut(t *testing.T) {
+	acctEnv(t)
+	if ns := Notices(); len(ns) != 0 {
+		t.Errorf("no Claude login, but notices: %+v", ns)
+	}
+}
+
+func TestAcct_CodexTokenFreshNoRefresh(t *testing.T) {
+	home := acctEnv(t)
+	acctCodexLogin(t, home, time.Now().Add(time.Hour))
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+	defer srv.Close()
+	old := codexRefreshURL
+	codexRefreshURL = srv.URL
+	t.Cleanup(func() { codexRefreshURL = old })
+
+	tok, acct, err := CodexToken(context.Background())
+	if err != nil || tok == "" || acct != "acct-123" {
+		t.Fatalf("CodexToken = %q %q %v", tok, acct, err)
+	}
+	if calls.Load() != 0 {
+		t.Error("a fresh token must not be refreshed")
+	}
+}
+
+func TestAcct_CodexTokenRefreshWritesBack(t *testing.T) {
+	home := acctEnv(t)
+	acctCodexLogin(t, home, time.Now().Add(time.Minute)) // inside the 5 minute window
+
+	newAccess := acctJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "gone", http.StatusForbidden)
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		if body["grant_type"] != "refresh_token" || body["refresh_token"] != "rt-old" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"access_token": newAccess, "refresh_token": "rt-new"})
 	}))
 	defer srv.Close()
-	oldURL := copilotTokenURL
-	copilotTokenURL = srv.URL
-	t.Cleanup(func() { copilotTokenURL = oldURL })
+	old := codexRefreshURL
+	codexRefreshURL = srv.URL
+	t.Cleanup(func() { codexRefreshURL = old })
 
-	cp := accountProvider(CopilotID, Account{ID: CopilotID}, nil)
-	_, _, err := Upstream(context.Background(), cp, Chat)
-	if err == nil || !strings.Contains(err.Error(), "请重新登录 Copilot") {
-		t.Fatalf("want re-login hint, got %v", err)
+	tok, _, err := CodexToken(context.Background())
+	if err != nil || tok != newAccess {
+		t.Fatalf("refreshed token not returned: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["other"] != "keep-me" {
+		t.Error("unrelated field lost on write-back")
+	}
+	tokens := doc["tokens"].(map[string]any)
+	if tokens["access_token"] != newAccess || tokens["refresh_token"] != "rt-new" || tokens["account_id"] != "acct-123" {
+		t.Errorf("tokens not written back correctly: %v", tokens)
+	}
+}
+
+func TestAcct_CodexRefreshFailureSaysLoggedOut(t *testing.T) {
+	home := acctEnv(t)
+	acctCodexLogin(t, home, time.Now().Add(-time.Minute))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	old := codexRefreshURL
+	codexRefreshURL = srv.URL
+	t.Cleanup(func() { codexRefreshURL = old })
+
+	_, _, err := CodexToken(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "已登出，请运行 `codex login`") {
+		t.Errorf("want logged-out message, got %v", err)
 	}
 }

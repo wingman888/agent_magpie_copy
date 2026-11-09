@@ -18,8 +18,8 @@ const manyModels = 24
 // Available lists every model the vendor is known to serve: its own list
 // when fetched (see Fetch), else the models.dev catalog for the vendor.
 func (p Provider) Available() []catalog.Model {
-	if p.IsAccount() {
-		return accountModels(p.ID)
+	if p.Account != nil {
+		return p.accountModels()
 	}
 	known := catalog.Provider(p.Catalog)
 	if live, _, ok := catalog.Live(p.ID); ok {
@@ -42,12 +42,6 @@ func (p Provider) Fetched() (time.Time, bool) {
 
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
-	if p.IsAccount() {
-		if p.ID == CopilotID {
-			return fetchCopilot(ctx)
-		}
-		return nil, errorf("%s serves the models of its signed-in account; refreshing that list is not supported yet", p.Name)
-	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
 		ms, err := catalog.Fetch(ctx, p.Base(proto), p.Key)

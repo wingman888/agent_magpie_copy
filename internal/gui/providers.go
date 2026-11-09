@@ -71,9 +71,10 @@ type gatewayJSON struct {
 }
 
 type providersJSON struct {
-	Providers []providerJSON `json:"providers"`
-	Presets   []presetJSON   `json:"presets"`
-	Gateway   gatewayJSON    `json:"gateway"`
+	Providers []providerJSON    `json:"providers"`
+	Presets   []presetJSON      `json:"presets"`
+	Gateway   gatewayJSON       `json:"gateway"`
+	Notices   []provider.Notice `json:"notices"`
 }
 
 // currentProvider reads which provider (and model) an agent is routed to now.
@@ -137,7 +138,7 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 
 func providersState(gw *gateway.Server) providersJSON {
 	agents := agent.Detected()
-	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}}
+	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Notices: append([]provider.Notice{}, provider.Notices()...)}
 	have := map[string]bool{}
 	for _, p := range provider.All() {
 		have[p.ID] = true

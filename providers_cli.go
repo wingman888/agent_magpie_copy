@@ -35,7 +35,7 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "dial provider add deepseek sk-…", muted.Render("· dial presets lists the vendors"))
-		printNotes()
+		printNotices()
 		return nil
 	}
 	uses := usesByProvider()
@@ -44,10 +44,19 @@ func providers() error {
 	w := [5]int{}
 	for _, p := range all {
 		r := row{name: bold.Render(p.Name), id: muted.Render(p.ID), host: p.Host()}
-		if p.Preset == "" && !p.IsAccount() {
+		if p.Preset == "" && p.Account == nil {
 			r.name += " " + faint.Render("custom")
 		}
-		r.key = keyCell(p)
+		switch {
+		case p.Account != nil:
+			r.key = green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
+		case p.Key != "":
+			r.key = green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
+		case p.Ready():
+			r.key = green.Render("●") + " " + muted.Render("no key needed")
+		default:
+			r.key = amber.Render("○ no key")
+		}
 		n := len(p.Exposed())
 		if t, ok := p.Fetched(); ok {
 			r.models = fmt.Sprintf("%d of %d models", n, len(p.Available())) + muted.Render(" · fetched "+ago(t))
@@ -65,38 +74,14 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
-	printNotes()
+	printNotices()
 	return nil
 }
 
-// keyCell is the key column: the masked key, "signed in as" for an account
-// provider, or "no key needed".
-func keyCell(p provider.Provider) string {
-	switch {
-	case p.IsAccount():
-		return green.Render("●") + " " + muted.Render("signed in as "+p.Account.User)
-	case p.Key != "":
-		return green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
-	case p.Ready():
-		return green.Render("●") + " " + muted.Render("no key needed")
-	}
-	return amber.Render("○ no key")
-}
-
-// accountLine describes a signed-in account: user, plan when known, and the
-// agent that holds the login.
-func accountLine(a *provider.Account) string {
-	s := a.User
-	if a.Plan != "" {
-		s += " (" + a.Plan + ")"
-	}
-	return s + " · from " + a.Source
-}
-
-// printNotes shows what dial sees but does not offer, such as Claude Code's login.
-func printNotes() {
-	for _, n := range provider.Notes() {
-		fmt.Println(amber.Render("!"), n)
+// printNotices says, after the list, which signed-in agents are not offered.
+func printNotices() {
+	for _, n := range provider.Notices() {
+		fmt.Println(muted.Render("  " + n.Text))
 	}
 }
 
@@ -325,17 +310,23 @@ func showProvider(p provider.Provider) error {
 		}
 	}
 	name := bold.Render(p.Name) + muted.Render("  "+p.ID)
-	if p.Preset == "" && !p.IsAccount() {
+	if p.Preset == "" && p.Account == nil {
 		name += faint.Render("  custom")
 	}
 	fmt.Println(" ", name)
-	if p.IsAccount() {
-		kv("account", accountLine(p.Account))
-	}
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
+	if a := p.Account; a != nil {
+		who := a.User
+		if a.Plan != "" {
+			who += " · " + a.Plan
+		}
+		kv("account", who+muted.Render(" · from "+a.Source))
+	}
 	switch {
+	case p.Account != nil:
+		kv("key", muted.Render("signed in as "+p.Account.User))
 	case p.Key != "":
 		kv("key", muted.Render(provider.Mask(p.Key)))
 	case p.Ready():
