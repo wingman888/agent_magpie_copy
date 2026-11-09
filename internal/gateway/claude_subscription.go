@@ -627,15 +627,19 @@ func (r *subscriptionRun) abort() {
 }
 
 func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
-	b.mu.Lock()
-	delete(b.runs, run.token)
-	for id, owner := range b.calls {
-		if owner == run {
-			delete(b.calls, id)
+	if b != nil {
+		b.mu.Lock()
+		delete(b.runs, run.token)
+		for id, owner := range b.calls {
+			if owner == run {
+				delete(b.calls, id)
+			}
 		}
+		b.mu.Unlock()
 	}
-	b.mu.Unlock()
-	_ = os.RemoveAll(run.tmp)
+	if run.tmp != "" {
+		_ = os.RemoveAll(run.tmp)
+	}
 }
 
 func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, usage *Usage) (int, string) {
