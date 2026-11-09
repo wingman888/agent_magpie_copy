@@ -98,7 +98,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOneWith(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +115,12 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
+	return fetchOneWith(ctx, url, key, anthropic, nil)
+}
+
+// fetchOneWith is fetchOne with extra request headers.
+func fetchOneWith(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -199,9 +204,7 @@ type liveModel struct {
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
-		if _, dup := byID[m.ID]; !dup {
-			byID[m.ID] = m
-		}
+		byID[m.ID] = m
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {

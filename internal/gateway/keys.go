@@ -157,38 +157,6 @@ func planLabel(pl provider.KeyPlan) string {
 	return pl.Provider.ID
 }
 
-// tryKeys sends the request with each key in turn. A key that is out of quota,
-// rate limited or overloaded hands the request to the next one, as long as
-// the client has not seen the reply yet. The last key's reply is final.
-// It returns the upstream protocol used, the status, the error message, and
-// the keys that failed on the way ("" when none did), and the key that served.
-func (s *Server) tryKeys(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, plans []provider.KeyPlan, u *Usage) (provider.Protocol, int, string, string, string) {
-	var failed []string
-	var to provider.Protocol
-	var status int
-	var msg, used string
-	for i, pl := range plans {
-		last := i == len(plans)-1
-		var relay bool
-		to, relay = pickUpstream(pl, from, body)
-		hw := newHoldWriter(w, !last)
-		if relay {
-			status, msg = s.passthrough(hw, r, pl.Provider, from, model, body, u)
-		} else {
-			status, msg = s.translate(hw, r, pl.Provider, from, to, model, body, u)
-		}
-		if hw.held && !last && retryableKey(hw.status, hw.buf.Bytes()) {
-			s.coolKey(pl.Provider.ID, pl.Ref)
-			failed = append(failed, planLabel(pl))
-			continue
-		}
-		used = keyLabel(pl)
-		hw.release()
-		break
-	}
-	return to, status, msg, strings.Join(failed, ", "), used
-}
-
 // keyLabel names a key in the call record: its name, else its fingerprint.
 func keyLabel(pl provider.KeyPlan) string {
 	if pl.Name != "" {

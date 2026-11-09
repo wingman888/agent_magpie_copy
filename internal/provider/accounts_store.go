@@ -243,8 +243,10 @@ func readStash(agent, user string) (map[string]any, error) {
 }
 
 // rememberLoginsLocked records every agent's current sign-in: a new account
-// gets an entry, and its sign-in is copied into the accounts directory. The
-// caller holds accountsMu.
+// gets an entry. The signed-in account's refresh token lives only in the
+// agent's own store, so no copy is kept for it; a stale copy left from before
+// it was signed in again is removed. A copy is saved when the account is
+// switched away from (see SwitchAccount). The caller holds accountsMu.
 func rememberLoginsLocked() error {
 	f := loadAccounts()
 	dirty := false
@@ -263,15 +265,9 @@ func rememberLoginsLocked() error {
 			f.Accounts[i].Plan = cur.plan
 			dirty = true
 		}
-		login, ok := agentLogin(agent)
-		if !ok {
-			continue
-		}
-		if _, err := writeStash(agent, cur.user, login); err != nil {
-			return err
-		}
-		if !f.Accounts[i].Saved {
-			f.Accounts[i].Saved = true
+		if f.Accounts[i].Saved {
+			os.Remove(stashPath(agent, cur.user))
+			f.Accounts[i].Saved = false
 			dirty = true
 		}
 	}
@@ -365,7 +361,14 @@ func SwitchAccount(agent, user string) (string, error) {
 		if err != nil {
 			return fmt.Errorf("magpie cannot read the saved sign-in for %s: %v", target.User, err)
 		}
-		curLogin, _ := agentLogin(agent)
+		curLogin, curOK := agentLogin(agent)
+		// the account signed out of keeps its newest sign-in, saved before the
+		// agent's own copy is replaced
+		if signedIn && curOK {
+			if _, err := writeStash(agent, cur.user, curLogin); err != nil {
+				return err
+			}
+		}
 		if err := writeAgentLogin(agent, mergeLogin(agent, curLogin, next)); err != nil {
 			return err
 		}
@@ -373,6 +376,7 @@ func SwitchAccount(agent, user string) (string, error) {
 		if signedIn {
 			if j := findRemembered(f.Accounts, agent, cur.user); j >= 0 {
 				f.Accounts[j].On = target.On
+				f.Accounts[j].Saved = curOK
 			}
 		}
 		// the target's sign-in is now the agent's own alone
@@ -449,11 +453,31 @@ func AddAccount(agent string) (string, error) {
 		return "", err
 	}
 	var before []rememberedAccount
+	// the sign-in replaces the agent's own copy, so the account signed in now
+	// is saved first; it is taken back if the sign-in does not finish
+	var kept string
 	if err := lockedAccounts(func() error {
 		if err := rememberLoginsLocked(); err != nil {
 			return err
 		}
 		before = loadAccounts().Accounts
+		cur, signedIn := currentSignIns()[agent]
+		if !signedIn {
+			return nil
+		}
+		login, ok := agentLogin(agent)
+		if !ok {
+			return nil
+		}
+		if _, err := writeStash(agent, cur.user, login); err != nil {
+			return err
+		}
+		f := loadAccounts()
+		if i := findRemembered(f.Accounts, agent, cur.user); i >= 0 {
+			f.Accounts[i].Saved = true
+			kept = cur.user
+			return storeAccounts(f)
+		}
 		return nil
 	}); err != nil {
 		return "", err
@@ -461,6 +485,17 @@ func AddAccount(agent string) (string, error) {
 	cmd := exec.Command(exe, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
+		if kept != "" {
+			lockedAccounts(func() error {
+				os.Remove(stashPath(agent, kept))
+				f := loadAccounts()
+				if i := findRemembered(f.Accounts, agent, kept); i >= 0 {
+					f.Accounts[i].Saved = false
+					return storeAccounts(f)
+				}
+				return nil
+			})
+		}
 		return "", fmt.Errorf("%s sign-in did not finish: %v", agentName(agent), err)
 	}
 	var user string

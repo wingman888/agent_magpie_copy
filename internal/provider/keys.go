@@ -388,25 +388,17 @@ func (p Provider) KeyPlans(from Protocol, model string) []KeyPlan {
 	return plans
 }
 
-// upstreamsFor lists the endpoints a key limited to kp may be sent to. A key
-// limited to chat or responses may use either OpenAI-style endpoint; one
-// limited to anthropic only the Anthropic endpoint; an unlimited key any.
+// upstreamsFor lists the endpoints a key limited to kp may be sent to: only
+// the endpoint of that protocol, and none if the vendor has no such endpoint.
+// An unlimited key may use any endpoint the vendor serves.
 func (p Provider) upstreamsFor(kp Protocol) []Protocol {
 	switch kp {
 	case "":
 		return p.Speaks()
-	case Anthropic:
-		if p.Anthropic != "" {
-			return []Protocol{Anthropic}
+	case Anthropic, Chat, Responses:
+		if p.Base(kp) != "" {
+			return []Protocol{kp}
 		}
-	case Chat, Responses:
-		var out []Protocol
-		for _, pr := range []Protocol{Chat, Responses} {
-			if p.Base(pr) != "" {
-				out = append(out, pr)
-			}
-		}
-		return out
 	}
 	return nil
 }

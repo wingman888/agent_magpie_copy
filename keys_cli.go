@@ -27,7 +27,7 @@ var keyVerbs = map[string]bool{"add": true, "use": true, "on": true, "off": true
 // keyCmd: `magpie provider key <id> …`
 func keyCmd(rest []string) error {
 	if len(rest) == 0 {
-		return fmt.Errorf("%s", keyUsage)
+		return fmt.Errorf("magpie provider key <id> <key>")
 	}
 	id, args := rest[0], rest[1:]
 	p, err := provider.Find(id)
@@ -35,11 +35,14 @@ func keyCmd(rest []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return showProvider(*p)
+		return fmt.Errorf("magpie provider key <id> <key>")
 	}
 	verb := strings.ToLower(args[0])
 	if len(args) == 1 && !keyVerbs[verb] {
-		// the legacy form: the one key, replaced
+		// the legacy form: the one key, replaced; a new key takes no name or limit of the old one
+		if strings.TrimSpace(args[0]) != p.Key {
+			p.KeyName, p.KeyProtocol = "", ""
+		}
 		p.Key = args[0]
 		if err := provider.Save(*p); err != nil {
 			return err

@@ -107,6 +107,29 @@ func s3StashName(t *testing.T, user string) string {
 	return name
 }
 
+// s3KeepSignIn saves the sign-in agent holds now as user's, the copy a switch
+// (or an add) makes when it hands the agent over, so user can be switched back
+// to. Tests that cannot run the agent's own sign-in use it in its place.
+func s3KeepSignIn(t *testing.T, agent, user string) {
+	t.Helper()
+	login, ok := agentLogin(agent)
+	if !ok {
+		t.Fatalf("no %s sign-in to keep", agent)
+	}
+	if _, err := writeStash(agent, user, login); err != nil {
+		t.Fatal(err)
+	}
+	f := loadAccounts()
+	i := findRemembered(f.Accounts, agent, user)
+	if i < 0 {
+		t.Fatalf("%s is not remembered", user)
+	}
+	f.Accounts[i].Saved = true
+	if err := storeAccounts(f); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // s3TwoAccounts remembers a@ first, then signs in as b@, so b@ is current and
 // a@ is remembered with its own saved sign-in.
 func s3TwoAccounts(t *testing.T) {
@@ -115,6 +138,7 @@ func s3TwoAccounts(t *testing.T) {
 	if err := observeSignIns(true); err != nil {
 		t.Fatal(err)
 	}
+	s3KeepSignIn(t, "codex", "a@example.com")
 	s3CodexAuth(t, "b@example.com", "b")
 	if err := observeSignIns(true); err != nil {
 		t.Fatal(err)
@@ -379,6 +403,7 @@ func TestS3ClaudeSwitchKeepsOtherCredentialKeys(t *testing.T) {
 	if err := observeSignIns(true); err != nil {
 		t.Fatal(err)
 	}
+	s3KeepSignIn(t, "claude", "c1@example.com")
 	signIn("c2@example.com", "tok-c2")
 	if err := observeSignIns(true); err != nil {
 		t.Fatal(err)

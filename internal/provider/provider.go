@@ -182,6 +182,10 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
+	// a nil list or map means the caller did not give the field, so the saved
+	// one stays; an empty one clears it. normalize turns both into nil, so
+	// the difference is noted first.
+	keepHeaders, keepFallback := p.Headers == nil, p.Fallback == nil
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -225,6 +229,12 @@ func Save(p Provider) error {
 			old := f.Providers[i]
 			if p.Keys == nil {
 				p.Keys = old.Keys
+			}
+			if keepHeaders {
+				p.Headers = old.Headers
+			}
+			if keepFallback {
+				p.Fallback = old.Fallback
 			}
 			if p.Key == old.Key {
 				if p.KeyName == "" {
