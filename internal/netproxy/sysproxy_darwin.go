@@ -1,5 +1,3 @@
-//go:build darwin
-
 package netproxy
 
 import (
@@ -8,14 +6,14 @@ import (
 	"time"
 )
 
-// readOSProxy reads "System Settings → Network → Proxies" through scutil.
-// Any failure means no system proxy.
-func readOSProxy() sysProxy {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+// platformSystemProxy reads "System Settings → Network → Proxies" through
+// `scutil --proxy`. Any failure means there is no system proxy.
+func platformSystemProxy() systemConfig {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "scutil", "--proxy").Output()
 	if err != nil {
-		return sysProxy{}
+		return systemConfig{}
 	}
 	return parseScutil(string(out))
 }
