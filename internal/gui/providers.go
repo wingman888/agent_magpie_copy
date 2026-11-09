@@ -248,7 +248,7 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			writeJSON(rw, map[string]string{"key": p.Key})
 			return
 		case "delete":
-			if err := provider.Delete(in.ID); err != nil {
+			if err := provider.Remove(in.ID); err != nil {
 				fail(rw, err)
 				return
 			}

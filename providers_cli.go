@@ -79,7 +79,7 @@ func providers() error {
 			name = a.Name
 		}
 		fmt.Println()
-		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why))
+		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why+" · magpie provider add "+x.Provider+" brings it back"))
 	}
 	return nil
 }
@@ -189,8 +189,12 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := provider.Delete(p.ID); err != nil {
+		if err := provider.Remove(p.ID); err != nil {
 			return err
+		}
+		if p.Account != nil {
+			fmt.Println(green.Render("✓"), "removed", p.Name, muted.Render("· still signed in to "+p.Account.Agent+"; magpie provider add "+p.ID+" brings it back"))
+			return nil
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil

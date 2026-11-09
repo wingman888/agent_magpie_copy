@@ -98,7 +98,8 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
-	stored := load().Providers
+	f := load()
+	stored := f.Providers
 	picks := map[string][]string{}
 	var out []Provider
 	for _, p := range stored {
@@ -110,7 +111,7 @@ func All() []Provider {
 		out = append(out, p)
 	}
 	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken {
+		if _, taken := find(out, a.ID); taken || hiddenIn(f, a.ID) {
 			continue
 		}
 		a.Models = picks[a.ID]
@@ -161,10 +162,17 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
+	f := load()
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in
-		p = Provider{ID: a.ID, Models: p.Models}
+		// agent's own sign-in. Bringing back a removed account restores
+		// the picks it had, unless new ones are given.
+		picks := p.Models
+		if hiddenIn(f, a.ID) && len(picks) == 0 {
+			picks = picksIn(f, a.ID)
+		}
+		p = Provider{ID: a.ID, Models: picks}
+		f.Excluded = withoutHidden(f.Excluded, a.ID)
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -173,7 +181,6 @@ func Save(p Provider) error {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
-	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
@@ -182,6 +189,62 @@ func Save(p Provider) error {
 	}
 	f.Providers = append(f.Providers, p)
 	return store(f)
+}
+
+// Remove takes a provider out of magpie. A signed-in account is only hidden
+// (see Hide): its model picks are kept and the agent stays signed in. A
+// provider the user added is deleted.
+func Remove(id string) error {
+	if a, ok := find(Accounts(), id); ok {
+		return Hide(a.ID)
+	}
+	return Delete(id)
+}
+
+// Hide stops offering a signed-in account from magpie. It leaves the agent's
+// own credentials alone and keeps the model picks, so Save brings it back.
+func Hide(id string) error {
+	a, ok := find(Accounts(), id)
+	if !ok || a.Account == nil {
+		return fmt.Errorf("no account %q", id)
+	}
+	f := load()
+	if hiddenIn(f, id) {
+		return nil
+	}
+	f.Excluded = append(f.Excluded, Exclusion{Agent: a.Account.Agent, Provider: id, Why: "removed from magpie"})
+	return store(f)
+}
+
+// hiddenIn reports whether the user removed the account with this id.
+func hiddenIn(f file, id string) bool {
+	for _, x := range f.Excluded {
+		if x.Provider == id {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutHidden drops the removal record for an account id.
+func withoutHidden(xs []Exclusion, id string) []Exclusion {
+	var out []Exclusion
+	for _, x := range xs {
+		if x.Provider != id {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// picksIn returns the model picks stored for an id that has no URL of its own.
+func picksIn(f file, id string) []string {
+	for _, p := range f.Providers {
+		if p.ID == id && p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+			return p.Models
+		}
+	}
+	return nil
 }
 
 // Delete removes a provider. For an account it forgets the model picks;
