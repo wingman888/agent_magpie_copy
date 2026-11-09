@@ -325,30 +325,43 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
-### 备份与恢复
+## Back up and move your setup
 
-`magpie backup` 把提供商（含 API Key、多 Key 账户、自定义请求头）、提供商的自选图标、
-设置、全部方案，以及各 Agent 当前的模型，导出为单个文件，默认是当前目录下的
-`magpie.magpie-backup`：
+`magpie backup` writes everything magpie is configured with into one file:
+providers and their keys (including several keys per provider and custom
+headers), the icons you picked, settings, saved profiles, and each agent's
+current models. The file is encrypted with a passphrase (AES-256-GCM, key
+derived with PBKDF2-SHA256) and is readable only by you.
 
 ```sh
-magpie backup                        # 交互输入两次口令（不回显）
-magpie backup ~/b.magpie-backup      # 指定文件名
-magpie backup --no-keys ~/b.magpie-backup   # 不含任何 API Key，也不含凭据类请求头，可用来分享
-echo "pw" | magpie backup            # 口令从标准输入第一行读取（脚本用，不要求确认）
+magpie backup                       # ./magpie.magpie-backup, asks for a passphrase twice
+magpie backup ~/b.magpie-backup
+magpie backup --no-keys ~/b.magpie-backup   # no API keys, no credential-like headers
+echo "my passphrase" | magpie backup b.magpie-backup   # passphrase from stdin
 
-magpie restore magpie.magpie-backup          # 输入口令，一次性还原
-magpie restore --no-agents b.magpie-backup   # 只还原提供商、设置和方案，不改 Agent 的模型
+magpie restore b.magpie-backup              # asks for the passphrase once
+magpie restore --no-agents b.magpie-backup  # providers, settings and profiles only
+echo "my passphrase" | magpie restore b.magpie-backup
 ```
 
-- 文件用口令加密（AES-256-GCM，口令经 PBKDF2-SHA256 派生），权限仅本人可读写，
-  文件内看不到 Key、域名或方案名。
-- 恢复时：本机已有同 id 的提供商会被替换，但备份里没有 Key 的提供商会保留本机原有的 Key；
-  本机没有的提供商被新增，若没有任何 Key，恢复后会列出名称，用 `magpie provider key <id> <key>` 补上。
-- 设置整体覆盖本机；方案按名称写入，同名覆盖，其余本机方案保留。
-- Agent 的模型只对本机已安装的 Agent 生效，未安装的会列在"跳过"里。
-- **订阅账号（靠 Agent 本机登录的部分）不进入备份**，需要在新机器上自行登录。
-- **口令丢失则备份文件无法打开**，请妥善保存口令。
+Restoring merges the file into this machine:
+
+- a provider with the same id is replaced; others are added. A provider from
+  a `--no-keys` backup keeps the keys this machine already has.
+- settings are replaced as a whole; profiles with the same name are replaced,
+  the others are kept.
+- agent models are applied only to agents installed here. Anything skipped,
+  and every provider left without a key, is listed at the end.
+- a running agent session keeps its model until it is restarted.
+
+Things to know:
+
+- Subscription sign-ins (Claude Code and Codex accounts) are not in the file.
+  Sign in on the new machine as you normally would.
+- The passphrase is not stored anywhere. If you lose it, the file cannot be
+  opened.
+- A wrong passphrase, or a file changed after it was written, is reported as
+  such and changes nothing on the machine.
 
 ## Files
 

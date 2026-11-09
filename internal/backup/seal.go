@@ -1,11 +1,13 @@
 package backup
 
-// The file is one JSON object: the header fields in clear, then "data", the
-// base64 ciphertext of the bundle's JSON. Every header field is bound to the
-// ciphertext as AES-GCM additional data, so changing any of them (the
-// iteration count included) makes Open fail with ErrPassphrase.
+// The file is a plain JSON header, a newline, then the base64 of the sealed
+// bundle. The header carries the format, version, key-derivation settings,
+// a salt and a nonce. Its exact bytes are the AES-GCM additional data, so
+// changing any header field, iterations included, makes the file fail to
+// open the same way a wrong passphrase does.
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/pbkdf2"
@@ -15,163 +17,150 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-)
-
-// ErrPassphrase means the passphrase is wrong or the file was changed.
-var ErrPassphrase = errors.New("口令错误或文件已被改动")
-
-var (
-	errNotBackup = errors.New("不是 magpie 备份文件")
-	errNewer     = errors.New("这个备份由更新版本的 magpie 生成，需升级 magpie 后再恢复")
+	"io"
 )
 
 const (
 	formatName        = "magpie-backup"
-	formatVersion     = 1
 	kdfName           = "pbkdf2-sha256"
 	defaultIterations = 600000
-	minIterations     = 100000
 	maxIterations     = 10000000
 	saltLen           = 16
-	nonceLen          = 12
 	keyLen            = 32
 )
 
-// headerFields is the clear part of the file, everything but "data".
-func headerFields(iterations int, salt, nonce []byte) map[string]any {
-	return map[string]any{
-		"format":     formatName,
-		"version":    formatVersion,
-		"kdf":        kdfName,
-		"iterations": iterations,
-		"salt":       base64.StdEncoding.EncodeToString(salt),
-		"nonce":      base64.StdEncoding.EncodeToString(nonce),
-	}
+// ErrPassphrase means the passphrase is wrong or the file was altered after
+// it was written. Test for it with errors.Is.
+var ErrPassphrase = errors.New("wrong password, or the backup file was changed")
+
+// ErrEmptyPassphrase means no passphrase was given.
+var ErrEmptyPassphrase = errors.New("口令不能为空")
+
+// errNotBackup means the data is not a magpie backup at all.
+var errNotBackup = errors.New("不是 magpie 备份文件")
+
+func errNewer(v int) error {
+	return fmt.Errorf("这个备份由更新版本的 magpie 生成（备份版本 %d，本机最高支持 %d），请先升级 magpie", v, version)
 }
 
-func deriveKey(pass string, salt []byte, iterations int) ([]byte, error) {
-	return pbkdf2.Key(sha256.New, pass, salt, iterations, keyLen)
+// header is the plain-text part of a backup file.
+type header struct {
+	Format     string `json:"format"`
+	Version    int    `json:"version"`
+	KDF        string `json:"kdf"`
+	Iterations int    `json:"iterations"`
+	Salt       []byte `json:"salt"`
+	Nonce      []byte `json:"nonce"`
 }
 
-func newGCM(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
-}
-
-// Seal encrypts the bundle with the passphrase and returns the file contents.
+// Seal encrypts b under pass and returns the file's content.
 func Seal(b Bundle, pass string) ([]byte, error) {
 	if pass == "" {
-		return nil, errors.New("口令不能为空")
+		return nil, ErrEmptyPassphrase
 	}
-	plain, err := json.Marshal(b)
+	payload, err := json.Marshal(b)
 	if err != nil {
 		return nil, err
 	}
 	salt := make([]byte, saltLen)
-	nonce := make([]byte, nonceLen)
-	if _, err := rand.Read(salt); err != nil {
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return nil, err
 	}
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	key, err := deriveKey(pass, salt, defaultIterations)
+	gcm, err := deriveGCM(pass, salt, defaultIterations)
 	if err != nil {
 		return nil, err
 	}
-	gcm, err := newGCM(key)
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	hdr, err := json.MarshalIndent(header{
+		Format:     formatName,
+		Version:    version,
+		KDF:        kdfName,
+		Iterations: defaultIterations,
+		Salt:       salt,
+		Nonce:      nonce,
+	}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	header := headerFields(defaultIterations, salt, nonce)
-	aad, err := json.Marshal(header)
-	if err != nil {
-		return nil, err
-	}
-	ct := gcm.Seal(nil, nonce, plain, aad)
-	out := headerFields(defaultIterations, salt, nonce)
-	out["data"] = base64.StdEncoding.EncodeToString(ct)
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(data, '\n'), nil
+	ct := gcm.Seal(nil, nonce, payload, hdr)
+
+	var out bytes.Buffer
+	out.Write(hdr)
+	out.WriteByte('\n')
+	out.WriteString(base64.StdEncoding.EncodeToString(ct))
+	out.WriteByte('\n')
+	return out.Bytes(), nil
 }
 
-// Open decrypts a backup file. The checks run in this order: the file must be
-// a backup at all, its version must be one this build understands, and only
-// then does the passphrase count.
+// Open decrypts a backup file. It tells apart data that is not a backup,
+// a backup from a newer magpie, and a wrong passphrase or altered file.
 func Open(data []byte, pass string) (Bundle, error) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return Bundle{}, errNotBackup
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
 		return Bundle{}, errNotBackup
 	}
 	var format string
-	if json.Unmarshal(raw["format"], &format) != nil || format != formatName {
+	if err := json.Unmarshal(fields["format"], &format); err != nil || format != formatName {
 		return Bundle{}, errNotBackup
 	}
-	var ver int
-	if json.Unmarshal(raw["version"], &ver) != nil || ver < 1 {
+	var v int
+	if err := json.Unmarshal(fields["version"], &v); err != nil || v < 1 {
+		return Bundle{}, errNotBackup
+	}
+	if v > version {
+		return Bundle{}, errNewer(v)
+	}
+	if pass == "" {
+		return Bundle{}, ErrEmptyPassphrase
+	}
+
+	// From here on, anything wrong with the file is reported as ErrPassphrase.
+	var h header
+	if err := json.Unmarshal(raw, &h); err != nil {
 		return Bundle{}, ErrPassphrase
 	}
-	if ver > formatVersion {
-		return Bundle{}, errNewer
-	}
-	var kdf string
-	if json.Unmarshal(raw["kdf"], &kdf) != nil || kdf != kdfName {
+	if h.KDF != kdfName || h.Iterations < 1 || h.Iterations > maxIterations || len(h.Salt) == 0 {
 		return Bundle{}, ErrPassphrase
 	}
-	var iterations int
-	if json.Unmarshal(raw["iterations"], &iterations) != nil ||
-		iterations < minIterations || iterations > maxIterations {
-		return Bundle{}, ErrPassphrase
-	}
-	var saltS, nonceS, dataS string
-	if json.Unmarshal(raw["salt"], &saltS) != nil || json.Unmarshal(raw["nonce"], &nonceS) != nil ||
-		json.Unmarshal(raw["data"], &dataS) != nil {
-		return Bundle{}, ErrPassphrase
-	}
-	salt, err := base64.StdEncoding.DecodeString(saltS)
+	body := bytes.Join(bytes.Fields(data[dec.InputOffset():]), nil)
+	ct, err := base64.StdEncoding.DecodeString(string(body))
 	if err != nil {
 		return Bundle{}, ErrPassphrase
 	}
-	nonce, err := base64.StdEncoding.DecodeString(nonceS)
-	if err != nil || len(nonce) != nonceLen {
-		return Bundle{}, ErrPassphrase
-	}
-	ct, err := base64.StdEncoding.DecodeString(dataS)
+	gcm, err := deriveGCM(pass, h.Salt, h.Iterations)
 	if err != nil {
 		return Bundle{}, ErrPassphrase
 	}
-	// AAD is every header field, re-marshalled canonically: map keys are
-	// sorted and raw values are compacted, so whitespace edits don't matter
-	// but any value change does.
-	delete(raw, "data")
-	aad, err := json.Marshal(raw)
-	if err != nil {
+	if len(h.Nonce) != gcm.NonceSize() {
 		return Bundle{}, ErrPassphrase
 	}
-	key, err := deriveKey(pass, salt, iterations)
+	plain, err := gcm.Open(nil, h.Nonce, ct, raw)
 	if err != nil {
 		return Bundle{}, ErrPassphrase
-	}
-	gcm, err := newGCM(key)
-	if err != nil {
-		return Bundle{}, err
-	}
-	plain, err := gcm.Open(nil, nonce, ct, aad)
-	if err != nil {
-		return Bundle{}, fmt.Errorf("%w", ErrPassphrase)
 	}
 	var b Bundle
 	if err := json.Unmarshal(plain, &b); err != nil {
 		return Bundle{}, fmt.Errorf("备份内容已损坏: %w", err)
 	}
-	if b.Version > formatVersion {
-		return Bundle{}, errNewer
-	}
 	return b, nil
+}
+
+func deriveGCM(pass string, salt []byte, iterations int) (cipher.AEAD, error) {
+	key, err := pbkdf2.Key(sha256.New, pass, salt, iterations, keyLen)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
 }
