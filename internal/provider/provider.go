@@ -37,12 +37,6 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName names the current key, and KeyProtocol limits it to one
-	// protocol ("" is any). Keys holds the others, in order (see keys.go).
-	KeyName     string     `json:"keyName,omitempty"`
-	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
-	Keys        []ExtraKey `json:"keys,omitempty"`
-
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -54,17 +48,7 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Fallback is the "provider/model" list tried, in order, when this
-	// provider cannot answer. Kept for signed-in accounts too.
-	Fallback []string `json:"fallback,omitempty"`
-
-	// Headers are extra request headers a custom provider needs (an org id,
-	// a gateway's own auth). Presets and signed-in accounts ignore them.
-	Headers map[string]string `json:"headers,omitempty"`
-
-	// Catalog is one or more comma-separated models.dev ids, for names and
-	// reasoning levels; they are searched in the order listed.
-	Catalog string `json:"catalog,omitempty"`
+	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
@@ -117,7 +101,6 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
-	_ = magObserveSignIns(false) // remember a sign-in that is new since last time
 	stored := load().Providers
 	picks := map[string]Provider{}
 	var out []Provider
@@ -134,7 +117,6 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -182,10 +164,6 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
-	// a nil list or map means the caller did not give the field, so the saved
-	// one stays; an empty one clears it. normalize turns both into nil, so
-	// the difference is noted first.
-	keepHeaders, keepFallback := p.Headers == nil, p.Fallback == nil
 	p = normalize(p)
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
@@ -202,7 +180,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -211,53 +189,15 @@ func Save(p Provider) error {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
-	if !magIsAccount(p.ID) {
-		if !ValidKeyProtocol(p.KeyProtocol) {
-			return fmt.Errorf("key protocol %q is not one of chat, responses, anthropic, or none", p.KeyProtocol)
-		}
-		for _, k := range p.Keys {
-			if !ValidKeyProtocol(k.Protocol) {
-				return fmt.Errorf("key protocol %q is not one of chat, responses, anthropic, or none", k.Protocol)
-			}
-		}
-	}
 	f := load()
-	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
-			// a caller that does not know about the other keys keeps them
-			old := f.Providers[i]
-			if p.Keys == nil {
-				p.Keys = old.Keys
-			}
-			if keepHeaders {
-				p.Headers = old.Headers
-			}
-			if keepFallback {
-				p.Fallback = old.Fallback
-			}
-			if p.Key == old.Key {
-				if p.KeyName == "" {
-					p.KeyName = old.KeyName
-				}
-				if p.KeyProtocol == "" {
-					p.KeyProtocol = old.KeyProtocol
-				}
-			}
-			magTidyKeys(&p)
 			f.Providers[i] = p
-			replaced = true
-			break
+			return store(f)
 		}
 	}
-	if !replaced {
-		f.Providers = append(f.Providers, p)
-	}
-	if err := store(f); err != nil {
-		return err
-	}
-	magPruneIcons(f)
-	return nil
+	f.Providers = append(f.Providers, p)
+	return store(f)
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -311,14 +251,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = strings.Join(magCatalogNames(p.Catalog), ",")
-	p.Headers = magCleanHeaders(p.Headers)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	magTidyKeys(&p)
-	if name, ok := strings.CutPrefix(p.Icon, magIconRefPrefix); ok && IconFile(name) == "" {
-		p.Icon = "" // a reference that is not a stored picture is not followed
-	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -334,45 +266,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
-}
-
-// magCleanHeaders trims header names and values and drops entries with no
-// name. An empty map is nil, so it is not written.
-func magCleanHeaders(hs map[string]string) map[string]string {
-	var out map[string]string
-	for k, v := range hs {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" {
-			continue
-		}
-		if out == nil {
-			out = map[string]string{}
-		}
-		out[k] = v
-	}
-	return out
-}
-
-// magCatalogNames splits a catalog value ("openai,deepseek") into its
-// models.dev ids, lowercased, in the order given, without repeats.
-func magCatalogNames(s string) []string {
-	var out []string
-	for _, x := range strings.Split(s, ",") {
-		if x = strings.ToLower(strings.TrimSpace(x)); x != "" && !contains(out, x) {
-			out = append(out, x)
-		}
-	}
-	return out
-}
-
-// CustomHeaders are the extra request headers this provider sends with every
-// request to its vendor: those of a custom provider, none for a preset or a
-// signed-in agent.
-func (p Provider) CustomHeaders() map[string]string {
-	if p.Preset != "" || p.Account != nil {
-		return nil
-	}
-	return p.Headers
 }
 
 func cleanList(xs []string) []string {

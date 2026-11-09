@@ -56,7 +56,6 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
-	catalog.SetRawHeaders(req.Header, p.CustomHeaders())
 	return nil
 }
 
@@ -595,16 +594,11 @@ func codexAccount(home string) (Provider, bool) {
 		return Provider{}, false
 	}
 	id := jwtClaims(a.Tokens.IDToken)
-	return magCodexProvider(path, claimString(id, "email"), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")), true
-}
-
-// magCodexProvider is a ChatGPT sign-in whose tokens live in the auth file at
-// path: Codex CLI's own, or a copy magpie keeps for a remembered account.
-func magCodexProvider(path, user, plan string) Provider {
-	if user == "" {
-		user = "ChatGPT"
+	acct := &Account{Agent: "codex", Stream: true,
+		User: claimString(id, "email"), Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")}
+	if acct.User == "" {
+		acct.User = "ChatGPT"
 	}
-	acct := &Account{Agent: "codex", Stream: true, User: user, Plan: plan}
 	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
 		tok, accountID, err := codexToken(ctx, path)
 		if err != nil {
@@ -621,7 +615,7 @@ func magCodexProvider(path, user, plan string) Provider {
 	acct.body = codexBody
 	acct.models = catalog.Codex
 	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}
+	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI
