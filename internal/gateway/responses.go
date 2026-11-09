@@ -332,8 +332,14 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 			emit(Event{Kind: KToolArgs, Text: ev.Item.Arguments})
 		}
 	case "response.completed", "response.incomplete", "response.failed":
-		if ev.Response.Error != nil {
-			emit(Event{Kind: KError, Text: ev.Response.Error.Message})
+		// a failed response is an error even when it says nothing of why:
+		// it is never a reply that simply stopped
+		if ev.Response.Error != nil || ev.Type == "response.failed" {
+			text := "response failed"
+			if ev.Response.Error != nil {
+				text = ev.Response.Error.Message
+			}
+			emit(Event{Kind: KError, Text: text})
 			return nil
 		}
 		stop := "stop"
@@ -490,8 +496,10 @@ func (e *responsesEncoder) event(ev Event) {
 		if ev.ID == "" {
 			ev.ID = "call_" + newID()
 		}
-		e.col.add(ev)
+		// Open (and so close the previous item) before recording this call:
+		// closeItem reads the call ID from e.col.last(ToolCall).
 		e.openItem(ToolCall, "fc_", map[string]any{"type": "function_call", "call_id": ev.ID, "name": ev.Name, "arguments": ""})
+		e.col.add(ev)
 		return
 	case KToolArgs:
 		if e.open == ToolCall && ev.Text != "" {
