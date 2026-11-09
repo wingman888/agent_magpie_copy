@@ -26,10 +26,17 @@ func TestS4FallbackListIsCleanedOnSave(t *testing.T) {
 	if want := []string{"b/m1", "c/m2"}; !reflect.DeepEqual(p.Fallback, want) {
 		t.Fatalf("fallback = %q, want %q", p.Fallback, want)
 	}
+	// a save that does not give a list keeps the saved one; an empty list clears it
 	if err := Save(Provider{ID: "s4a", Name: "S4 A", Chat: "https://a.example/v1", Key: "sk-s4"}); err != nil {
 		t.Fatal(err)
 	}
+	if p, _ := Find("s4a"); !reflect.DeepEqual(p.Fallback, []string{"b/m1", "c/m2"}) {
+		t.Fatalf("a save without a list changed fallback to %q", p.Fallback)
+	}
+	if err := Save(Provider{ID: "s4a", Name: "S4 A", Chat: "https://a.example/v1", Key: "sk-s4", Fallback: []string{}}); err != nil {
+		t.Fatal(err)
+	}
 	if p, _ := Find("s4a"); len(p.Fallback) != 0 {
-		t.Fatalf("a save without a list left fallback %q", p.Fallback)
+		t.Fatalf("an empty list left fallback %q", p.Fallback)
 	}
 }

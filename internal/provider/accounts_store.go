@@ -453,11 +453,31 @@ func AddAccount(agent string) (string, error) {
 		return "", err
 	}
 	var before []rememberedAccount
+	// the sign-in replaces the agent's own copy, so the account signed in now
+	// is saved first; it is taken back if the sign-in does not finish
+	var kept string
 	if err := lockedAccounts(func() error {
 		if err := rememberLoginsLocked(); err != nil {
 			return err
 		}
 		before = loadAccounts().Accounts
+		cur, signedIn := currentSignIns()[agent]
+		if !signedIn {
+			return nil
+		}
+		login, ok := agentLogin(agent)
+		if !ok {
+			return nil
+		}
+		if _, err := writeStash(agent, cur.user, login); err != nil {
+			return err
+		}
+		f := loadAccounts()
+		if i := findRemembered(f.Accounts, agent, cur.user); i >= 0 {
+			f.Accounts[i].Saved = true
+			kept = cur.user
+			return storeAccounts(f)
+		}
 		return nil
 	}); err != nil {
 		return "", err
@@ -465,6 +485,17 @@ func AddAccount(agent string) (string, error) {
 	cmd := exec.Command(exe, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
+		if kept != "" {
+			lockedAccounts(func() error {
+				os.Remove(stashPath(agent, kept))
+				f := loadAccounts()
+				if i := findRemembered(f.Accounts, agent, kept); i >= 0 {
+					f.Accounts[i].Saved = false
+					return storeAccounts(f)
+				}
+				return nil
+			})
+		}
 		return "", fmt.Errorf("%s sign-in did not finish: %v", agentName(agent), err)
 	}
 	var user string

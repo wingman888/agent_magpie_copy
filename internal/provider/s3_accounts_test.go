@@ -107,9 +107,9 @@ func s3StashName(t *testing.T, user string) string {
 	return name
 }
 
-// s3KeepSignIn saves the sign-in agent holds now as user's, as a switch away
-// from user does, so user can be switched back to. The signed-in account gets
-// no copy of its own, so this is the only way such a copy comes to exist.
+// s3KeepSignIn saves the sign-in agent holds now as user's, the copy a switch
+// (or an add) makes when it hands the agent over, so user can be switched back
+// to. Tests that cannot run the agent's own sign-in use it in its place.
 func s3KeepSignIn(t *testing.T, agent, user string) {
 	t.Helper()
 	login, ok := agentLogin(agent)

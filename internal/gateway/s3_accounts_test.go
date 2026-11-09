@@ -84,8 +84,23 @@ func TestS3AccountFailsOverToTheOnAccount(t *testing.T) {
 	home := filepath.Join(dir, "home")
 	s3SignIn(t, home, "a@example.com", "a")
 	provider.Remembered("codex") // magpie remembers a
-	s3SignIn(t, home, "b@example.com", "b")
-	provider.Remembered("codex") // b is signed in now, a is kept
+	// b signs in through magpie's own sign-in, which runs codex from PATH; a
+	// stand-in codex writes b's sign-in where the real one would
+	bHome := filepath.Join(dir, "b-home")
+	s3SignIn(t, bHome, "b@example.com", "b")
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stand := "#!/bin/sh\ncp \"" + filepath.Join(bHome, ".codex", "auth.json") + "\" \"$HOME/.codex/auth.json\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(stand), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if user, err := provider.AddAccount("codex"); err != nil || !strings.EqualFold(user, "b@example.com") {
+		t.Fatalf("AddAccount = %q, %v", user, err)
+	}
+	// a is kept with its own sign-in; it serves alongside b
 	if err := provider.SetLoginOn("codex", "a@example.com", true); err != nil {
 		t.Fatal(err)
 	}
