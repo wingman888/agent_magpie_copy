@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"slices"
@@ -25,7 +24,7 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo, balance, balance.path
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
   magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
@@ -35,8 +34,7 @@ const providerUsage = `usage:
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
        magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
-       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme
-       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… balance=https://relay.example.com/api/usage/token balance.path='$data.total_available / 500000'`
+       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme`
 
 // providers: `magpie providers`
 func providers() error {
@@ -101,23 +99,13 @@ func providers() error {
 
 // usesByProvider maps provider ids to the agents currently routed to them.
 func usesByProvider() map[string][]string {
-	return usesIn(agent.Detected())
-}
-
-// usesIn is usesByProvider over a given set of agents. An agent set to a
-// routing group (group/<id>) is not counted: the group's members are what
-// serve it, and they are counted under their own providers.
-func usesIn(as []*agent.Agent) map[string][]string {
 	out := map[string][]string{}
-	for _, a := range as {
+	for _, a := range agent.Detected() {
 		if len(a.Fields) == 0 {
 			continue
 		}
 		v := a.Fields[0].Get()
 		v = strings.TrimPrefix(v, "magpie/")
-		if strings.HasPrefix(v, provider.GroupPrefix) {
-			continue
-		}
 		if pid, _, ok := strings.Cut(v, "/"); ok {
 			out[pid] = append(out[pid], a.Name)
 		}
@@ -160,48 +148,15 @@ func models() error {
 		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
 	}
-	printModels(os.Stdout, entries)
-	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
-	return nil
-}
-
-// printModels lists the catalog: the routing groups in a section of their
-// own, first, then each provider's models under the provider's name.
-func printModels(out io.Writer, entries []provider.Entry) {
-	var groups, models []provider.Entry
-	for _, e := range entries {
-		if e.Group {
-			groups = append(groups, e)
-		} else {
-			models = append(models, e)
-		}
-	}
-	if len(groups) > 0 {
-		fmt.Fprintln(out, faint.Render("  Routing groups"))
-		w := 0
-		for _, e := range groups {
-			w = max(w, len(e.ID))
-		}
-		for _, e := range groups {
-			line := "  " + pad(e.ID, w)
-			if e.Name != "" && e.Name != e.Model {
-				line += "  " + muted.Render(e.Name)
-			}
-			if len(e.Efforts) > 0 {
-				line += faint.Render("  " + strings.Join(e.Efforts, "/"))
-			}
-			fmt.Fprintln(out, line)
-		}
-	}
 	w := 0
-	for _, e := range models {
+	for _, e := range entries {
 		w = max(w, len(e.ID))
 	}
 	last := ""
-	for _, e := range models {
+	for _, e := range entries {
 		if e.Provider.ID != last {
 			last = e.Provider.ID
-			fmt.Fprintln(out, faint.Render("  "+e.Provider.Name))
+			fmt.Println(faint.Render("  " + e.Provider.Name))
 		}
 		line := "  " + pad(e.ID, w)
 		if e.Name != "" && e.Name != e.Model {
@@ -210,8 +165,10 @@ func printModels(out io.Writer, entries []provider.Entry) {
 		if len(e.Efforts) > 0 {
 			line += faint.Render("  " + strings.Join(e.Efforts, "/"))
 		}
-		fmt.Fprintln(out, line)
+		fmt.Println(line)
 	}
+	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
+	return nil
 }
 
 // providerCmd: `magpie provider <verb> …`
@@ -452,19 +409,6 @@ func showProvider(p provider.Provider) error {
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	if amount, ok, err := provider.Balance(ctx, p); ok {
-		from := ""
-		if p.BalanceURL != "" {
-			from = muted.Render("  from " + p.BalanceURL + " " + p.BalancePath)
-		}
-		if err != nil {
-			kv("balance", amber.Render("unavailable")+muted.Render("  "+err.Error())+from)
-		} else {
-			kv("balance", bold.Render(amount)+from)
-		}
-	}
-	cancel()
 	for _, k := range slices.Sorted(maps.Keys(p.Headers)) {
 		kv("header", k+": "+muted.Render(p.Headers[k]))
 	}
@@ -518,10 +462,6 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.Website = v
 		case "keys":
 			p.KeysURL = v
-		case "balance":
-			p.BalanceURL = v
-		case "balance.path":
-			p.BalancePath = v
 		case "icon":
 			// a picture on disk is kept by magpie; anything else is one of
 			// the built-in icons' names
