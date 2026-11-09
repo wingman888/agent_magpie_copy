@@ -127,9 +127,17 @@ func importKeyLine(key string) string {
 	}
 }
 
+// interactive reports whether stdin is a terminal. Pipes and files are not;
+// /dev/null is a character device too, so it is ruled out by name.
 func interactive() bool {
 	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	if null, err := os.Stat(os.DevNull); err == nil && os.SameFile(fi, null) {
+		return false
+	}
+	return true
 }
 
 func containsString(xs []string, x string) bool {
