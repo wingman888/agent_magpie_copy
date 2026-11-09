@@ -62,10 +62,11 @@ func keyCandidates(p provider.Provider, model string) []candidate {
 	return out
 }
 
-// candidates is the primary's keys and then each fallback's, those resting
-// after a recent failure moved behind the rest. A provider's own keys stay
-// together, so its keys are all tried before any fallback; within a provider
-// the resting keys follow the ready ones.
+// candidates is the primary's keys, then each fallback's keys, in the order
+// they are tried: every ready candidate first (the primary's keys, then the
+// fallbacks' in turn), and then every resting one, so a key that just failed
+// is only tried once nothing else is left. Within each group the order is
+// kept. A provider with one key and no fallback is a single candidate, as ever.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
 	groups := [][]candidate{keyCandidates(p, model)}
 	seen := map[string]bool{p.ID + "/" + model: true}
@@ -82,19 +83,12 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 	}
 	var out, back []candidate
 	for _, g := range groups {
-		var ready, resting []candidate
 		for _, c := range g {
 			if s.resting(restKey(c.p)) {
-				resting = append(resting, c)
+				back = append(back, c)
 			} else {
-				ready = append(ready, c)
+				out = append(out, c)
 			}
-		}
-		if len(ready) > 0 {
-			out = append(out, ready...)
-			out = append(out, resting...)
-		} else {
-			back = append(back, resting...)
 		}
 	}
 	return append(out, back...)

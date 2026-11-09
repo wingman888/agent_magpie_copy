@@ -214,12 +214,40 @@ func Save(p Provider) error {
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
+			p = keepKeys(p, &f.Providers[i])
 			f.Providers[i] = p
 			return store(f)
 		}
 	}
+	p = keepKeys(p, nil)
 	f.Providers = append(f.Providers, p)
 	return store(f)
+}
+
+// keepKeys settles the keys of a provider being saved over old (nil when it
+// is new). A save that says nothing about the other keys keeps the stored
+// ones, and the front key's name while the front key is unchanged. A key
+// that is also the new front key leaves the extras, and its name goes to
+// the front, so no name is lost on the way.
+func keepKeys(p Provider, old *Provider) Provider {
+	if old != nil {
+		if len(p.Keys) == 0 && p.KeyName == "" {
+			p.Keys = append([]ExtraKey(nil), old.Keys...)
+			if p.Key == old.Key {
+				p.KeyName = old.KeyName
+			}
+		} else if p.Key != old.Key && p.KeyName == old.KeyName {
+			p.KeyName = "" // a new front key does not wear the old one's name
+		}
+	}
+	for i, k := range p.Keys {
+		if p.Key != "" && strings.TrimSpace(k.Key) == p.Key {
+			p.KeyName = strings.TrimSpace(k.Name)
+			p.Keys = append(p.Keys[:i:i], p.Keys[i+1:]...)
+			break
+		}
+	}
+	return p
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
