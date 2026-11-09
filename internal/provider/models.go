@@ -20,12 +20,7 @@ const manyModels = 24
 // for an account, whatever the agent's own sign-in can see).
 func (p Provider) Available() []catalog.Model {
 	signedIn := p.Account != nil && p.Account.models != nil
-	var known []catalog.Model
-	if signedIn {
-		known = p.Account.models()
-	} else {
-		known = p.catalogModels()
-	}
+	known := p.knownModels()
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
 	}
@@ -41,13 +36,17 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
-// catalogModels lists the models of every models.dev catalog the provider
-// names, in order; a model listed by an earlier catalog wins.
-func (p Provider) catalogModels() []catalog.Model {
+// knownModels is what the catalogs say about the vendor's models: the
+// models.dev lists of every catalog the provider names, searched in the
+// order given, or the agent's own list for a signed-in account.
+func (p Provider) knownModels() []catalog.Model {
+	if p.Account != nil && p.Account.models != nil {
+		return p.Account.models()
+	}
 	var out []catalog.Model
 	seen := map[string]bool{}
-	for _, c := range p.Catalogs() {
-		for _, m := range catalog.Provider(c) {
+	for _, name := range catalogNames(p.Catalog) {
+		for _, m := range catalog.Provider(name) {
 			if !seen[m.ID] {
 				seen[m.ID] = true
 				out = append(out, m)
@@ -70,12 +69,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		kp, ok := p.KeyFor(proto)
-		if !ok {
-			lastErr = errorf("%s has no key for its %s endpoint", p.Name, proto)
-			continue
-		}
-		ms, err := catalog.FetchWith(ctx, p.Base(proto), kp.Key, proto == Anthropic, kp.ExtraHeaders())
+		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.CustomHeaders())
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -95,13 +89,17 @@ func (p Provider) Exposed() []catalog.Model {
 	for _, m := range avail {
 		byID[m.ID] = m
 	}
+	known := p.knownModels()
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
 			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
+				// not in the vendor's list: still name it from the catalogs,
+				// which also knows "provider/model" ids by their last part
+				m := catalog.Model{ID: id, Name: id, Provider: p.Catalog}
+				out = append(out, catalog.Decorate([]catalog.Model{m}, known)[0])
 			}
 		}
 		return out
