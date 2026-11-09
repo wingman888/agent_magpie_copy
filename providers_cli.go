@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -23,15 +24,19 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, header.<name>
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon
+                                                                 header.<name>=value sends an extra request header
   magpie provider key <id> <key>          change the API key
+  magpie provider icon <id> <file | name | "">  set a custom provider's icon: an image file, a built-in icon name, or "" for the default
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
-       magpie provider add "Acme GW" url=https://gw.example.com/v1 key=sk-… header.X-Org-Id=acme
-       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
+       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
+       magpie provider add "Org Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme
+       magpie provider add "Logo Relay" url=https://relay.example.com/v1 key=sk-… icon=./logo.png
+       magpie provider icon relay ./logo.png`
 
 // providers: `magpie providers`
 func providers() error {
@@ -188,6 +193,31 @@ func providerCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), p.Name, "key", muted.Render(provider.Mask(p.Key)))
 		return nil
+	case "icon":
+		if len(rest) != 2 {
+			return fmt.Errorf("magpie provider icon <id> <image file | built-in icon name | \"\">")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if err := customOnly(*p); err != nil {
+			return err
+		}
+		icon, err := iconArg(rest[1])
+		if err != nil {
+			return err
+		}
+		p.Icon = icon
+		if err := provider.Save(*p); err != nil {
+			return err
+		}
+		shown := icon
+		if shown == "" {
+			shown = "default"
+		}
+		fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(shown))
+		return nil
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -262,9 +292,6 @@ func providerCmd(args []string) error {
 	}
 	return showProvider(*p)
 }
-
-// headerPrefix starts a k=v key that adds a request header: header.X-Org-Id=acme.
-const headerPrefix = "header."
 
 // addProvider: `magpie provider add <preset> [key]` or `magpie provider add <name> k=v…`
 func addProvider(rest []string) error {
@@ -349,14 +376,16 @@ func showProvider(p provider.Provider) error {
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
-	hs := p.CustomHeaders()
-	names := make([]string, 0, len(hs))
-	for k := range hs {
-		names = append(names, k)
+	if p.Preset == "" && p.Account == nil {
+		kv("icon", p.Icon)
+	}
+	names := make([]string, 0, len(p.Headers))
+	for name := range p.Headers {
+		names = append(names, name)
 	}
 	sort.Strings(names)
-	for _, k := range names {
-		fmt.Printf("  %s  %s: %s\n", "header", k, hs[k])
+	for _, name := range names {
+		fmt.Printf("  header  %s: %s\n", name, p.Headers[name])
 	}
 	ms := p.Exposed()
 	src := "models.dev"
@@ -389,15 +418,13 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 		if len(k) >= len(headerPrefix) && strings.EqualFold(k[:len(headerPrefix)], headerPrefix) {
-			// header.<name> is one request header; the name keeps its casing.
-			name := strings.TrimSpace(k[len(headerPrefix):])
-			if name == "" {
-				continue
+			// the name after header. keeps the case the user typed
+			if name := strings.TrimSpace(k[len(headerPrefix):]); name != "" {
+				if p.Headers == nil {
+					p.Headers = map[string]string{}
+				}
+				p.Headers[name] = v
 			}
-			if p.Headers == nil {
-				p.Headers = map[string]string{}
-			}
-			p.Headers[name] = v
 			continue
 		}
 		switch strings.ToLower(k) {
@@ -422,12 +449,65 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "keys":
 			p.KeysURL = v
 		case "icon":
-			p.Icon = v
+			if err := customOnly(*p); err != nil {
+				return err
+			}
+			icon, err := iconArg(v)
+			if err != nil {
+				return err
+			}
+			p.Icon = icon
 		default:
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}
 	}
 	return nil
+}
+
+// headerPrefix marks a k=v pair as an extra request header: header.X-Org-Id=acme.
+const headerPrefix = "header."
+
+// customOnly rejects an icon change on a built-in preset or a signed-in
+// agent, which keep their own icon.
+func customOnly(p provider.Provider) error {
+	if p.Preset != "" || p.Account != nil {
+		return fmt.Errorf("%s is a built-in provider: only custom providers can have an icon", p.Name)
+	}
+	return nil
+}
+
+// iconArg turns an icon argument into the value stored on a provider. An
+// existing file is stored as an image and becomes its "file:" reference;
+// "" means the default icon; anything else is taken as a built-in icon name.
+// A path-looking argument that is not a file is an error, not a name.
+func iconArg(arg string) (string, error) {
+	if arg == "" {
+		return "", nil
+	}
+	info, err := os.Stat(arg)
+	switch {
+	case err == nil && info.IsDir():
+		return "", fmt.Errorf("icon %s is a directory, not an image file", arg)
+	case err == nil:
+		return provider.StoreIconFile(arg)
+	case looksLikeIconPath(arg):
+		return "", fmt.Errorf("icon file %s: %w", arg, err)
+	}
+	return arg, nil
+}
+
+// looksLikeIconPath is true for an argument that names a file rather than a
+// built-in icon: it has a path separator, a leading dot or ~, or an image
+// extension.
+func looksLikeIconPath(s string) bool {
+	if strings.ContainsAny(s, `/\`) || strings.HasPrefix(s, ".") || strings.HasPrefix(s, "~") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(s)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg":
+		return true
+	}
+	return false
 }
 
 func ago(t time.Time) string {
