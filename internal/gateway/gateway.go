@@ -489,12 +489,13 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		last := i == len(eps)-1
 		ew := newHoldWriter(w, !last)
 		call.To = e.proto
+		var raw []byte // the upstream's error body, as it said it
 		if e.relay {
-			status, msg = s.passthrough(ew, r, p, from, model, body, &call.Usage)
+			status, msg = s.passthrough(ew, r, p, from, model, body, &call.Usage, &raw)
 		} else {
-			status, msg = s.translate(ew, r, p, from, e.proto, model, body, &call.Usage)
+			status, msg = s.translate(ew, r, p, from, e.proto, model, body, &call.Usage, &raw)
 		}
-		if !last && notChatModel(status, []byte(msg)) {
+		if !last && notChatModel(status, raw) {
 			s.markRefused(p.ID, model, e.proto)
 			continue
 		}
@@ -533,7 +534,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, upstream *[]byte) (int, string) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
@@ -545,6 +546,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		*upstream = b
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		keepRetry(w.Header(), res.Header)
 		return writeError(w, proto, res.StatusCode, msg), msg
@@ -647,7 +649,7 @@ func notChatModel(status int, body []byte) bool {
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, upstream *[]byte) (int, string) {
 	request, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
@@ -661,6 +663,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		*upstream = b
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		keepRetry(w.Header(), res.Header)
 		return writeError(w, from, res.StatusCode, msg), msg
