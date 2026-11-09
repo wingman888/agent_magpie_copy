@@ -3,8 +3,6 @@
 One place to pick every agent's model: Codex on DeepSeek, Claude Code
 on Kimi, Gemini CLI on GLM, from the menu bar. [usemagpie.ai](https://usemagpie.ai)
 
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/vGSnD3ZKQF)
-
 `magpie` is a single screen that lists each AI agent on your machine and
 the model it is set to. Click a value, pick a model. That is the whole app.
 
@@ -64,7 +62,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 
 | Agent        | File                              | Fields          |
 | ------------ | --------------------------------- | --------------- |
-| Claude Code  | `~/.claude/settings.json`         | provider, model, opus/sonnet/haiku/fable (through magpie) |
+| Claude Code  | `~/.claude/settings.json`         | provider, model |
 | Codex        | `~/.codex/config.toml`            | provider, model, effort |
 | Gemini CLI   | `~/.gemini/settings.json`, `~/.gemini/.env` | auth, model |
 | OpenCode     | `~/.config/opencode/opencode.json(c)` | model, small |
@@ -73,11 +71,8 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
-| DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
-| Command Code | `~/.commandcode/settings.json` (+ `providers.json`) | model |
-| omp (oh-my-pi) | `~/.omp/agent/config.yml` (+ `models.yml`) | model |
 
-Provider-scoped agents (OpenCode, Pi, Goose, Crush, omp) take `provider/model`.
+Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
 
 ## Providers and the gateway
@@ -107,6 +102,78 @@ separate Responses endpoint, `catalog=` to borrow a models.dev list, and
 `models=` to name the models to expose. Anything a preset does not know can
 be overridden the same way.
 
+OpenCode has two presets, `opencode-go` (OpenCode Go, the monthly subscription
+to open coding models) and `opencode-zen` (OpenCode Zen). Get a key at
+<https://opencode.ai/auth> and add it like any preset:
+
+```sh
+magpie provider add opencode-go <key>
+magpie provider add opencode-zen <key>
+```
+
+The OpenCode gateway refuses requests that carry no session id, so magpie
+sends an `x-opencode-session` header on every request to `opencode.ai`. It
+uses the session id the agent already sends (`x-opencode-session`,
+`x-session-affinity`, `x-session-id`, `session_id`, `session-id` or
+`x-claude-code-session-id`, first non-empty wins). When the agent sends none,
+magpie derives a stable `magpie-…` id from the conversation's first user
+message, so every turn of one conversation shares it. Other providers never
+receive this header.
+
+### Import links
+
+A provider can be shared as a link. `magpie://import?<parameters>` describes
+one provider; magpie shows what it would add (name, the host the key and
+requests will go to, the models) and saves nothing until you confirm.
+
+```
+magpie://import?preset=deepseek&key=sk-…
+magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…
+```
+
+Parameters are URL-encoded values:
+
+| Parameter | Meaning |
+| --- | --- |
+| `preset` | a preset id; its endpoints are used |
+| `region` | the region of a preset that has several (an unknown region is an error) |
+| `name` | the display name; required without `preset`, overrides the preset name with it |
+| `id` | the provider id; without it, derived from the name (or the preset id) |
+| `key` | the API key; without it, add the key later with `magpie provider key <id> <key>` |
+| `chat` / `responses` / `anthropic` | base URLs for the three APIs (`anthropic` without `/v1`) |
+| `models` | comma-separated model ids (blank entries ignored, at most 200) |
+| `catalog` | a models.dev provider id, for model names and reasoning efforts |
+| `website` / `keys` | the vendor's website / the page to get a key; only `https` is kept |
+
+Rules: without `preset` you need a `name` and at least one base URL. Base
+URLs must be `https`; plain `http` is allowed only for localhost, loopback,
+private-network addresses and `.local` names, and a base URL may not carry
+credentials, a query string or a fragment. The name is cut to 80 characters.
+The id is derived with the same rule as `magpie provider add` (lowercase,
+anything outside `a-z0-9-` becomes `-`, trimmed), and a given `id` must already
+be in that form. An invalid link is rejected as a whole; nothing is partly
+imported.
+
+From a terminal, the same link is handled by:
+
+```sh
+magpie import 'magpie://import?preset=deepseek&key=sk-…'
+magpie import -y 'magpie://import?name=My%20Relay&chat=http://127.0.0.1:8000/v1'   # skip the question
+```
+
+`magpie import` prints the provider, then asks `Add it? [y/N]`. It refuses to
+run without a terminal unless `-y` is given, and it asks before replacing a
+provider that already has the same id. Passing a `magpie:` link as the first
+argument does the same thing.
+
+Web pages and GitHub cannot reliably open custom schemes, so a link can also
+be published as `https://usemagpie.ai/import#<same parameters>`. The
+parameters sit in the fragment, which browsers never send to the server:
+
+```
+https://usemagpie.ai/import#preset=deepseek&key=sk-…
+```
+
 ### Signed-in agents as providers
 
 An agent you have signed in to is a subscription with models behind it, so
@@ -119,7 +186,16 @@ Providers tab as *signed in as …*, with their models spelled
 every other agent's picker. magpie reads the agent's own credentials each
 time, refreshes tokens the way the agent does — writing a rotated token
 back where the agent will find it — and stores nothing but your model
-picks; sign out of the agent and the provider is gone. The model list is
+picks. Signing out of the agent removes the provider. Claude Code counts as
+signed in only while `claude auth status` reports a login, so leftover
+credentials after a sign-out do not make it a provider.
+
+To hide a signed-in account from magpie without touching the agent's login,
+run `magpie provider rm claude` (or `codex`, `copilot`). The provider leaves
+the list, its `provider/model` names stop resolving and its usage is no
+longer counted; your model picks are kept. `magpie providers` lists removed
+accounts and how to bring them back, and `magpie provider add codex` restores
+the account with its previous model choices. The model list is
 the vendor's own too: magpie asks Anthropic's, Copilot's or Codex's API with
 that same sign-in, so a model added upstream appears on the next refresh.
 The ChatGPT backend only streams and rejects a few parameters, so magpie
@@ -168,6 +244,29 @@ and the recent calls; `MAGPIE_DEBUG=1` logs every call to the terminal.
 model variables in the `env` block of `settings.json`; picking a native
 model (`opus`, `sonnet`…) removes them and restores whatever was there.
 
+#### Claude Code model tiers
+
+Claude Code has four tiers, `opus`, `sonnet`, `haiku` and `fable`. Each can
+name its own model; a tier you do not set follows the main model, so changing
+the main model moves every unpinned tier with it:
+
+```sh
+magpie claude deepseek/pro            # main model: all four tiers follow it
+magpie claude haiku deepseek/flash    # haiku now uses flash; the rest stay on pro
+magpie claude haiku ""                # haiku follows the main model again
+```
+
+Setting a tier needs a main model that goes through magpie first; clearing a
+tier with `""` is a no-op if nothing is set. The tiers are written to
+`ANTHROPIC_DEFAULT_<TIER>_MODEL`, and haiku also sets the small-and-fast model
+(`ANTHROPIC_SMALL_FAST_MODEL`). Once any tier is pinned, subagents no longer
+share one model (`CLAUDE_CODE_SUBAGENT_MODEL` is dropped); when every tier
+matches the main model again, the shared setting returns. Clearing the main model (picking
+the native model in the app, which leaves magpie's routing) restores Claude
+Code as it was and removes all of these variables; other settings such as
+`theme` are kept. In the agent list,
+tiers that are not pinned are not shown.
+
 **Codex** gets a `[model_providers.magpie]` table, `model_catalog_json`
 pointing at `~/.codex/magpie-models.json` (written from the catalog, so the
 models show in Codex's own list) and a valid `model`/`effort`; picking a
@@ -181,41 +280,6 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 `GOOGLE_GEMINI_BASE_URL` at the gateway (which speaks the Gemini API), sets
 `auth` to API key with the gateway token, and names the model in
 `settings.json`; a native model puts the previous auth back.
-
-### Import links
-
-A vendor or relay can hand its users a ready-made provider as a link:
-
-```
-magpie://import?preset=deepseek&key=sk-…
-magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&anthropic=https://api.acme.example&key=sk-…&models=gpt-5.5,claude-sonnet-5
-```
-
-Opening one brings up magpie with what the link would add: the name, the
-hosts your prompts and key would go to, the models. Nothing is saved until
-you press *Add*. `magpie import <link>` does the same in a terminal.
-
-| Parameter   | Meaning                                                            |
-| ----------- | ------------------------------------------------------------------ |
-| `preset`    | a preset id (`magpie presets`); its endpoints are used             |
-| `region`    | with a preset that has regions, which one                          |
-| `name`      | the provider's name; required without a preset                     |
-| `id`        | its id; derived from the name when absent                          |
-| `key`       | the API key; the user pastes one when absent                       |
-| `chat`      | OpenAI Chat Completions base URL (`…/v1`)                          |
-| `responses` | OpenAI Responses base URL (`…/v1`)                                 |
-| `anthropic` | Anthropic Messages base URL (the root, without `/v1`)              |
-| `models`    | model ids to expose, comma separated                               |
-| `catalog`   | models.dev provider id, for model names and reasoning levels       |
-| `website`, `keys` | the vendor's site and its API-key page (https)               |
-| `icon`      | an https picture of the vendor's own (PNG, JPEG, GIF, WebP, ICO, SVG, at most 1 MB). magpie downloads it once, after you confirm the import, into its icons folder; without one it falls back to the catalog's logo or a plain mark |
-
-Base URLs must be https (plain http only to this machine or the local
-network). Web pages and GitHub don't link custom schemes reliably, so link
-to `https://usemagpie.ai/import#<same parameters>` instead: it opens
-magpie, and offers the download when it is not installed. The parameters
-stay in the fragment, which browsers never send to a server. The full guide,
-with a link builder: <https://usemagpie.ai/docs/import>.
 
 ## Install
 
@@ -291,8 +355,8 @@ magpie codex effort high        # other fields
 magpie codex xhigh              # bare effort levels are recognised too
 magpie codex deepseek/deepseek-chat   # any catalog model, through the gateway
 magpie claude moonshot/kimi-k2.5
-magpie claude haiku deepseek/deepseek-v4-flash   # one tier on its own model
-magpie claude haiku ""          # back to the main model
+magpie claude haiku deepseek/deepseek-flash   # pin one Claude Code tier
+magpie claude haiku ""          # back to following the main model
 magpie gemini auth api-key
 magpie opencode anthropic/claude-sonnet-5
 magpie oc small anthropic/claude-haiku-4-5
@@ -329,41 +393,35 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
-### Moving to another machine
+## Settings
 
-```sh
-magpie backup                   # writes magpie.magpie-backup, asks for a passphrase twice
-magpie backup --no-keys ~/b.magpie-backup   # the same with no API keys in it
-magpie restore magpie.magpie-backup         # on the other machine
-magpie restore --no-agents b.magpie-backup  # providers, settings, profiles; agents left as they are
-```
+`~/.config/magpie/settings.json` holds two options that the app and the
+terminal version both respect.
 
-A backup holds your providers (with their keys, unless `--no-keys`), the
-pictures picked for them, the settings, the profiles and every agent's model.
-It is encrypted on your machine (AES-256-GCM, the key derived from the
-passphrase with PBKDF2-SHA256); nothing in it can be read without the
-passphrase. Restoring replaces providers with the same id and adds the rest;
-one that came without a key keeps the key already there. Agent models are set
-only for agents installed on that machine. Subscriptions are not in it: sign
-in to them on each machine. Piped in, the passphrase is the first line of
-stdin.
+- `tray`: what a click on the menu bar icon does. `panel` (the default) opens
+  the drop-down panel; `window` opens the main window. Any other value is
+  rejected when saved.
+- `proxy`: the proxy magpie uses for its own requests to vendors, the
+  gateway's included. Leave it empty to follow, in order, the environment
+  (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`), then the system proxy
+  (macOS network settings, Windows Internet options, which both honour their
+  exception lists; on Linux, the environment only). `direct` turns the proxy
+  off. Otherwise give `http://`, `https://`, `socks5://` or `socks5h://` with
+  the address, or a bare `host:port` (read as HTTP), for example
+  `socks5://127.0.0.1:1080`. Other schemes such as `ftp://` are rejected. Loopback
+  addresses never use a proxy.
 
 ## Files
 
 - `~/.config/magpie/profiles.json` — saved profiles
 - `~/.config/magpie/providers.json` — your providers, keys included (0600)
+- `~/.config/magpie/settings.json` — `tray` and `proxy` (see *Settings*)
 - `~/.config/magpie/stash.json` — values magpie replaced, restored on switch-back
 - `~/.cache/magpie/models.json` — models.dev catalog (OpenCode's cache at
   `~/.cache/opencode/models.json` is used when present)
 - `~/.cache/magpie/models/<provider>.json` — model lists fetched from vendors
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are respected.
-
-## Community
-
-Questions, setups worth sharing, ideas, bugs: come talk to us and other
-magpie users on [Discord](https://discord.gg/vGSnD3ZKQF). Issues and pull
-requests are welcome here too.
 
 ## License
 
