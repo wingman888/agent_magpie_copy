@@ -35,14 +35,7 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user: the front key, tried first
-
-	// KeyName names the front key ("personal", "team"); may be empty.
-	KeyName string `json:"keyName,omitempty"`
-
-	// Keys are the other keys, in the order they are tried after the front
-	// one. An Off key is kept but never used. See keys.go.
-	Keys []ExtraKey `json:"keys,omitempty"`
+	Key    string `json:"key"`              // API key, as typed by the user
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -50,12 +43,6 @@ type Provider struct {
 	Chat      string `json:"chat,omitempty"`
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
-
-	// Fallback is where a request goes when this provider can't take it —
-	// out of quota, rate limited, overloaded or down — before any of the
-	// reply has been sent: models as agents pick them (provider/model),
-	// tried in order.
-	Fallback []string `json:"fallback,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
@@ -68,6 +55,11 @@ type Provider struct {
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
+
+	// Fallback is the backup list: provider/model ids the gateway tries, in
+	// order, when this provider cannot answer (quota spent, rate limited,
+	// overloaded, down). Blank and duplicate entries are dropped on save.
+	Fallback []string `json:"fallback,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
@@ -138,7 +130,8 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
+		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -214,40 +207,12 @@ func Save(p Provider) error {
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
-			p = keepKeys(p, &f.Providers[i])
 			f.Providers[i] = p
 			return store(f)
 		}
 	}
-	p = keepKeys(p, nil)
 	f.Providers = append(f.Providers, p)
 	return store(f)
-}
-
-// keepKeys settles the keys of a provider being saved over old (nil when it
-// is new). A save that says nothing about the other keys keeps the stored
-// ones, and the front key's name while the front key is unchanged. A key
-// that is also the new front key leaves the extras, and its name goes to
-// the front, so no name is lost on the way.
-func keepKeys(p Provider, old *Provider) Provider {
-	if old != nil {
-		if len(p.Keys) == 0 && p.KeyName == "" {
-			p.Keys = append([]ExtraKey(nil), old.Keys...)
-			if p.Key == old.Key {
-				p.KeyName = old.KeyName
-			}
-		} else if p.Key != old.Key && p.KeyName == old.KeyName {
-			p.KeyName = "" // a new front key does not wear the old one's name
-		}
-	}
-	for i, k := range p.Keys {
-		if p.Key != "" && strings.TrimSpace(k.Key) == p.Key {
-			p.KeyName = strings.TrimSpace(k.Name)
-			p.Keys = append(p.Keys[:i:i], p.Keys[i+1:]...)
-			break
-		}
-	}
-	return p
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -302,7 +267,6 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {
 		// Presets own their request shape; custom headers are supported only
@@ -324,13 +288,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
-}
-
-// Catalogs are the models.dev ids the provider's models are looked up in,
-// first match wins: a gateway that resells several vendors names them all
-// ("openai, deepseek").
-func (p Provider) Catalogs() []string {
-	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
 }
 
 func cleanList(xs []string) []string {
