@@ -382,7 +382,7 @@ func TestBktRestoreClearsDanglingIcon(t *testing.T) {
 
 	// Picture already on this machine under that name: the reference stays.
 	b = Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "relay", Name: "Relay", Icon: local},
+		{ID: "relay", Name: "Relay", Chat: "https://" + bktHost + "/v1", Icon: local},
 	}}
 	if _, err := Restore(b, All); err != nil {
 		t.Fatal(err)
