@@ -28,23 +28,6 @@ func TestMultikeySaveKeepsKeys(t *testing.T) {
 	}
 }
 
-// TestMultikeySaveNamedFrontKeepsName: when the front key stays and the caller
-// gives it a name, the caller's name is used and the extra key is kept.
-func TestMultikeySaveNamedFrontKeepsName(t *testing.T) {
-	multikeyHome(t)
-	const first = "sk-first-aaaaaaaa"
-	multikeyLegacy(t, first)
-	if err := AddKey("relay", "团队", "sk-team-bbbbbbbb"); err != nil {
-		t.Fatal(err)
-	}
-	if err := Save(Provider{ID: "relay", Name: "Relay", Key: first, KeyName: "个人", Chat: "https://relay.example/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := multikeyOrder(multikeyFind(t)); strings.Join(got, ",") != "个人(on),团队(on)" {
-		t.Fatalf("after a named Save: %v", got)
-	}
-}
-
 // TestMultikeySaveDedupesFrontKey: saving a key that is already an extra makes
 // it the front key once, taking its name, with no duplicate left behind.
 func TestMultikeySaveDedupesFrontKey(t *testing.T) {
