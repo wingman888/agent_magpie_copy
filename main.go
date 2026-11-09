@@ -39,7 +39,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie profiles                 list profiles
   magpie rm <name>                delete a profile
 
-  magpie accounts [claude|codex]  list the subscriptions magpie remembers (switch, add, forget)
+  magpie accounts [claude|codex]  your subscription accounts: which is in use, usage, switch, add, forget
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
@@ -121,10 +121,10 @@ func run(args []string) error {
 		return profiles(args)
 	case "import":
 		return importCmd(args[1:])
+	case "accounts":
+		return accountsCmd(args)
 	case "providers":
 		return providers()
-	case "accounts":
-		return accountsCmd(args[1:])
 	case "presets":
 		return presets()
 	case "provider":

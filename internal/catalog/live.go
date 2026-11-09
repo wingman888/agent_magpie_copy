@@ -69,9 +69,9 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchWith is Fetch with extra request headers, set after the defaults and
-// the key (see ApplyHeaders).
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+// FetchWith is Fetch with extra request headers, sent after the defaults and
+// the key so they can override them. Names keep the caller's casing.
+func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -98,7 +98,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key, anthropic, extra)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +115,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -131,7 +131,12 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	ApplyHeaders(req, headers)
+	for name, v := range extra {
+		// Delete the canonical form first so the override replaces the
+		// default, then store the name exactly as the user typed it.
+		req.Header.Del(name)
+		req.Header[name] = []string{v}
+	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -176,20 +181,6 @@ type liveModel struct {
 	DisplayName string `json:"display_name"`
 }
 
-// ApplyHeaders sets the user's own headers on req. A header replaces any
-// default with the same name, whatever its case; the name is sent as typed.
-// Go's Header.Set would canonicalize the case, so the map is written directly.
-func ApplyHeaders(req *http.Request, headers map[string]string) {
-	for name, value := range headers {
-		for have := range req.Header {
-			if strings.EqualFold(have, name) {
-				delete(req.Header, have)
-			}
-		}
-		req.Header[name] = []string{value}
-	}
-}
-
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
@@ -199,14 +190,7 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if !ok {
-			// a relay names models "vendor/model"; the catalog has "model"
-			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
-				k, ok = byID[m.ID[i+1:]]
-			}
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

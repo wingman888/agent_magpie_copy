@@ -56,7 +56,7 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
-	p.ApplyHeaders(req)
+	applyHeaders(req, p.ExtraHeaders())
 	return nil
 }
 
@@ -203,7 +203,7 @@ type claudeCredentialLocation struct {
 	keychain bool
 }
 
-// claudeConfigDir is where Claude Code keeps its config and .credentials.json.
+// claudeConfigDir is where Claude Code keeps its own files.
 func claudeConfigDir() string {
 	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
 		return dir
@@ -331,12 +331,16 @@ func claudeIdentity() (user, plan string, signedOut bool) {
 	return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 }
 
+// claudeLoginIdentity says who Claude Code is signed in as; a var so tests can
+// stand in for the CLI.
+var claudeLoginIdentity = claudeIdentity
+
 func claudeAccount() (Provider, bool) {
 	c, _, ok := claudeCredential()
 	if !ok {
 		return Provider{}, false
 	}
-	user, statusPlan, signedOut := claudeIdentity()
+	user, statusPlan, signedOut := claudeLoginIdentity()
 	if signedOut {
 		return Provider{}, false
 	}
@@ -473,6 +477,11 @@ func claudeToken(ctx context.Context) (string, error) {
 	if claudeFresh(c) {
 		return c.OAuth.AccessToken, nil
 	}
+	if signingIn("claude") {
+		// magpie keeps a copy of this sign-in for `accounts add`; refreshing
+		// would rotate the token the copy holds
+		return c.OAuth.AccessToken, nil
+	}
 	if c.OAuth.RefreshToken == "" {
 		return "", errors.New("Claude Code OAuth token expired; run claude auth login")
 	}
@@ -592,6 +601,12 @@ type codexAuth struct {
 	} `json:"tokens"`
 }
 
+// codexAuthFile is the auth file Codex CLI keeps its current sign-in in.
+func codexAuthFile() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex", "auth.json")
+}
+
 func codexAccount(home string) (Provider, bool) {
 	path := filepath.Join(home, ".codex", "auth.json")
 	var a codexAuth
@@ -599,11 +614,17 @@ func codexAccount(home string) (Provider, bool) {
 		return Provider{}, false
 	}
 	id := jwtClaims(a.Tokens.IDToken)
-	acct := &Account{Agent: "codex", Stream: true,
-		User: claimString(id, "email"), Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")}
-	if acct.User == "" {
-		acct.User = "ChatGPT"
+	acct := codexSigner(path, claimString(id, "email"), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type"))
+	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
+}
+
+// codexSigner is a ChatGPT account whose tokens live in the auth file at path:
+// Codex CLI's own file for the current sign-in, magpie's copy for the others.
+func codexSigner(path, user, plan string) *Account {
+	if user == "" {
+		user = "ChatGPT"
 	}
+	acct := &Account{Agent: "codex", Stream: true, User: user, Plan: plan}
 	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
 		tok, accountID, err := codexToken(ctx, path)
 		if err != nil {
@@ -620,7 +641,7 @@ func codexAccount(home string) (Provider, bool) {
 	acct.body = codexBody
 	acct.models = catalog.Codex
 	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
+	return acct
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI
@@ -638,6 +659,10 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 		accountID = claimString(jwtClaims(a.Tokens.IDToken), "https://api.openai.com/auth", "chatgpt_account_id")
 	}
 	if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
+		return a.Tokens.AccessToken, accountID, nil
+	}
+	if path == codexAuthFile() && signingIn("codex") {
+		// see claudeToken: the copy magpie keeps must not be left behind by a refresh
 		return a.Tokens.AccessToken, accountID, nil
 	}
 	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
