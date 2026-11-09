@@ -56,7 +56,7 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
-	applyHeaders(req, p.ExtraHeaders())
+	p.ApplyHeaders(req)
 	return nil
 }
 
