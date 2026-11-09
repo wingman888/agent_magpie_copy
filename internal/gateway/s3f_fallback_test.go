@@ -115,7 +115,7 @@ func TestS3FRetryableStatusesFallBackToModel(t *testing.T) {
 		if !strings.Contains(body, `"hi"`) {
 			t.Errorf("%d %q: client did not get the fallback reply: %s", f.status, f.msg, body)
 		}
-		if got := u.take(); got != "/chat/completions m1|/chat/completions m2" {
+		if got := u.take(); got != "/v1/chat/completions m1|/v1/chat/completions m2" {
 			t.Errorf("%d %q: upstream saw %s", f.status, f.msg, got)
 		}
 		c := s.Recent()[0]
@@ -132,7 +132,7 @@ func TestS3FBadRequestIsNotRetried(t *testing.T) {
 	if code != 400 || !strings.Contains(body, "bad request") {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	if got := u.take(); got != "/chat/completions m1" {
+	if got := u.take(); got != "/v1/chat/completions m1" {
 		t.Errorf("a 400 should not fall back; upstream saw %s", got)
 	}
 	if c := s.Recent()[0]; c.Fallback != "" || c.Provider != "s3fp" {
@@ -147,7 +147,7 @@ func TestS3FLastCandidateErrorReachesClient(t *testing.T) {
 	if code != 503 || !strings.Contains(body, "m2 is down") {
 		t.Fatalf("want the last candidate's 503, got %d: %s", code, body)
 	}
-	if got := u.take(); got != "/chat/completions m1|/chat/completions m2" {
+	if got := u.take(); got != "/v1/chat/completions m1|/v1/chat/completions m2" {
 		t.Errorf("upstream saw %s", got)
 	}
 	if c := s.Recent()[0]; c.Status != 503 || c.Fallback != "s3fp" {
@@ -161,14 +161,14 @@ func TestS3FFailedProviderRestsForAMinute(t *testing.T) {
 	if code, body := s3fPost(s, s3fBody); code != 200 {
 		t.Fatalf("first status %d: %s", code, body)
 	}
-	if got := u.take(); got != "/chat/completions m1|/chat/completions m2" {
+	if got := u.take(); got != "/v1/chat/completions m1|/v1/chat/completions m2" {
 		t.Errorf("first request saw %s", got)
 	}
 	// the primary is skipped while it rests: the backup answers first
 	if code, body := s3fPost(s, s3fBody); code != 200 {
 		t.Fatalf("second status %d: %s", code, body)
 	}
-	if got := u.take(); got != "/chat/completions m2" {
+	if got := u.take(); got != "/v1/chat/completions m2" {
 		t.Errorf("second request should skip the resting provider; upstream saw %s", got)
 	}
 	if c := s.Recent()[0]; c.Provider != "s3fb" || c.Fallback != "" {
@@ -202,7 +202,7 @@ func TestS3FUnreadableFallbackEntriesAreSkipped(t *testing.T) {
 	if code, body := s3fPost(s, s3fBody); code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	if got := u.take(); got != "/chat/completions m1|/chat/completions m2" {
+	if got := u.take(); got != "/v1/chat/completions m1|/v1/chat/completions m2" {
 		t.Errorf("upstream saw %s", got)
 	}
 }
@@ -217,7 +217,7 @@ func TestS3FStreamOpeningErrorFallsBack(t *testing.T) {
 	if code != 200 || !strings.Contains(body, `"hi"`) || strings.Contains(body, "Overloaded") {
 		t.Fatalf("status %d: %s", code, body)
 	}
-	if got := u.take(); got != "/chat/completions m1|/chat/completions m2" {
+	if got := u.take(); got != "/v1/chat/completions m1|/v1/chat/completions m2" {
 		t.Errorf("upstream saw %s", got)
 	}
 	if c := s.Recent()[0]; c.Provider != "s3fb" || c.Fallback != "s3fp" {
@@ -235,7 +235,7 @@ func TestS3FStreamOpeningBadRequestIsNotRetried(t *testing.T) {
 	if code != 200 || !strings.Contains(body, "invalid request body") {
 		t.Fatalf("the error should reach the client as it was: %d %s", code, body)
 	}
-	if got := u.take(); got != "/chat/completions m1" {
+	if got := u.take(); got != "/v1/chat/completions m1" {
 		t.Errorf("upstream saw %s", got)
 	}
 	if c := s.Recent()[0]; c.Fallback != "" {
@@ -250,7 +250,7 @@ func TestS3FStreamedReplyPassesThroughUnchanged(t *testing.T) {
 	if code != 200 || body != s3fChatReply {
 		t.Fatalf("status %d, body %q", code, body)
 	}
-	if got := u.take(); got != "/chat/completions m1" {
+	if got := u.take(); got != "/v1/chat/completions m1" {
 		t.Errorf("upstream saw %s", got)
 	}
 }
