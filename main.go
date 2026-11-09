@@ -44,10 +44,9 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
-  magpie accounts [claude|codex]  the subscriptions you are signed in to: switch, add, forget
-  magpie accounts on|off <agent> <email>  let a remembered account serve requests at the same time
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
+  magpie accounts [claude|codex]  saved sign-ins: switch, forget, add; several can be on at once
 
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
@@ -128,10 +127,10 @@ func run(args []string) error {
 		return presets()
 	case "provider":
 		return providerCmd(args)
-	case "accounts":
-		return magAccountsCmd(args[1:])
 	case "models":
 		return models()
+	case "accounts":
+		return accountsCmd(args[1:])
 	case "serve":
 		return serve()
 	case "usage":

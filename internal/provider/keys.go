@@ -5,37 +5,35 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 )
 
-// ExtraKey is a key a provider holds besides its current one: a second
-// account's key, a team key, or one limited to a single protocol. Off keys
-// are kept but never tried.
-type ExtraKey struct {
-	Name     string   `json:"name,omitempty"`
+// KeyEntry is an extra API key kept beside a provider's current one. The
+// current key lives in Provider.Key (named by KeyName, limited by KeyProtocol);
+// the rest are here, in the order they are tried.
+type KeyEntry struct {
 	Key      string   `json:"key"`
-	Protocol Protocol `json:"protocol,omitempty"`
-	Off      bool     `json:"off,omitempty"`
+	Name     string   `json:"name,omitempty"`
+	Protocol Protocol `json:"protocol,omitempty"` // "" means any protocol the vendor serves
+	Off      bool     `json:"off,omitempty"`      // a disabled key is never tried
 }
 
-// current is the keyPos of the provider's current key (the top-level key).
-const magCurrent = -1
+var (
+	errLastKey = errors.New("a provider needs at least one enabled key; this change would leave none")
+	errNoKey   = errors.New("no key of this provider matches that reference")
+)
 
-// KeyRef is a key's fingerprint, the name the CLI and the call records use:
-// the first five bytes of its SHA-256, in lowercase hex.
+// KeyRef is a key's fingerprint: the first five bytes of its SHA-256, in
+// lowercase hex. It names a key without showing it.
 func KeyRef(key string) string {
-	if key == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:5])
 }
 
-// ValidKeyProtocol reports whether a key may be limited to proto: "" (any),
-// or one of the protocols magpie speaks upstream.
-func ValidKeyProtocol(proto Protocol) bool {
+// validKeyProtocol is true for "" (any) and the three protocols a key can be
+// limited to.
+func validKeyProtocol(proto Protocol) bool {
 	switch proto {
 	case "", Chat, Responses, Anthropic:
 		return true
@@ -43,369 +41,305 @@ func ValidKeyProtocol(proto Protocol) bool {
 	return false
 }
 
-func magBadProtocol(proto Protocol) error {
-	return fmt.Errorf("key protocol %q is not one of chat, responses, anthropic, or any", proto)
-}
-
-// magIsAccount reports whether id is a signed-in agent, which holds no keys.
-func magIsAccount(id string) bool {
-	_, ok := find(Accounts(), id)
-	return ok
-}
-
-// magTidyKeys trims the key fields, drops empty keys and any extra key that
-// repeats the current one.
-func magTidyKeys(p *Provider) {
-	p.Key = strings.TrimSpace(p.Key)
-	var out []ExtraKey
-	for _, k := range p.Keys {
-		k.Key = strings.TrimSpace(k.Key)
-		k.Name = strings.TrimSpace(k.Name)
-		if k.Key == "" || (p.Key != "" && k.Key == p.Key) {
-			continue
-		}
-		dup := false
-		for _, o := range out {
-			dup = dup || o.Key == k.Key
-		}
-		if !dup {
-			out = append(out, k)
-		}
-	}
-	p.Keys = out
-}
-
-// KeyInfo describes one key of a provider, for display.
-type KeyInfo struct {
-	Name     string
-	Ref      string
-	Mask     string
-	Protocol Protocol
-	Current  bool // the key requests use first
-	On       bool
-}
-
-// KeyList lists the provider's keys, the current one first.
-func (p Provider) KeyList() []KeyInfo {
-	var out []KeyInfo
+// keyRing lists the provider's keys in order: the current one first, then the
+// extra keys as stored.
+func keyRing(p Provider) []KeyEntry {
+	var out []KeyEntry
 	if p.Key != "" {
-		out = append(out, KeyInfo{Name: p.KeyName, Ref: KeyRef(p.Key), Mask: Mask(p.Key), Protocol: p.KeyProtocol, Current: true, On: true})
+		out = append(out, KeyEntry{Key: p.Key, Name: p.KeyName, Protocol: p.KeyProtocol})
 	}
-	for _, k := range p.Keys {
-		out = append(out, KeyInfo{Name: k.Name, Ref: KeyRef(k.Key), Mask: Mask(k.Key), Protocol: k.Protocol, On: !k.Off})
-	}
-	return out
+	return append(out, p.Keys...)
 }
 
-// enabledCount is how many keys may be tried: the current one, if any, and
-// the extra keys that are on.
-func (p *Provider) enabledCount() int {
-	n := 0
-	if p.Key != "" {
-		n++
-	}
-	for _, k := range p.Keys {
-		if !k.Off && k.Key != "" {
-			n++
+// setKeyRing writes an ordered key list back into the provider. The first
+// enabled key becomes the current one; keys ahead of it (all disabled) stay
+// in the extra keys, at the front. It changes nothing when no key is enabled.
+func setKeyRing(p *Provider, ring []KeyEntry) error {
+	i := -1
+	for j, k := range ring {
+		if !k.Off {
+			i = j
+			break
 		}
 	}
-	return n
+	if i < 0 {
+		return errLastKey
+	}
+	top := ring[i]
+	rest := make([]KeyEntry, 0, len(ring)-1)
+	rest = append(rest, ring[:i]...)
+	rest = append(rest, ring[i+1:]...)
+	p.Key, p.KeyName, p.KeyProtocol = top.Key, top.Name, top.Protocol
+	p.Keys = nil
+	if len(rest) > 0 {
+		p.Keys = rest
+	}
+	return nil
 }
 
-// firstEnabled is the index of the first extra key that is on, or -1.
-func (p *Provider) firstEnabled() int {
-	for i, k := range p.Keys {
-		if !k.Off && k.Key != "" {
+func findKey(ring []KeyEntry, ref string) int {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	for i, k := range ring {
+		if KeyRef(k.Key) == ref {
 			return i
 		}
 	}
 	return -1
 }
 
-// keyPos finds a key by fingerprint: current, or the index among the extras.
-func (p *Provider) keyPos(ref string) (int, bool) {
-	ref = strings.ToLower(strings.TrimSpace(ref))
-	if ref == "" {
-		return 0, false
-	}
-	if p.Key != "" && KeyRef(p.Key) == ref {
-		return magCurrent, true
-	}
-	for i, k := range p.Keys {
-		if KeyRef(k.Key) == ref {
-			return i, true
-		}
-	}
-	return 0, false
-}
-
-// promote makes extra key j the current one. The old current key goes to the
-// front of the extras when keepOld is set, switched off when offOld is set.
-func (p *Provider) promote(j int, keepOld, offOld bool) {
-	next := p.Keys[j]
-	rest := make([]ExtraKey, 0, len(p.Keys))
-	if keepOld && p.Key != "" {
-		rest = append(rest, ExtraKey{Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol, Off: offOld})
-	}
-	for i, k := range p.Keys {
-		if i != j {
-			rest = append(rest, k)
-		}
-	}
-	p.Keys = rest
-	p.Key, p.KeyName, p.KeyProtocol = next.Key, next.Name, next.Protocol
-}
-
-// magEditKeys runs fn on the stored entry for a provider that holds keys, then
-// saves it.
-func magEditKeys(id string, fn func(p *Provider) error) error {
-	found, err := Find(id)
-	if err != nil {
-		return err
-	}
-	if found.Account != nil {
-		return fmt.Errorf("%s is a signed-in account; its sign-in holds the key", found.Name)
-	}
+// editKeys applies change to one stored provider and saves the file. The
+// change works on a copy, so an error leaves the file as it was.
+func editKeys(id string, change func(p *Provider) error) error {
+	id = strings.ToLower(strings.TrimSpace(id))
 	f := load()
 	for i := range f.Providers {
-		if f.Providers[i].ID == found.ID {
-			q := f.Providers[i]
-			if err := fn(&q); err != nil {
-				return err
-			}
-			magTidyKeys(&q)
-			f.Providers[i] = q
-			return store(f)
+		if f.Providers[i].ID != id {
+			continue
 		}
+		p := f.Providers[i]
+		if err := change(&p); err != nil {
+			return err
+		}
+		f.Providers[i] = p
+		return store(f)
+	}
+	if _, ok := find(Accounts(), id); ok {
+		return fmt.Errorf("%s is a signed-in account; its sign-in holds the key, so it has no keys to manage", id)
 	}
 	return fmt.Errorf("no provider %q", id)
 }
 
-func magNoKey(p *Provider, ref string) error {
-	return fmt.Errorf("%s has no key %s; magpie provider key %s lists them", p.Name, ref, p.ID)
-}
-
-func magNeedOne(p *Provider) error {
-	return fmt.Errorf("%s needs at least one enabled key; add another key first", p.Name)
-}
-
-// AddKey adds a key to a provider. A provider with no key takes it as the
-// current one; otherwise it is appended, on, after the existing keys.
+// AddKey adds a key to a provider. The new key is enabled and goes after the
+// existing ones; a provider with no key gets this one as its current key.
 func AddKey(id, name, key string, proto Protocol) error {
-	key, name = strings.TrimSpace(key), strings.TrimSpace(name)
+	key = strings.TrimSpace(key)
 	if key == "" {
 		return errors.New("the key is empty")
 	}
-	if !ValidKeyProtocol(proto) {
-		return magBadProtocol(proto)
+	if !validKeyProtocol(proto) {
+		return fmt.Errorf("unknown protocol %q: use chat, responses or anthropic, or leave it empty", proto)
 	}
-	return magEditKeys(id, func(p *Provider) error {
-		if _, ok := p.keyPos(KeyRef(key)); ok {
-			return fmt.Errorf("%s already has that key (%s)", p.Name, KeyRef(key))
+	name = strings.TrimSpace(name)
+	return editKeys(id, func(p *Provider) error {
+		ring := keyRing(*p)
+		for _, k := range ring {
+			if k.Key == key {
+				return errors.New("that key is already on this provider")
+			}
 		}
-		if p.Key == "" {
-			p.Key, p.KeyName, p.KeyProtocol = key, name, proto
-			return nil
-		}
-		p.Keys = append(p.Keys, ExtraKey{Name: name, Key: key, Protocol: proto})
-		return nil
+		ring = append(ring, KeyEntry{Key: key, Name: name, Protocol: proto})
+		return setKeyRing(p, ring)
 	})
 }
 
-// SetKeyProtocol limits a key to one protocol, or clears the limit with "".
-func SetKeyProtocol(id, keyRef string, proto Protocol) error {
-	if !ValidKeyProtocol(proto) {
-		return magBadProtocol(proto)
-	}
-	return magEditKeys(id, func(p *Provider) error {
-		pos, ok := p.keyPos(keyRef)
-		if !ok {
-			return magNoKey(p, keyRef)
-		}
-		if pos == magCurrent {
-			p.KeyProtocol = proto
-		} else {
-			p.Keys[pos].Protocol = proto
-		}
-		return nil
-	})
-}
-
-// UseKey makes a key the current one. The key it replaces stays on, right
-// after it, with its name and protocol.
+// UseKey makes a key the current one. The key it replaces stays enabled, right
+// after it; the other keys and their protocol limits are kept.
 func UseKey(id, keyRef string) error {
-	return magEditKeys(id, func(p *Provider) error {
-		pos, ok := p.keyPos(keyRef)
-		if !ok {
-			return magNoKey(p, keyRef)
+	return editKeys(id, func(p *Provider) error {
+		ring := keyRing(*p)
+		i := findKey(ring, keyRef)
+		if i < 0 {
+			return errNoKey
 		}
-		if pos != magCurrent {
-			p.promote(pos, true, false)
-		}
-		return nil
+		chosen := ring[i]
+		chosen.Off = false
+		next := make([]KeyEntry, 0, len(ring))
+		next = append(next, chosen)
+		next = append(next, ring[:i]...)
+		next = append(next, ring[i+1:]...)
+		return setKeyRing(p, next)
 	})
 }
 
-// SetKeyOn switches a key on or off. Turning off the current key hands the
-// job to the next key that is on, and the old one stays, off.
+// SetKeyOn enables or disables a key. Disabling the current key hands the
+// current place to the next enabled key; the disabled one is kept. Refused,
+// with nothing changed, when no other key is enabled.
 func SetKeyOn(id, keyRef string, on bool) error {
-	return magEditKeys(id, func(p *Provider) error {
-		pos, ok := p.keyPos(keyRef)
-		if !ok {
-			return magNoKey(p, keyRef)
+	return editKeys(id, func(p *Provider) error {
+		ring := keyRing(*p)
+		i := findKey(ring, keyRef)
+		if i < 0 {
+			return errNoKey
 		}
-		if pos == magCurrent {
-			if on {
-				return nil
-			}
-			j := p.firstEnabled()
-			if j < 0 {
-				return magNeedOne(p)
-			}
-			p.promote(j, true, true)
-			return nil
-		}
-		k := &p.Keys[pos]
-		if on {
-			k.Off = false
-			return nil
-		}
-		if k.Off {
-			return nil
-		}
-		if p.enabledCount() <= 1 {
-			return magNeedOne(p)
-		}
-		k.Off = true
-		return nil
+		ring[i].Off = !on
+		return setKeyRing(p, ring)
 	})
 }
 
-// RemoveKey deletes a key. The last key that is on cannot go; removing the
-// current key hands the job to the next key that is on.
+// RemoveKey deletes a key. The last enabled key cannot be removed; removing
+// the current key hands the current place to the next enabled one.
 func RemoveKey(id, keyRef string) error {
-	return magEditKeys(id, func(p *Provider) error {
-		pos, ok := p.keyPos(keyRef)
-		if !ok {
-			return magNoKey(p, keyRef)
+	return editKeys(id, func(p *Provider) error {
+		ring := keyRing(*p)
+		i := findKey(ring, keyRef)
+		if i < 0 {
+			return errNoKey
 		}
-		if pos == magCurrent {
-			j := p.firstEnabled()
-			if j < 0 {
-				return magNeedOne(p)
-			}
-			p.promote(j, false, false)
-			return nil
-		}
-		if !p.Keys[pos].Off && p.enabledCount() <= 1 {
-			return magNeedOne(p)
-		}
-		p.Keys = append(p.Keys[:pos], p.Keys[pos+1:]...)
-		return nil
+		next := make([]KeyEntry, 0, len(ring)-1)
+		next = append(next, ring[:i]...)
+		next = append(next, ring[i+1:]...)
+		return setKeyRing(p, next)
 	})
 }
 
-// RenameKey names a key; "" clears the name.
+// RenameKey changes a key's name.
 func RenameKey(id, keyRef, name string) error {
 	name = strings.TrimSpace(name)
-	return magEditKeys(id, func(p *Provider) error {
-		pos, ok := p.keyPos(keyRef)
-		if !ok {
-			return magNoKey(p, keyRef)
+	return editKeys(id, func(p *Provider) error {
+		ring := keyRing(*p)
+		i := findKey(ring, keyRef)
+		if i < 0 {
+			return errNoKey
 		}
-		if pos == magCurrent {
-			p.KeyName = name
-		} else {
-			p.Keys[pos].Name = name
-		}
-		return nil
+		ring[i].Name = name
+		return setKeyRing(p, ring)
 	})
 }
 
-// KeyPlan is one key of a provider, ready to send a request with.
-type KeyPlan struct {
-	Provider  Provider   // the provider, with this key as its key
-	Ref       string     // the key's fingerprint; "" when the provider needs none
-	Name      string     // the key's name, if it has one
-	Protocol  Protocol   // the protocol the key is limited to; "" for any
-	Upstreams []Protocol // the endpoints this key may be sent to, preferred first
+// SetKeyProtocol limits a key to one protocol, or lifts the limit with "".
+func SetKeyProtocol(id, keyRef string, proto Protocol) error {
+	if !validKeyProtocol(proto) {
+		return fmt.Errorf("unknown protocol %q: use chat, responses or anthropic, or leave it empty", proto)
+	}
+	return editKeys(id, func(p *Provider) error {
+		ring := keyRing(*p)
+		i := findKey(ring, keyRef)
+		if i < 0 {
+			return errNoKey
+		}
+		ring[i].Protocol = proto
+		return setKeyRing(p, ring)
+	})
 }
 
-// KeyPlans lists the keys that may serve a request in protocol from for the
-// given model, best first. A key limited to a protocol the provider has no
-// endpoint for is left out. Claude models prefer Anthropic keys, GPT, o-series
-// and codex models prefer OpenAI keys, and other models prefer a key that can
-// speak the client's protocol directly, so no translation is needed. Keys that
-// fit poorly come last, as the final resort.
-func (p Provider) KeyPlans(from Protocol, model string) []KeyPlan {
-	if p.Account != nil {
-		return p.accountPlans()
+// checkKeys refuses a provider whose keys cannot be used as stored.
+func checkKeys(p Provider) error {
+	if !validKeyProtocol(p.KeyProtocol) {
+		return fmt.Errorf("unknown key protocol %q: use chat, responses or anthropic, or leave it empty", p.KeyProtocol)
 	}
-	type cand struct {
-		key, name string
-		proto     Protocol
-	}
-	var cands []cand
-	active := false
-	for _, k := range p.Keys {
-		if !k.Off && k.Key != "" {
-			active = true
-		}
-	}
-	if p.Key != "" || !active {
-		cands = append(cands, cand{p.Key, p.KeyName, p.KeyProtocol})
+	seen := map[string]bool{}
+	if p.Key != "" {
+		seen[p.Key] = true
 	}
 	for _, k := range p.Keys {
-		if !k.Off && k.Key != "" {
-			cands = append(cands, cand{k.Key, k.Name, k.Protocol})
+		if !validKeyProtocol(k.Protocol) {
+			return fmt.Errorf("unknown protocol %q on key %s: use chat, responses or anthropic, or leave it empty", k.Protocol, KeyRef(k.Key))
 		}
-	}
-	fam := magFamilyOf(model)
-	type ranked struct {
-		plan KeyPlan
-		rank int
-	}
-	var out []ranked
-	for _, c := range cands {
-		ups := p.upstreamsFor(c.proto)
-		if len(ups) == 0 {
-			continue
+		if seen[k.Key] {
+			return errors.New("a provider lists the same key twice")
 		}
-		pl := p
-		pl.Key, pl.KeyName, pl.KeyProtocol, pl.Keys = c.key, c.name, c.proto, nil
-		ref := ""
-		if c.key != "" {
-			ref = KeyRef(c.key)
-		}
-		out = append(out, ranked{KeyPlan{Provider: pl, Ref: ref, Name: c.name, Protocol: c.proto, Upstreams: ups},
-			magKeyRank(fam, c.proto, ups, from)})
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].rank < out[j].rank })
-	plans := make([]KeyPlan, len(out))
-	for i, r := range out {
-		plans[i] = r.plan
-	}
-	return plans
-}
-
-// upstreamsFor lists the endpoints a key limited to kp may be sent to: only
-// the endpoint of that protocol, and none if the vendor has no such endpoint.
-// An unlimited key may use any endpoint the vendor serves.
-func (p Provider) upstreamsFor(kp Protocol) []Protocol {
-	switch kp {
-	case "":
-		return p.Speaks()
-	case Anthropic, Chat, Responses:
-		if p.Base(kp) != "" {
-			return []Protocol{kp}
-		}
+		seen[k.Key] = true
 	}
 	return nil
 }
 
-// magKeyRank orders keys for a request: lower is better.
-func magKeyRank(fam string, kp Protocol, ups []Protocol, from Protocol) int {
-	switch fam {
+// cleanKeys trims the extra keys and drops empty ones.
+func cleanKeys(ks []KeyEntry) []KeyEntry {
+	var out []KeyEntry
+	for _, k := range ks {
+		k.Key = strings.TrimSpace(k.Key)
+		k.Name = strings.TrimSpace(k.Name)
+		if k.Key == "" {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+// KeyLabel names the key a provider carries for display: its name, else a
+// masked form of the key itself.
+func (p Provider) KeyLabel() string {
+	if p.Account != nil {
+		return p.Account.User
+	}
+	if p.KeyName != "" {
+		return p.KeyName
+	}
+	return Mask(p.Key)
+}
+
+// withKey is a copy of the provider that carries only this key.
+func (p Provider) withKey(k KeyEntry) Provider {
+	c := p
+	c.Key, c.KeyName, c.KeyProtocol = k.Key, k.Name, k.Protocol
+	c.Keys = nil
+	return c
+}
+
+// hasKeys is false for providers that need no key, such as local servers, and
+// for signed-in accounts.
+func (p Provider) hasKeys() bool {
+	return p.Account == nil && (p.Key != "" || len(p.Keys) > 0)
+}
+
+// KeyFor returns the copy of the provider to talk to one protocol with: its
+// first enabled key that may speak that protocol. A key limited to another
+// protocol is never used there. ok is false when no key fits.
+func (p Provider) KeyFor(proto Protocol) (Provider, bool) {
+	if !p.hasKeys() {
+		return p, true
+	}
+	for _, k := range keyRing(p) {
+		if k.Off || !validKeyProtocol(k.Protocol) {
+			continue
+		}
+		if k.Protocol != "" && k.Protocol != proto {
+			continue
+		}
+		return p.withKey(k), true
+	}
+	return Provider{}, false
+}
+
+// KeyCandidates lists copies of the provider, each with one enabled key, in
+// the order to try them for a request from client protocol from, for model.
+// Keys limited to a protocol the vendor lacks are left out, and so are
+// disabled keys. Claude models try Anthropic keys first; GPT, o-series and
+// codex models try OpenAI keys first; other models try a key that speaks the
+// client's protocol directly, to avoid translating. A key that fits poorly
+// comes last.
+func (p Provider) KeyCandidates(from Protocol, model string) []Provider {
+	if p.Account != nil {
+		// a signed-in login: the agent's current one first, then the saved
+		// logins that are on at the same time, in the order they were saved
+		self := p
+		acct := *p.Account
+		acct.also = nil
+		self.Account = &acct
+		return append([]Provider{self}, p.Account.also...)
+	}
+	if !p.hasKeys() {
+		return []Provider{p}
+	}
+	type cand struct {
+		p    Provider
+		rank int
+	}
+	var cs []cand
+	for _, k := range keyRing(p) {
+		if k.Off || !validKeyProtocol(k.Protocol) {
+			continue
+		}
+		if k.Protocol != "" && p.Base(k.Protocol) == "" {
+			continue // the vendor has no endpoint for this key
+		}
+		if k.Protocol == "" && len(p.Speaks()) == 0 {
+			continue
+		}
+		cs = append(cs, cand{p.withKey(k), keyRank(k.Protocol, from, p, model)})
+	}
+	sort.SliceStable(cs, func(i, j int) bool { return cs[i].rank < cs[j].rank })
+	out := make([]Provider, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, c.p)
+	}
+	return out
+}
+
+// keyRank orders keys for a request: lower is tried first.
+func keyRank(kp, from Protocol, p Provider, model string) int {
+	switch modelFamily(model) {
 	case "claude":
 		switch kp {
 		case Anthropic:
@@ -423,20 +357,15 @@ func magKeyRank(fam string, kp Protocol, ups []Protocol, from Protocol) int {
 		}
 		return 2
 	}
-	if magProtoIn(ups, from) {
-		return 0
+	if kp == from || (kp == "" && p.Base(from) != "") {
+		return 0 // speaks the client's protocol directly
 	}
-	if kp == "" {
-		return 1
-	}
-	return 2
+	return 1
 }
 
-var magOpenAISeries = regexp.MustCompile(`^o\d`)
-
-// magFamilyOf names the model family that decides which key suits a model:
-// "claude", "openai" (GPT, o-series, codex), or "" for anything else.
-func magFamilyOf(model string) string {
+// modelFamily sorts a model id into "claude", "openai" (GPT, o-series, codex)
+// or "" (anything else). A provider prefix such as "anthropic/" is ignored.
+func modelFamily(model string) string {
 	m := strings.ToLower(model)
 	if i := strings.LastIndex(m, "/"); i >= 0 {
 		m = m[i+1:]
@@ -444,17 +373,10 @@ func magFamilyOf(model string) string {
 	switch {
 	case strings.Contains(m, "claude"):
 		return "claude"
-	case strings.HasPrefix(m, "gpt"), strings.Contains(m, "codex"), magOpenAISeries.MatchString(m):
+	case strings.HasPrefix(m, "gpt"), strings.Contains(m, "codex"):
+		return "openai"
+	case len(m) >= 2 && m[0] == 'o' && m[1] >= '0' && m[1] <= '9':
 		return "openai"
 	}
 	return ""
-}
-
-func magProtoIn(ps []Protocol, p Protocol) bool {
-	for _, x := range ps {
-		if x == p {
-			return true
-		}
-	}
-	return false
 }
