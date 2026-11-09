@@ -107,11 +107,21 @@ func TestAccountsAreProviders(t *testing.T) {
 	if len(codex.Exposed()) != 1 || codex.Exposed()[0].ID != "gpt-5.5" || codex.Responses == "" {
 		t.Fatalf("picks: %+v", codex.Exposed())
 	}
+	// removing hides the account (its sign-in is untouched) and keeps the picks
 	if err := Delete("codex"); err != nil {
 		t.Fatal(err)
 	}
-	if codex, _ = find(All(), "codex"); len(codex.Models) != 0 || codex.Account == nil {
-		t.Fatalf("after delete: %+v", codex)
+	if _, ok := find(All(), "codex"); ok {
+		t.Fatal("removed codex still listed")
+	}
+	if got := Excluded(); len(got) != 1 || got[0].Provider != "codex" {
+		t.Fatalf("excluded after delete: %+v", got)
+	}
+	if err := Save(Provider{ID: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if codex, ok := find(All(), "codex"); !ok || codex.Account == nil || len(codex.Exposed()) != 1 {
+		t.Fatalf("codex after adding back: %+v", codex)
 	}
 
 	// signed out: gone, and a stale picks entry is not a provider
