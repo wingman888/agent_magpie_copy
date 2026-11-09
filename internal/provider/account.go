@@ -873,11 +873,9 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
-		req.Header.Set("X-Initiator", "agent")
-		if lastRole(body) == "user" {
-			req.Header.Set("X-Initiator", "user")
-		}
-		if bytes.Contains(body, []byte(`"image_url"`)) {
+		initiator, vision := copilotInitiator(req.URL.Path, body)
+		req.Header.Set("X-Initiator", initiator)
+		if vision {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
@@ -890,19 +888,6 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
 	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
-}
-
-// lastRole is the role of the last message in a chat request.
-func lastRole(body []byte) string {
-	var v struct {
-		Messages []struct {
-			Role string `json:"role"`
-		} `json:"messages"`
-	}
-	if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
-		return ""
-	}
-	return v.Messages[len(v.Messages)-1].Role
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {
