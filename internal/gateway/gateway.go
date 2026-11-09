@@ -72,6 +72,7 @@ type Call struct {
 	ResponseBody      string            `json:"responseBody,omitempty"`
 	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
 	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	Fallback          string            `json:"fallback,omitempty"` // "<providerId>: <reason>; …" for the providers that failed before Provider answered; empty when nothing switched
 }
 
 // Server is the gateway.
@@ -82,6 +83,9 @@ type Server struct {
 	// responseOnly remembers models rejected by Chat Completions, avoiding a
 	// known-failing probe on every Claude Code turn.
 	responseOnly map[string]bool
+	// cooling holds providers that recently failed with a retryable error,
+	// keyed by provider id. Memory only: a restart clears it.
+	cooling      map[string]cooldown
 	subscription *subscriptionBridge
 	debug        bool
 }
@@ -349,45 +353,30 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	// A Claude Code subscription must run through the genuine binary. Direct
-	// OAuth HTTP requests are content-classified as third-party traffic when
-	// they carry another agent's harness (Pi, OpenCode, and others).
-	if p.Account != nil && p.Account.Agent == "claude" {
-		call.To = provider.Anthropic
-		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
-		call.Millis = time.Since(start).Milliseconds()
-		finishCapture()
-		s.record(call)
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-		return
-	}
-	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		call.Status, call.Error = s.passthrough(w, r, p, from, model, body, &call.Usage)
+	// the provider's own fallback list, in attempt order; a single candidate
+	// is served exactly as before
+	cands := s.candidates(p, model)
+	var a answer
+	final := cands[0]
+	if len(cands) == 1 {
+		a = s.attempt(w, r, from, final.p, final.model, body)
 	} else {
-		to := p.Speaks()
-		if len(to) == 0 {
-			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
-			writeError(w, from, call.Status, call.Error)
-			call.Millis = time.Since(start).Milliseconds()
-			finishCapture()
-			s.record(call)
-			return
-		}
-		call.To = to[0]
-		call.Status, call.Error = s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+		a, final, call.Fallback = s.failover(w, r, from, cands, body)
 	}
+	if final.p.ID != p.ID || final.model != model {
+		call.Provider, call.Model = final.p.ID, final.p.ID+"/"+final.model
+	}
+	call.To = a.to
+	call.Status, call.Error = a.status, a.msg
+	call.Usage = a.usage
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+	if a.attempted {
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: final.p.ID, Model: final.model,
+			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
+	}
 }
 
 // forward sends a request to the provider.
@@ -420,6 +409,12 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	return s.passthroughRaw(w, r, p, proto, model, body, u, nil)
+}
+
+// passthroughRaw is passthrough that also reports the full upstream error
+// body through raw when it is non-nil.
+func (s *Server) passthroughRaw(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, raw *string) (int, string) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
@@ -431,6 +426,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		if raw != nil {
+			*raw = string(b)
+		}
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
@@ -560,6 +558,12 @@ func notChatModel(status int, body []byte) bool {
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
 func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	return s.translateRaw(w, r, p, from, to, model, body, u, nil)
+}
+
+// translateRaw is translate that also reports the full upstream error body
+// through raw when it is non-nil.
+func (s *Server) translateRaw(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, raw *string) (int, string) {
 	request, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
@@ -573,6 +577,9 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		if raw != nil {
+			*raw = string(b)
+		}
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
