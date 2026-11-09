@@ -237,17 +237,17 @@ type Entry struct {
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`
-	// Group is set on a routing group's entry (group/<id>), which has no
-	// Provider of its own; its members are what FindGroup resolves.
-	Group *Group `json:"-"`
+	// Group is set on a routing group (group/<id>), which has no provider
+	// of its own; see groups.go.
+	Group bool `json:"group,omitempty"`
 }
 
 // Catalog lists every exposed model of every ready provider, then the
-// routing groups that have a member ready.
+// routing groups.
 func Catalog() []Entry {
-	ps := All()
+	all := All()
 	var out []Entry
-	for _, p := range ps {
+	for _, p := range all {
 		if !p.Ready() {
 			continue
 		}
@@ -255,15 +255,7 @@ func Catalog() []Entry {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
 		}
 	}
-	for _, g := range listGroups(ps, load()) {
-		ms := resolveMembers(g.Members, ps)
-		if len(ms) == 0 {
-			continue
-		}
-		gc := g
-		out = append(out, Entry{ID: groupPrefix + g.ID, Model: groupPrefix + g.ID, Name: g.Name, Efforts: groupEfforts(ms), Group: &gc})
-	}
-	return out
+	return append(out, groupEntries(all)...)
 }
 
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
@@ -271,9 +263,14 @@ func Catalog() []Entry {
 // and the bare model id when exactly one provider serves it.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
-	entries := Catalog()
+	var entries []Entry // the provider models; a routing group is resolved elsewhere
+	for _, e := range Catalog() {
+		if !e.Group {
+			entries = append(entries, e)
+		}
+	}
 	for _, e := range entries {
-		if e.ID == id && e.Group == nil {
+		if e.ID == id {
 			return e.Provider, e.Model, true
 		}
 	}
@@ -284,7 +281,7 @@ func Resolve(id string) (Provider, string, bool) {
 	}
 	var hits []Entry
 	for _, e := range entries {
-		if e.Group == nil && e.Model == id {
+		if e.Model == id {
 			hits = append(hits, e)
 		}
 	}

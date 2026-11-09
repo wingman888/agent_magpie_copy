@@ -2224,7 +2224,7 @@ const ROUTINGS = [
   ["", "Smart", "The first takes requests while it has quota to spare; when it runs low, the one with the most left takes over. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again."],
   ["order", "In order", "Requests go to the first; the next takes over when the one before runs out of quota, hits a rate limit or fails."],
   ["rotate", "In turn", "Each request goes to the next one, spreading the load evenly; one that fails is passed over for a minute."],
-  ["least-used", "Least used first","Each request goes to the one used least: a subscription by the share of its allowance used, a key by the tokens it served in the last hours."],
+  ["usage", "Least used first", "Each request goes to the one used least: a subscription by the share of its allowance used, a key by the tokens it served in the last hours."],
 ];
 function renderRouting(p) {
   const cur = ROUTINGS.find(([id]) => id === (p.routing || "")) || ROUTINGS[0];

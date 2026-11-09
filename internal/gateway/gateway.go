@@ -349,54 +349,24 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	fail := func(msg string) {
-		call.Status, call.Error = 404, msg
+	p, model, ok := provider.Resolve(call.Model)
+	if !ok {
+		call.Status, call.Error = 404, "unknown model"
+		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
+		if ids := provider.IDs(); len(ids) > 0 {
+			msg += "; it has " + strings.Join(ids, ", ")
+		} else {
+			msg += "; add a provider in magpie first"
+		}
 		writeError(w, from, 404, msg)
 		finishCapture()
 		s.record(call)
+		return
 	}
-	conv := conversationID(r.Header, body)
-	tc := turnOf(from, body, conv)
-	var (
-		model string // the vendor's model id, once a candidate has it
-		pid   string // the provider the model resolved to, or "group"
-		cands []candidate
-		pl    planned
-	)
-	if gid, ok := groupRequest(call.Model); ok {
-		g, ms, found := provider.FindGroup(gid)
-		switch {
-		case !found:
-			fail(fmt.Sprintf("magpie knows no routing group %q", call.Model))
-			return
-		case len(ms) == 0:
-			fail(fmt.Sprintf("该组没有模型就绪（%s）", call.Model))
-			return
-		}
-		cands, pl = s.planGroup(g, ms, from, tc)
-		pid = "group"
-	} else {
-		p, m, ok := provider.Resolve(call.Model)
-		if !ok {
-			call.Status, call.Error = 404, "unknown model"
-			msg := fmt.Sprintf("magpie knows no model %q", call.Model)
-			if ids := provider.IDs(); len(ids) > 0 {
-				msg += "; it has " + strings.Join(ids, ", ")
-			} else {
-				msg += "; add a provider in magpie first"
-			}
-			writeError(w, from, 404, msg)
-			finishCapture()
-			s.record(call)
-			return
-		}
-		// the primary, then its fallbacks while it can't take the request and
-		// nothing has been sent yet
-		cands, pl = s.planTurn(p, m, from, tc)
-		pid, model = p.ID, m
-	}
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: pid, Order: pl.order, Left: pl.left,
-		Group: pl.group, Affinity: pl.aff})
+	// the primary, then its fallbacks while it can't take the request and
+	// nothing has been sent yet
+	cands, pl := s.plan(p, model, from)
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
@@ -417,7 +387,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			rememberSticky(conv, pl.scope, c, call.Usage.CacheRead)
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}
@@ -437,8 +406,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	if call.To != "" {
 		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
 			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status,
-			Group: viaGroup(call.Model)})
+			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 	}
 }
 
