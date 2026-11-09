@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = p.knownModels()
+		known = catalog.Provider(p.Catalog)
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -41,42 +41,6 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
-// knownModels lists the models of every catalog the provider names, in the
-// order the catalogs are listed, each model once.
-func (p Provider) knownModels() []catalog.Model {
-	var out []catalog.Model
-	seen := map[string]bool{}
-	for _, id := range catalogIDs(p.Catalog) {
-		for _, m := range catalog.Provider(id) {
-			if !seen[m.ID] {
-				seen[m.ID] = true
-				out = append(out, m)
-			}
-		}
-	}
-	return out
-}
-
-// catalogModel finds a model in a list of catalog models. An exact id wins;
-// otherwise an id with a vendor prefix ("deepseek/deepseek-chat") is looked up
-// by the part after its last "/".
-func catalogModel(models []catalog.Model, id string) (catalog.Model, bool) {
-	for _, m := range models {
-		if m.ID == id {
-			return m, true
-		}
-	}
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		rest := id[i+1:]
-		for _, m := range models {
-			if m.ID == rest {
-				return m, true
-			}
-		}
-	}
-	return catalog.Model{}, false
-}
-
 // Fetched reports when the vendor's own list was last fetched.
 func (p Provider) Fetched() (time.Time, bool) {
 	_, t, ok := catalog.Live(p.ID)
@@ -90,7 +54,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.CustomHeaders())
+		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.ExtraHeaders())
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -115,11 +79,6 @@ func (p Provider) Exposed() []catalog.Model {
 		for _, id := range ids {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
-			} else if m, ok := catalogModel(avail, id); ok {
-				// named by the catalog under another id (a vendor prefix): keep the
-				// id the user chose, which is what the vendor is sent
-				m.ID = id
-				out = append(out, m)
 			} else {
 				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
 			}
@@ -143,8 +102,10 @@ func (p Provider) Exposed() []catalog.Model {
 // plus the vendor's own list — so a model released after this binary was
 // built is handled without a code change.
 func (p Provider) RejectsTemperature(model string) bool {
-	if m, ok := catalogModel(p.Available(), model); ok && m.Temperature != nil {
-		return !*m.Temperature
+	for _, m := range p.Available() {
+		if m.ID == model && m.Temperature != nil {
+			return !*m.Temperature
+		}
 	}
 	return false
 }

@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/yetone/magpie/internal/extrahdr"
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
@@ -71,8 +69,8 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchWith is Fetch with extra request headers, sent after the auth
-// header on every list request (a custom provider's own headers).
+// FetchWith is Fetch with extra request headers, sent after the defaults and
+// the key so they can override them. Names keep the caller's casing.
 func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
@@ -133,7 +131,12 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[st
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	extrahdr.Set(req.Header, extra)
+	for name, v := range extra {
+		// Delete the canonical form first so the override replaces the
+		// default, then store the name exactly as the user typed it.
+		req.Header.Del(name)
+		req.Header[name] = []string{v}
+	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
