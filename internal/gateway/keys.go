@@ -169,9 +169,10 @@ func (s *Server) tryKeys(w http.ResponseWriter, r *http.Request, from provider.P
 	var msg string
 	for i, pl := range plans {
 		last := i == len(plans)-1
-		to = pickUpstream(pl, from, body)
+		var relay bool
+		to, relay = pickUpstream(pl, from, body)
 		hw := newHoldWriter(w, !last)
-		if to == from {
+		if relay {
 			status, msg = s.passthrough(hw, r, pl.Provider, from, model, body, u)
 		} else {
 			status, msg = s.translate(hw, r, pl.Provider, from, to, model, body, u)
@@ -187,10 +188,11 @@ func (s *Server) tryKeys(w http.ResponseWriter, r *http.Request, from provider.P
 	return to, status, msg, strings.Join(failed, ", ")
 }
 
-// pickUpstream chooses the endpoint a key's request goes to: the client's own
-// protocol when the key can take it as it is, else the first endpoint the key
-// may use (translated).
-func pickUpstream(pl provider.KeyPlan, from provider.Protocol, body []byte) provider.Protocol {
+// pickUpstream chooses the endpoint a key's request goes to, and whether it is
+// relayed as it is: the client's own protocol when the key can take it, else
+// the first endpoint the key may use, translated. A backend that only streams
+// gets a non-streaming request translated, never relayed.
+func pickUpstream(pl provider.KeyPlan, from provider.Protocol, body []byte) (provider.Protocol, bool) {
 	relay := false
 	for _, u := range pl.Upstreams {
 		relay = relay || u == from
@@ -199,7 +201,7 @@ func pickUpstream(pl provider.KeyPlan, from provider.Protocol, body []byte) prov
 		relay = false
 	}
 	if relay {
-		return from
+		return from, true
 	}
-	return pl.Upstreams[0]
+	return pl.Upstreams[0], false
 }
