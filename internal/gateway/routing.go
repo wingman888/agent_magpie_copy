@@ -124,6 +124,12 @@ func (s *Server) restAfter(c candidate, status int, header http.Header, body []b
 	d := fallbackCooldown
 	why := failure(status, body)
 	r := Rest{Why: why, Status: status, By: "cooldown"}
+	if modelRefusal(status, body) {
+		// about the model, not the provider or its key: nothing rests, and no
+		// failure is counted against it
+		r.Until = now
+		return r
+	}
 	switch why {
 	case failCredit:
 		d, r.By = creditRest, "credit"

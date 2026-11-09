@@ -65,7 +65,7 @@ func (s *Server) endpoints(p provider.Provider, model string, prefer provider.Pr
 // OpenAI's own API and Copilot's OpenAI models prefer Responses; other
 // vendors prefer Chat Completions. Anthropic Messages comes last.
 func preference(p provider.Provider, model string) []provider.Protocol {
-	if p.Host() == "api.openai.com" || (isCopilot(p) && openAIModel(model)) {
+	if (p.Host() == "api.openai.com" || isCopilot(p)) && openAIModel(model) && !openWeightsModel(model) {
 		return []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
 	}
 	return []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}
@@ -86,6 +86,15 @@ func openAIModel(model string) bool {
 		return true
 	}
 	return len(model) >= 2 && model[0] == 'o' && model[1] >= '0' && model[1] <= '9'
+}
+
+// openWeightsModel reports whether a model is one of the gpt-oss open-weights
+// models: other vendors serve them too, so they take the other vendors' order.
+func openWeightsModel(model string) bool {
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		model = model[i+1:]
+	}
+	return strings.HasPrefix(strings.ToLower(model), "gpt-oss")
 }
 
 // refusedBefore reports whether endpoint proto already refused model at p.

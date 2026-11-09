@@ -419,10 +419,17 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		if !last && hw.failed() {
 			status, header, held := hw.reply()
 			hw.discard()
+			skipped = append(skipped, c.label()+": "+call.Error)
+			if modelRefusal(status, held) {
+				// the model is not there, not the provider: nothing rests, and
+				// the endpoint that refused it is remembered by markRefused
+				try.Fail = failure(status, held)
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+				continue
+			}
 			rest := s.restAfter(c, status, header, held)
 			try.Fail, try.Rest = rest.Why, &rest
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
 		hw.release()

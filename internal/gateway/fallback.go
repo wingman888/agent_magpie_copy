@@ -339,6 +339,20 @@ func retryable(status int, body []byte) bool {
 	return status >= 500
 }
 
+// modelRefusal reports a 400 or 422 that says the model is not there for the
+// caller (or not on the endpoint asked), and not that the account is out of
+// quota or the request is at fault. Such a refusal is about the model alone:
+// the provider it came from is not at fault and does not rest for it.
+func modelRefusal(status int, body []byte) bool {
+	if status != 400 && status != 422 {
+		return false
+	}
+	if failure(status, body) != failOther {
+		return false
+	}
+	return modelWords.Match(body) || notChatModel(status, body)
+}
+
 // holdWriter keeps a reply back while another provider or another try may
 // still answer: headers and body wait until release, or are dropped for the
 // next try. Anything that cannot be taken back goes straight through. A
