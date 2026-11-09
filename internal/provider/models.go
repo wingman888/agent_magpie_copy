@@ -237,18 +237,31 @@ type Entry struct {
 	Name     string   `json:"name"`
 	Efforts  []string `json:"efforts,omitempty"`
 	Provider Provider `json:"-"`
+	// Group is set on a routing group's entry (group/<id>), which has no
+	// Provider of its own; its members are what FindGroup resolves.
+	Group *Group `json:"-"`
 }
 
-// Catalog lists every exposed model of every ready provider.
+// Catalog lists every exposed model of every ready provider, then the
+// routing groups that have a member ready.
 func Catalog() []Entry {
+	ps := All()
 	var out []Entry
-	for _, p := range All() {
+	for _, p := range ps {
 		if !p.Ready() {
 			continue
 		}
 		for _, m := range p.Exposed() {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
 		}
+	}
+	for _, g := range listGroups(ps, load()) {
+		ms := resolveMembers(g.Members, ps)
+		if len(ms) == 0 {
+			continue
+		}
+		gc := g
+		out = append(out, Entry{ID: groupPrefix + g.ID, Model: groupPrefix + g.ID, Name: g.Name, Efforts: groupEfforts(ms), Group: &gc})
 	}
 	return out
 }
@@ -260,7 +273,7 @@ func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
 	entries := Catalog()
 	for _, e := range entries {
-		if e.ID == id {
+		if e.ID == id && e.Group == nil {
 			return e.Provider, e.Model, true
 		}
 	}
@@ -271,7 +284,7 @@ func Resolve(id string) (Provider, string, bool) {
 	}
 	var hits []Entry
 	for _, e := range entries {
-		if e.Model == id {
+		if e.Group == nil && e.Model == id {
 			hits = append(hits, e)
 		}
 	}
