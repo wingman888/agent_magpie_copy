@@ -35,7 +35,13 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key"`              // the current API key, as typed by the user
+
+	// KeyName names the current key, and KeyProtocol limits it to one
+	// protocol's endpoint ("" = any). Keys holds the other keys, in order.
+	KeyName     string   `json:"keyName,omitempty"`
+	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
+	Keys        []SubKey `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -197,10 +203,14 @@ func Save(p Provider) error {
 	if strings.HasPrefix(p.Icon, "file:") && IconFile(strings.TrimPrefix(p.Icon, "file:")) == "" {
 		return fmt.Errorf("%s has an invalid icon %q", p.Name, p.Icon)
 	}
+	if err := checkKeys(p); err != nil {
+		return err
+	}
 	f := load()
 	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
+			carryKeys(&p, f.Providers[i])
 			f.Providers[i] = p
 			replaced = true
 			break
@@ -268,6 +278,7 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Headers = cleanHeaders(p.Headers)
+	p = cleanKeys(p)
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
