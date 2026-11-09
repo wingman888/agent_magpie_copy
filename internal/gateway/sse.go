@@ -7,7 +7,22 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/yetone/dial/internal/provider"
 )
+
+// upstreamStream reads an upstream reply's body and says whether it is an
+// event stream. A reply without Content-Type (the Codex backend does this)
+// is judged by its first bytes, which are only peeked, not consumed.
+func upstreamStream(res *http.Response) (io.Reader, bool) {
+	br := bufio.NewReader(res.Body)
+	ct := res.Header.Get("Content-Type")
+	var head []byte
+	if ct == "" {
+		head, _ = br.Peek(6)
+	}
+	return br, provider.IsEventStream(ct, head)
+}
 
 // readSSE walks a server-sent event stream, calling fn with each event's
 // name and data. Data lines of one event are joined with newlines.
