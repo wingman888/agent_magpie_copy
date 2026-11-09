@@ -197,17 +197,13 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		icon, err := provider.IconArg(rest[1])
-		if err != nil {
+		if err := provider.SetIcon(p.ID, rest[1]); err != nil {
 			return err
 		}
-		if err := provider.SetIcon(p.ID, icon); err != nil {
-			return err
-		}
-		if icon == "" {
-			fmt.Println(green.Render("✓"), p.Name, "uses the generic icon")
+		if saved, err := provider.Find(p.ID); err == nil && saved.Icon != "" {
+			fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(saved.Icon))
 		} else {
-			fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(icon))
+			fmt.Println(green.Render("✓"), p.Name, "uses the generic icon")
 		}
 		return nil
 	case "fallback":

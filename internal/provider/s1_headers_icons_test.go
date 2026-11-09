@@ -267,15 +267,12 @@ func TestS1SetIconOnlyForCustomProviders(t *testing.T) {
 	if err := os.WriteFile(img, s1PNG("s1-picked"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	icon, err := IconArg(img)
-	if err != nil {
+	if err := SetIcon("s1-relay", img); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetIcon("s1-relay", icon); err != nil {
-		t.Fatal(err)
-	}
-	if p, _ := Find("s1-relay"); p.Icon != icon {
-		t.Fatalf("icon %q, want %q", p.Icon, icon)
+	p, _ := Find("s1-relay")
+	if !strings.HasPrefix(p.Icon, "file:") || IconFile(strings.TrimPrefix(p.Icon, "file:")) == "" {
+		t.Fatalf("icon %q is not a stored reference", p.Icon)
 	}
 	if err := SetIcon("s1-relay", ""); err != nil {
 		t.Fatal(err)

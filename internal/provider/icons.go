@@ -157,15 +157,20 @@ func IconArg(arg string) (string, error) {
 	return arg, nil
 }
 
-// SetIcon sets a custom provider's icon: a stored image, a built-in name, or
-// "" for the generic one. Presets and signed-in accounts keep their own.
-func SetIcon(id, icon string) error {
+// SetIcon sets a custom provider's icon from what the user typed: an image
+// file (stored), a built-in name, or "" for the generic one. Presets and
+// signed-in accounts keep their own, and are refused before anything is stored.
+func SetIcon(id, arg string) error {
 	p, err := Find(id)
 	if err != nil {
 		return err
 	}
 	if p.Account != nil || p.Preset != "" {
 		return fmt.Errorf("仅自定义供应商可设置图标：%s", p.Name)
+	}
+	icon, err := IconArg(arg)
+	if err != nil {
+		return err
 	}
 	p.Icon = icon
 	return Save(*p)
