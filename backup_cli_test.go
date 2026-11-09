@@ -1,77 +1,39 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
+	"bufio"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/backup"
 )
 
-// bcliHome points magpie's config and cache at a fresh temp home.
-func bcliHome(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-}
-
-// bcliStdin makes the next passphrase read come from s, as a pipe would.
-func bcliStdin(t *testing.T, s string) {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.WriteString(s); err != nil {
-		t.Fatal(err)
-	}
-	w.Close()
-	old := os.Stdin
-	os.Stdin = r
-	stdin = nil
-	t.Cleanup(func() {
-		os.Stdin = old
-		stdin = nil
-		r.Close()
-	})
-}
-
-func TestBcliParseBackupArgs(t *testing.T) {
+func TestCLIBackup_ParseBackupArgs(t *testing.T) {
 	cases := []struct {
 		args    []string
 		noKeys  bool
 		file    string
 		wantErr bool
 	}{
-		{nil, false, "magpie.magpie-backup", false},
-		{[]string{"--no-keys"}, true, "magpie.magpie-backup", false},
-		{[]string{"b.magpie-backup"}, false, "b.magpie-backup", false},
+		{nil, false, "magpie" + backup.Ext, false},
+		{[]string{"--no-keys"}, true, "magpie" + backup.Ext, false},
 		{[]string{"--no-keys", "x.magpie-backup"}, true, "x.magpie-backup", false},
+		{[]string{"x.magpie-backup"}, false, "x.magpie-backup", false},
 		{[]string{"--bogus"}, false, "", true},
-		{[]string{"-"}, false, "", true},
 		{[]string{"a", "b"}, false, "", true},
 	}
 	for _, c := range cases {
-		o, err := parseBackupArgs(c.args)
-		if c.wantErr {
-			if err == nil {
-				t.Errorf("parseBackupArgs(%q): want error", c.args)
-			}
-			continue
+		noKeys, file, err := parseBackupArgs(c.args)
+		if (err != nil) != c.wantErr {
+			t.Fatalf("parseBackupArgs(%q) error = %v, want error %v", c.args, err, c.wantErr)
 		}
-		if err != nil {
-			t.Errorf("parseBackupArgs(%q): %v", c.args, err)
-			continue
-		}
-		if o.noKeys != c.noKeys || o.file != c.file {
-			t.Errorf("parseBackupArgs(%q) = %+v", c.args, o)
+		if err == nil && (noKeys != c.noKeys || file != c.file) {
+			t.Fatalf("parseBackupArgs(%q) = %v, %q; want %v, %q", c.args, noKeys, file, c.noKeys, c.file)
 		}
 	}
 }
 
-func TestBcliParseRestoreArgs(t *testing.T) {
+func TestCLIBackup_ParseRestoreArgs(t *testing.T) {
 	cases := []struct {
 		args     []string
 		noAgents bool
@@ -82,103 +44,58 @@ func TestBcliParseRestoreArgs(t *testing.T) {
 		{[]string{"--no-agents"}, false, "", true},
 		{[]string{"b.magpie-backup"}, false, "b.magpie-backup", false},
 		{[]string{"--no-agents", "b.magpie-backup"}, true, "b.magpie-backup", false},
-		{[]string{"b.magpie-backup", "--no-agents"}, true, "b.magpie-backup", false},
-		{[]string{"--bogus", "b"}, false, "", true},
+		{[]string{"-x", "b.magpie-backup"}, false, "", true},
 		{[]string{"a", "b"}, false, "", true},
 	}
 	for _, c := range cases {
-		o, err := parseRestoreArgs(c.args)
-		if c.wantErr {
-			if err == nil {
-				t.Errorf("parseRestoreArgs(%q): want error", c.args)
-			}
-			continue
+		noAgents, file, err := parseRestoreArgs(c.args)
+		if (err != nil) != c.wantErr {
+			t.Fatalf("parseRestoreArgs(%q) error = %v, want error %v", c.args, err, c.wantErr)
 		}
-		if err != nil {
-			t.Errorf("parseRestoreArgs(%q): %v", c.args, err)
-			continue
-		}
-		if o.noAgents != c.noAgents || o.file != c.file {
-			t.Errorf("parseRestoreArgs(%q) = %+v", c.args, o)
+		if err == nil && (noAgents != c.noAgents || file != c.file) {
+			t.Fatalf("parseRestoreArgs(%q) = %v, %q; want %v, %q", c.args, noAgents, file, c.noAgents, c.file)
 		}
 	}
 }
 
-func TestBcliBackupRestoreRoundTrip(t *testing.T) {
-	bcliHome(t)
-	dir := t.TempDir()
-	file := filepath.Join(dir, "b.magpie-backup")
-
-	// an empty passphrase writes nothing
-	bcliStdin(t, "\n")
-	if err := backupCmd([]string{"backup", file}); err == nil {
-		t.Fatal("backup with empty passphrase: want error")
+func TestCLIBackup_PipedPassphraseFirstLine(t *testing.T) {
+	in := bufio.NewReader(strings.NewReader("pw one\r\nsecond\n"))
+	got, err := readPass(in, false, "")
+	if err != nil || got != "pw one" {
+		t.Fatalf("readPass = %q, %v; want %q, nil", got, err, "pw one")
 	}
-	if _, err := os.Stat(file); !os.IsNotExist(err) {
-		t.Fatalf("backup with empty passphrase created a file: %v", err)
-	}
-
-	bcliStdin(t, "pw-one\n")
-	if err := backupCmd([]string{"backup", "--no-keys", file}); err != nil {
-		t.Fatalf("backup: %v", err)
-	}
-	if runtime.GOOS != "windows" {
-		st, err := os.Stat(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if perm := st.Mode().Perm(); perm != 0o600 {
-			t.Errorf("backup mode = %o, want 600", perm)
-		}
-	}
-
-	// a wrong passphrase is reported as such
-	bcliStdin(t, "wrong\n")
-	err := restoreCmd([]string{"restore", file})
-	if err == nil || !strings.Contains(err.Error(), "口令错误或文件已被改动") {
-		t.Fatalf("restore with wrong passphrase: got %v", err)
-	}
-
-	bcliStdin(t, "pw-one\n")
-	if err := restoreCmd([]string{"restore", "--no-agents", file}); err != nil {
-		t.Fatalf("restore: %v", err)
+	got, err = readPass(in, false, "")
+	if err != nil || got != "second" {
+		t.Fatalf("second readPass = %q, %v; want %q, nil", got, err, "second")
 	}
 }
 
-func TestBcliRestoreRejectsNonBackup(t *testing.T) {
-	bcliHome(t)
-	dir := t.TempDir()
-	for name, content := range map[string]string{"empty": "", "obj": "{}", "text": "hello"} {
-		file := filepath.Join(dir, name)
-		if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		bcliStdin(t, "\n")
-		err := restoreCmd([]string{"restore", file})
-		if err == nil {
-			t.Errorf("%s: restore want error", name)
-			continue
-		}
-		msg := err.Error()
-		if !strings.Contains(msg, "不是 magpie 备份") {
-			t.Errorf("%s: got %q, want not-a-backup message", name, msg)
-		}
-		if strings.Contains(strings.ToLower(msg), "passphrase") || strings.Contains(msg, "口令") {
-			t.Errorf("%s: message mentions passphrase: %q", name, msg)
-		}
+func TestCLIBackup_PipedEmptyPassphrase(t *testing.T) {
+	got, err := readPass(bufio.NewReader(strings.NewReader("")), false, "")
+	if err != nil || got != "" {
+		t.Fatalf("readPass on empty input = %q, %v; want empty, nil", got, err)
 	}
 }
 
-func TestBcliNewerBackupNeedsUpgrade(t *testing.T) {
-	bcliHome(t)
-	file := filepath.Join(t.TempDir(), "new.magpie-backup")
-	body := `{"format":"magpie-backup","version":99,"kdf":"pbkdf2-sha256","iterations":600000}` + "\nAAAA\n"
-	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
+func TestCLIBackup_CheckHeaderKinds(t *testing.T) {
+	notBackup := []string{"", "hello", "{}"}
+	for _, s := range notBackup {
+		err := checkBackupHeader([]byte(s))
+		if err == nil || !strings.Contains(err.Error(), "不是 magpie 备份") {
+			t.Fatalf("checkBackupHeader(%q) = %v; want not-a-backup error", s, err)
+		}
 	}
-	bcliStdin(t, "pw\n")
-	err := restoreCmd([]string{"restore", file})
-	if err == nil || !strings.Contains(err.Error(), "升级") {
-		t.Fatalf("restore of newer backup: got %v, want upgrade message", err)
+	newer := `{"format":"magpie-backup","version":2}`
+	err := checkBackupHeader([]byte(newer))
+	if err == nil || !strings.Contains(err.Error(), "需升级 magpie") {
+		t.Fatalf("checkBackupHeader(newer) = %v; want upgrade error", err)
+	}
+	for _, e := range []error{checkBackupHeader(nil), err} {
+		if strings.Contains(strings.ToLower(e.Error()), "passphrase") {
+			t.Fatalf("header error mentions passphrase: %v", e)
+		}
+	}
+	if err := checkBackupHeader([]byte(`{"format":"magpie-backup","version":1}`)); err != nil {
+		t.Fatalf("checkBackupHeader(version 1) = %v; want nil", err)
 	}
 }

@@ -52,14 +52,14 @@ const usage = `magpie — one place to pick every agent's model
   magpie accounts add <agent>     sign in to one more Claude or ChatGPT subscription
   magpie accounts switch <agent> <email>   sign the agent in to another of them
 
+  magpie backup [--no-keys] [file]        save everything to one file sealed with a passphrase
+  magpie restore [--no-agents] <file>     restore a backup file on this machine
+
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
   magpie sync                     refresh the model catalog and vendor model lists
   magpie agents                   list every supported agent
   magpie update [check]           install the newest release (check: only say if there is one)
-
-  magpie backup [--no-keys] [file]     export providers, keys, settings, profiles and agent models to one encrypted file
-  magpie restore [--no-agents] <file>  restore a file made by magpie backup (asks for its passphrase)
 
 agents: claude (cc), codex, gemini, opencode (oc), pi, goose, cursor, copilot, crush
 `
@@ -145,14 +145,14 @@ func run(args []string) error {
 		return serve()
 	case "accounts", "account":
 		return accountsCmd(args)
+	case "backup":
+		return backupCmd(args[1:])
+	case "restore":
+		return restoreCmd(args[1:])
 	case "usage":
 		return usageCmd(args)
 	case "update":
 		return updateCmd(args)
-	case "backup":
-		return backupCmd(args)
-	case "restore":
-		return restoreCmd(args)
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 		return claudebridge.RunMCP(args[1:])
 	}
