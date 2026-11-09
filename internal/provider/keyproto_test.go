@@ -86,6 +86,9 @@ func TestKeyProtocolLimitsFollowKeys(t *testing.T) {
 	}
 
 	// removing the current key hands the lead to the next one, with its limit
+	if err := SetKeyOn("relayp", claudeID, true); err != nil {
+		t.Fatal(err)
+	}
 	if err := RemoveKey("relayp", firstID); err != nil {
 		t.Fatal(err)
 	}
