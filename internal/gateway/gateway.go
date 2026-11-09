@@ -367,11 +367,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 		return
 	}
-	call.To, call.Status, call.Error, call.Fallback = s.route(w, r, p, from, model, body, &call.Usage)
+	res := s.routeAll(w, r, from, body, s.targets(p, model), &call.Usage)
+	// the call belongs to the provider and model that finished it
+	call.Provider, call.To, call.Status, call.Error, call.Fallback = res.end.p.ID, res.to, res.status, res.text, res.chain
+	model = res.end.model
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
@@ -473,51 +476,6 @@ func retryable(status int, msg string) bool {
 		}
 	}
 	return false
-}
-
-// route sends a request through the provider's keys, best first. A failure
-// that retryable accepts moves the request to the next key, as long as
-// nothing has been written to the client yet. The last candidate's failure
-// is the answer. It returns the protocol that answered, the status, the
-// error text and the candidates that failed before (for the call record).
-func (s *Server) route(w http.ResponseWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, u *Usage) (provider.Protocol, int, string, string) {
-	if len(p.Speaks()) == 0 {
-		msg := p.Name + " has no endpoint configured"
-		return from, writeError(w, from, 502, msg), msg, ""
-	}
-	choices := s.restedFirst(p.ID, p.KeyChoices(model, from))
-	if len(choices) == 0 {
-		msg := p.Name + " has no key for this endpoint"
-		return from, writeError(w, from, 502, msg), msg, ""
-	}
-	var failed []string
-	for i, c := range choices {
-		pc := p.Using(c)
-		up := s.open(r, pc, from, model, body)
-		if up.bad != "" {
-			return from, writeError(w, from, 400, up.bad), up.bad, strings.Join(failed, "; ")
-		}
-		code, text := 0, ""
-		switch {
-		case up.err != nil:
-			code, text = 502, p.Name+": "+up.err.Error()
-		case up.res.StatusCode >= 400:
-			b, _ := io.ReadAll(io.LimitReader(up.res.Body, 1<<20))
-			up.res.Body.Close()
-			code, text = up.res.StatusCode, p.Name+": "+provider.APIError(b, up.res.Status)
-		}
-		if code == 0 {
-			code, text = s.finish(w, up, p.Name, from, u)
-			return up.to, code, text, strings.Join(failed, "; ")
-		}
-		last := i == len(choices)-1
-		if last || r.Context().Err() != nil || !retryable(code, text) {
-			return up.to, writeError(w, from, code, text), text, strings.Join(failed, "; ")
-		}
-		s.rest(p.ID, c.Ref)
-		failed = append(failed, candidateName(p, c)+": "+text)
-	}
-	return from, 502, "no key tried", strings.Join(failed, "; ")
 }
 
 // upstream is a provider's answer, read as far as the status line, before

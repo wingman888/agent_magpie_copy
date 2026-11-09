@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = catalog.Provider(p.Catalog)
+		known = p.catalogModels()
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -36,6 +36,23 @@ func (p Provider) Available() []catalog.Model {
 	for _, m := range known {
 		if !strings.Contains(m.ID, "-exp") && !strings.Contains(m.ID, "preview") {
 			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// catalogModels is the models.dev list of every catalog the provider names,
+// in the order they are named. A model listed by two catalogs keeps the
+// entry of the first.
+func (p Provider) catalogModels() []catalog.Model {
+	var out []catalog.Model
+	seen := map[string]bool{}
+	for _, id := range CatalogIDs(p.Catalog) {
+		for _, m := range catalog.Provider(id) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out = append(out, m)
+			}
 		}
 	}
 	return out
@@ -80,7 +97,8 @@ func (p Provider) Exposed() []catalog.Model {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
 			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
+				// a listed id may name its catalog model with a prefix ("deepseek/deepseek-chat")
+				out = append(out, catalog.Decorate([]catalog.Model{{ID: id, Name: id}}, p.catalogModels())[0])
 			}
 		}
 		return out

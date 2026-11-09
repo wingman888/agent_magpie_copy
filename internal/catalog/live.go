@@ -186,7 +186,9 @@ type liveModel struct {
 }
 
 // Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order.
+// catalog's entry for the same id, keeping the live order. A gateway may
+// prefix its ids with the vendor ("deepseek/deepseek-chat"); the part after
+// the last slash is then looked up. An id that matches nothing is kept as is.
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
@@ -194,7 +196,13 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := byID[m.ID]; ok {
+		k, ok := byID[m.ID]
+		if !ok {
+			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
+				k, ok = byID[m.ID[i+1:]]
+			}
+		}
+		if ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

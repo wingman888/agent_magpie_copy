@@ -326,16 +326,21 @@ func claudeIdentity() (user, plan string, signedOut bool) {
 	return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 }
 
-func claudeAccount() (Provider, bool) {
-	c, _, ok := claudeCredential()
+// claudeIdentityOf says who Claude Code is signed in as; a var so tests can
+// stand in for `claude auth status`.
+var claudeIdentityOf = func() (user, plan string, signedOut bool) { return claudeIdentity() }
+
+// claudeLiveIdentity is the account Claude Code is signed in to right now.
+func claudeLiveIdentity() (user, plan string, c claudeCredentials, ok bool) {
+	c, _, ok = claudeCredential()
 	if !ok {
-		return Provider{}, false
+		return "", "", c, false
 	}
-	user, statusPlan, signedOut := claudeIdentity()
+	user, statusPlan, signedOut := claudeIdentityOf()
 	if signedOut {
-		return Provider{}, false
+		return "", "", c, false
 	}
-	plan := c.OAuth.SubscriptionType
+	plan = c.OAuth.SubscriptionType
 	if statusPlan != "" {
 		plan = statusPlan
 	}
@@ -345,35 +350,54 @@ func claudeAccount() (Provider, bool) {
 			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
 		}
 	}
+	return user, plan, c, true
+}
+
+func claudeAccount() (Provider, bool) {
+	user, plan, _, ok := claudeLiveIdentity()
+	if !ok {
+		return Provider{}, false
+	}
 	acct := &Account{Agent: "claude", User: user, Plan: plan}
+	return claudeProvider(acct, "claude", claudeToken), true
+}
+
+// claudeProvider is Claude Code signed in with whichever token source it is
+// given: the live login, or an account magpie keeps for itself.
+func claudeProvider(acct *Account, id string, token func(context.Context) (string, error)) Provider {
 	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
-		tok, err := claudeToken(ctx)
+		tok, err := token(ctx)
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("User-Agent", claudeUserAgent())
-		req.Header.Set("X-Claude-Code-Session-Id", claudeSessionID())
-		req.Header.Set("anthropic-beta", claudeBetaHeader(claudeModelOf(body)))
-		req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-		req.Header.Set("x-app", "cli")
-		req.Header.Set("x-client-request-id", randomUUID())
-		for k, v := range claudeStainlessHeaders() {
-			req.Header.Set(k, v)
-		}
+		claudeSignRequest(req, tok, body)
 		return nil
 	}
 	acct.body = claudeBody
 	acct.models = func() []catalog.Model { return catalog.Provider("anthropic") }
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := claudeModels(ctx)
+		ms, err := claudeModelsFrom(ctx, token)
 		if err != nil {
 			return nil, err
 		}
 		return ms, catalog.SaveLive("claude", claudeBase, ms)
 	}
-	return Provider{ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Anthropic: claudeBase,
-		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}, true
+	return Provider{ID: id, Name: "Claude Code", Icon: "claudecode-color", Anthropic: claudeBase,
+		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}
+}
+
+// claudeSignRequest adds the headers Claude Code sends with its own tokens.
+func claudeSignRequest(req *http.Request, tok string, body []byte) {
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("User-Agent", claudeUserAgent())
+	req.Header.Set("X-Claude-Code-Session-Id", claudeSessionID())
+	req.Header.Set("anthropic-beta", claudeBetaHeader(claudeModelOf(body)))
+	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+	req.Header.Set("x-app", "cli")
+	req.Header.Set("x-client-request-id", randomUUID())
+	for k, v := range claudeStainlessHeaders() {
+		req.Header.Set(k, v)
+	}
 }
 
 // claudeModels asks Anthropic's Models API, authenticated with the account's
@@ -381,7 +405,12 @@ func claudeAccount() (Provider, bool) {
 // Nothing here is compiled in: a new model shows up the moment Anthropic
 // lists it (which is what the refresh button runs).
 func claudeModels(ctx context.Context) ([]catalog.Model, error) {
-	tok, err := claudeToken(ctx)
+	return claudeModelsFrom(ctx, claudeToken)
+}
+
+// claudeModelsFrom lists the models with the token token returns.
+func claudeModelsFrom(ctx context.Context, token func(context.Context) (string, error)) ([]catalog.Model, error) {
+	tok, err := token(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -471,16 +500,29 @@ func claudeToken(ctx context.Context) (string, error) {
 	if c.OAuth.RefreshToken == "" {
 		return "", errors.New("Claude Code OAuth token expired; run claude auth login")
 	}
+	fresh, err := claudeRefresh(ctx, c)
+	if err != nil {
+		return "", err
+	}
+	if err := saveClaudeCredential(loc, fresh); err != nil {
+		return "", err
+	}
+	return fresh.OAuth.AccessToken, nil
+}
+
+// claudeRefresh trades c's refresh token for a new access token. The rotated
+// pair comes back in the returned credentials; nothing is saved here.
+func claudeRefresh(ctx context.Context, c claudeCredentials) (claudeCredentials, error) {
 	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": c.OAuth.RefreshToken,
 		"client_id": claudeClientID})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeTokenURL, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return c, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", errors.New("Claude Code token refresh: " + err.Error())
+		return c, errors.New("Claude Code token refresh: " + err.Error())
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -490,7 +532,7 @@ func claudeToken(ctx context.Context) (string, error) {
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if res.StatusCode != http.StatusOK || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return "", errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
+		return c, errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
 	}
 	c.OAuth.AccessToken = fresh.AccessToken
 	if fresh.RefreshToken != "" {
@@ -499,10 +541,7 @@ func claudeToken(ctx context.Context) (string, error) {
 	if fresh.ExpiresIn > 0 {
 		c.OAuth.ExpiresAt = time.Now().Add(time.Duration(fresh.ExpiresIn) * time.Second).UnixMilli()
 	}
-	if err := saveClaudeCredential(loc, c); err != nil {
-		return "", err
-	}
-	return fresh.AccessToken, nil
+	return c, nil
 }
 
 // Accounts lists the signed-in agents as providers.
@@ -512,13 +551,18 @@ func Accounts() []Provider {
 	if cfg == "" {
 		cfg = filepath.Join(home, ".config")
 	}
+	noteLiveAccounts()
 	var out []Provider
+	// each agent's own login first, then the other accounts magpie keeps
+	// signed in beside it, in the order they were remembered
 	if p, ok := claudeAccount(); ok {
 		out = append(out, p)
 	}
+	out = append(out, extraAccounts("claude")...)
 	if p, ok := codexAccount(home); ok {
 		out = append(out, p)
 	}
+	out = append(out, extraAccounts("codex")...)
 	if p, ok := copilotAccount(cfg); ok {
 		out = append(out, p)
 	}
@@ -588,7 +632,7 @@ type codexAuth struct {
 }
 
 func codexAccount(home string) (Provider, bool) {
-	path := filepath.Join(home, ".codex", "auth.json")
+	path := codexAuthPath(home)
 	var a codexAuth
 	if !readJSON(path, &a) || a.Tokens.AccessToken == "" || a.AuthMode == "apikey" {
 		return Provider{}, false
@@ -599,6 +643,16 @@ func codexAccount(home string) (Provider, bool) {
 	if acct.User == "" {
 		acct.User = "ChatGPT"
 	}
+	return codexProvider(acct, "codex", path), true
+}
+
+// codexAuthPath is the auth file Codex CLI keeps under home.
+func codexAuthPath(home string) string {
+	return filepath.Join(home, ".codex", "auth.json")
+}
+
+// codexProvider is Codex signed in with the tokens kept in the auth file at path.
+func codexProvider(acct *Account, id, path string) Provider {
 	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
 		tok, accountID, err := codexToken(ctx, path)
 		if err != nil {
@@ -615,7 +669,7 @@ func codexAccount(home string) (Provider, bool) {
 	acct.body = codexBody
 	acct.models = catalog.Codex
 	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
+	return Provider{ID: id, Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI

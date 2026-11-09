@@ -227,6 +227,10 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
+			// the form does not edit the fallback list; keep the stored one
+			if in.Fallback == nil && old != nil {
+				in.Fallback = old.Fallback
+			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
 				return

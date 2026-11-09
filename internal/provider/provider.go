@@ -62,9 +62,16 @@ type Provider struct {
 	// user's casing. Presets and signed-in accounts ignore them.
 	Headers map[string]string `json:"headers,omitempty"`
 
-	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
+	// Catalog names the models.dev catalogs, comma-separated and searched in
+	// order, for names and reasoning levels (see CatalogIDs).
+	Catalog string `json:"catalog,omitempty"`
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
+
+	// Fallback lists "provider/model" pairs to try, in order, when this
+	// provider cannot answer (see gateway fallback routing). Kept for signed-in
+	// accounts too.
+	Fallback []string `json:"fallback,omitempty"`
 
 	// Hidden is set on an account the user removed from magpie; the
 	// agent stays signed in, magpie just leaves it alone.
@@ -131,6 +138,7 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -202,7 +210,7 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -293,7 +301,9 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
 	p.Headers = cleanHeaders(p.Headers)
+	p.Catalog = strings.Join(CatalogIDs(p.Catalog), ",")
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -309,6 +319,30 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
+}
+
+// CatalogIDs splits a catalog field ("openai,deepseek") into its models.dev
+// ids, trimmed, lowercased and without repeats, in the order they were named.
+func CatalogIDs(s string) []string {
+	var out []string
+	for _, id := range strings.Split(s, ",") {
+		if id = strings.ToLower(strings.TrimSpace(id)); id != "" && !contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// SetFallback replaces a provider's fallback list. Entries are kept as given
+// (an unreadable one is skipped when a request needs it), but blanks and
+// repeats go. An empty list clears it.
+func SetFallback(id string, list []string) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	p.Fallback = cleanList(list)
+	return Save(*p)
 }
 
 func cleanList(xs []string) []string {

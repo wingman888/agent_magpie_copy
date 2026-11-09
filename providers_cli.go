@@ -32,6 +32,8 @@ const providerUsage = `usage:
   magpie provider key <id> protocol <key> chat|responses|anthropic|any   limit a key to one protocol
                                           (<key> is a key's fingerprint or its name)
   magpie provider icon <id> <file|name|"">  set a custom vendor's icon: an image file, a built-in icon name, or "" for the generic one
+  magpie provider fallback <id> [provider/model …]   show or set the fallback models, tried in order
+                                          when this provider is out of quota, rate limited or down ("-" clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
@@ -184,6 +186,8 @@ func providerCmd(args []string) error {
 		return keyCmd(rest)
 	case "icon":
 		return iconCmd(rest)
+	case "fallback":
+		return fallbackCmd(rest)
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -513,6 +517,9 @@ func showProvider(p provider.Provider) error {
 		kv("icon", p.Icon)
 	}
 	kv("catalog", p.Catalog)
+	if len(p.Fallback) > 0 {
+		kv("fallback", fallbackLabel(p.Fallback))
+	}
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
 	ms := p.Exposed()
@@ -646,6 +653,55 @@ func iconCmd(rest []string) error {
 	}
 	fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(label))
 	return nil
+}
+
+// fallbackCmd handles `magpie provider fallback <id> [provider/model …]`:
+// with no list it shows the fallback models; with one it replaces them.
+func fallbackCmd(rest []string) error {
+	if len(rest) < 1 {
+		return fmt.Errorf("magpie provider fallback <id> [provider/model …]")
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	if len(rest) == 1 {
+		showFallback(*p)
+		return nil
+	}
+	list := strings.FieldsFunc(strings.Join(rest[1:], " "), func(r rune) bool { return r == ',' || r == ' ' })
+	if len(list) == 1 && (list[0] == "-" || list[0] == "none") {
+		list = nil
+	}
+	if err := provider.SetFallback(p.ID, list); err != nil {
+		return err
+	}
+	p2, err := provider.Find(p.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), p.Name, "fallback", muted.Render(fallbackLabel(p2.Fallback)))
+	return nil
+}
+
+// fallbackLabel lists fallback models in order, or says there are none.
+func fallbackLabel(fs []string) string {
+	if len(fs) == 0 {
+		return "none"
+	}
+	return strings.Join(fs, " → ")
+}
+
+// showFallback prints a provider's fallback list, one model per line.
+func showFallback(p provider.Provider) {
+	if len(p.Fallback) == 0 {
+		fmt.Println(muted.Render(p.Name + " has no fallback · magpie provider fallback " + p.ID + " <provider/model …>"))
+		return
+	}
+	fmt.Println(" ", bold.Render(p.Name), muted.Render("fallback, in order"))
+	for i, f := range p.Fallback {
+		fmt.Printf("  %d. %s\n", i+1, f)
+	}
 }
 
 func ago(t time.Time) string {
