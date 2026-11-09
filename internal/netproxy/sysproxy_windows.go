@@ -1,27 +1,24 @@
+//go:build windows
+
 package netproxy
 
-import (
-	"context"
-	"os/exec"
-	"syscall"
-	"time"
-)
+import "golang.org/x/sys/windows/registry"
 
-// createNoWindow is CREATE_NO_WINDOW, so the query does not flash a console.
-const createNoWindow = 0x08000000
-
-// platformSystemProxy reads the manual proxy under "Internet Options" from the
-// current user's registry key with `reg query`. Any failure means there is no
-// system proxy.
-func platformSystemProxy() systemConfig {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "reg", "query", `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-	out, err := cmd.Output()
+// readOSProxy reads the manual proxy from "Internet Options". When the
+// proxy is not enabled, or the registry cannot be read, there is no system proxy.
+func readOSProxy() sysProxy {
+	k, err := registry.OpenKey(registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.QUERY_VALUE)
 	if err != nil {
-		return systemConfig{}
+		return sysProxy{}
 	}
-	m := parseRegQuery(string(out))
-	return parseWindowsProxy(m["ProxyEnable"], m["ProxyServer"], m["ProxyOverride"])
+	defer k.Close()
+
+	enable, _, err := k.GetIntegerValue("ProxyEnable")
+	if err != nil || enable == 0 {
+		return sysProxy{}
+	}
+	server, _, _ := k.GetStringValue("ProxyServer")
+	override, _, _ := k.GetStringValue("ProxyOverride")
+	return parseWindowsProxy(server, override)
 }

@@ -3,172 +3,240 @@ package netproxy
 import (
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/settings"
 )
 
-var netproxyEnvNames = []string{
-	"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
-	"ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "REQUEST_METHOD",
-}
-
-// netproxySetup isolates the settings file, the environment, and the system
-// proxy reading. settingsProxy "" leaves the settings file absent.
-func netproxySetup(t *testing.T, settingsProxy string, env map[string]string, sys systemConfig) {
+// npTestSetup replaces the settings, environment and OS proxy readings for
+// the duration of one test. The cached OS reading is dropped before and after.
+func npTestSetup(t *testing.T, s settings.Settings, env map[string]string, sys sysProxy) *int {
 	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	for _, n := range netproxyEnvNames {
-		t.Setenv(n, "")
-	}
-	for k, v := range env {
-		t.Setenv(k, v)
-	}
-	if settingsProxy != "" {
-		if err := settings.Save(settings.Settings{Proxy: settingsProxy}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	old := loadSystem
-	loadSystem = func() systemConfig { return sys }
-	resetSystemCache()
+	prevSettings, prevEnv, prevSys := loadSettings, envGet, readSystemProxy
+	calls := 0
+	loadSettings = func() settings.Settings { return s }
+	envGet = func(k string) string { return env[k] }
+	readSystemProxy = func() sysProxy { calls++; return sys }
+	npTestResetCache()
 	t.Cleanup(func() {
-		loadSystem = old
-		resetSystemCache()
+		loadSettings, envGet, readSystemProxy = prevSettings, prevEnv, prevSys
+		npTestResetCache()
 	})
+	return &calls
 }
 
-func netproxyMust(t *testing.T, raw string) *url.URL {
+func npTestResetCache() {
+	sysMu.Lock()
+	sysAt = time.Time{}
+	sysMu.Unlock()
+}
+
+func npTestURL(t *testing.T, s string) *url.URL {
 	t.Helper()
-	u, err := url.Parse(raw)
+	u, err := url.Parse(s)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return u
 }
 
-func netproxyWantProxy(t *testing.T, target, want string) {
+func npTestWant(t *testing.T, got *url.URL, want string) {
 	t.Helper()
-	got, err := For(netproxyMust(t, target))
-	if err != nil {
-		t.Fatalf("For(%s) error: %v", target, err)
-	}
 	if want == "" {
 		if got != nil {
-			t.Fatalf("For(%s) = %s, want direct", target, got)
+			t.Fatalf("expected direct, got %s", got)
 		}
 		return
 	}
-	if got == nil || got.String() != want {
-		t.Fatalf("For(%s) = %v, want %s", target, got, want)
+	if got == nil {
+		t.Fatalf("expected proxy %s, got direct", want)
+	}
+	if got.String() != want {
+		t.Fatalf("proxy = %s, want %s", got, want)
 	}
 }
 
-func netproxyWantSource(t *testing.T, proxy, source, wantProxy, wantSource string) {
+func npTestFor(t *testing.T, rawURL string) *url.URL {
 	t.Helper()
-	if source != wantSource || proxy != wantProxy {
-		t.Fatalf("Describe() = (%q, %q), want (%q, %q)", proxy, source, wantProxy, wantSource)
+	p, err := For(npTestURL(t, rawURL))
+	if err != nil {
+		t.Fatalf("For(%s) error: %v", rawURL, err)
+	}
+	return p
+}
+
+func npTestDescribe(t *testing.T, wantProxy, wantSource string) {
+	t.Helper()
+	p, src := Describe()
+	if p != wantProxy || src != wantSource {
+		t.Fatalf("Describe() = (%q, %q), want (%q, %q)", p, src, wantProxy, wantSource)
 	}
 }
 
-var netproxySystem7890 = systemConfig{proxy: &url.URL{Scheme: "http", Host: "127.0.0.1:7890"}}
-
-// Acceptance 1: system proxy is used when settings and env are empty.
+// Acceptance 1: system proxy used when nothing else is set.
 func TestNetproxySystemProxyUsed(t *testing.T) {
-	netproxySetup(t, "", nil, netproxySystem7890)
-	netproxyWantProxy(t, "https://chatgpt.com/backend-api", "http://127.0.0.1:7890")
-	p, s := Describe()
-	netproxyWantSource(t, p, s, "http://127.0.0.1:7890", "system")
+	npTestSetup(t, settings.Settings{}, nil, sysProxy{proxy: "http://127.0.0.1:7890"})
+	npTestWant(t, npTestFor(t, "https://chatgpt.com/backend-api"), "http://127.0.0.1:7890")
+	npTestDescribe(t, "http://127.0.0.1:7890", "system")
 }
 
-// Acceptance 2: system exception list makes matching hosts direct.
+// Acceptance 2: system exception list.
 func TestNetproxySystemExceptions(t *testing.T) {
-	sys := netproxySystem7890
-	sys.exceptions = []string{"*.corp"}
-	netproxySetup(t, "", nil, sys)
-	netproxyWantProxy(t, "https://git.corp/x", "")
-	netproxyWantProxy(t, "https://chatgpt.com/", "http://127.0.0.1:7890")
+	npTestSetup(t, settings.Settings{}, nil, sysProxy{
+		proxy:      "http://127.0.0.1:7890",
+		exceptions: []string{"*.corp"},
+	})
+	npTestWant(t, npTestFor(t, "https://git.corp/x"), "")
+	npTestWant(t, npTestFor(t, "https://chatgpt.com/"), "http://127.0.0.1:7890")
 }
 
-// Acceptance 3: settings proxy beats env and system.
-func TestNetproxySettingsProxyWins(t *testing.T) {
-	netproxySetup(t, "socks5://127.0.0.1:1080",
-		map[string]string{"HTTPS_PROXY": "http://env:3128"}, netproxySystem7890)
-	netproxyWantProxy(t, "https://api.openai.com/", "socks5://127.0.0.1:1080")
-	p, s := Describe()
-	netproxyWantSource(t, p, s, "socks5://127.0.0.1:1080", "settings")
+// Acceptance 3: settings beat environment and system.
+func TestNetproxySettingsWin(t *testing.T) {
+	npTestSetup(t,
+		settings.Settings{Proxy: "socks5://127.0.0.1:1080"},
+		map[string]string{"HTTPS_PROXY": "http://10.0.0.9:3128"},
+		sysProxy{proxy: "http://127.0.0.1:7890"})
+	npTestWant(t, npTestFor(t, "https://api.openai.com/v1"), "socks5://127.0.0.1:1080")
+	npTestDescribe(t, "socks5://127.0.0.1:1080", "settings")
 }
 
-// Acceptance 4: "direct" disables every proxy.
-func TestNetproxyDirectDisables(t *testing.T) {
-	netproxySetup(t, "direct",
-		map[string]string{"HTTPS_PROXY": "http://env:3128"}, netproxySystem7890)
-	netproxyWantProxy(t, "https://api.openai.com/", "")
-	p, s := Describe()
-	netproxyWantSource(t, p, s, "", "off")
+// Bare host:port in settings is an HTTP proxy.
+func TestNetproxySettingsBareHostPort(t *testing.T) {
+	npTestSetup(t, settings.Settings{Proxy: "127.0.0.1:7890"}, nil, sysProxy{})
+	npTestWant(t, npTestFor(t, "https://api.openai.com/"), "http://127.0.0.1:7890")
+	npTestDescribe(t, "http://127.0.0.1:7890", "settings")
+}
+
+// Acceptance 4: direct beats everything.
+func TestNetproxySettingsDirect(t *testing.T) {
+	npTestSetup(t,
+		settings.Settings{Proxy: "direct"},
+		map[string]string{"HTTPS_PROXY": "http://10.0.0.9:3128"},
+		sysProxy{proxy: "http://127.0.0.1:7890"})
+	npTestWant(t, npTestFor(t, "https://api.openai.com/"), "")
+	npTestDescribe(t, "", "off")
 }
 
 // Acceptance 5: environment beats system.
-func TestNetproxyEnvironmentBeatsSystem(t *testing.T) {
-	netproxySetup(t, "", map[string]string{"HTTPS_PROXY": "http://env:3128"}, netproxySystem7890)
-	netproxyWantProxy(t, "https://api.openai.com/", "http://env:3128")
-	p, s := Describe()
-	netproxyWantSource(t, p, s, "http://env:3128", "environment")
+func TestNetproxyEnvironmentBeforeSystem(t *testing.T) {
+	npTestSetup(t, settings.Settings{},
+		map[string]string{"HTTPS_PROXY": "http://10.0.0.9:3128"},
+		sysProxy{proxy: "http://127.0.0.1:7890"})
+	npTestWant(t, npTestFor(t, "https://api.anthropic.com/"), "http://10.0.0.9:3128")
+	npTestDescribe(t, "http://10.0.0.9:3128", "environment")
 }
 
-// Scenario D: NO_PROXY from the environment still applies.
+// Lowercase variables are honoured, and ALL_PROXY covers https when HTTPS_PROXY is absent.
+func TestNetproxyEnvironmentLowercaseAndAll(t *testing.T) {
+	npTestSetup(t, settings.Settings{},
+		map[string]string{"all_proxy": "socks5://127.0.0.1:1080"}, sysProxy{})
+	npTestWant(t, npTestFor(t, "https://api.anthropic.com/"), "socks5://127.0.0.1:1080")
+	npTestDescribe(t, "socks5://127.0.0.1:1080", "environment")
+}
+
+// NO_PROXY from the environment keeps the standard meaning.
 func TestNetproxyEnvironmentNoProxy(t *testing.T) {
-	netproxySetup(t, "", map[string]string{
-		"HTTPS_PROXY": "http://env:3128",
-		"NO_PROXY":    ".corp,example.org",
-	}, netproxySystem7890)
-	netproxyWantProxy(t, "https://git.corp/x", "")
-	netproxyWantProxy(t, "https://example.org/", "")
-	netproxyWantProxy(t, "https://api.openai.com/", "http://env:3128")
+	npTestSetup(t, settings.Settings{},
+		map[string]string{"HTTPS_PROXY": "http://10.0.0.9:3128", "NO_PROXY": ".internal.example, chatgpt.com"},
+		sysProxy{proxy: "http://127.0.0.1:7890"})
+	npTestWant(t, npTestFor(t, "https://chatgpt.com/"), "")
+	npTestWant(t, npTestFor(t, "https://a.internal.example/"), "")
+	npTestWant(t, npTestFor(t, "https://api.anthropic.com/"), "http://10.0.0.9:3128")
 }
 
 // Acceptance 6: loopback is always direct, whatever is configured.
 func TestNetproxyLoopbackAlwaysDirect(t *testing.T) {
-	netproxySetup(t, "socks5://127.0.0.1:1080",
-		map[string]string{"HTTPS_PROXY": "http://env:3128", "HTTP_PROXY": "http://env:3128"},
-		netproxySystem7890)
-	for _, target := range []string{
-		"http://127.0.0.1:3425/x", "http://localhost:3425", "http://a.localhost/",
-		"http://[::1]:3425/", "http://127.9.9.9/",
-	} {
-		netproxyWantProxy(t, target, "")
+	env := map[string]string{"HTTPS_PROXY": "http://10.0.0.9:3128", "HTTP_PROXY": "http://10.0.0.9:3128"}
+	sys := sysProxy{proxy: "http://127.0.0.1:7890"}
+	for _, s := range []settings.Settings{{}, {Proxy: "socks5://127.0.0.1:1080"}, {Proxy: "direct"}} {
+		npTestSetup(t, s, env, sys)
+		for _, u := range []string{
+			"http://127.0.0.1:3425/x",
+			"https://localhost/x",
+			"http://LOCALHOST:8080/",
+			"http://foo.localhost/",
+			"http://[::1]:3425/",
+			"http://127.9.8.7/",
+		} {
+			npTestWant(t, npTestFor(t, u), "")
+		}
 	}
 }
 
-// Acceptance 7: a bare host:port in settings is an HTTP proxy.
-func TestNetproxyBareHostPortIsHTTP(t *testing.T) {
-	netproxySetup(t, "127.0.0.1:7890", nil, systemConfig{})
-	netproxyWantProxy(t, "https://api.openai.com/", "http://127.0.0.1:7890")
+// Acceptance 10: non-macOS, non-Windows with nothing set is direct, source none.
+func TestNetproxyNoneDirect(t *testing.T) {
+	npTestSetup(t, settings.Settings{}, nil, sysProxy{})
+	npTestWant(t, npTestFor(t, "https://chatgpt.com/"), "")
+	npTestDescribe(t, "", "none")
 }
 
-// A value that was edited into the file by hand must fail, not go direct.
+// A broken configured proxy is an error, never a silent direct connection.
 func TestNetproxyInvalidSettingsErrors(t *testing.T) {
-	netproxySetup(t, "", nil, netproxySystem7890)
-	if err := os.MkdirAll(settings.Dir(), 0o755); err != nil {
-		t.Fatal(err)
+	npTestSetup(t, settings.Settings{Proxy: "ftp://x"}, nil, sysProxy{proxy: "http://127.0.0.1:7890"})
+	if _, err := For(npTestURL(t, "https://api.openai.com/")); err == nil {
+		t.Fatal("For accepted an invalid settings proxy")
 	}
-	if err := os.WriteFile(filepath.Clean(settings.Path()), []byte(`{"proxy":"ftp://x"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := For(netproxyMust(t, "https://api.openai.com/")); err == nil {
-		t.Fatal("invalid settings proxy did not return an error")
-	}
-	if _, err := For(netproxyMust(t, "http://127.0.0.1:3425/")); err != nil {
-		t.Fatalf("loopback should stay direct without error: %v", err)
+	npTestDescribe(t, "", "invalid")
+}
+
+// A broken environment proxy is an error too.
+func TestNetproxyInvalidEnvironmentErrors(t *testing.T) {
+	npTestSetup(t, settings.Settings{}, map[string]string{"HTTPS_PROXY": "ftp://x"}, sysProxy{})
+	if _, err := For(npTestURL(t, "https://api.openai.com/")); err == nil {
+		t.Fatal("For accepted an invalid environment proxy")
 	}
 }
 
-// Acceptance 8 (macOS scutil parsing).
-func TestNetproxyParseScutilPriority(t *testing.T) {
-	all := `<dictionary> {
+// A nil URL goes direct.
+func TestNetproxyNilURL(t *testing.T) {
+	npTestSetup(t, settings.Settings{Proxy: "socks5://127.0.0.1:1080"}, nil, sysProxy{})
+	if p, err := For(nil); p != nil || err != nil {
+		t.Fatalf("For(nil) = %v, %v", p, err)
+	}
+}
+
+// Settings changes take effect on the next call, without a restart.
+func TestNetproxySettingsReadEveryCall(t *testing.T) {
+	npTestSetup(t, settings.Settings{}, nil, sysProxy{})
+	cur := settings.Settings{}
+	loadSettings = func() settings.Settings { return cur }
+	npTestWant(t, npTestFor(t, "https://api.openai.com/"), "")
+	cur = settings.Settings{Proxy: "socks5://127.0.0.1:1080"}
+	npTestWant(t, npTestFor(t, "https://api.openai.com/"), "socks5://127.0.0.1:1080")
+}
+
+// The OS reading is cached: a second call inside the TTL does not re-read it.
+func TestNetproxySystemReadCached(t *testing.T) {
+	calls := npTestSetup(t, settings.Settings{}, nil, sysProxy{proxy: "http://127.0.0.1:7890"})
+	npTestFor(t, "https://a.example/")
+	npTestFor(t, "https://b.example/")
+	if *calls != 1 {
+		t.Fatalf("system proxy read %d times, want 1", *calls)
+	}
+}
+
+// Install makes http.DefaultTransport follow For.
+func TestNetproxyInstallSetsDefaultTransport(t *testing.T) {
+	npTestSetup(t, settings.Settings{Proxy: "socks5://127.0.0.1:1080"}, nil, sysProxy{})
+	Install()
+	tr, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatal("DefaultTransport has no proxy function")
+	}
+	p, err := tr.Proxy(&http.Request{URL: npTestURL(t, "https://api.openai.com/")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	npTestWant(t, p, "socks5://127.0.0.1:1080")
+	p, err = tr.Proxy(&http.Request{URL: npTestURL(t, "http://127.0.0.1:3425/")})
+	if err != nil || p != nil {
+		t.Fatalf("loopback through DefaultTransport: %v, %v", p, err)
+	}
+}
+
+// Acceptance 8: macOS scutil output.
+const npTestScutilAll = `<dictionary> {
   ExceptionsList : <array> {
     0 : *.local
     1 : 169.254/16
@@ -178,122 +246,114 @@ func TestNetproxyParseScutilPriority(t *testing.T) {
   HTTPPort : 8080
   HTTPProxy : 10.0.0.1
   HTTPSEnable : 1
-  HTTPSPort : 7890
-  HTTPSProxy : 127.0.0.1
+  HTTPSPort : 8443
+  HTTPSProxy : 10.0.0.2
   SOCKSEnable : 1
   SOCKSPort : 1080
-  SOCKSProxy : 127.0.0.2
+  SOCKSProxy : 127.0.0.1
 }
 `
-	cfg := parseScutil(all)
-	if cfg.proxy == nil || cfg.proxy.String() != "http://127.0.0.1:7890" {
-		t.Fatalf("all enabled: proxy = %v, want https one", cfg.proxy)
+
+func TestNetproxyScutilPrefersHTTPS(t *testing.T) {
+	sp := parseScutil(npTestScutilAll)
+	if sp.proxy != "http://10.0.0.2:8443" {
+		t.Fatalf("proxy = %q, want https entry", sp.proxy)
 	}
-	if len(cfg.exceptions) != 2 || cfg.exceptions[0] != "*.local" {
-		t.Fatalf("exceptions = %v", cfg.exceptions)
+	if len(sp.exceptions) != 2 || sp.exceptions[0] != "*.local" {
+		t.Fatalf("exceptions = %v", sp.exceptions)
 	}
-	onlySOCKS := `<dictionary> {
+}
+
+func TestNetproxyScutilSocksOnly(t *testing.T) {
+	out := `<dictionary> {
   HTTPEnable : 0
   HTTPProxy : 10.0.0.1
   HTTPPort : 8080
   HTTPSEnable : 0
+  HTTPSProxy : 10.0.0.2
+  HTTPSPort : 8443
   SOCKSEnable : 1
-  SOCKSPort : 1080
   SOCKSProxy : 127.0.0.1
+  SOCKSPort : 1080
 }`
-	if cfg := parseScutil(onlySOCKS); cfg.proxy == nil || cfg.proxy.String() != "socks5://127.0.0.1:1080" {
-		t.Fatalf("only SOCKS: proxy = %v", cfg.proxy)
+	if sp := parseScutil(out); sp.proxy != "socks5://127.0.0.1:1080" {
+		t.Fatalf("proxy = %q", sp.proxy)
 	}
-	none := `<dictionary> {
+}
+
+func TestNetproxyScutilAllDisabled(t *testing.T) {
+	out := `<dictionary> {
   HTTPEnable : 0
   HTTPProxy : 10.0.0.1
-  HTTPSEnable : 0
-  HTTPSProxy : 10.0.0.2
+  HTTPPort : 8080
   SOCKSEnable : 0
-  SOCKSProxy : 10.0.0.3
+  SOCKSProxy : 127.0.0.1
+  SOCKSPort : 1080
 }`
-	if cfg := parseScutil(none); cfg.proxy != nil {
-		t.Fatalf("nothing enabled: proxy = %v, want nil", cfg.proxy)
+	if sp := parseScutil(out); sp.proxy != "" {
+		t.Fatalf("disabled proxies used: %q", sp.proxy)
 	}
 }
 
-// Acceptance 9 (Windows ProxyServer forms and ProxyOverride).
-func TestNetproxyParseWindowsForms(t *testing.T) {
-	cases := []struct{ server, want string }{
-		{"127.0.0.1:7890", "http://127.0.0.1:7890"},
-		{"http=10.0.0.1:80;https=127.0.0.1:7890", "http://127.0.0.1:7890"},
-		{"http=10.0.0.1:80;socks=127.0.0.1:1080", "http://10.0.0.1:80"},
-		{"socks=127.0.0.1:1080", "socks5://127.0.0.1:1080"},
+// Acceptance 9: Windows ProxyServer and ProxyOverride.
+func TestNetproxyWindowsSingleHostPort(t *testing.T) {
+	if sp := parseWindowsProxy("127.0.0.1:7890", ""); sp.proxy != "http://127.0.0.1:7890" {
+		t.Fatalf("proxy = %q", sp.proxy)
+	}
+}
+
+func TestNetproxyWindowsPerProtocol(t *testing.T) {
+	if sp := parseWindowsProxy("http=10.0.0.1:80;https=10.0.0.2:443", ""); sp.proxy != "http://10.0.0.2:443" {
+		t.Fatalf("https not preferred: %q", sp.proxy)
+	}
+	if sp := parseWindowsProxy("http=10.0.0.1:80;socks=127.0.0.1:1080", ""); sp.proxy != "http://10.0.0.1:80" {
+		t.Fatalf("http not preferred over socks: %q", sp.proxy)
+	}
+	if sp := parseWindowsProxy("socks=127.0.0.1:1080", ""); sp.proxy != "socks5://127.0.0.1:1080" {
+		t.Fatalf("socks = %q", sp.proxy)
+	}
+}
+
+func TestNetproxyWindowsOverrideMatching(t *testing.T) {
+	sp := parseWindowsProxy("127.0.0.1:7890", "*.corp;<local>")
+	if !matchExceptions("git.corp", sp.exceptions) {
+		t.Fatal("git.corp should be direct")
+	}
+	if !matchExceptions("intranet", sp.exceptions) {
+		t.Fatal("intranet should be direct")
+	}
+	if matchExceptions("chatgpt.com", sp.exceptions) {
+		t.Fatal("chatgpt.com should go through the proxy")
+	}
+}
+
+func TestNetproxyExceptionRules(t *testing.T) {
+	cases := []struct {
+		host string
+		list []string
+		want bool
+	}{
+		{"Git.Corp", []string{"git.corp"}, true},
+		{"corp", []string{"*.corp"}, true},
+		{"a.b.corp", []string{"*.corp"}, true},
+		{"a.b.corp", []string{".corp"}, true},
+		{"notcorp", []string{"*.corp"}, false},
+		{"intranet", []string{"<local>"}, true},
+		{"a.intranet", []string{"<local>"}, false},
+		{"x.com", []string{"", "  "}, false},
 	}
 	for _, c := range cases {
-		cfg := parseWindowsProxy("0x1", c.server, "")
-		if cfg.proxy == nil || cfg.proxy.String() != c.want {
-			t.Errorf("ProxyServer %q: proxy = %v, want %s", c.server, cfg.proxy, c.want)
+		if got := matchExceptions(c.host, c.list); got != c.want {
+			t.Errorf("matchExceptions(%q, %v) = %v, want %v", c.host, c.list, got, c.want)
 		}
 	}
-	if cfg := parseWindowsProxy("0", "127.0.0.1:7890", ""); cfg.proxy != nil {
-		t.Fatal("disabled ProxyEnable still gave a proxy")
-	}
 }
 
-func TestNetproxyWindowsOverride(t *testing.T) {
-	sys := parseWindowsProxy("0x1", "127.0.0.1:7890", "*.corp;<local>")
-	netproxySetup(t, "", nil, sys)
-	netproxyWantProxy(t, "https://git.corp/x", "")
-	netproxyWantProxy(t, "http://intranet/", "")
-	netproxyWantProxy(t, "https://chatgpt.com/", "http://127.0.0.1:7890")
-}
-
-func TestNetproxyParseRegQuery(t *testing.T) {
-	out := "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\r\n" +
-		"    ProxyEnable    REG_DWORD    0x1\r\n" +
-		"    ProxyServer    REG_SZ    127.0.0.1:7890\r\n" +
-		"    ProxyOverride    REG_SZ    *.corp;<local>\r\n"
-	m := parseRegQuery(out)
-	if m["ProxyEnable"] != "0x1" || m["ProxyServer"] != "127.0.0.1:7890" || m["ProxyOverride"] != "*.corp;<local>" {
-		t.Fatalf("parseRegQuery = %v", m)
+// A system value that cannot be used counts as no system proxy.
+func TestNetproxyUnusableSystemValueIgnored(t *testing.T) {
+	if sp := parseWindowsProxy("ftp://bad", ""); sp.proxy != "" {
+		t.Fatalf("unusable system value kept: %q", sp.proxy)
 	}
-}
-
-// Acceptance 10: on other systems with no env, requests are direct.
-func TestNetproxyNoSystemProxyOffPlatform(t *testing.T) {
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		t.Skip("system proxy is read on this platform")
-	}
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	for _, n := range netproxyEnvNames {
-		t.Setenv(n, "")
-	}
-	resetSystemCache()
-	netproxyWantProxy(t, "https://chatgpt.com/", "")
-	p, s := Describe()
-	netproxyWantSource(t, p, s, "", "none")
-}
-
-// The system reading is cached, but a change must show up within the TTL.
-func TestNetproxySystemCacheExpires(t *testing.T) {
-	netproxySetup(t, "", nil, systemConfig{})
-	netproxyWantProxy(t, "https://chatgpt.com/", "")
-	sysCache.mu.Lock()
-	sysCache.at = sysCache.at.Add(-systemTTL - 1)
-	sysCache.mu.Unlock()
-	loadSystem = func() systemConfig { return netproxySystem7890 }
-	netproxyWantProxy(t, "https://chatgpt.com/", "http://127.0.0.1:7890")
-}
-
-func TestNetproxyInstallWiresDefaultTransport(t *testing.T) {
-	old := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = old })
-	http.DefaultTransport = &http.Transport{}
-	Install()
-	tr, ok := http.DefaultTransport.(*http.Transport)
-	if !ok || tr.Proxy == nil {
-		t.Fatal("Install did not set a Proxy on DefaultTransport")
-	}
-	netproxySetup(t, "", nil, netproxySystem7890)
-	req, _ := http.NewRequest(http.MethodGet, "https://chatgpt.com/", nil)
-	p, err := tr.Proxy(req)
-	if err != nil || p == nil || p.String() != "http://127.0.0.1:7890" {
-		t.Fatalf("Proxy(req) = %v, %v", p, err)
-	}
+	npTestSetup(t, settings.Settings{}, nil, sysProxy{})
+	npTestWant(t, npTestFor(t, "https://chatgpt.com/"), "")
 }

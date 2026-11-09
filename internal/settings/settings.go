@@ -9,6 +9,8 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,7 +22,68 @@ type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
 	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
-	Proxy string `json:"proxy,omitempty"` // "" follow env then system | direct | proxy address (see CheckProxy)
+	// Proxy is the outbound proxy for requests to vendors: "" follows the
+	// environment and then the OS, "direct" turns proxies off, anything else
+	// is a proxy address such as socks5://127.0.0.1:1080 or 127.0.0.1:7890.
+	Proxy string `json:"proxy,omitempty"`
+}
+
+// proxyExample is quoted in the error for an invalid proxy value.
+const proxyExample = "http://127.0.0.1:7890"
+
+// ValidateProxy reports whether s is an accepted proxy setting. "" and
+// "direct" are always accepted. Otherwise s must be a URL with scheme http,
+// https, socks5 or socks5h and a host, or a bare host:port (taken as HTTP).
+// s is expected to be already trimmed.
+func ValidateProxy(s string) error {
+	if s == "" || s == "direct" {
+		return nil
+	}
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return fmt.Errorf("proxy %q is not a valid address, for example %s", s, proxyExample)
+		}
+		switch u.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("proxy %q must start with http://, https://, socks5:// or socks5h://, for example %s", s, proxyExample)
+		}
+		if u.Hostname() == "" {
+			return fmt.Errorf("proxy %q has no host, for example %s", s, proxyExample)
+		}
+		if p := u.Port(); p != "" {
+			if !validPort(p) {
+				return fmt.Errorf("proxy %q has an invalid port, for example %s", s, proxyExample)
+			}
+		}
+		return nil
+	}
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return fmt.Errorf("proxy %q is not a valid address, for example %s (or \"direct\" to turn proxies off)", s, proxyExample)
+	}
+	if host == "" {
+		return fmt.Errorf("proxy %q has no host, for example %s", s, proxyExample)
+	}
+	if !validPort(port) {
+		return fmt.Errorf("proxy %q has an invalid port, for example %s", s, proxyExample)
+	}
+	return nil
+}
+
+func validPort(p string) bool {
+	n := 0
+	for _, c := range p {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+		if n > 65535 {
+			return false
+		}
+	}
+	return p != ""
 }
 
 // Themes and Langs are the accepted values, in the order the UI offers them.
@@ -55,9 +118,6 @@ func Load() Settings {
 func Save(s Settings) error {
 	s = s.normal()
 	s.Proxy = strings.TrimSpace(s.Proxy)
-	if err := CheckProxy(s.Proxy); err != nil {
-		return err
-	}
 	if !slices.Contains(Themes, s.Theme) {
 		return fmt.Errorf("theme must be one of %v, not %q", Themes, s.Theme)
 	}
@@ -66,6 +126,9 @@ func Save(s Settings) error {
 	}
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
+	}
+	if err := ValidateProxy(s.Proxy); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
