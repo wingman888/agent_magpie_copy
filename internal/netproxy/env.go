@@ -54,15 +54,17 @@ func envProxy(u *url.URL) (p *url.URL, decided bool, err error) {
 	if raw == "" {
 		raw = e.all
 	}
-	if raw == "" {
-		return nil, false, nil
-	}
 	port := u.Port()
 	if port == "" {
 		port = defaultPort(u.Scheme)
 	}
+	// NO_PROXY excluding the host means direct, even when no variable gives a
+	// proxy for this scheme: the system setting is not consulted then.
 	if envBypass(e.noProxy, u.Hostname(), port) {
 		return nil, true, nil
+	}
+	if raw == "" {
+		return nil, false, nil
 	}
 	if !strings.Contains(raw, "://") {
 		raw = "http://" + raw
