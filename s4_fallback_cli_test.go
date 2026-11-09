@@ -12,7 +12,7 @@ func TestS4ProviderFallbackCommand(t *testing.T) {
 	if err := provider.Save(provider.Provider{ID: "s4cli", Name: "S4 CLI", Chat: "https://a.example/v1", Key: "sk-s4"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := providerCmd([]string{"magpie", "provider", "fallback", "s4cli", " x/one ", "x/one", "", "y/two"}); err != nil {
+	if err := providerCmd([]string{"provider", "fallback", "s4cli", " x/one ", "x/one", "", "y/two"}); err != nil {
 		t.Fatal(err)
 	}
 	p, err := provider.Find("s4cli")
@@ -22,10 +22,10 @@ func TestS4ProviderFallbackCommand(t *testing.T) {
 	if want := []string{"x/one", "y/two"}; !reflect.DeepEqual(p.Fallback, want) {
 		t.Fatalf("fallback = %q, want %q", p.Fallback, want)
 	}
-	if err := providerCmd([]string{"magpie", "provider", "fallback", "s4cli"}); err != nil {
+	if err := providerCmd([]string{"provider", "fallback", "s4cli"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := providerCmd([]string{"magpie", "provider", "fallback", "s4cli", ""}); err != nil {
+	if err := providerCmd([]string{"provider", "fallback", "s4cli", ""}); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := provider.Find("s4cli"); len(p.Fallback) != 0 {
