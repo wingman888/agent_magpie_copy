@@ -2,112 +2,110 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
 const accountsUsage = `usage:
-  magpie accounts [claude|codex]             the subscription accounts magpie remembers
-  magpie accounts switch <agent> <email>     sign the agent in to a remembered account
-  magpie accounts forget <agent> <email>     forget a remembered account
-  magpie accounts add <agent>                sign in to another account and remember it
+  magpie accounts [claude|codex]                  list the accounts each agent has signed in to
+  magpie accounts switch <claude|codex> <email>   sign the agent in to a remembered account
+  magpie accounts forget <claude|codex> <email>   forget a remembered account
+  magpie accounts add <claude|codex>              sign in to another account and remember it
 
 agents: claude (cc), codex`
 
-// accountsCmd runs `magpie accounts …`; args is what follows "accounts".
+// accountsCmd handles `magpie accounts`: listing the subscription accounts
+// magpie remembers, switching the agent between them, forgetting one, or
+// adding another sign-in.
 func accountsCmd(args []string) error {
-	if len(args) == 0 {
-		for _, agent := range []string{"claude", "codex"} {
+	rest := args[1:]
+	if len(rest) == 0 {
+		for _, agent := range provider.LoginAgents {
 			if err := listAccounts(agent); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	switch args[0] {
+	switch strings.ToLower(rest[0]) {
 	case "switch", "forget":
-		if len(args) != 3 {
-			return fmt.Errorf("%s takes an agent and an email\n\n%s", args[0], accountsUsage)
+		if len(rest) != 3 {
+			return fmt.Errorf("usage: magpie accounts %s <claude|codex> <email>\n\n%s", rest[0], accountsUsage)
 		}
-		agent, ok := provider.AccountAgent(args[1])
+		agent, ok := provider.AccountAgent(rest[1])
 		if !ok {
-			return unknownAccountAgent(args[1])
+			return fmt.Errorf("unknown agent %q\n\n%s", rest[1], accountsUsage)
 		}
-		if args[0] == "forget" {
-			if err := provider.ForgetAccount(agent, args[2]); err != nil {
+		if rest[0] == "switch" {
+			if err := provider.SwitchLogin(agent, rest[2]); err != nil {
 				return err
 			}
-			fmt.Println(green.Render("✓"), "forgot", bold.Render(args[2]), muted.Render("("+agentTitleOf(agent)+")"))
+			fmt.Println(green.Render("✓"), "signed", agentLabel(agent), "in as", rest[2])
+			fmt.Println("sessions already running keep the account they started with until they restart")
 			return nil
 		}
-		if err := provider.SwitchAccount(agent, args[2]); err != nil {
+		if err := provider.ForgetLogin(agent, rest[2]); err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), bold.Render(agentTitleOf(agent)), "is signed in as", bold.Render(args[2]))
-		fmt.Println(muted.Render("  sessions already running keep the account they started with; restart them to use this one"))
+		fmt.Println(green.Render("✓"), "forgot", rest[2], "for", agentLabel(agent))
 		return nil
 	case "add":
-		if len(args) != 2 {
-			return fmt.Errorf("add takes an agent\n\n%s", accountsUsage)
+		if len(rest) != 2 {
+			return fmt.Errorf("usage: magpie accounts add <claude|codex>\n\n%s", accountsUsage)
 		}
-		agent, ok := provider.AccountAgent(args[1])
+		agent, ok := provider.AccountAgent(rest[1])
 		if !ok {
-			return unknownAccountAgent(args[1])
+			return fmt.Errorf("unknown agent %q\n\n%s", rest[1], accountsUsage)
 		}
-		acct, err := provider.AddAccount(agent)
+		fmt.Println("signing in to", agentLabel(agent), "- its sign-in page opens at", provider.LoginPage(agent))
+		name, err := provider.AddAccount(agent)
 		if err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), bold.Render(agentTitleOf(agent)), "is signed in as", bold.Render(acct.User))
+		fmt.Println(green.Render("✓"), "remembered", name, "- it serves requests alongside the current login")
 		return listAccounts(agent)
 	}
-	if len(args) != 1 {
-		return fmt.Errorf("too many arguments\n\n%s", accountsUsage)
-	}
-	agent, ok := provider.AccountAgent(args[0])
+	agent, ok := provider.AccountAgent(rest[0])
 	if !ok {
-		return unknownAccountAgent(args[0])
+		return fmt.Errorf("unknown agent %q\n\n%s", rest[0], accountsUsage)
+	}
+	if len(rest) > 1 {
+		return fmt.Errorf("too many arguments\n\n%s", accountsUsage)
 	}
 	return listAccounts(agent)
 }
 
-func unknownAccountAgent(name string) error {
-	return fmt.Errorf("unknown agent %q\n\n%s", name, accountsUsage)
-}
-
-func agentTitleOf(agent string) string {
+// agentLabel is the name an agent goes by in the accounts list.
+func agentLabel(agent string) string {
 	if agent == "claude" {
 		return "Claude Code"
 	}
 	return "Codex"
 }
 
-// listAccounts prints the accounts remembered for one agent, marking the one
-// the agent is signed in to and each plan.
+// listAccounts prints the accounts an agent has signed in to, marking the
+// current login and the plan each one has.
 func listAccounts(agent string) error {
-	accts, err := provider.RememberedAccounts(agent)
-	if err != nil {
-		return err
-	}
-	title := agentTitleOf(agent)
-	if len(accts) == 0 {
-		fmt.Println(bold.Render(title), muted.Render("— no accounts remembered; sign in to it, or run magpie accounts add "+agent))
+	signIns := provider.SignIns(agent)
+	fmt.Println(bold.Render(agentLabel(agent)))
+	if len(signIns) == 0 {
+		fmt.Println("  no accounts yet; sign in with magpie accounts add", agent)
 		return nil
 	}
-	fmt.Println(bold.Render(title))
-	for _, a := range accts {
-		mark, state := faint.Render("○"), muted.Render("remembered")
+	for _, s := range signIns {
+		mark, status := " ", muted.Render("remembered")
 		switch {
-		case a.Active:
-			mark, state = green.Render("●"), green.Render("signed in")
-		case a.On:
-			state = muted.Render("answers beside the signed-in account")
+		case s.Current:
+			mark, status = green.Render("●"), "signed in"
+		case s.On:
+			status = "serving alongside"
 		}
-		plan := ""
-		if a.Plan != "" {
-			plan = "  " + muted.Render(a.Plan)
+		plan := s.Plan
+		if plan == "" {
+			plan = "-"
 		}
-		fmt.Printf("  %s %s%s  %s\n", mark, a.User, plan, state)
+		fmt.Printf("  %s %-36s %-10s %s\n", mark, s.User, plan, status)
 	}
 	return nil
 }

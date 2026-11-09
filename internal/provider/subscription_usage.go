@@ -31,6 +31,11 @@ type SubscriptionQuota struct {
 	Plan     string        `json:"plan,omitempty"`
 	Windows  []QuotaWindow `json:"windows"`
 	Error    string        `json:"error,omitempty"`
+
+	// FiveHour and Weekly are the used percentages of the account's 5-hour and
+	// 7-day windows, set by LoginUsage; nil when the vendor reports no such window.
+	FiveHour *float64 `json:"fiveHour,omitempty"`
+	Weekly   *float64 `json:"weekly,omitempty"`
 }
 
 var subscriptionUsageCache struct {
@@ -154,10 +159,6 @@ type accountStatusError struct{ status int }
 
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
-// claudeUsageURL is where a Claude account's usage windows come from; a var
-// so tests can point it elsewhere.
-var claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
-
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
 	token, err := claudeToken(ctx)
@@ -165,35 +166,41 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 		q.Error = err.Error()
 		return q
 	}
-	_, plan, _ := claudeIdentityOf()
-	return claudeUsageWith(ctx, q, token, plan)
+	_, plan, _ := claudeIdentity()
+	q.Plan = plan
+	wins, err := claudeWindows(ctx, token)
+	if err != nil {
+		q.Error = err.Error()
+		return q
+	}
+	q.Windows = append(q.Windows, wins...)
+	return q
 }
 
-// claudeUsageWith fills q with the usage windows of the account behind token.
-func claudeUsageWith(ctx context.Context, q SubscriptionQuota, token, plan string) SubscriptionQuota {
-	q.Plan = plan
+// claudeWindows asks Anthropic for the rolling windows of the account behind token.
+func claudeWindows(ctx context.Context, token string) ([]QuotaWindow, error) {
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err := accountJSON(ctx, claudeUsageURL, token, map[string]string{
+	err := accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {
-		q.Error = err.Error()
-		return q
+		return nil, err
 	}
+	out := []QuotaWindow{}
 	for _, x := range []struct {
 		name string
 		w    *quotaWire
 	}{{"5 hours", data.FiveHour}, {"7 days", data.SevenDay}, {"7 days · Opus", data.SevenDayOpus}, {"7 days · Sonnet", data.SevenDaySonnet}} {
 		if x.w != nil {
-			q.Windows = append(q.Windows, x.w.window(x.name))
+			out = append(out, x.w.window(x.name))
 		}
 	}
-	return q
+	return out, nil
 }
 
 type quotaWire struct {
@@ -216,6 +223,18 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		q.Error = err.Error()
 		return q
 	}
+	plan, wins, err := codexWindows(ctx, token, accountID)
+	if err != nil {
+		q.Error = err.Error()
+		return q
+	}
+	q.Plan = plan
+	q.Windows = append(q.Windows, wins...)
+	return q
+}
+
+// codexWindows asks ChatGPT for the plan and rolling windows of the account behind token.
+func codexWindows(ctx context.Context, token, accountID string) (string, []QuotaWindow, error) {
 	var data struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -224,19 +243,18 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		} `json:"rate_limit"`
 	}
 	base := strings.TrimSuffix(CodexBase, "/codex")
-	err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
+	err := accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data)
 	if err != nil {
-		q.Error = err.Error()
-		return q
+		return "", nil, err
 	}
-	q.Plan = data.PlanType
+	out := []QuotaWindow{}
 	if data.RateLimit.Primary != nil {
-		q.Windows = append(q.Windows, data.RateLimit.Primary.window())
+		out = append(out, data.RateLimit.Primary.window())
 	}
 	if data.RateLimit.Secondary != nil {
-		q.Windows = append(q.Windows, data.RateLimit.Secondary.window())
+		out = append(out, data.RateLimit.Secondary.window())
 	}
-	return q
+	return data.PlanType, out, nil
 }
 
 type codexWindow struct {
