@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -70,7 +69,8 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchWith is Fetch with the provider's own headers added to every request.
+// FetchWith is Fetch with extra request headers, sent under the names given
+// (their letter case kept) after the authentication headers.
 func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
@@ -131,7 +131,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	ApplyHeaders(req, headers)
+	SetRawHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -170,38 +170,18 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	return out, nil
 }
 
-// ApplyHeaders sets a vendor's own headers on a request, after the defaults
-// and replacing any default of the same name whatever its casing. Names keep
-// the casing the user typed, except User-Agent and Accept-Encoding: the
-// transport looks for those by their canonical names, so they go out
-// canonical.
-func ApplyHeaders(req *http.Request, extra map[string]string) {
-	names := make([]string, 0, len(extra))
-	for k := range extra {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		key := name
-		switch c := http.CanonicalHeaderKey(name); c {
-		case "User-Agent", "Accept-Encoding":
-			key = c
-		}
-		for have := range req.Header {
-			if strings.EqualFold(have, key) {
-				delete(req.Header, have)
+// SetRawHeaders sets each header under exactly the name given, so the wire
+// keeps its letter case, and replaces any value already set under that name
+// in any case. Go's Header.Set would canonicalize the name.
+func SetRawHeaders(h http.Header, headers map[string]string) {
+	for name, value := range headers {
+		for k := range h {
+			if strings.EqualFold(k, name) {
+				delete(h, k)
 			}
 		}
-		req.Header[key] = []string{extra[name]}
+		h[name] = []string{value}
 	}
-}
-
-// bareID is a model id without its "vendor/" prefix.
-func bareID(id string) string {
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		return id[i+1:]
-	}
-	return id
 }
 
 type liveModel struct {
@@ -211,19 +191,25 @@ type liveModel struct {
 }
 
 // Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order. A gateway that
-// resells other vendors names their models "vendor/model"; when the id
-// itself is not in the catalog, the part after the last slash is looked up.
+// catalog's entry for the same id, keeping the live order.
+//
+// A live id may carry a "provider/" prefix, as a relay spells it ("deepseek/
+// deepseek-chat"); when the id itself is not in the catalog, the part after
+// the last "/" is looked up instead. The live id is kept as it is.
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
-		byID[m.ID] = m
+		if _, dup := byID[m.ID]; !dup {
+			byID[m.ID] = m
+		}
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
 		k, ok := byID[m.ID]
 		if !ok {
-			k, ok = byID[bareID(m.ID)]
+			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
+				k, ok = byID[m.ID[i+1:]]
+			}
 		}
 		if ok {
 			if m.Name == "" || m.Name == m.ID {
