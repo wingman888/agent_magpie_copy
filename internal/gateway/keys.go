@@ -44,7 +44,7 @@ func (s *Server) routes(p provider.Provider, from provider.Protocol, model strin
 		if to == "" {
 			return nil
 		}
-		return []provider.Candidate{{Provider: p, To: to}}
+		return []provider.Candidate{{Provider: p, To: to, Relay: relay}}
 	}
 	return s.inOrder(p.Candidates(from, model))
 }
@@ -53,7 +53,7 @@ func (s *Server) routes(p provider.Provider, from provider.Protocol, model strin
 // failure is one another key can get past, nothing has been written to w and
 // retry is true.
 func (s *Server) attempt(w http.ResponseWriter, r *http.Request, c provider.Candidate, from provider.Protocol, model string, body []byte, u *Usage, canRetry bool) (int, string, bool) {
-	if c.To == from {
+	if c.Relay {
 		return s.passthrough(w, r, c.Provider, from, model, body, u, canRetry)
 	}
 	return s.translate(w, r, c.Provider, from, c.To, model, body, u, canRetry)

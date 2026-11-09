@@ -327,8 +327,9 @@ func (p Provider) route(from Protocol) Protocol {
 // key (empty when the vendor needs none), and the endpoint to send to.
 type Candidate struct {
 	Provider
-	Ref string // the key's fingerprint, "" for the no-key route
-	To  Protocol
+	Ref   string   // the key's fingerprint, "" for the no-key route
+	To    Protocol // the endpoint the request is sent to
+	Relay bool     // the request goes to the client's own protocol as-is, not translated
 }
 
 // Candidates orders the ways to serve a request from this provider: its
@@ -358,6 +359,7 @@ func (p Provider) Candidates(from Protocol, model string) []Candidate {
 				continue
 			}
 		}
+		cand.Relay = cand.To == from
 		out = append(out, cand)
 	}
 	rank := func(c Candidate) int {
