@@ -222,8 +222,20 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok && p.Anthropic != "" {
-		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+	// the first key that may reach an Anthropic endpoint; a provider whose
+	// keys are all limited to other protocols is never sent here
+	var up provider.Provider
+	var viaAnthropic bool
+	if ok {
+		for _, c := range perKey(p, model, provider.Anthropic) {
+			if c.p.Anthropic != "" {
+				up, viaAnthropic = c.p, true
+				break
+			}
+		}
+	}
+	if viaAnthropic {
+		res, err := s.forward(r.Context(), up, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
 			if res.StatusCode < 400 {
@@ -351,7 +363,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// the primary, then its fallbacks while it can't take the request and
 	// nothing has been sent yet
-	cands := s.candidates(p, model)
+	cands := s.candidates(p, model, from)
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil

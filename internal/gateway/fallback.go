@@ -47,7 +47,7 @@ func (c candidate) label() string {
 
 // perKey is a provider once per key it has on, in order — or, for a
 // signed-in agent, once per account it has on, its own first.
-func perKey(p provider.Provider, model string) []candidate {
+func perKey(p provider.Provider, model string, from provider.Protocol) []candidate {
 	if p.Account != nil {
 		out := []candidate{{p, model, p.ID}}
 		for _, q := range p.AlsoOn() {
@@ -56,6 +56,21 @@ func perKey(p provider.Provider, model string) []candidate {
 		return out
 	}
 	keys := p.KeysOn()
+	// keys limited to a protocol, or several keys: each key is its own
+	// candidate, with only the endpoints it may use, best fit first
+	if hasLimit(keys) || len(keys) >= 2 {
+		if picked := routeKeys(p, keys, model, from); len(picked) > 0 {
+			out := make([]candidate, 0, len(picked))
+			for _, k := range picked {
+				rest := p.ID + "#" + provider.KeyID(k.Key)
+				if len(picked) == 1 {
+					rest = p.ID
+				}
+				out = append(out, candidate{p.WithKey(k), model, rest})
+			}
+			return out
+		}
+	}
 	if len(keys) < 2 {
 		return []candidate{{p, model, p.ID}}
 	}
@@ -70,8 +85,8 @@ func perKey(p provider.Provider, model string) []candidate {
 
 // candidates is the primary and then its fallbacks, those resting after a
 // recent failure moved behind the rest.
-func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := perKey(p, model)
+func (s *Server) candidates(p provider.Provider, model string, from provider.Protocol) []candidate {
+	out := perKey(p, model, from)
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -79,7 +94,7 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, perKey(fp, fm)...)
+		out = append(out, perKey(fp, fm, from)...)
 	}
 	if len(out) == 1 {
 		return out
