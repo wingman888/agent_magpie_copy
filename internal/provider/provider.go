@@ -126,7 +126,11 @@ func All() []Provider {
 		}
 		out = append(out, p)
 	}
-	for _, a := range Accounts() {
+	accts := Accounts()
+	loginMu.Lock()
+	rememberLocked(accts)
+	loginMu.Unlock()
+	for _, a := range accts {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}

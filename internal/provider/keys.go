@@ -23,6 +23,10 @@ type Credential struct {
 	Name     string   // the user's label, may be empty
 	Key      string   // the key itself; "" for a keyless provider
 	Protocol Protocol // the one protocol it may serve; "" means any
+
+	// Account is the signed-in account this credential stands for, for a
+	// subscription provider; nil for keys.
+	Account *Account
 }
 
 // KeyRef is a key's fingerprint, the handle the commands use: the first five
@@ -150,6 +154,9 @@ func (p Provider) enabledKeys() int {
 // current key, then the extras in the order they were added. A provider
 // with no key at all (a local server) gets one empty credential.
 func (p Provider) Credentials() []Credential {
+	if p.Account != nil {
+		return accountCredentials(p)
+	}
 	var out []Credential
 	if p.Key != "" {
 		out = append(out, Credential{Ref: KeyRef(p.Key), Name: p.KeyName, Key: p.Key, Protocol: p.KeyProtocol})
@@ -186,6 +193,9 @@ func (p Provider) CredentialsFor(proto Protocol) []Credential {
 // WithCredential is the provider as it looks when it sends one credential.
 func (p Provider) WithCredential(c Credential) Provider {
 	p.Key, p.KeyName, p.KeyProtocol, p.Keys = c.Key, c.Name, c.Protocol, nil
+	if c.Account != nil {
+		p.Account = c.Account
+	}
 	return p
 }
 
