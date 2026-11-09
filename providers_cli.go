@@ -35,7 +35,6 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
-		return nil
 	}
 	uses := usesByProvider()
 	type row struct{ name, id, host, key, models, uses string }

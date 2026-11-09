@@ -58,13 +58,15 @@ func OpenCodeSession(in http.Header, body []byte) string {
 			return v
 		}
 	}
-	sum := sha256.Sum256([]byte(firstUserText(body)))
+	sum := sha256.Sum256([]byte(firstUserKey(body)))
 	return "magpie-" + hex.EncodeToString(sum[:16])
 }
 
-// firstUserText returns the text of the first user message in a Chat
-// Completions body (messages) or a Responses body (input, a string or a list).
-func firstUserText(body []byte) string {
+// firstUserKey is what identifies a conversation: the text of its first user
+// message. A first message with no text (only images, say) is identified by
+// its own JSON instead, so two such conversations do not collide. When there
+// is no user message at all, the canonical JSON of messages/input is used.
+func firstUserKey(body []byte) string {
 	var v struct {
 		Messages json.RawMessage `json:"messages"`
 		Input    json.RawMessage `json:"input"`
@@ -72,39 +74,60 @@ func firstUserText(body []byte) string {
 	if json.Unmarshal(body, &v) != nil {
 		return ""
 	}
-	if len(v.Messages) > 0 {
-		if t, ok := userText(v.Messages); ok {
-			return t
+	for _, list := range []json.RawMessage{v.Messages, v.Input} {
+		if len(list) == 0 {
+			continue
+		}
+		if t, item, ok := userItem(list); ok {
+			if t != "" {
+				return t
+			}
+			return "raw\x00" + canonicalJSON(item)
 		}
 	}
-	if len(v.Input) > 0 {
-		if t, ok := userText(v.Input); ok {
-			return t
+	for _, list := range []json.RawMessage{v.Messages, v.Input} {
+		if len(list) > 0 {
+			return "raw\x00" + canonicalJSON(list)
 		}
 	}
 	return ""
 }
 
-// userText reads a list of messages and returns the first user message's
-// text. A bare string (Responses' input as a plain prompt) is a user message.
-func userText(raw json.RawMessage) (string, bool) {
+// userItem finds the first user message in a list of messages (a bare string
+// input is a user message). It returns the message's text and its raw JSON.
+func userItem(raw json.RawMessage) (string, json.RawMessage, bool) {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return s, true
+		return s, raw, true
 	}
 	var items []struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	}
-	if json.Unmarshal(raw, &items) != nil {
-		return "", false
+	var all []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil || json.Unmarshal(raw, &all) != nil || len(all) != len(items) {
+		return "", nil, false
 	}
-	for _, it := range items {
+	for i, it := range items {
 		if it.Role == "user" {
-			return contentText(it.Content), true
+			return contentText(it.Content), all[i], true
 		}
 	}
-	return "", false
+	return "", nil, false
+}
+
+// canonicalJSON re-encodes JSON with sorted object keys and no whitespace, so
+// the same message hashes the same however the agent formatted it.
+func canonicalJSON(raw json.RawMessage) string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return string(raw)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return string(raw)
+	}
+	return string(b)
 }
 
 // contentText is a message's content: a string, or a list of parts whose

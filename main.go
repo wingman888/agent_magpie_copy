@@ -84,7 +84,7 @@ func run(args []string) error {
 	}
 	// the system hands a magpie: link over when it is clicked
 	if strings.HasPrefix(strings.ToLower(args[0]), "magpie:") {
-		return importLink(args[0], false)
+		return handoffLink(args[0])
 	}
 	switch args[0] {
 	case "import":

@@ -37,15 +37,43 @@ var claudeTiers = []struct{ name, env string }{
 // claudeHaiku is the index of the haiku tier in claudeTiers.
 const claudeHaiku = 2
 
+// claudePinPrefix names the stash keys that record a tier picked on its own:
+// "claude.pin.<tier>" holds the picked model. The flag is explicit, so a tier
+// picked to the same model as main stays pinned when main changes.
+const claudePinPrefix = "claude.pin."
+
+// claudePinKeys lists every stash key that records a pinned tier.
+func claudePinKeys() []string {
+	keys := make([]string, len(claudeTiers))
+	for i, t := range claudeTiers {
+		keys[i] = claudePinPrefix + t.name
+	}
+	return keys
+}
+
 // claudeTierPicks reads which tiers were picked on their own. An empty entry
 // is a tier that follows main. Without a main model every tier follows.
+// Stashes written before the pin flags existed carry no flags; for those a
+// tier that differs from main is taken as picked, as before.
 func claudeTierPicks(env func(string) string, main string) []string {
 	out := make([]string, len(claudeTiers))
 	if main == "" {
 		return out
 	}
+	pins := stashLoad()
+	legacy := true
+	for k := range pins {
+		if strings.HasPrefix(k, claudePinPrefix) {
+			legacy = false
+			break
+		}
+	}
 	for i, t := range claudeTiers {
-		if v := env(t.env); v != "" && v != main {
+		v := env(t.env)
+		if v == "" {
+			continue
+		}
+		if pins[claudePinPrefix+t.name] != "" || (legacy && v != main) {
 			out[i] = v
 		}
 	}
@@ -53,25 +81,25 @@ func claudeTierPicks(env func(string) string, main string) []string {
 }
 
 // writeClaudeTiers stores the extra keys, the main model and every tier. An
-// empty pick follows main. CLAUDE_CODE_SUBAGENT_MODEL is written only while
-// every tier equals main, so a tier picked on its own is not overridden.
+// empty pick follows main; a non-empty pick is pinned and keeps its model.
+// CLAUDE_CODE_SUBAGENT_MODEL is written only while no tier is pinned, so a
+// tier picked on its own is not overridden.
 func writeClaudeTiers(path, main string, picks []string, extra ...edit.KV) error {
 	kvs := append([]edit.KV{}, extra...)
-	same := true
+	pinned := false
 	for i, t := range claudeTiers {
 		v := picks[i]
 		if v == "" {
 			v = main
-		}
-		if v != main {
-			same = false
+		} else {
+			pinned = true
 		}
 		kvs = append(kvs, edit.KV{Path: "env." + t.env, Value: v})
 		if i == claudeHaiku {
 			kvs = append(kvs, edit.KV{Path: "env.ANTHROPIC_SMALL_FAST_MODEL", Value: v})
 		}
 	}
-	if same {
+	if !pinned {
 		kvs = append(kvs, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: main})
 	} else if err := edit.DelJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL"); err != nil {
 		return err
@@ -103,7 +131,7 @@ func claude(home string) *Agent {
 			for _, k := range claudeEnv {
 				keys = append(keys, "env."+k)
 			}
-			forget("claude.model", "claude.base_url", "claude.auth_token")
+			forget(append([]string{"claude.model", "claude.base_url", "claude.auth_token"}, claudePinKeys()...)...)
 			return edit.DelJSON(path, keys...)
 		}
 		if isMagpie(v) {
@@ -134,6 +162,7 @@ func claude(home string) *Agent {
 			if err := edit.DelJSON(path, keys...); err != nil {
 				return err
 			}
+			forget(claudePinKeys()...)
 			unstash("claude.model")
 			var back []edit.KV
 			if u := unstash("claude.base_url"); u != "" {
@@ -165,6 +194,7 @@ func claude(home string) *Agent {
 		main := env("ANTHROPIC_MODEL")
 		picks := claudeTierPicks(env, main)
 		picks[i] = v
+		stash(map[string]string{claudePinPrefix + claudeTiers[i].name: v})
 		return writeClaudeTiers(path, main, picks)
 	}
 

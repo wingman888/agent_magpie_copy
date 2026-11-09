@@ -36,6 +36,20 @@ func importCmd(args []string) error {
 	return importLink(link, yes)
 }
 
+// handoffLink takes a magpie: link the system passed on a click. Without a
+// terminal nothing can be confirmed, so nothing is saved: the link is checked,
+// then the user is pointed at `magpie import` in a terminal. The link itself is
+// not printed, since it carries the key.
+func handoffLink(link string) error {
+	if interactive() {
+		return importLink(link, false)
+	}
+	if _, err := provider.ParseImport(link); err != nil {
+		return err
+	}
+	return errors.New("link received, nothing added: run `magpie import <link>` in a terminal to review and add it")
+}
+
 // importLink adds the provider a link describes, after showing it and
 // asking, unless yes is set. Nothing is written before the answer.
 func importLink(link string, yes bool) error {

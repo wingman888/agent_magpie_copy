@@ -5,9 +5,11 @@
 package gui
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -169,12 +171,32 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		writeJSON(rw, settingsState())
 	})
 	mux.HandleFunc("POST /api/settings", func(rw http.ResponseWriter, r *http.Request) {
-		// Start from what is saved: the page sends only the fields it changed,
-		// and a missing tray or proxy must not reset them.
-		in := settings.Load()
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		// Decode as the request sent it, as before. Only tray and proxy keep
+		// the saved value when the request does not carry them, so a page that
+		// sends just the theme does not reset them.
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
 			fail(rw, err)
 			return
+		}
+		var in settings.Settings
+		if err := json.NewDecoder(bytes.NewReader(body)).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		var sent struct {
+			Tray  *string `json:"tray"`
+			Proxy *string `json:"proxy"`
+		}
+		_ = json.Unmarshal(body, &sent)
+		if sent.Tray == nil || sent.Proxy == nil {
+			saved := settings.Load()
+			if sent.Tray == nil {
+				in.Tray = saved.Tray
+			}
+			if sent.Proxy == nil {
+				in.Proxy = saved.Proxy
+			}
 		}
 		if err := settings.Save(in); err != nil {
 			fail(rw, err)
