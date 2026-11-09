@@ -795,17 +795,16 @@ func codexTokenFrom(ctx context.Context, src codexSource) (tok, accountID string
 		return "", "", errors.New("Codex token refresh: " + err.Error())
 	}
 	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	reply, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	var fresh struct {
 		IDToken      string `json:"id_token"`
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 	}
-	if res.StatusCode != 200 || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
+	if res.StatusCode != 200 || json.Unmarshal(reply, &fresh) != nil || fresh.AccessToken == "" {
 		return "", "", errors.New(src.signedOut + " (token refresh failed)")
 	}
 	// keep every other field of the file as Codex CLI wrote it
-	var raw map[string]any
 	if raw, err := decodeRaw(b); err == nil {
 		toks, _ := raw["tokens"].(map[string]any)
 		if toks == nil {
