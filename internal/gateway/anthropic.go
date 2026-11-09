@@ -311,7 +311,7 @@ func decodeAnthropic(data string, emit func(Event)) error {
 		}
 		emit(Event{Kind: KUsage, Usage: ev.Usage.usage()})
 	case "error":
-		emit(Event{Kind: KError, Text: ev.Error.Message})
+		emit(Event{Kind: KError, Text: ev.Error.Message, Status: errorStatus(ev.Error.Type, nil)})
 	}
 	return nil
 }
