@@ -3,8 +3,6 @@
 One place to pick every agent's model: Codex on DeepSeek, Claude Code
 on Kimi, Gemini CLI on GLM, from the menu bar. [usemagpie.ai](https://usemagpie.ai)
 
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/vGSnD3ZKQF)
-
 `magpie` is a single screen that lists each AI agent on your machine and
 the model it is set to. Click a value, pick a model. That is the whole app.
 
@@ -74,10 +72,8 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
 | DeepSeek Harness (dsh) | `~/.dsh/config.yaml` (`$DSH_HOME`) | model |
-| Command Code | `~/.commandcode/settings.json` (+ `providers.json`) | model |
-| omp (oh-my-pi) | `~/.omp/agent/config.yml` (+ `models.yml`) | model |
 
-Provider-scoped agents (OpenCode, Pi, Goose, Crush, omp) take `provider/model`.
+Provider-scoped agents (OpenCode, Pi, Goose, Crush) take `provider/model`.
 Only agents that are installed or configured are shown.
 
 ## Providers and the gateway
@@ -329,24 +325,30 @@ Keys in the terminal version:
 Agents read their config at startup, so a running session keeps its model
 until you start a new one.
 
-### Moving to another machine
+### 备份与恢复
+
+`magpie backup` 把提供商（含 API Key、多 Key 账户、自定义请求头）、提供商的自选图标、
+设置、全部方案，以及各 Agent 当前的模型，导出为单个文件，默认是当前目录下的
+`magpie.magpie-backup`：
 
 ```sh
-magpie backup                   # writes magpie.magpie-backup, asks for a passphrase twice
-magpie backup --no-keys ~/b.magpie-backup   # the same with no API keys in it
-magpie restore magpie.magpie-backup         # on the other machine
-magpie restore --no-agents b.magpie-backup  # providers, settings, profiles; agents left as they are
+magpie backup                        # 交互输入两次口令（不回显）
+magpie backup ~/b.magpie-backup      # 指定文件名
+magpie backup --no-keys ~/b.magpie-backup   # 不含任何 API Key，也不含凭据类请求头，可用来分享
+echo "pw" | magpie backup            # 口令从标准输入第一行读取（脚本用，不要求确认）
+
+magpie restore magpie.magpie-backup          # 输入口令，一次性还原
+magpie restore --no-agents b.magpie-backup   # 只还原提供商、设置和方案，不改 Agent 的模型
 ```
 
-A backup holds your providers (with their keys, unless `--no-keys`), the
-pictures picked for them, the settings, the profiles and every agent's model.
-It is encrypted on your machine (AES-256-GCM, the key derived from the
-passphrase with PBKDF2-SHA256); nothing in it can be read without the
-passphrase. Restoring replaces providers with the same id and adds the rest;
-one that came without a key keeps the key already there. Agent models are set
-only for agents installed on that machine. Subscriptions are not in it: sign
-in to them on each machine. Piped in, the passphrase is the first line of
-stdin.
+- 文件用口令加密（AES-256-GCM，口令经 PBKDF2-SHA256 派生），权限仅本人可读写，
+  文件内看不到 Key、域名或方案名。
+- 恢复时：本机已有同 id 的提供商会被替换，但备份里没有 Key 的提供商会保留本机原有的 Key；
+  本机没有的提供商被新增，若没有任何 Key，恢复后会列出名称，用 `magpie provider key <id> <key>` 补上。
+- 设置整体覆盖本机；方案按名称写入，同名覆盖，其余本机方案保留。
+- Agent 的模型只对本机已安装的 Agent 生效，未安装的会列在"跳过"里。
+- **订阅账号（靠 Agent 本机登录的部分）不进入备份**，需要在新机器上自行登录。
+- **口令丢失则备份文件无法打开**，请妥善保存口令。
 
 ## Files
 
@@ -358,12 +360,6 @@ stdin.
 - `~/.cache/magpie/models/<provider>.json` — model lists fetched from vendors
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are respected.
-
-## Community
-
-Questions, setups worth sharing, ideas, bugs: come talk to us and other
-magpie users on [Discord](https://discord.gg/vGSnD3ZKQF). Issues and pull
-requests are welcome here too.
 
 ## License
 
