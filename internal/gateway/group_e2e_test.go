@@ -40,9 +40,12 @@ func e2eMembers(t *testing.T) (b, a *fake) {
 	t.Helper()
 	e2eReset(t)
 	b = &fake{t: t, ctype: "application/json", code: 429, reply: `{"error":{"message":"slow down"}}`}
-	a = &fake{t: t, ctype: "application/json", reply: `{"id":"e2e-a","object":"chat.completion","created":1,"model":"only-a",` +
-		`"choices":[{"index":0,"message":{"role":"assistant","content":"hello from a"},"finish_reason":"stop"}],` +
-		`"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`}
+	// a streams, as the providers magpie translates for always do
+	a = &fake{t: t, reply: sse(
+		`data: {"id":"e2e-a","model":"only-a","choices":[{"delta":{"role":"assistant","content":"hello from a"}}]}`,
+		`data: {"id":"e2e-a","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: {"id":"e2e-a","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}`,
+		`data: [DONE]`)}
 	e2eServe(t, provider.Provider{ID: "b", Name: "B", Key: "k-b", Models: []string{"vendor/m"}}, b)
 	e2eServe(t, provider.Provider{ID: "a", Name: "A", Key: "k-a", Models: []string{"only-a"}}, a)
 	if err := provider.SaveGroup(provider.Group{ID: "mine", Name: "Mine", Members: []string{"b/vendor/m", "a/only-a"}, Routing: provider.Ordered}); err != nil {
