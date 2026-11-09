@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -63,13 +62,14 @@ type Call struct {
 	Agent             string            `json:"agent"` // who called, from the client's User-Agent
 	Model             string            `json:"model"`
 	Provider          string            `json:"provider"`
-	Key               string            `json:"key,omitempty"`      // the key that answered: its name, else its fingerprint
-	Fallback          string            `json:"fallback,omitempty"` // candidates that failed first, e.g. "relay (team)"
 	From              provider.Protocol `json:"from"`
 	To                provider.Protocol `json:"to"`
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
+	// Fallback names the candidates that failed before the one that answered:
+	// a provider id, with the key's name in brackets when the key has one.
+	Fallback          string            `json:"fallback,omitempty"`
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
 	ResponseBody      string            `json:"responseBody,omitempty"`
@@ -85,16 +85,11 @@ type Server struct {
 	// responseOnly remembers models rejected by Chat Completions, avoiding a
 	// known-failing probe on every Claude Code turn.
 	responseOnly map[string]bool
-	// keyPref is the key of each provider that answered last; keyRest holds
-	// when each key last failed with a quota or rate-limit reply.
-	keyPref      map[string]string
-	keyRest      map[string]time.Time
+	// cooled holds credentials that just failed, keyed by provider and key.
+	cooled       map[string]time.Time
 	subscription *subscriptionBridge
 	debug        bool
 }
-
-// keyRestFor is how long a key that ran out or was rate limited is passed over.
-const keyRestFor = time.Minute
 
 // New makes a gateway.
 func New() *Server {
@@ -107,8 +102,6 @@ func New() *Server {
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
-		keyPref:      make(map[string]string),
-		keyRest:      make(map[string]time.Time),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -233,9 +226,9 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	// Keys limited to another protocol (OpenAI's, say) never count tokens.
-	if a, found := anthropicAttempt(p, model); ok && found {
-		res, err := s.forward(r.Context(), a.Provider, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+	// only a credential allowed on Anthropic's endpoint may count tokens there
+	if cs := p.CredentialsFor(provider.Anthropic); ok && len(cs) > 0 {
+		res, err := s.forward(r.Context(), p.WithCredential(cs[0]), provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
 			if res.StatusCode < 400 {
@@ -376,145 +369,50 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 		return
 	}
-	if p.Account == nil {
-		s.tryKeys(w, r, p, from, model, body, &call)
-	} else {
-		// a backend that only streams gets a non-streaming request translated
-		// (the provider is always streamed on that path) rather than relayed
-		relay := p.Base(from) != "" && (!p.Account.Stream || streamOf(body))
-		if relay {
-			call.To = from
-			call.Status, call.Error, _ = s.passthrough(w, r, p, from, model, body, &call.Usage, false)
-		} else {
-			to := p.Speaks()
-			if len(to) == 0 {
-				call.Status, call.Error = 502, p.Name+" has no endpoint configured"
-				writeError(w, from, call.Status, call.Error)
-			} else {
-				call.To = to[0]
-				call.Status, call.Error, _ = s.translate(w, r, p, from, to[0], model, body, &call.Usage, false)
-			}
-		}
-	}
-	call.Millis = time.Since(start).Milliseconds()
-	finishCapture()
-	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-}
-
-// tryKeys sends the request with the provider's keys in turn. A key that is
-// out of quota or rate limited hands the request to the next one; nothing
-// reaches the client until an attempt answers or the last attempt fails.
-func (s *Server) tryKeys(w http.ResponseWriter, r *http.Request, p provider.Provider, from provider.Protocol, model string, body []byte, call *Call) {
-	attempts := s.orderAttempts(p.ID, p.Attempts(from, model))
-	if len(attempts) == 0 {
+	// a backend that only streams gets a non-streaming request translated
+	// (the provider is always streamed on that path) rather than relayed;
+	// attempts works that out for each credential
+	// the provider's own keys first, then its fallback models; a candidate
+	// that fails before any reply is written hands the request on
+	tries := s.chain(p, from, model, body)
+	if len(tries) == 0 {
 		call.Status, call.Error = 502, p.Name+" has no endpoint configured"
 		writeError(w, from, call.Status, call.Error)
+		call.Millis = time.Since(start).Milliseconds()
+		finishCapture()
+		s.record(call)
 		return
 	}
 	var failed []string
-	for i, a := range attempts {
-		more := i < len(attempts)-1
+	var last attempt
+	for i, at := range tries {
+		more := i < len(tries)-1
 		var retry bool
-		call.To = a.To
-		if a.To == from {
-			call.Status, call.Error, retry = s.passthrough(w, r, a.Provider, from, model, body, &call.Usage, more)
+		if at.relay {
+			call.To = from
+			call.Status, call.Error, retry = s.passthrough(w, r, at.p, from, at.model, body, &call.Usage, more)
 		} else {
-			call.Status, call.Error, retry = s.translate(w, r, a.Provider, from, a.To, model, body, &call.Usage, more)
+			call.To = at.to
+			call.Status, call.Error, retry = s.translate(w, r, at.p, from, at.to, at.model, body, &call.Usage, more)
 		}
-		if retry {
-			s.restKey(p.ID, a.KeyRef)
-			failed = append(failed, failedLabel(p.ID, a))
-			continue
+		last = at
+		if !retry {
+			break
 		}
-		call.Key = a.KeyName
-		if call.Key == "" {
-			call.Key = a.KeyRef
-		}
-		if len(failed) > 0 {
-			call.Fallback = strings.Join(failed, ", ")
-		}
-		if call.Status < 400 && a.KeyRef != "" {
-			s.preferKey(p.ID, a.KeyRef)
-		}
-		return
+		failed = append(failed, at.label())
+		s.markFailed(at)
 	}
-}
-
-// failedLabel names a candidate in a call record: the provider, and the key's
-// name when it has one.
-func failedLabel(id string, a provider.Attempt) string {
-	if a.KeyName == "" {
-		return id
+	if len(failed) > 0 {
+		call.Fallback = strings.Join(failed, ", ")
 	}
-	return id + " (" + a.KeyName + ")"
-}
-
-// orderAttempts keeps the provider's own order (rank first), but within a
-// rank puts the key that answered last first, and keys that failed within
-// keyRestFor after the others. Resting keys are still tried, just last.
-func (s *Server) orderAttempts(id string, attempts []provider.Attempt) []provider.Attempt {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now()
-	pref := s.keyPref[id]
-	resting := func(ref string) bool {
-		t, ok := s.keyRest[id+"\x00"+ref]
-		return ok && now.Sub(t) < keyRestFor
-	}
-	sort.SliceStable(attempts, func(i, j int) bool {
-		a, b := attempts[i], attempts[j]
-		if a.Rank != b.Rank {
-			return a.Rank < b.Rank
-		}
-		if ra, rb := resting(a.KeyRef), resting(b.KeyRef); ra != rb {
-			return !ra
-		}
-		return a.KeyRef == pref && b.KeyRef != pref
-	})
-	return attempts
-}
-
-func (s *Server) preferKey(id, ref string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.keyPref[id] = ref
-}
-
-func (s *Server) restKey(id, ref string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.keyRest[id+"\x00"+ref] = time.Now()
-}
-
-// keyExhausted reports whether a failed reply says this key cannot serve the
-// request right now (rate limited, or out of quota), so another key may.
-func keyExhausted(status int, body []byte) bool {
-	switch status {
-	case http.StatusTooManyRequests, http.StatusPaymentRequired:
-		return true
-	case http.StatusForbidden:
-		msg := strings.ToLower(string(body))
-		for _, phrase := range []string{"quota", "insufficient", "balance", "credit", "exhaust", "exceed", "额度", "余额"} {
-			if strings.Contains(msg, phrase) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// anthropicAttempt is the first way to reach the provider's Anthropic endpoint
-// for the model. Keys limited to another protocol are never chosen.
-func anthropicAttempt(p provider.Provider, model string) (provider.Attempt, bool) {
-	for _, a := range p.Attempts(provider.Anthropic, model) {
-		if a.To == provider.Anthropic {
-			return a, true
-		}
-	}
-	return provider.Attempt{}, false
+	// the provider that answered, or the last one tried when none did
+	call.Provider = last.p.ID
+	call.Millis = time.Since(start).Milliseconds()
+	finishCapture()
+	s.record(call)
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: last.p.ID, Model: last.model,
+		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
 // forward sends a request to the provider.
@@ -545,21 +443,27 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
-// carries are read on the way past into u. When more is set and the reply
-// says this key is out of quota, nothing is written and retry is true.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, more bool) (status int, msg string, retry bool) {
+// carries are read on the way past into u.
+//
+// more says whether another candidate is waiting. When one is, a failure that
+// failover accepts is reported back with retry set and nothing is written,
+// so the client never sees it.
+func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, more bool) (int, string, bool) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
 	}
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
 	if err != nil {
+		if more {
+			return 502, err.Error(), true
+		}
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), false
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		if more && keyExhausted(res.StatusCode, b) {
+		if more && failover(res.StatusCode, b) {
 			return res.StatusCode, p.Name + ": " + provider.APIError(b, res.Status), true
 		}
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
@@ -690,7 +594,9 @@ func notChatModel(status int, body []byte) bool {
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, more bool) (status int, msg string, retry bool) {
+//
+// more and the retry result work as in passthrough.
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, more bool) (int, string, bool) {
 	request, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error(), false
@@ -699,12 +605,15 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	request.Stream = true
 	res, actual, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
 	if err != nil {
+		if more {
+			return 502, err.Error(), true
+		}
 		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error(), false
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		if more && keyExhausted(res.StatusCode, b) {
+		if more && failover(res.StatusCode, b) {
 			return res.StatusCode, p.Name + ": " + provider.APIError(b, res.Status), true
 		}
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
@@ -721,18 +630,32 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	if stream {
 		enc := encoder(from, newSSEWriter(w), request.Model)
-		var failed string
+		var failed, early string
+		wrote := false
 		readSSE(rd, func(_, data string) error {
 			return dec(data, func(ev Event) {
+				if early != "" {
+					return
+				}
+				// an error that opens the stream, before anything reached the
+				// client, can still hand the request to the next candidate
+				if ev.Kind == KError && !wrote && more && failoverText(ev.Text) {
+					early = p.Name + ": " + ev.Text
+					return
+				}
 				switch ev.Kind {
 				case KError:
 					failed = ev.Text
 				case KStart, KUsage:
 					u.add(ev.Usage)
 				}
+				wrote = true
 				enc.event(ev)
 			})
 		})
+		if early != "" {
+			return 502, early, true
+		}
 		enc.finish()
 		return 200, failed, false
 	}
