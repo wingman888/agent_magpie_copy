@@ -17,10 +17,32 @@ import (
 // magpieID is the provider id agents know the gateway by.
 const magpieID = "magpie"
 
-// viaMagpie lists the catalog for a picker, one group per provider.
+// routingSection is the picker section of the routing groups, listed first.
+const routingSection = "Routing groups"
+
+// catalogFirst is the catalog with the routing groups before the providers'
+// models, as the pickers list them.
+func catalogFirst() []provider.Entry {
+	var groups, models []provider.Entry
+	for _, e := range provider.Catalog() {
+		if e.Group {
+			groups = append(groups, e)
+		} else {
+			models = append(models, e)
+		}
+	}
+	return append(groups, models...)
+}
+
+// viaMagpie lists the catalog for a picker: the routing groups in a section
+// of their own, then one group per provider.
 func viaMagpie(prefix string) []Option {
 	var out []Option
-	for _, e := range provider.Catalog() {
+	for _, e := range catalogFirst() {
+		if e.Group {
+			out = append(out, groupOption(prefix, e))
+			continue
+		}
 		note := e.Provider.Name + " · via magpie"
 		if a := e.Provider.Account; a != nil {
 			note = a.User + " · via magpie"
@@ -29,6 +51,26 @@ func viaMagpie(prefix string) []Option {
 			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
 	}
 	return out
+}
+
+// groupOption is a routing group as a picker option. Its icons are its
+// members' providers' icons, one each; Icon is the first of them.
+func groupOption(prefix string, e provider.Entry) Option {
+	o := Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
+		Group: routingSection, Ref: e.ID}
+	_, ms, _ := provider.FindGroup(strings.TrimPrefix(e.ID, provider.GroupPrefix))
+	seen := map[string]bool{}
+	for _, m := range ms {
+		if seen[m.Provider.ID] || m.Provider.Icon == "" {
+			continue
+		}
+		seen[m.Provider.ID] = true
+		o.Icons = append(o.Icons, m.Provider.Icon)
+	}
+	if len(o.Icons) > 0 {
+		o.Icon = o.Icons[0]
+	}
+	return o
 }
 
 // viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going
@@ -43,8 +85,12 @@ func viaMagpieFor(agentID, prefix string) []Option {
 	return out
 }
 
-// isMagpie reports whether a model value is a catalog reference.
+// isMagpie reports whether a model value is a catalog reference, a routing
+// group (group/<id>) included.
 func isMagpie(v string) bool {
+	if strings.HasPrefix(v, provider.GroupPrefix) {
+		return len(v) > len(provider.GroupPrefix)
+	}
 	_, _, ok := provider.Resolve(v)
 	return ok && strings.Contains(v, "/")
 }
@@ -60,7 +106,11 @@ func firstOf(xs []string) string {
 // own model files.
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
-	for _, e := range provider.Catalog() {
+	for _, e := range catalogFirst() {
+		if e.Group {
+			out = append(out, catalog.Model{ID: e.ID, Name: e.Name, Efforts: e.Efforts})
+			continue
+		}
 		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
 	}
 	return out

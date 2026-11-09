@@ -861,10 +861,8 @@ var sessionHeaders = []string{
 // It is the agent's own session id when it sends one; otherwise it is derived
 // from the conversation's first user message, which every later turn repeats.
 func conversationID(in http.Header, body []byte) string {
-	for _, h := range sessionHeaders {
-		if v := strings.TrimSpace(in.Get(h)); v != "" {
-			return v
-		}
+	if s := sessionOf(in); s != "" {
+		return s
 	}
 	var m struct {
 		Messages []json.RawMessage `json:"messages"`

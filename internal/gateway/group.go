@@ -18,7 +18,7 @@ import (
 
 // turn is where a request stands in its conversation.
 type turn struct {
-	conv   string // the conversation: its session id, see conversationID
+	conv   string // the conversation's session id from the headers, see sessionOf; "" if none
 	model  string // the model the agent asked for, as it named it
 	turn   int    // user turns in the conversation, this one included
 	within bool   // a tool result sent back inside the turn
@@ -72,10 +72,23 @@ func sweepLocked(now time.Time) {
 	}
 }
 
+// sessionOf is the conversation's session id as the agent's headers name it:
+// the first of sessionHeaders that is set, or "" when the agent sends none.
+// Affinity and rotation go by this id alone; a request without one stands on
+// its own (see turn.conv).
+func sessionOf(in http.Header) string {
+	for _, h := range sessionHeaders {
+		if v := strings.TrimSpace(in.Get(h)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // turnOf places a request in its conversation: how many user turns it has,
 // and whether it sends tool results back within one.
 func turnOf(r *http.Request, from provider.Protocol, body []byte, model string) turn {
-	t := turn{conv: conversationID(r.Header, body), model: model}
+	t := turn{conv: sessionOf(r.Header), model: model}
 	req, err := parse(from, body)
 	if err != nil {
 		return t
@@ -139,6 +152,9 @@ func (t turn) rotate(owner string, cs []candidate) []candidate {
 // answered remembers which candidate answered a conversation's model, and
 // what it read from the vendor's cache.
 func answered(t turn, c candidate, cacheRead int) {
+	if t.conv == "" {
+		return
+	}
 	now := time.Now()
 	conversations.Lock()
 	defer conversations.Unlock()
@@ -158,7 +174,8 @@ func affinityOf(cs []candidate, order []Weighed, mode string, t turn) ([]candida
 			pool++
 		}
 	}
-	if pool < 2 || len(order) != len(cs) {
+	// no session id from the agent: nothing to keep a conversation by
+	if t.conv == "" || pool < 2 || len(order) != len(cs) {
 		return cs, order, nil
 	}
 	if mode == "" {

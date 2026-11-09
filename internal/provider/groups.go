@@ -105,22 +105,21 @@ func SaveGroup(g Group) error {
 	return store(f)
 }
 
-// DeleteGroup removes a group. The user's own are deleted; one magpie found
-// is hidden, so ShowGroup can bring it back.
+// DeleteGroup removes a group. A group the user made is deleted outright and
+// nothing else changes: a discovered group under the same id, if there is
+// one, shows again. A discovered group with no user group of that id is
+// hidden, so ShowGroup can bring it back.
 func DeleteGroup(id string) error {
 	id = strings.ToLower(strings.TrimSpace(id))
 	f := load()
-	i := slices.IndexFunc(f.Groups, func(g Group) bool { return g.ID == id })
-	auto := !slices.Contains(f.HiddenGroups, id) && slices.ContainsFunc(discover(All()), func(g Group) bool { return g.ID == id })
-	if i < 0 && !auto {
+	if i := slices.IndexFunc(f.Groups, func(g Group) bool { return g.ID == id }); i >= 0 {
+		f.Groups = slices.Delete(f.Groups, i, i+1)
+		return store(f)
+	}
+	if slices.Contains(f.HiddenGroups, id) || !slices.ContainsFunc(discover(All()), func(g Group) bool { return g.ID == id }) {
 		return fmt.Errorf("no group %q", id)
 	}
-	if i >= 0 {
-		f.Groups = slices.Delete(f.Groups, i, i+1)
-	}
-	if auto && !slices.Contains(f.HiddenGroups, id) {
-		f.HiddenGroups = append(f.HiddenGroups, id)
-	}
+	f.HiddenGroups = append(f.HiddenGroups, id)
 	return store(f)
 }
 
@@ -134,10 +133,12 @@ func ShowGroup(id string) error {
 	return store(f)
 }
 
-// FindGroup looks a group up by its id (without the group/ prefix) and
-// resolves its members that can be used now, in the group's order. ok is
-// false when there is no such group or none of its members can be used.
+// FindGroup looks a group up by its id, written with or without the group/
+// prefix, and resolves its members that can be used now, in the group's
+// order. ok is false when there is no such group or none of its members can
+// be used.
 func FindGroup(id string) (Group, []Member, bool) {
+	id = strings.TrimPrefix(strings.TrimSpace(id), GroupPrefix)
 	ps := All()
 	for _, g := range visibleGroups(ps) {
 		if g.ID == id {
