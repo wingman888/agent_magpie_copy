@@ -241,7 +241,7 @@ func (s *Server) planTurn(p provider.Provider, model string, from provider.Proto
 
 // arrange puts candidates in the order they try: ready ones before resting
 // ones, and the asides after the pool. It marks those resting in order.
-func arrange(out []candidate, order []Weighed) ([]candidate, []Weighed) {
+func arrange(out []candidate, weighed []Weighed) ([]candidate, []Weighed) {
 	var cls [4][]candidate
 	var wcls [4][]Weighed
 	for i, c := range out {
@@ -250,10 +250,10 @@ func arrange(out []candidate, order []Weighed) ([]candidate, []Weighed) {
 			k = 2
 		}
 		if r, ok := restOf(c.rest); ok {
-			order[i].Rest = &r
+			weighed[i].Rest = &r
 			k++
 		}
-		cls[k], wcls[k] = append(cls[k], c), append(wcls[k], order[i])
+		cls[k], wcls[k] = append(cls[k], c), append(wcls[k], weighed[i])
 	}
 	var ordered []candidate
 	var order []Weighed
