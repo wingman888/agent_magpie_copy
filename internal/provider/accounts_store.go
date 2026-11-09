@@ -127,15 +127,15 @@ func findRemembered(list []rememberedAccount, agent, user string) int {
 	return -1
 }
 
-// signIn is the account an agent is signed in to now.
-type signIn struct{ user, plan string }
+// agentSignIn is the account an agent is signed in to now.
+type agentSignIn struct{ user, plan string }
 
 // currentSignIns asks every agent with a remembered account who is signed in.
-func currentSignIns() map[string]signIn {
-	out := map[string]signIn{}
+func currentSignIns() map[string]agentSignIn {
+	out := map[string]agentSignIn{}
 	for _, p := range Accounts() {
 		if p.Account != nil {
-			out[p.Account.Agent] = signIn{user: p.Account.User, plan: p.Account.Plan}
+			out[p.Account.Agent] = agentSignIn{user: p.Account.User, plan: p.Account.Plan}
 		}
 	}
 	return out
