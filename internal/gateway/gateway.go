@@ -491,12 +491,13 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		call.To = pr
 		var status int
 		var msg string
+		var upErr []byte // the upstream's own error reply, as it was sent
 		if pr == from && relay {
-			status, msg = s.passthrough(hw, r, p, from, model, body, &call.Usage)
+			status, msg = s.passthrough(hw, r, p, from, model, body, &call.Usage, &upErr)
 		} else {
-			status, msg = s.translate(hw, r, p, from, pr, model, body, &call.Usage)
+			status, msg = s.translate(hw, r, p, from, pr, model, body, &call.Usage, &upErr)
 		}
-		if !last && hw.status >= 400 && endpointRefused(hw.status, hw.held.Bytes()) {
+		if !last && endpointRefused(hw.status, upErr) {
 			s.markRefused(p.ID, model, pr)
 			continue
 		}
@@ -535,7 +536,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, upErr *[]byte) (int, string) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
@@ -547,6 +548,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		*upErr = b
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		keepRetry(w.Header(), res.Header)
 		return writeError(w, proto, res.StatusCode, msg), msg
@@ -641,7 +643,7 @@ func notChatModel(status int, body []byte) bool {
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, upErr *[]byte) (int, string) {
 	request, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
@@ -655,6 +657,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		*upErr = b
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		keepRetry(w.Header(), res.Header)
 		return writeError(w, from, res.StatusCode, msg), msg
