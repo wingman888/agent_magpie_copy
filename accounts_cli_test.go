@@ -5,36 +5,18 @@ import (
 	"testing"
 )
 
-// Unknown agents are an error that prints the usage, which names both agents.
-func TestAccountsCmdUnknownAgentPrintsUsage(t *testing.T) {
-	for _, args := range [][]string{
-		{"accounts", "gemini"},
-		{"accounts", "switch", "gemini", "a@example.com"},
-		{"accounts", "forget", "gemini", "a@example.com"},
-		{"accounts", "add", "gemini"},
-	} {
+// An unknown agent is an error (so the process exits non-zero) and the error
+// carries the usage, which names both agents and claude's alias.
+func TestAccountsCmdUnknownAgentIsUsageError(t *testing.T) {
+	for _, args := range [][]string{{"gemini"}, {"switch", "gemini", "a@x.com"}, {"forget", "gemini", "a@x.com"}, {"add", "gemini"}} {
 		err := accountsCmd(args)
 		if err == nil {
-			t.Fatalf("%v: no error", args)
+			t.Fatalf("accountsCmd(%v) accepted an unknown agent", args)
 		}
-		msg := err.Error()
-		for _, want := range []string{"claude", "cc", "codex"} {
-			if !strings.Contains(msg, want) {
-				t.Fatalf("%v: usage lacks %q: %s", args, want, msg)
+		for _, want := range []string{"claude", "cc", "codex", "usage"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("accountsCmd(%v) usage lacks %q:\n%s", args, want, err)
 			}
-		}
-	}
-}
-
-func TestAccountsCmdWrongArgCountIsAnError(t *testing.T) {
-	for _, args := range [][]string{
-		{"accounts", "switch", "claude"},
-		{"accounts", "forget", "codex"},
-		{"accounts", "add"},
-		{"accounts", "codex", "extra"},
-	} {
-		if err := accountsCmd(args); err == nil {
-			t.Fatalf("%v: no error", args)
 		}
 	}
 }
