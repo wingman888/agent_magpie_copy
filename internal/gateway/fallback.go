@@ -1,147 +1,83 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
-	"io"
-	"net/http"
+	"encoding/json"
+	"regexp"
 	"strings"
-	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// candidate is one provider and model a request may be sent to, with the
-// keys (or accounts) to try there, in order.
+// candidate is one place a request may be tried: a provider's key (or a
+// signed-in account) serving one of its models.
 type candidate struct {
-	p      provider.Provider
-	model  string
-	plans  []provider.KeyPlan
-	claude bool // a Claude Code subscription, served through the Claude Code binary
+	c     provider.Provider
+	model string
 }
 
-// candidates lists where a request may go, best first: the provider and model
-// the client named, then the entries of its fallback list that resolve. A
-// provider that failed within the cooldown moves behind the others; it is
-// still tried when nothing else works. Candidates with no endpoint are left out.
-func (s *Server) candidates(p provider.Provider, model string, from provider.Protocol) []candidate {
-	all := []candidate{s.candidateFor(p, model, from)}
+// candidates lists where a request goes, in order: the provider's enabled
+// keys for its model, then the keys of each fallback "provider/model" in the
+// order the user listed them. Entries that cannot be read, name no ready
+// provider, or repeat an earlier candidate are skipped without a word.
+func candidates(p provider.Provider, from provider.Protocol, model string) []candidate {
+	var out []candidate
+	for _, c := range p.KeyCandidates(from, model) {
+		out = append(out, candidate{c, model})
+	}
 	seen := map[string]bool{p.ID + "\x00" + model: true}
 	for _, entry := range p.Fallback {
-		fp, fm, ok := resolveFallback(entry)
-		if !ok || seen[fp.ID+"\x00"+fm] {
+		pid, fmodel, ok := splitFallback(entry)
+		if !ok || seen[pid+"\x00"+fmodel] {
 			continue
 		}
-		seen[fp.ID+"\x00"+fm] = true
-		all = append(all, s.candidateFor(fp, fm, from))
-	}
-	var hot, cold []candidate
-	for _, c := range all {
-		switch {
-		case len(c.plans) == 0:
-		case s.providerCooling(c.p.ID):
-			cold = append(cold, c)
-		default:
-			hot = append(hot, c)
+		seen[pid+"\x00"+fmodel] = true
+		fp, ok := readyProvider(pid)
+		if !ok {
+			continue
+		}
+		for _, c := range fp.KeyCandidates(from, fmodel) {
+			out = append(out, candidate{c, fmodel})
 		}
 	}
-	return append(hot, cold...)
-}
-
-// candidateFor is the keys of one provider to try for a model, best first.
-func (s *Server) candidateFor(p provider.Provider, model string, from provider.Protocol) candidate {
-	if p.Account != nil && p.Account.Agent == "claude" {
-		return candidate{p: p, model: model, claude: true, plans: []provider.KeyPlan{{Provider: p}}}
-	}
-	return candidate{p: p, model: model, plans: s.coolLast(p.ID, p.KeyPlans(from, model))}
-}
-
-// resolveFallback reads one fallback entry, "provider/model". Anything that
-// does not name a known provider and a model is skipped silently.
-func resolveFallback(entry string) (provider.Provider, string, bool) {
-	pid, model, ok := strings.Cut(strings.TrimSpace(entry), "/")
-	model = strings.TrimSpace(model)
-	if !ok || strings.TrimSpace(pid) == "" || model == "" {
-		return provider.Provider{}, "", false
-	}
-	p, err := provider.Find(strings.TrimSpace(pid))
-	if err != nil || !p.Ready() {
-		return provider.Provider{}, "", false
-	}
-	return *p, model, true
-}
-
-// attempt is the outcome of tryCandidates.
-type attempt struct {
-	served string            // the provider that answered, or failed last
-	model  string            // the model it was asked for
-	to     provider.Protocol // the upstream protocol used
-	status int
-	msg    string
-	failed string // the candidates that failed first, "" when none did
-	key    string // the key that served, as in keyLabel
-}
-
-// tryCandidates sends the request to each candidate in turn, and each key of a
-// candidate in turn. A failure that means "out of quota, rate limited, overloaded
-// or down" hands the request to the next one, as long as the client has not seen
-// the reply yet. The last candidate's reply is final.
-func (s *Server) tryCandidates(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte, cands []candidate, u *Usage) attempt {
-	var out attempt
-	var failed []string
-	for ci, c := range cands {
-		lastCand := ci == len(cands)-1
-		out.served, out.model = c.p.ID, c.model
-		for i, pl := range c.plans {
-			last := lastCand && i == len(c.plans)-1
-			hw := newHoldWriter(w, !last)
-			to, status, msg := s.sendOnce(hw, r, from, body, c, pl, !last, u)
-			out.to, out.status, out.msg = to, status, msg
-			if hw.held && retryable(hw.status, hw.buf.Bytes()) {
-				s.coolKey(c.p.ID, pl.Ref)
-				failed = append(failed, planLabel(pl))
-				continue
-			}
-			out.key = keyLabel(pl)
-			hw.release()
-			out.failed = strings.Join(failed, ", ")
-			return out
-		}
-		// every key of this candidate failed; rest it for a while
-		s.coolProvider(c.p.ID)
-	}
-	out.failed = strings.Join(failed, ", ")
 	return out
 }
 
-// sendOnce sends the request with one key of one candidate.
-func (s *Server) sendOnce(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte, c candidate, pl provider.KeyPlan, canRetry bool, u *Usage) (provider.Protocol, int, string) {
-	if c.claude {
-		status, msg := s.serveClaudeSubscription(w, r, from, c.model, body, u)
-		return provider.Anthropic, status, msg
+// splitFallback reads a "provider/model" fallback entry. Provider ids hold no
+// slash, so the model is everything after the first one.
+func splitFallback(entry string) (string, string, bool) {
+	pid, model, ok := strings.Cut(strings.TrimSpace(entry), "/")
+	pid, model = strings.ToLower(strings.TrimSpace(pid)), strings.TrimSpace(model)
+	if !ok || pid == "" || model == "" {
+		return "", "", false
 	}
-	to, relay := pickUpstream(pl, from, body)
-	if relay {
-		status, msg := s.passthrough(w, r, pl.Provider, from, c.model, body, u, canRetry)
-		return to, status, msg
-	}
-	status, msg := s.translate(w, r, pl.Provider, from, to, c.model, body, u, canRetry)
-	return to, status, msg
+	return pid, model, true
 }
 
-// retryable reports whether a failed reply is worth sending elsewhere: out of
-// quota or rate limited (see retryableKey), or the server failed or is down.
-func retryable(status int, body []byte) bool {
-	return retryableKey(status, body) || status >= 500
+// readyProvider finds a configured provider by id, ready to take requests.
+func readyProvider(id string) (provider.Provider, bool) {
+	for _, p := range provider.All() {
+		if p.ID == id && p.Ready() {
+			return p, true
+		}
+	}
+	return provider.Provider{}, false
 }
 
-// retryableText reports whether an error message, sent by a provider in the
-// middle of a 200 stream before any content, says the provider is out of
-// quota, rate limited or overloaded.
-func retryableText(msg string) bool {
+// retryStatus matches status codes as whole numbers, so "max_tokens 5000"
+// does not read as a 500.
+var retryStatus = regexp.MustCompile(`\b(402|429|5\d\d)\b`)
+
+// retryText reports whether the text of an error that opened a reply names a
+// failure the next candidate should be tried for: a rate limit, exhausted
+// quota, overload or an unavailable service.
+func retryText(msg string) bool {
+	if retryStatus.MatchString(msg) {
+		return true
+	}
 	m := strings.ToLower(msg)
-	for _, w := range []string{"rate limit", "ratelimit", "rate_limit", "quota", "credit", "balance",
-		"insufficient", "exhaust", "overload", "capacity", "unavailable", "429", "529", "额度", "余额", "限流", "过载"} {
+	for _, w := range []string{"rate limit", "rate_limit", "ratelimit", "too many requests", "overload",
+		"unavailable", "quota", "insufficient", "balance", "exhaust", "credit", "额度", "余额", "用完", "用尽", "限流", "过载"} {
 		if strings.Contains(m, w) {
 			return true
 		}
@@ -149,54 +85,133 @@ func retryableText(msg string) bool {
 	return false
 }
 
-// startError reports whether the first event of a stream is an error that
-// retryableText recognises. raw is that event, as it came.
-func startError(raw []byte) (string, bool) {
-	var msg string
-	readSSE(bytes.NewReader(raw), func(event, data string) error {
-		if msg == "" && (event == "error" || strings.Contains(data, `"error"`)) {
-			msg = data
+const (
+	leadUndecided = iota // not enough of the reply has arrived to tell
+	leadOK               // the reply is not an error: send it
+	leadError            // the reply opens with an error
+)
+
+// leadMax is how much of a reply is held back while it is judged.
+const leadMax = 8 << 10
+
+// leadState judges the start of a reply from the complete SSE events in b.
+// Control events (ping, message_start, role-only chunks) are skipped; the
+// first event that is anything else decides. When the reply is not SSE at
+// all, the judgement waits for leadMax bytes.
+func leadState(b []byte) (string, int) {
+	rest := b
+	for {
+		end, n := sseEnd(rest)
+		if end < 0 {
+			if len(b) >= leadMax {
+				return "", leadOK
+			}
+			return "", leadUndecided
 		}
-		return nil
-	})
-	if msg == "" || !retryableText(msg) {
-		return "", false
+		msg, kind := classifyEvent(rest[:end])
+		switch kind {
+		case leadError:
+			return msg, leadError
+		case leadOK:
+			return "", leadOK
+		}
+		rest = rest[end+n:]
 	}
-	return msg, true
 }
 
-// peekEvent reads the first event of a stream, through its blank line. It
-// returns the raw bytes read and a reader for the rest of the stream.
-func peekEvent(rd io.Reader) ([]byte, io.Reader) {
-	br := bufio.NewReaderSize(rd, 4<<10)
-	var buf []byte
-	for len(buf) < 64<<10 {
-		line, err := br.ReadBytes('\n')
-		buf = append(buf, line...)
-		if err != nil {
-			break
-		}
-		if len(bytes.TrimSpace(line)) == 0 && bytes.Contains(buf, []byte("data:")) {
-			break
-		}
+// sseEnd finds the blank line that ends the first SSE event in b, and its
+// length.
+func sseEnd(b []byte) (int, int) {
+	lf := bytes.Index(b, []byte("\n\n"))
+	crlf := bytes.Index(b, []byte("\r\n\r\n"))
+	switch {
+	case crlf >= 0 && (lf < 0 || crlf < lf):
+		return crlf, 4
+	case lf >= 0:
+		return lf, 2
 	}
-	return buf, br
+	return -1, 0
 }
 
-// coolProvider records that a provider failed for every key just now.
-func (s *Server) coolProvider(providerID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.providerCool == nil {
-		s.providerCool = make(map[string]time.Time)
+// classifyEvent reads one complete SSE event. It returns leadBenign for a
+// control event, which is skipped; the other kinds decide the reply.
+func classifyEvent(ev []byte) (string, int) {
+	var event string
+	var data []string
+	for _, line := range strings.Split(string(ev), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
 	}
-	s.providerCool[providerID] = time.Now()
+	text := strings.Join(data, "\n")
+	if event == "error" || isErrorData(text) {
+		if text == "" {
+			text = event
+		}
+		return text, leadError
+	}
+	if len(data) == 0 && event == "" {
+		return "", leadBenign
+	}
+	switch event {
+	case "ping", "message_start", "response.created", "response.in_progress":
+		return "", leadBenign
+	}
+	if isBenignData(text) {
+		return "", leadBenign
+	}
+	return "", leadOK
 }
 
-// providerCooling reports whether a provider failed within the cooldown.
-func (s *Server) providerCooling(providerID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	t, ok := s.providerCool[providerID]
-	return ok && time.Since(t) < keyCooldown
+// leadBenign is a control event that does not yet decide the reply. It sits
+// beside the three states leadState reports; it never escapes it.
+const leadBenign = -1
+
+// isErrorData reports whether an event's JSON data is an error.
+func isErrorData(data string) bool {
+	var v struct {
+		Type  string          `json:"type"`
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal([]byte(data), &v) != nil {
+		return false
+	}
+	return v.Type == "error" || (len(v.Error) > 0 && string(v.Error) != "null")
+}
+
+// isBenignData reports whether an event's JSON data only opens the reply: a
+// ping, the start of a message, or a chunk with nothing but a role.
+func isBenignData(data string) bool {
+	var v struct {
+		Type    string `json:"type"`
+		Choices []struct {
+			Delta        map[string]json.RawMessage `json:"delta"`
+			FinishReason json.RawMessage            `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal([]byte(data), &v) != nil {
+		return false
+	}
+	switch v.Type {
+	case "ping", "message_start", "response.created", "response.in_progress":
+		return true
+	}
+	if len(v.Choices) == 0 {
+		return false
+	}
+	for _, ch := range v.Choices {
+		for k := range ch.Delta {
+			if k != "role" {
+				return false
+			}
+		}
+		if len(ch.FinishReason) > 0 && string(ch.FinishReason) != "null" {
+			return false
+		}
+	}
+	return true
 }

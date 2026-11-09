@@ -102,7 +102,10 @@ func callbackBaseURL() string {
 	return "http://" + host + ":" + port
 }
 
-func (b *subscriptionBridge) start(ctx context.Context, req *Request, model string) (*subscriptionRun, <-chan Event, error) {
+// start runs the claude binary for one request. configDir, when set, is a
+// Claude Code login magpie keeps itself, so the binary signs in with it
+// instead of the agent's own login.
+func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, configDir string) (*subscriptionRun, <-chan Event, error) {
 	binary, err := claudeBinary()
 	if err != nil {
 		return nil, nil, err
@@ -144,6 +147,10 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model stri
 	cmd := exec.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
 	cmd.Env = cleanClaudeEnv(os.Environ())
+	if configDir != "" {
+		// later entries win, so this overrides any CLAUDE_CONFIG_DIR inherited
+		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+configDir)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cleanup()
@@ -556,7 +563,7 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	_ = os.RemoveAll(run.tmp)
 }
 
-func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) (int, string) {
+func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model, configDir string, body []byte, usage *Usage) (int, string) {
 	req, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
@@ -569,7 +576,7 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	if run != nil {
 		events, err = run.continueWith(results)
 	} else {
-		run, events, err = s.subscription.start(r.Context(), req, model)
+		run, events, err = s.subscription.start(r.Context(), req, model, configDir)
 	}
 	if err != nil {
 		return writeError(w, from, 502, "Claude Code: "+err.Error()), err.Error()
