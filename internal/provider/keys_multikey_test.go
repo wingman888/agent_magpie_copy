@@ -216,7 +216,7 @@ func TestMultikeyLastEnabledProtected(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := multikeyFind(t)
-	if got := multikeyOrder(p); strings.Join(got, ",") != "(on)" || p.Key != "sk-spare-gggggggg" {
+	if got := multikeyOrder(p); strings.Join(got, ",") != "spare(on)" || p.Key != "sk-spare-gggggggg" || p.KeyName != "spare" {
 		t.Fatalf("after removing front: %v key=%q", got, p.Key)
 	}
 }
