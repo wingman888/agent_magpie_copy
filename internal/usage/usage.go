@@ -32,6 +32,10 @@ type Record struct {
 	Reasoning  int       `json:"reasoning,omitempty"`
 	Millis     int64     `json:"ms"`
 	Status     int       `json:"status"`
+	// Group is "group/<id>" when the agent asked for a routing group rather
+	// than a model. Such calls are counted in the totals and by agent, but
+	// not in the provider and model breakdown.
+	Group string `json:"group,omitempty"`
 }
 
 // Path is the log file: ~/.config/magpie/usage.jsonl (XDG-aware).
@@ -297,6 +301,9 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 			agents[r.Agent] = a
 		}
 		a.add(r, pr)
+		if r.Group != "" {
+			continue
+		}
 		k := r.Provider + "/" + r.Model
 		m := models[k]
 		if m == nil {

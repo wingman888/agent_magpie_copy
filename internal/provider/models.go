@@ -235,19 +235,31 @@ type Entry struct {
 	ID       string   `json:"id"`    // what the agent sends magpie
 	Model    string   `json:"model"` // what magpie sends the vendor
 	Name     string   `json:"name"`
-	Efforts  []string `json:"efforts,omitempty"`
+	Efforts  []string `json:"efforts,omitempty"` // for display: a group's, all members share
 	Provider Provider `json:"-"`
-	// Group is set on a routing group (group/<id>), which has no provider
-	// of its own; see groups.go.
-	Group bool `json:"group,omitempty"`
+	// Group is set on a routing group's entry (group/<id>), which has no
+	// Provider of its own; its members are what FindGroup resolves.
+	Group *Group `json:"-"`
+	// Able is a routing group's capability: the reasoning levels of its
+	// first ready member. Use Capability to read it.
+	Able []string `json:"-"`
+}
+
+// Capability is the reasoning levels a model answers for: a routing group
+// answers as its first ready member does, anything else as its own Efforts.
+func (e Entry) Capability() []string {
+	if e.Group != nil {
+		return e.Able
+	}
+	return e.Efforts
 }
 
 // Catalog lists every exposed model of every ready provider, then the
-// routing groups.
+// routing groups that have a member ready.
 func Catalog() []Entry {
-	all := All()
+	ps := All()
 	var out []Entry
-	for _, p := range all {
+	for _, p := range ps {
 		if !p.Ready() {
 			continue
 		}
@@ -255,7 +267,16 @@ func Catalog() []Entry {
 			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Efforts: m.Efforts, Provider: p})
 		}
 	}
-	return append(out, groupEntries(all)...)
+	for _, g := range listGroups(ps, load()) {
+		ms := resolveMembers(g.Members, ps)
+		if len(ms) == 0 {
+			continue
+		}
+		gc := g
+		out = append(out, Entry{ID: groupPrefix + g.ID, Model: groupPrefix + g.ID, Name: g.Name, Efforts: groupEfforts(ms),
+			Able: ms[0].efforts(), Group: &gc})
+	}
+	return out
 }
 
 // Resolve maps an id an agent sent to a provider and the vendor's model id.
@@ -263,14 +284,9 @@ func Catalog() []Entry {
 // and the bare model id when exactly one provider serves it.
 func Resolve(id string) (Provider, string, bool) {
 	id = strings.TrimSpace(id)
-	var entries []Entry // the provider models; a routing group is resolved elsewhere
-	for _, e := range Catalog() {
-		if !e.Group {
-			entries = append(entries, e)
-		}
-	}
+	entries := Catalog()
 	for _, e := range entries {
-		if e.ID == id {
+		if e.ID == id && e.Group == nil {
 			return e.Provider, e.Model, true
 		}
 	}
@@ -281,7 +297,7 @@ func Resolve(id string) (Provider, string, bool) {
 	}
 	var hits []Entry
 	for _, e := range entries {
-		if e.Model == id {
+		if e.Group == nil && e.Model == id {
 			hits = append(hits, e)
 		}
 	}
