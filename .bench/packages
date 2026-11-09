@@ -1,1 +1,1 @@
-./internal/usage ./internal/agent ./internal/gateway ./internal/provider ./.
+./internal/gateway ./internal/provider

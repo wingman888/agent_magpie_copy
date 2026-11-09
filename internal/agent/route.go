@@ -19,45 +19,16 @@ const magpieID = "magpie"
 
 // viaMagpie lists the catalog for a picker, one group per provider.
 func viaMagpie(prefix string) []Option {
-	var out, groups []Option
+	var out []Option
 	for _, e := range provider.Catalog() {
-		if e.Group != nil {
-			_, ms, _ := provider.FindGroup(e.ID)
-			groups = append(groups, groupOption(prefix, e, ms))
-			continue
-		}
 		note := e.Provider.Name + " · via magpie"
 		if a := e.Provider.Account; a != nil {
 			note = a.User + " · via magpie"
 		}
 		out = append(out, Option{Value: prefix + e.ID, Label: e.Name, Note: note,
-			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID})
+			Icon: e.Provider.Icon, Group: e.Provider.Name})
 	}
-	return append(groups, out...)
-}
-
-// groupSection is the picker's header for routing groups, shown above the
-// providers.
-const groupSection = "Routing groups"
-
-// groupOption is a routing group as a picker option: its name, a note that
-// says it is a group, and the icon of each member's provider, once each.
-func groupOption(prefix string, e provider.Entry, ms []provider.Member) Option {
-	o := Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie", Group: groupSection, Ref: e.ID}
-	seen := map[string]bool{}
-	for _, m := range ms {
-		if seen[m.Provider.ID] {
-			continue
-		}
-		seen[m.Provider.ID] = true
-		if m.Provider.Icon != "" {
-			o.Icons = append(o.Icons, m.Provider.Icon)
-		}
-	}
-	if len(o.Icons) > 0 {
-		o.Icon = o.Icons[0]
-	}
-	return o
+	return out
 }
 
 // viaMagpieFor is viaMagpie without the agent's own account: Codex CLI going
@@ -74,10 +45,6 @@ func viaMagpieFor(agentID, prefix string) []Option {
 
 // isMagpie reports whether a model value is a catalog reference.
 func isMagpie(v string) bool {
-	if id, ok := strings.CutPrefix(v, "group/"); ok {
-		_, _, found := provider.FindGroup(id)
-		return found
-	}
 	_, _, ok := provider.Resolve(v)
 	return ok && strings.Contains(v, "/")
 }
@@ -94,11 +61,6 @@ func firstOf(xs []string) string {
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		if e.Group != nil {
-			// listed for display: only the reasoning levels every member supports
-			out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · routing group", Efforts: e.Efforts})
-			continue
-		}
 		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts})
 	}
 	return out
