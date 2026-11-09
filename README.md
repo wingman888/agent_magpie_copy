@@ -102,6 +102,56 @@ separate Responses endpoint, `catalog=` to borrow a models.dev list, and
 `models=` to name the models to expose. Anything a preset does not know can
 be overridden the same way.
 
+### Import links
+
+A relay or vendor can publish a link that adds a provider in one click:
+
+```
+magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…
+magpie://import?preset=deepseek&key=sk-…
+```
+
+Opening the link (or running `magpie import '<link>'`) shows what would be
+added (the name, the hosts the requests and the key go to, the models) and
+saves nothing until you confirm. `magpie import -y '<link>'` skips the
+question; without a terminal to ask in, it needs `-y`. An existing provider
+with the same id is replaced after you confirm. A link without `key` leaves
+the provider to be keyed later with `magpie provider key <id> <key>`.
+Links that do not check out are refused whole, never half-imported.
+
+| Parameter | Meaning |
+| --- | --- |
+| `preset` | a preset id (`magpie presets`); its endpoints are used |
+| `region` | the preset's region, when it has several |
+| `name` | display name; required without `preset`, overrides the preset's name with it |
+| `id` | provider id; derived from the name when missing (`Acme Relay` → `acme-relay`) |
+| `key` | API key; optional |
+| `chat`, `responses`, `anthropic` | base URLs of the three APIs (`anthropic` without `/v1`) |
+| `models` | comma-separated model ids (at most 200) |
+| `catalog` | a models.dev provider id, for model names and reasoning levels |
+| `website`, `keys` | the vendor's site and its key page (https only; anything else is ignored) |
+
+Base URLs must be https, except for local, private or `.local` hosts, and
+carry no user name, password, query or fragment. Values are URL-encoded.
+
+Custom schemes do not open from web pages or GitHub, so a page can link to
+the same parameters in a fragment instead; the fragment never reaches the
+server:
+
+```
+https://usemagpie.ai/import#name=Acme%20Relay&chat=https://api.acme.example/v1&key=sk-…
+```
+
+### Network proxy
+
+magpie's own requests to vendors (model lists, tests, updates, and the
+gateway's calls) take the first proxy they find: the `proxy` setting in
+`settings.json`, then `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` and
+`NO_PROXY`, then the system proxy (macOS network settings or Windows
+Internet options, with their exception lists). `"proxy": "direct"` turns it
+off; accepted forms are `http://`, `https://`, `socks5://`, `socks5h://`, or a
+bare `host:port` (http). Loopback addresses are never proxied.
+
 ### Signed-in agents as providers
 
 An agent you have signed in to is a subscription with models behind it, so
@@ -251,6 +301,8 @@ magpie codex effort high        # other fields
 magpie codex xhigh              # bare effort levels are recognised too
 magpie codex deepseek/deepseek-chat   # any catalog model, through the gateway
 magpie claude moonshot/kimi-k2.5
+magpie claude haiku deepseek/deepseek-flash   # one tier of Claude Code's own
+magpie claude haiku ""                        # back to following the main model
 magpie gemini auth api-key
 magpie opencode anthropic/claude-sonnet-5
 magpie oc small anthropic/claude-haiku-4-5
@@ -262,6 +314,18 @@ magpie rm work
 
 magpie sync                     # refresh the models.dev catalog and every live model list
 ```
+
+### Claude Code model tiers
+
+Claude Code has four model tiers, `opus`, `sonnet`, `haiku` and `fable`, and
+each subagent uses one of them. `magpie claude <tier> <model>` sets a tier
+to a model magpie provides (`provider/model`); a tier you do not set follows
+the main model, so changing the main model moves those tiers and leaves the
+ones you set alone. `magpie claude haiku ""` makes a tier follow the main
+model again. Setting a tier needs Claude Code to be pointed at magpie first:
+pick a magpie model as the main one. `magpie claude <model>` with no tier
+sets the main model. Clearing the main model (a native Claude model) removes
+all of these settings and leaves the rest of Claude Code's settings alone.
 
 In the app, click any value to open a filtered list; type to search or to
 enter something that is not listed; `esc` closes the panel. Profiles are the
@@ -295,6 +359,9 @@ until you start a new one.
 - `~/.cache/magpie/models.json` — models.dev catalog (OpenCode's cache at
   `~/.cache/opencode/models.json` is used when present)
 - `~/.cache/magpie/models/<provider>.json` — model lists fetched from vendors
+
+- `~/.config/magpie/settings.json` — theme, language, `tray` (`panel` or
+  `window`: what a click on the tray icon opens) and `proxy`
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are respected.
 

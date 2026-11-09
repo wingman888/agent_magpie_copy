@@ -169,7 +169,9 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		writeJSON(rw, settingsState())
 	})
 	mux.HandleFunc("POST /api/settings", func(rw http.ResponseWriter, r *http.Request) {
-		var in settings.Settings
+		// Start from what is saved: the page sends only the fields it changed,
+		// and a missing tray or proxy must not reset them.
+		in := settings.Load()
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return

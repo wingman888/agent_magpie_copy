@@ -15,6 +15,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
 )
 
@@ -195,7 +196,13 @@ func Run(version string, showMain bool) error {
 		h.tray.SetIcon(appIcon)
 	}
 	h.tray.SetMenu(menu)
-	h.tray.AttachWindow(h.panel).WindowOffset(6)
+	// A click opens the panel under the icon, or the main window when the
+	// settings say so. The choice is read at start, so a change needs a restart.
+	if settings.Load().Tray == "window" {
+		h.tray.OnClick(func() { h.ShowMain("") })
+	} else {
+		h.tray.AttachWindow(h.panel).WindowOffset(6)
+	}
 
 	if showMain {
 		if runtime.GOOS == "windows" {
