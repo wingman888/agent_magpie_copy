@@ -41,15 +41,6 @@ type Account struct {
 	// a non-streaming request instead of relaying it.
 	Stream bool `json:"-"`
 
-	// ConfigDir is the Claude Code config directory this login lives in when
-	// magpie keeps the login itself (a saved login that is not the one the
-	// agent is signed in to). Empty means the agent's own login.
-	ConfigDir string `json:"-"`
-
-	// also are the other saved logins that are on at the same time, in the
-	// order they are tried after this one. Set on the current login only.
-	also []Provider
-
 	sign   func(ctx context.Context, req *http.Request, body []byte) error
 	body   func(body []byte) []byte // request tweaks the backend insists on
 	models func() []catalog.Model
@@ -259,16 +250,6 @@ func forgetClaudeCredential() {
 }
 
 func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) error {
-	if err := rsiWriteClaudeCredential(loc, c); err != nil {
-		return err
-	}
-	cacheClaudeCredential(c, loc)
-	return nil
-}
-
-// writeClaudeCredential stores a credential blob without touching the cache
-// of the agent's own login.
-func rsiWriteClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) error {
 	b, err := c.marshal()
 	if err != nil {
 		return err
@@ -277,28 +258,18 @@ func rsiWriteClaudeCredential(loc claudeCredentialLocation, c claudeCredentials)
 		if err := os.WriteFile(loc.path, append(b, '\n'), 0o600); err != nil {
 			return err
 		}
-		return nil
+	} else {
+		args := []string{"add-generic-password", "-U", "-s", "Claude Code-credentials"}
+		if loc.account != "" {
+			args = append(args, "-a", loc.account)
+		}
+		args = append(args, "-w", string(b))
+		if out, err := exec.Command("security", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("save Claude Code credentials: %v: %s", err, strings.TrimSpace(string(out)))
+		}
 	}
-	args := []string{"add-generic-password", "-U", "-s", "Claude Code-credentials"}
-	if loc.account != "" {
-		args = append(args, "-a", loc.account)
-	}
-	args = append(args, "-w", string(b))
-	if out, err := exec.Command("security", args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("save Claude Code credentials: %v: %s", err, strings.TrimSpace(string(out)))
-	}
+	cacheClaudeCredential(c, loc)
 	return nil
-}
-
-// readClaudeDir reads the login kept in a config directory magpie manages.
-func rsiReadClaudeDir(dir string) (claudeCredentials, claudeCredentialLocation, bool) {
-	path := filepath.Join(dir, ".credentials.json")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return claudeCredentials{}, claudeCredentialLocation{}, false
-	}
-	c, ok := parseClaudeCredentials(b)
-	return c, claudeCredentialLocation{path: path}, ok
 }
 
 // claudeExecutable finds the claude CLI; a var so tests can fake it.
@@ -355,18 +326,7 @@ func claudeIdentity() (user, plan string, signedOut bool) {
 	return claudeStatusUser, claudeStatusPlan, claudeStatusOut
 }
 
-// claudeAccount is the Claude Code login the agent is signed in to, with the
-// saved logins that are on at the same time behind it.
 func claudeAccount() (Provider, bool) {
-	p, ok := rsiClaudeSelf()
-	if !ok {
-		return Provider{}, false
-	}
-	return rsiWithAlternates(p), true
-}
-
-// claudeSelf is the login Claude Code itself is signed in to.
-func rsiClaudeSelf() (Provider, bool) {
 	c, _, ok := claudeCredential()
 	if !ok {
 		return Provider{}, false
@@ -385,15 +345,9 @@ func rsiClaudeSelf() (Provider, bool) {
 			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
 		}
 	}
-	return rsiClaudeProvider("", user, plan), true
-}
-
-// claudeProvider is a Claude Code login: the agent's own when dir is "", else
-// the one magpie keeps in dir.
-func rsiClaudeProvider(dir, user, plan string) Provider {
-	acct := &Account{Agent: "claude", User: user, Plan: plan, ConfigDir: dir}
+	acct := &Account{Agent: "claude", User: user, Plan: plan}
 	acct.sign = func(ctx context.Context, req *http.Request, body []byte) error {
-		tok, err := rsiClaudeTokenAt(ctx, dir)
+		tok, err := claudeToken(ctx)
 		if err != nil {
 			return err
 		}
@@ -412,27 +366,22 @@ func rsiClaudeProvider(dir, user, plan string) Provider {
 	acct.body = claudeBody
 	acct.models = func() []catalog.Model { return catalog.Provider("anthropic") }
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := rsiClaudeModelsAt(ctx, dir)
+		ms, err := claudeModels(ctx)
 		if err != nil {
 			return nil, err
 		}
 		return ms, catalog.SaveLive("claude", claudeBase, ms)
 	}
 	return Provider{ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Anthropic: claudeBase,
-		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}
+		Catalog: "anthropic", Website: "https://claude.ai", Account: acct}, true
 }
 
-// claudeModels asks Anthropic's Models API with the agent's own login.
+// claudeModels asks Anthropic's Models API, authenticated with the account's
+// own OAuth token, so the picker follows the vendor instead of a snapshot.
+// Nothing here is compiled in: a new model shows up the moment Anthropic
+// lists it (which is what the refresh button runs).
 func claudeModels(ctx context.Context) ([]catalog.Model, error) {
-	return rsiClaudeModelsAt(ctx, "")
-}
-
-// claudeModelsAt asks Anthropic's Models API, authenticated with the account's
-// own OAuth token (dir as in claudeProvider), so the picker follows the vendor
-// instead of a snapshot. Nothing here is compiled in: a new model shows up the
-// moment Anthropic lists it (which is what the refresh button runs).
-func rsiClaudeModelsAt(ctx context.Context, dir string) ([]catalog.Model, error) {
-	tok, err := rsiClaudeTokenAt(ctx, dir)
+	tok, err := claudeToken(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -499,41 +448,20 @@ func claudeFresh(c claudeCredentials) bool {
 		(c.OAuth.ExpiresAt == 0 || time.Until(claudeExpiry(c.OAuth.ExpiresAt)) > 5*time.Minute)
 }
 
-// claudeToken is the agent's own login's access token.
+// claudeToken returns a usable access token, refreshing it through Anthropic
+// when it is about to expire. A refresh rotates the refresh token, so the new
+// pair goes back where Claude Code will look for it.
 func claudeToken(ctx context.Context) (string, error) {
-	return rsiClaudeTokenAt(ctx, "")
-}
-
-// claudeTokenAt returns a usable access token for the login in dir ("" is the
-// agent's own), refreshing it through Anthropic when it is about to expire. A
-// refresh rotates the refresh token, so the new pair goes back where the login
-// was read from.
-func rsiClaudeTokenAt(ctx context.Context, dir string) (string, error) {
 	claudeMu.Lock()
 	defer claudeMu.Unlock()
-	var c claudeCredentials
-	var loc claudeCredentialLocation
-	var ok bool
-	if dir == "" {
-		c, loc, ok = claudeCredential()
-	} else {
-		c, loc, ok = rsiReadClaudeDir(dir)
-	}
+	c, loc, ok := claudeCredential()
 	if !ok {
 		return "", errors.New("Claude Code is signed out; run claude auth login")
 	}
 	if !claudeFresh(c) {
 		// Claude Code itself may have rotated the token since the cache was
 		// filled; a stale refresh token would be rejected, so look again.
-		var latest claudeCredentials
-		var latestLoc claudeCredentialLocation
-		var found bool
-		if dir == "" {
-			latest, latestLoc, found = readClaudeCredential()
-		} else {
-			latest, latestLoc, found = rsiReadClaudeDir(dir)
-		}
-		if found {
+		if latest, latestLoc, ok := readClaudeCredential(); ok {
 			c, loc = latest, latestLoc
 		}
 	}
@@ -571,11 +499,7 @@ func rsiClaudeTokenAt(ctx context.Context, dir string) (string, error) {
 	if fresh.ExpiresIn > 0 {
 		c.OAuth.ExpiresAt = time.Now().Add(time.Duration(fresh.ExpiresIn) * time.Second).UnixMilli()
 	}
-	if dir == "" {
-		if err := saveClaudeCredential(loc, c); err != nil {
-			return "", err
-		}
-	} else if err := rsiWriteClaudeCredential(loc, c); err != nil {
+	if err := saveClaudeCredential(loc, c); err != nil {
 		return "", err
 	}
 	return fresh.AccessToken, nil
@@ -588,7 +512,6 @@ func Accounts() []Provider {
 	if cfg == "" {
 		cfg = filepath.Join(home, ".config")
 	}
-	rsiRememberCurrent()
 	var out []Provider
 	if p, ok := claudeAccount(); ok {
 		out = append(out, p)
@@ -664,34 +587,18 @@ type codexAuth struct {
 	} `json:"tokens"`
 }
 
-// codexAccount is the ChatGPT login Codex CLI is signed in to, with the saved
-// logins that are on at the same time behind it.
 func codexAccount(home string) (Provider, bool) {
-	p, ok := rsiCodexSelf(home)
-	if !ok {
-		return Provider{}, false
-	}
-	return rsiWithAlternates(p), true
-}
-
-// codexSelf is the login Codex CLI itself keeps in ~/.codex/auth.json.
-func rsiCodexSelf(home string) (Provider, bool) {
 	path := filepath.Join(home, ".codex", "auth.json")
 	var a codexAuth
 	if !readJSON(path, &a) || a.Tokens.AccessToken == "" || a.AuthMode == "apikey" {
 		return Provider{}, false
 	}
 	id := jwtClaims(a.Tokens.IDToken)
-	user := claimString(id, "email")
-	if user == "" {
-		user = "ChatGPT"
+	acct := &Account{Agent: "codex", Stream: true,
+		User: claimString(id, "email"), Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")}
+	if acct.User == "" {
+		acct.User = "ChatGPT"
 	}
-	return rsiCodexProvider(path, user, claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")), true
-}
-
-// codexProvider is a ChatGPT login whose tokens live in the auth file at path.
-func rsiCodexProvider(path, user, plan string) Provider {
-	acct := &Account{Agent: "codex", Stream: true, User: user, Plan: plan}
 	acct.sign = func(ctx context.Context, req *http.Request, _ []byte) error {
 		tok, accountID, err := codexToken(ctx, path)
 		if err != nil {
@@ -708,7 +615,7 @@ func rsiCodexProvider(path, user, plan string) Provider {
 	acct.body = codexBody
 	acct.models = catalog.Codex
 	acct.fetch = func(context.Context) ([]catalog.Model, error) { return catalog.Codex(), nil }
-	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}
+	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true
 }
 
 // codexToken returns a usable access token, refreshing it through OpenAI

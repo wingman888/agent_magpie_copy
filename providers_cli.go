@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,10 +27,7 @@ const providerUsage = `usage:
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
-  magpie provider icon <id> <file|name|"">  set a custom vendor's icon: a picture, a built-in name, or "" for the default
-  magpie provider fallback <id> [vendor/model …]  show or set the models tried, in order, when this vendor fails (- clears)
 
-  more for a custom vendor: header.<Name>=value (any number), icon=<file|name>, catalog=a,b
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
        magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
 
@@ -230,64 +226,6 @@ func providerCmd(args []string) error {
 			os.Exit(1)
 		}
 		return nil
-	case "icon":
-		if len(rest) != 2 {
-			return fmt.Errorf("magpie provider icon <id> <image file | built-in icon | \"\">")
-		}
-		p, err := provider.Find(rest[0])
-		if err != nil {
-			return err
-		}
-		if p.Preset != "" || p.Account != nil {
-			return fmt.Errorf("仅自定义供应商可设置图标（%s 是预设或订阅供应商）", p.Name)
-		}
-		icon, err := rsiIconArg(rest[1])
-		if err != nil {
-			return err
-		}
-		p.Icon = icon
-		if err := provider.Save(*p); err != nil {
-			return err
-		}
-		if icon == "" {
-			fmt.Println(green.Render("✓"), p.Name, muted.Render("uses the default icon"))
-		} else {
-			fmt.Println(green.Render("✓"), p.Name, "icon", muted.Render(icon))
-		}
-		return nil
-	case "fallback":
-		if len(rest) < 1 {
-			return fmt.Errorf("magpie provider fallback <id> [vendor/model …]")
-		}
-		p, err := provider.Find(rest[0])
-		if err != nil {
-			return err
-		}
-		if len(rest) == 1 {
-			if len(p.Fallback) == 0 {
-				fmt.Println(muted.Render(p.Name + " has no fallback · magpie provider fallback " + p.ID + " <vendor/model…>"))
-				return nil
-			}
-			fmt.Println(bold.Render(p.Name), muted.Render("falls back to, in order:"))
-			for i, m := range p.Fallback {
-				fmt.Printf("  %d. %s\n", i+1, m)
-			}
-			return nil
-		}
-		list := rest[1:]
-		if len(list) == 1 && list[0] == "-" {
-			list = nil
-		}
-		p.Fallback = list
-		if err := provider.Save(*p); err != nil {
-			return err
-		}
-		if len(list) == 0 {
-			fmt.Println(green.Render("✓"), p.Name, muted.Render("has no fallback"))
-		} else {
-			fmt.Println(green.Render("✓"), p.Name, "falls back to", muted.Render(strings.Join(list, " → ")))
-		}
-		return nil
 	case "models":
 		if len(rest) < 1 {
 			return fmt.Errorf("magpie provider models <id> [model ids to expose…]")
@@ -406,9 +344,6 @@ func showProvider(p provider.Provider) error {
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
-	for _, k := range provider.HeaderNames(p.ExtraHeaders()) {
-		kv("header", k+": "+p.ExtraHeaders()[k])
-	}
 	ms := p.Exposed()
 	src := "models.dev"
 	if t, ok := p.Fetched(); ok {
@@ -438,16 +373,6 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		if !ok {
 			return fmt.Errorf("expected key=value, got %q\n\n%s", kv, providerUsage)
 		}
-		if name, ok := rsiHeaderName(k); ok {
-			if name == "" {
-				return fmt.Errorf("a header needs a name: header.<Name>=value\n\n%s", providerUsage)
-			}
-			if p.Headers == nil {
-				p.Headers = map[string]string{}
-			}
-			p.Headers[name] = v
-			continue
-		}
 		switch strings.ToLower(k) {
 		case "id":
 			p.ID = v
@@ -470,59 +395,12 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "keys":
 			p.KeysURL = v
 		case "icon":
-			if p.Preset != "" || p.Account != nil {
-				return fmt.Errorf("仅自定义供应商可设置图标（%s 是预设或订阅供应商）", p.Name)
-			}
-			icon, err := rsiIconArg(v)
-			if err != nil {
-				return err
-			}
-			p.Icon = icon
+			p.Icon = v
 		default:
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}
 	}
 	return nil
-}
-
-// headerName reads a "header.<Name>" key, case-insensitively on the prefix;
-// the name keeps the casing the user typed. ok is false for other keys.
-func rsiHeaderName(k string) (name string, ok bool) {
-	const prefix = "header."
-	if len(k) < len(prefix) || !strings.EqualFold(k[:len(prefix)], prefix) {
-		return "", false
-	}
-	return strings.TrimSpace(k[len(prefix):]), true
-}
-
-// iconArg turns what the user typed for an icon into the value providers.json
-// keeps: an existing file is stored as a picture and becomes "file:<name>";
-// anything else must be a built-in icon name; "" means the default icon.
-func rsiIconArg(v string) (string, error) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return "", nil
-	}
-	if fi, err := os.Stat(v); err == nil {
-		if fi.IsDir() {
-			return "", fmt.Errorf("%s is a folder, not an image", v)
-		}
-		if fi.Size() > provider.MaxIcon {
-			return "", fmt.Errorf("%s is larger than %d KB", v, provider.MaxIcon>>10)
-		}
-		b, err := os.ReadFile(v)
-		if err != nil {
-			return "", err
-		}
-		return provider.StoreIcon(b)
-	}
-	if provider.IsBuiltinIcon(v) {
-		return v, nil
-	}
-	if strings.ContainsAny(v, "/\\") || filepath.Ext(v) != "" {
-		return "", fmt.Errorf("no image file %s", v)
-	}
-	return "", fmt.Errorf("%q is not a built-in icon name or an image file", v)
 }
 
 func ago(t time.Time) string {
