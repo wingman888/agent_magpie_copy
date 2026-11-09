@@ -65,7 +65,10 @@ func (s *Server) endpoints(p provider.Provider, model string, prefer provider.Pr
 // OpenAI's own API and Copilot's OpenAI models prefer Responses; other
 // vendors prefer Chat Completions. Anthropic Messages comes last.
 func preference(p provider.Provider, model string) []provider.Protocol {
-	if (p.Host() == "api.openai.com" || isCopilot(p)) && openAIModel(model) && !openWeightsModel(model) {
+	if p.Host() == "api.openai.com" {
+		return []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
+	}
+	if isCopilot(p) && openAIModel(model) && !openWeightsModel(model) {
 		return []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
 	}
 	return []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}

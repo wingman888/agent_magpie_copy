@@ -83,6 +83,17 @@ func TestFixModelRefusalClassification(t *testing.T) {
 	}
 }
 
+func TestFixApiOpenAIAnyModelRespFirst(t *testing.T) {
+	openai := provider.Provider{ID: "fixpref-any-openai", Chat: "https://api.openai.com/v1", Responses: "https://api.openai.com/v1"}
+	respFirst := []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
+	for _, model := range []string{"my-model", "claude-sonnet-5-5", "llama-3"} {
+		got := preference(openai, model)
+		if len(got) != len(respFirst) || got[0] != respFirst[0] || got[1] != respFirst[1] {
+			t.Errorf("preference(api.openai.com, %q) = %v, want %v", model, got, respFirst)
+		}
+	}
+}
+
 func TestFixGptOssPreference(t *testing.T) {
 	copilot := provider.Provider{ID: "copilot", Chat: "https://api.githubcopilot.com", Responses: "https://api.githubcopilot.com", Anthropic: "https://api.githubcopilot.com"}
 	openai := provider.Provider{ID: "fixpref-openai", Chat: "https://api.openai.com/v1", Responses: "https://api.openai.com/v1"}
@@ -94,7 +105,7 @@ func TestFixGptOssPreference(t *testing.T) {
 		want  []provider.Protocol
 	}{
 		{copilot, "openai/gpt-oss-120b", chatFirst},
-		{openai, "openai/gpt-oss-120b", chatFirst},
+		{openai, "openai/gpt-oss-120b", respFirst},
 		{copilot, "gpt-6-sol", respFirst},
 		{copilot, "o4-mini", respFirst},
 		{openai, "gpt-6-sol", respFirst},
