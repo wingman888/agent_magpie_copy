@@ -5,39 +5,34 @@ import (
 	"strings"
 )
 
-// dateSuffix is a trailing 8-digit date, as vendors add to snapshot names.
-var dateSuffix = regexp.MustCompile(`-\d{8}$`)
-
-// NormalizeModelKey is the form two vendors' spellings of one model meet
-// in: `claude-opus-5-5`, `anthropic/claude-opus-5.5`, `Claude-Opus-5.5` and
-// `claude-opus-5-5-20260801` are all `claude-opus-5-5`. Case is ignored, the
-// vendor prefix (up to the last `/`) is dropped, a dot between two digits
-// is a version point and reads as a hyphen, and a trailing 8-digit date is
-// dropped. A colon variant such as `:batch` is part of the model, kept as
-// it is; so is any other dot, as in `v1.beta`.
-func NormalizeModelKey(model string) string {
-	m := strings.ToLower(strings.TrimSpace(model))
-	if i := strings.LastIndex(m, "/"); i >= 0 {
-		m = m[i+1:]
+// NormalizeModelKey is the form a model's name takes when it is the same
+// model in another vendor's name: case doesn't count, a vendor prefix
+// (anthropic/…) doesn't, a version's dot is a hyphen (5.5 is 5-5), and an
+// 8-digit date at the end doesn't. A colon variant (:batch) is another
+// model, kept as it is; so is a dot that isn't a version's (v1.beta).
+func NormalizeModelKey(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if i := strings.Index(name, "/"); i >= 0 {
+		name = name[i+1:]
 	}
-	base, variant := m, ""
-	if i := strings.Index(m, ":"); i >= 0 {
-		base, variant = m[:i], m[i:]
+	base, variant, hasVariant := strings.Cut(name, ":")
+	for {
+		next := versionDot.ReplaceAllString(base, "$1-$2")
+		if next == base {
+			break
+		}
+		base = next
 	}
 	base = dateSuffix.ReplaceAllString(base, "")
-	base = versionPoints(base)
-	return base + variant
-}
-
-// versionPoints turns each dot that has a digit on both sides into a hyphen.
-func versionPoints(s string) string {
-	b := []byte(s)
-	for i := 1; i+1 < len(b); i++ {
-		if b[i] == '.' && isDigit(b[i-1]) && isDigit(b[i+1]) {
-			b[i] = '-'
-		}
+	if hasVariant {
+		return base + ":" + variant
 	}
-	return string(b)
+	return base
 }
 
-func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+var (
+	// versionDot is a dot between two digits: a version's, in 5.5 or 4.1.
+	versionDot = regexp.MustCompile(`(\d)\.(\d)`)
+	// dateSuffix is a release date at the end: -20260801.
+	dateSuffix = regexp.MustCompile(`-\d{8}$`)
+)
