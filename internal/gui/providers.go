@@ -199,23 +199,6 @@ func ago(t time.Time) string {
 	}
 }
 
-// keepSaved fills in what the editor did not send for a saved custom
-// provider: the custom headers and the icon. Presets and signed-in accounts
-// are left alone; their headers and icons follow their own rules in provider.Save.
-func keepSaved(in *provider.Provider, old *provider.Provider) {
-	if old == nil || old.Preset != "" || old.Account != nil {
-		return
-	}
-	// the editor does not send custom headers yet: keep the saved ones
-	if in.Headers == nil {
-		in.Headers = old.Headers
-	}
-	// the editor does not send an icon yet: keep the saved one
-	if in.Icon == "" {
-		in.Icon = old.Icon
-	}
-}
-
 func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 	mux.HandleFunc("GET /api/providers", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, providersState(gw))
@@ -244,7 +227,13 @@ func providerRoutes(mux *http.ServeMux, w Windows, gw *gateway.Server) {
 			if in.Key == "" && old != nil {
 				in.Key = old.Key
 			}
-			keepSaved(&in, old)
+			// a save that leaves headers or icon out keeps the stored ones
+			if old != nil && in.Headers == nil {
+				in.Headers = old.Headers
+			}
+			if old != nil && in.Icon == "" {
+				in.Icon = old.Icon
+			}
 			if err := provider.Save(in); err != nil {
 				fail(rw, err)
 				return
