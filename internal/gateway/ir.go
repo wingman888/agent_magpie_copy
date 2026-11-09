@@ -102,6 +102,9 @@ type Event struct {
 	Model string
 	Stop  string // stop | length | tool | filter
 	Usage Usage
+	// Status is, for KError, the HTTP status the error stands for, by the
+	// type or code the provider named it with (0: unknown).
+	Status int
 }
 
 // Usage counts tokens.

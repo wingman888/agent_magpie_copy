@@ -863,7 +863,6 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		if err != nil {
 			return err
 		}
-		path := req.URL.Path // the endpoint's path: /chat/completions, /responses or /v1/messages
 		if s.Endpoints.API != "" {
 			if u, err := url.Parse(s.Endpoints.API + req.URL.Path); err == nil {
 				req.URL, req.Host = u, u.Host
@@ -875,8 +874,12 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
-		req.Header.Set("X-Initiator", copilotInitiator(path, body))
-		if copilotHasImage(body) {
+		proto := copilotProtocol(req.URL.Path)
+		req.Header.Set("X-Initiator", "agent")
+		if copilotUserTurn(body, proto) {
+			req.Header.Set("X-Initiator", "user")
+		}
+		if copilotHasImage(body, proto) {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
@@ -891,33 +894,33 @@ func copilotProvider(app copilotApp, plan string) Provider {
 	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
 }
 
-// copilotInitiator is the X-Initiator a request carries: "user" when its
-// last turn is something the user typed, "agent" when it only answers a
-// tool (or the last turn is anything else). path says which API the body
-// is in.
-func copilotInitiator(path string, body []byte) string {
-	if copilotLastIsUser(path, body) {
-		return "user"
+// copilotProtocol is the protocol of a request to Copilot, told by the path
+// it goes to.
+func copilotProtocol(path string) Protocol {
+	switch {
+	case path == "/responses":
+		return Responses
+	case strings.HasPrefix(path, "/v1/messages"):
+		return Anthropic
 	}
-	return "agent"
+	return Chat
 }
 
-func copilotLastIsUser(path string, body []byte) bool {
-	var v struct {
-		Messages []json.RawMessage `json:"messages"`
-		Input    json.RawMessage   `json:"input"`
-	}
-	if json.Unmarshal(body, &v) != nil {
-		return false
-	}
-	switch path {
-	case "/responses":
-		if len(v.Input) == 0 {
+// copilotUserTurn reports whether the last turn of a request is the user's
+// own message, rather than the agent's reply to a tool. A tool result, in
+// any of the three APIs, is the agent's turn; a text typed by the user is not.
+func copilotUserTurn(body []byte, proto Protocol) bool {
+	switch proto {
+	case Responses:
+		var v struct {
+			Input json.RawMessage `json:"input"`
+		}
+		if json.Unmarshal(body, &v) != nil || len(v.Input) == 0 {
 			return false
 		}
 		var s string
 		if json.Unmarshal(v.Input, &s) == nil {
-			return true // a plain string input is the user's text
+			return true // a bare string is the user's text
 		}
 		var items []struct {
 			Type string `json:"type"`
@@ -927,54 +930,55 @@ func copilotLastIsUser(path string, body []byte) bool {
 			return false
 		}
 		last := items[len(items)-1]
-		// a function's output is the agent's turn; a message is the user's
-		// only when its role says so
-		if last.Type != "" && last.Type != "message" {
+		if strings.HasSuffix(last.Type, "_call_output") {
 			return false
 		}
 		return last.Role == "user"
-	case "/v1/messages":
-		if len(v.Messages) == 0 {
+	case Anthropic:
+		var v struct {
+			Messages []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
 			return false
 		}
-		var m struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		}
-		if json.Unmarshal(v.Messages[len(v.Messages)-1], &m) != nil || m.Role != "user" {
+		last := v.Messages[len(v.Messages)-1]
+		if last.Role != "user" {
 			return false
 		}
 		var s string
-		if json.Unmarshal(m.Content, &s) == nil {
+		if json.Unmarshal(last.Content, &s) == nil {
 			return true
 		}
 		var blocks []struct {
 			Type string `json:"type"`
 		}
-		if json.Unmarshal(m.Content, &blocks) != nil || len(blocks) == 0 {
-			return false
+		if json.Unmarshal(last.Content, &blocks) != nil || len(blocks) == 0 {
+			return true
 		}
 		for _, b := range blocks {
 			if b.Type != "tool_result" {
-				return true // text or an image the user sent alongside the results
+				return true // text, an image, anything the user wrote
 			}
 		}
-		return false // nothing but tool results: the agent's turn
+		return false // nothing but tool results
 	}
-	// Chat Completions: a tool's reply has role "tool"
-	if len(v.Messages) == 0 {
-		return false
-	}
-	var m struct {
-		Role string `json:"role"`
-	}
-	return json.Unmarshal(v.Messages[len(v.Messages)-1], &m) == nil && m.Role == "user"
+	return lastRole(body) == "user"
 }
 
-// copilotHasImage reports whether a request carries an image in any of the
-// three APIs: an image_url part (Chat), an input_image part (Responses), or
-// an image block (Anthropic).
-func copilotHasImage(body []byte) bool {
+// copilotHasImage reports whether a request carries an image in the block
+// shape its API uses: image_url (Chat), input_image (Responses), image
+// (Anthropic).
+func copilotHasImage(body []byte, proto Protocol) bool {
+	kind := "image_url"
+	switch proto {
+	case Responses:
+		kind = "input_image"
+	case Anthropic:
+		kind = "image"
+	}
 	var v any
 	if json.Unmarshal(body, &v) != nil {
 		return false
@@ -983,10 +987,7 @@ func copilotHasImage(body []byte) bool {
 	walk = func(x any) bool {
 		switch t := x.(type) {
 		case map[string]any:
-			if _, ok := t["image_url"]; ok {
-				return true
-			}
-			if s, _ := t["type"].(string); s == "image" || s == "input_image" {
+			if s, _ := t["type"].(string); s == kind {
 				return true
 			}
 			for _, c := range t {
@@ -1006,9 +1007,9 @@ func copilotHasImage(body []byte) bool {
 	return walk(v)
 }
 
-// copilotAPIs maps Copilot's supported_endpoints to the APIs magpie speaks;
-// other endpoints (websocket, embeddings) are not ours to route. nil when
-// none of ours is listed.
+// copilotAPIs maps the supported_endpoints of a Copilot model to the wire
+// APIs magpie speaks; other endpoints (websocket, embeddings) are left out.
+// Nothing mapped, or nothing listed, is unknown: nil.
 func copilotAPIs(endpoints []string) []string {
 	var out []string
 	for _, e := range endpoints {
@@ -1028,6 +1029,19 @@ func copilotAPIs(endpoints []string) []string {
 		}
 	}
 	return out
+}
+
+// lastRole is the role of the last message in a chat request.
+func lastRole(body []byte) string {
+	var v struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &v) != nil || len(v.Messages) == 0 {
+		return ""
+	}
+	return v.Messages[len(v.Messages)-1].Role
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {
@@ -1088,11 +1102,10 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	var v struct {
 		Data []struct {
-			ID                 string   `json:"id"`
-			Name               string   `json:"name"`
-			SupportedEndpoints []string `json:"supported_endpoints"`
-			Picker             bool     `json:"model_picker_enabled"`
-			Capabilities       struct {
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			Picker       bool   `json:"model_picker_enabled"`
+			Capabilities struct {
 				Type     string `json:"type"`
 				Supports struct {
 					Efforts []string `json:"reasoning_effort"`
@@ -1101,6 +1114,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 			Policy *struct {
 				State string `json:"state"`
 			} `json:"policy"`
+			SupportedEndpoints []string `json:"supported_endpoints"`
 		} `json:"data"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(b, &v) != nil {
