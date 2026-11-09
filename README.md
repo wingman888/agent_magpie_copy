@@ -179,76 +179,58 @@ the API key goes to `~/.gemini/.env`. Picking a catalog model points
 
 ## Import links
 
-A provider can be shared as a link. Opening it, or running it in the terminal,
-shows what would be added and waits for your yes. Nothing is saved until you
-agree.
+A vendor or relay can hand you a provider as one link:
 
 ```
 magpie://import?preset=deepseek&key=sk-…
 magpie://import?name=Acme%20Relay&chat=https://api.acme.example/v1&anthropic=https://api.acme.example&key=sk-…&models=gpt-5.5,claude-sonnet-5
 ```
 
-```sh
-magpie import '<link>'          # shows the summary, then asks: Add it? [y/N]
-magpie import -y '<link>'       # add without asking (scripts)
-```
+Nothing is saved from a link by itself. `magpie import '<link>'` prints what
+would be added (the name, the id, the hosts that will receive your prompts and
+key, and the models), then asks `Add it? [y/N]`. Only `y` or `yes` saves it.
+If the id matches a provider you already have, the summary says it will be
+replaced.
 
-The `magpie://` scheme is registered by the app, so a link opened in a browser
-or from another program is passed to magpie as its first argument. A build
-without a window handles it the same way as `magpie import`.
+Scripts and pipes: standard input must be a terminal, or pass `-y` to add
+without asking (`magpie import -y '<link>'`). Without either, magpie refuses.
+A non-terminal standard input such as `/dev/null` counts as a script, so it
+also needs `-y`.
 
-Every value must be URL-encoded. The scheme is case-insensitive, and
-`magpie:import?…`, `magpie:///import?…` and `MAGPIE://import/?…` are equivalent.
+Not yet built: registering `magpie://` with the operating system (macOS app
+declaration, Windows registry, Linux desktop entry) and the app's confirmation
+window for links opened from the browser. Until then, use `magpie import` in a
+terminal to handle a link.
 
-| Parameter   | Meaning |
-| ----------- | ------- |
-| `preset`    | preset id (see `magpie presets`); its endpoints are used |
-| `region`    | one of the preset's regions; an unknown region is an error |
-| `name`      | provider name; required without `preset`; with `preset`, replaces the preset's name |
-| `id`        | provider id; derived from the name when omitted (a preset link uses the preset's id) |
-| `key`       | API key; without it you add the key afterwards |
-| `chat`      | OpenAI Chat Completions base URL (`…/v1`) |
-| `responses` | OpenAI Responses base URL (`…/v1`) |
-| `anthropic` | Anthropic Messages base URL (root, without `/v1`) |
-| `models`    | model ids, comma-separated; empty items and surrounding spaces are ignored |
-| `catalog`   | models.dev provider id, for model names and reasoning levels; invalid values are ignored |
-| `website`, `keys` | the vendor's website and its key page; only `https` is kept, anything else is ignored |
+Values are URL-encoded. The forms `magpie:import?…`, `magpie:///import?…` and
+`MAGPIE://import/?…` are accepted too.
 
-With `preset`, the endpoints, catalog, website and keys come from the preset
-(and the chosen region), so `chat`, `responses`, `anthropic`, `catalog`,
-`website` and `keys` are not used. Without `preset`, give at least one of
-`chat`, `responses` or `anthropic`.
+| Parameter | Meaning |
+| --- | --- |
+| `preset` | a preset id (see `magpie presets`); its endpoints are used |
+| `region` | one of the preset's regions; an unknown region is an error |
+| `name` | the provider name; required without `preset`, overrides the preset's name with it |
+| `id` | the provider id; defaults to the preset id, or is derived from the name |
+| `key` | the API key; without it, add one later with `magpie provider key <id> <key>` |
+| `chat` | OpenAI Chat Completions base URL, ending in `/v1` |
+| `responses` | OpenAI Responses base URL, ending in `/v1` |
+| `anthropic` | Anthropic Messages base URL, the root without `/v1` |
+| `models` | model ids, comma-separated; empty items and surrounding spaces are ignored |
+| `catalog` | a models.dev provider id, for model names and reasoning levels |
+| `website`, `keys` | the vendor's site and its key page; only `https` is kept |
 
-Base URLs must be `https`. The exception is a local or private address
-(`localhost`, a loopback IP, a private-network IP, or a `.local` name), which may
-use `http`. A base URL must not contain a user name or password, a query or a
-fragment, and must not use another scheme such as `file:`. A trailing `/` is removed.
+With `preset`, the endpoints come from the preset (and the chosen region), so
+`chat`, `responses`, `anthropic`, `catalog`, `website` and `keys` are ignored.
+Without `preset`, give at least one of `chat`, `responses` or `anthropic`.
 
-**Confirmation.** The summary lists the provider's name, id and models, and the
-host each endpoint sends your prompts and key to. If the link's id matches a
-provider you already have, the summary warns that it will replace that provider
-before the question. Only `y` or `yes` saves. Anything else, including an
-empty answer, adds nothing and exits with "nothing added". When standard input
-is not a terminal, magpie refuses to ask and exits unless you pass `-y`. If
-the link has no key and the provider is not ready yet, magpie tells you to run
-`magpie provider key <id> <key>`.
+Base URLs must be `https`. Plain `http` is allowed only for localhost, loopback,
+private-network IPs and `.local` names. Credentials, query strings, fragments
+and other schemes are rejected. Links that break these rules are refused with
+a message, not quietly fixed. A key with control characters or over 4096 bytes
+is refused too.
 
-A malformed or unsafe link is refused with a message, and nothing is changed.
-
-**Web pages.** A site that hands out links can put the same parameters in the
-fragment: `https://usemagpie.ai/import#preset=deepseek&key=sk-…`. The browser
-does not send the part after `#` to the server, so the key stays out of the
-site's logs. Build the `magpie://import?…` link from the same parameters to
-hand it to magpie.
-
-**Platform registration.** The macOS app declares the `magpie` scheme in its
-`Info.plist` (`CFBundleURLTypes`). The repository has no Linux desktop entry or
-Windows installer script, so those builds do not register the scheme yet; this
-must be done in the packaging layer. For example, on Linux a `.desktop` file
-with `MimeType=x-scheme-handler/magpie;` and `Exec=magpie %u`, and on Windows a
-per-user key `HKCU\Software\Classes\magpie` with `URL Protocol` set to an empty
-value and `shell\open\command` pointing at `"<magpie.exe>" "%1"`. Until then,
-`magpie import '<link>'` works on every platform.
+A web page can act as the relay: `https://usemagpie.ai/import#<the same
+parameters>`. The browser does not send the part after `#` to the server.
 
 ## Install
 
