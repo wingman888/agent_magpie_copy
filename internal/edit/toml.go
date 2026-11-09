@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Whole TOML tables are treated as units: dial owns the tables it writes
+// Whole TOML tables are treated as units: magpie owns the tables it writes
 // (for example a model provider) and replaces them verbatim, while every
 // other line of the file stays untouched.
 
