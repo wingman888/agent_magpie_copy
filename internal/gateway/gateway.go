@@ -67,8 +67,10 @@ type Call struct {
 	Status            int               `json:"status"`
 	Millis            int64             `json:"ms"`
 	Error             string            `json:"error,omitempty"`
-	// Fallback names the keys that failed before the reply came, when any did;
-	// Provider is the one that finally served the request.
+	// KeyName is the key that answered: its name, else a masked form.
+	KeyName string `json:"keyName,omitempty"`
+	// Fallback lists the candidates that failed before one answered, when any
+	// did: a provider id, with the key's name in brackets when it has one.
 	Fallback          string            `json:"fallback,omitempty"`
 	Usage             Usage             `json:"usage"`
 	RequestBody       string            `json:"requestBody,omitempty"`
@@ -85,8 +87,8 @@ type Server struct {
 	// responseOnly remembers models rejected by Chat Completions, avoiding a
 	// known-failing probe on every Claude Code turn.
 	responseOnly map[string]bool
-	// keyCool holds when each provider key last failed (see keys.go).
-	keyCool      map[string]time.Time
+	// rested holds keys that failed lately, keyed by restKey, until the time.
+	rested       map[string]time.Time
 	subscription *subscriptionBridge
 	debug        bool
 }
@@ -102,6 +104,7 @@ func New() *Server {
 			ForceAttemptHTTP2:     true,
 		}},
 		responseOnly: make(map[string]bool),
+		rested:       make(map[string]time.Time),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -226,29 +229,17 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"input_tokens": estimate(req)})
 		return
 	}
-	if ok && p.Anthropic != "" {
-		// a key limited to OpenAI has no business counting Anthropic tokens
-		for _, pl := range p.KeyPlans(provider.Anthropic, model) {
-			if pl.Protocol == provider.Chat || pl.Protocol == provider.Responses {
-				continue
-			}
-			res, err := s.forward(r.Context(), pl.Provider, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
-			if err != nil {
-				break
-			}
+	// a key limited to OpenAI never counts Anthropic tokens
+	if kp, usable := p.KeyFor(provider.Anthropic); ok && p.Anthropic != "" && usable {
+		res, err := s.forward(r.Context(), kp, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
+		if err == nil {
+			defer res.Body.Close()
 			if res.StatusCode < 400 {
-				defer res.Body.Close()
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(res.StatusCode)
 				io.Copy(w, res.Body)
 				return
 			}
-			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-			res.Body.Close()
-			if !retryableKey(res.StatusCode, b) {
-				break
-			}
-			s.coolKey(p.ID, pl.Ref)
 		}
 	}
 	req, err := parseAnthropic(body)
@@ -381,18 +372,50 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 		return
 	}
-	// a backend that only streams gets a non-streaming request translated
-	// (the provider is always streamed on that path) rather than relayed
-	plans := s.coolLast(p.ID, p.KeyPlans(from, model))
-	if len(plans) == 0 {
-		call.Status, call.Error = 502, p.Name+" has no endpoint configured"
+	// each enabled key is a candidate, tried in order; a retryable failure
+	// before the reply starts moves on to the next one
+	cands := s.keyOrder(p.KeyCandidates(from, model))
+	if len(cands) == 0 {
+		call.Status, call.Error = 502, p.Name+" has no key that can serve this request"
 		writeError(w, from, call.Status, call.Error)
 		call.Millis = time.Since(start).Milliseconds()
 		finishCapture()
 		s.record(call)
 		return
 	}
-	call.To, call.Status, call.Error, call.Fallback = s.tryKeys(w, r, from, model, body, plans, &call.Usage)
+	var failed []string
+	for i, c := range cands {
+		to, relay, ok := route(c, from, body)
+		if !ok {
+			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
+			call.Fallback = strings.Join(failed, ", ")
+			writeError(w, from, call.Status, call.Error)
+			break
+		}
+		g := &gate{ResponseWriter: w}
+		call.To = to
+		var status int
+		var msg string
+		if relay {
+			status, msg = s.passthrough(g, r, c, from, model, body, &call.Usage)
+		} else {
+			status, msg = s.translate(g, r, c, from, to, model, body, &call.Usage)
+		}
+		last := i == len(cands)-1
+		if g.held && !last && retryable(status, msg) {
+			s.restKeyFor(c)
+			failed = append(failed, failedLabel(c))
+			continue
+		}
+		g.release()
+		if status < 400 {
+			s.unrestKey(c)
+		}
+		call.Status, call.Error = status, msg
+		call.KeyName = c.KeyLabel()
+		call.Fallback = strings.Join(failed, ", ")
+		break
+	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
@@ -424,6 +447,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
+	p.ApplyHeaders(req)
 	return s.client.Do(req)
 }
 
@@ -523,14 +547,16 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 		body := build(proto, req, model, p.Host(), p.RejectsTemperature(model))
 		return s.forward(ctx, p, proto, pathOf(proto), p.Prepare(body), in)
 	}
-	if to == provider.Chat && p.Responses != "" && s.responseOnlyModel(p.ID, model) {
+	// a key limited to one protocol never reaches the other endpoint
+	canResponses := p.Responses != "" && p.KeyProtocol == ""
+	if to == provider.Chat && canResponses && s.responseOnlyModel(p.ID, model) {
 		to = provider.Responses
 	}
 	res, err := send(to)
 	if err != nil {
 		return nil, to, err
 	}
-	if to != provider.Chat || p.Responses == "" || res.StatusCode < 400 {
+	if to != provider.Chat || !canResponses || res.StatusCode < 400 {
 		return res, to, nil
 	}
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
