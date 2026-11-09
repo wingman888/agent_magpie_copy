@@ -17,7 +17,7 @@ type Option struct {
 	Label string   `json:"label,omitempty"` // display name, when the value is an id
 	Note  string   `json:"note"`
 	Icon  string   `json:"icon,omitempty"`  // bundled icon name
-	Icons []string `json:"icons,omitempty"` // every member provider's icon, once each (routing groups)
+	Icons []string `json:"icons,omitempty"` // a routing group's members' icons, each provider once
 	Group string   `json:"group,omitempty"` // section header in the picker
 	Ref   string   `json:"ref,omitempty"`   // the catalog model, the same in every agent
 }

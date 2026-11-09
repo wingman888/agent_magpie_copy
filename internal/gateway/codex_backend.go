@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -255,16 +256,32 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var ms []catalog.Model
-	for _, e := range provider.Catalog() {
+	all := provider.Catalog()
+	// routing groups lead the list, as their own section in `magpie models`
+	slices.SortStableFunc(all, func(a, b provider.Entry) int {
+		switch {
+		case a.Group == b.Group:
+			return 0
+		case a.Group:
+			return -1
+		}
+		return 1
+	})
+	for _, e := range all {
 		// a ChatGPT account in magpie offers the models listed already
 		if e.Provider.Account != nil && e.Provider.Account.Agent == "codex" {
 			continue
 		}
-		name := e.Name
-		if e.Group == nil { // a routing group has no provider to name
-			name += " · " + e.Provider.Name
+		if e.Group {
+			// a routing group answers for its first usable member
+			efforts := e.Efforts
+			if m, ok := firstMember(e); ok {
+				efforts = m.Efforts
+			}
+			ms = append(ms, catalog.Model{ID: e.ID, Name: e.Name + " · routing group · via magpie", Efforts: efforts})
+			continue
 		}
-		ms = append(ms, catalog.Model{ID: e.ID, Name: name, Efforts: e.Efforts}) // listed: a group's overlap
+		ms = append(ms, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Efforts: e.Efforts})
 	}
 	if etag != "" {
 		w.Header().Set("ETag", etag)

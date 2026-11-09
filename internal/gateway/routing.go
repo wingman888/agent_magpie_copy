@@ -220,11 +220,12 @@ func route(p provider.Provider, cs []candidate, model string, from provider.Prot
 	return cs
 }
 
-// weighing is what candidates were ordered by: the share of its allowance
-// each account has used and when that renews, and the tokens each served
-// lately. Both are keyed by candKey. The routing trace shows the same.
+// weighing is what one provider's candidates were ordered by: the share of
+// its allowance each account has used and when that renews, and the tokens
+// each served lately. The routing trace shows the same.
 type weighing struct {
-	lefts  map[string]left
+	lefts map[string]left // the accounts the vendor said what they have left of
+
 	tokens map[string]float64 // least used: tokens each served lately
 }
 
@@ -233,84 +234,45 @@ type left struct {
 	renews []time.Time
 }
 
-// candKey tells one candidate from another of the same key or account
-// under a different model (a routing group can hold both).
-func candKey(c candidate) string { return c.rest + "\x00" + c.model }
-
-// merge adds what src weighed to dst.
-func (dst *weighing) merge(src weighing) {
-	if dst.lefts == nil {
-		dst.lefts = map[string]left{}
-	}
-	if dst.tokens == nil && src.tokens != nil {
-		dst.tokens = map[string]float64{}
-	}
-	for k, v := range src.lefts {
-		dst.lefts[k] = v
-	}
-	for k, v := range src.tokens {
-		dst.tokens[k] = v
-	}
-}
+// lkey is the key a candidate's allowance is known by: its rest and model,
+// since one account can serve several models of a routing group.
+func lkey(c candidate) string { return c.rest + "\x00" + c.model }
 
 // weigh orders one provider's candidates as its routing says, and tells
-// what it went by. The keys set aside for another protocol are routed
-// among themselves after the rest, never in turn with those that suit.
+// what it went by.
 func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
-	return weighTurn(p, cs, model, from, turnCtx{})
+	return weighTurn(p, cs, model, from, turn{})
 }
 
-// weighTurn is weigh with the conversation's turn, which rotate goes by.
-// Without one, rotate goes by each request, as it always did.
-func weighTurn(p provider.Provider, cs []candidate, model string, from provider.Protocol, tc turnCtx) ([]candidate, weighing) {
-	var asides []candidate
-	if p.Account == nil {
-		var main []candidate
-		for _, c := range cs {
-			if c.aside {
-				asides = append(asides, c)
-			} else {
-				main = append(main, c)
-			}
-		}
-		cs = main
-	}
-	scope := tc.scope
-	if scope == "" {
-		scope = p.ID
-	}
-	out, wg := weighMain(p.Routing, scope, cs, tc)
-	return append(out, asides...), wg
-}
-
-// weighMain orders candidates that suit the request alike, by routing; scope
-// is what a rotation counts for (a provider and model, or a routing group).
-func weighMain(routing, scope string, cs []candidate, tc turnCtx) ([]candidate, weighing) {
+// weighTurn is weigh for a request placed in its conversation: a rotating
+// routing turns in the conversation's turns, see turn.rotate. Without one
+// (a zero turn) it turns per request.
+func weighTurn(p provider.Provider, cs []candidate, model string, from provider.Protocol, t turn) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
 	}
 	now := time.Now()
 	wg.lefts = map[string]left{}
-	known := map[string]map[string]provider.Allowance{} // agent → user → allowance
+	known := map[string]map[string]provider.Allowance{} // by agent, as each candidate's account asks
 	for _, c := range cs {
 		if c.p.Account == nil {
 			continue
 		}
-		agent := c.p.Account.Agent
-		k, ok := known[agent]
+		ag := c.p.Account.Agent
+		k, ok := known[ag]
 		if !ok {
-			k = allowances(agent)
-			known[agent] = k
+			k = allowances(ag)
+			known[ag] = k
 		}
 		if a, ok := k[c.p.Account.User]; ok {
 			u, r := a.For(c.model, now)
-			wg.lefts[candKey(c)] = left{u, r} // one not known counts as unused
+			wg.lefts[lkey(c)] = left{u, r} // one not known counts as unused
 		}
 	}
 	lefts := wg.lefts
-	shareOf := func(c candidate) float64 { return lefts[candKey(c)].used }
-	switch routing {
+	shareOf := func(c candidate) float64 { return lefts[lkey(c)].used }
+	switch p.Routing {
 	case "":
 		// of those with quota to spare, the one whose allowance renews
 		// soonest, since what it has left is lost then, while one renewing
@@ -333,7 +295,7 @@ func weighMain(routing, scope string, cs []candidate, tc turnCtx) ([]candidate, 
 			}
 		}
 		sort.SliceStable(fine, func(i, j int) bool {
-			ri, rj := lefts[candKey(fine[i])].renews, lefts[candKey(fine[j])].renews
+			ri, rj := lefts[lkey(fine[i])].renews, lefts[lkey(fine[j])].renews
 			for k := 0; k < len(ri) || k < len(rj); k++ {
 				var a, b time.Time // to the hour, so a few minutes don't reorder
 				if k < len(ri) {
@@ -361,7 +323,14 @@ func weighMain(routing, scope string, cs []candidate, tc turnCtx) ([]candidate, 
 	case provider.Ordered:
 		return cs, wg
 	case provider.Rotate:
-		n := rotateStart(tc, scope, len(cs))
+		if t.conv != "" {
+			cs = t.rotate(p.ID, cs)
+			break
+		}
+		routed.Lock()
+		n := routed.turn[p.ID] % len(cs)
+		routed.turn[p.ID]++
+		routed.Unlock()
 		cs = append(append([]candidate{}, cs[n:]...), cs[:n]...)
 	case provider.LeastUsed:
 		// a subscription by the share of its allowance used, as the vendor
@@ -371,7 +340,7 @@ func weighMain(routing, scope string, cs []candidate, tc turnCtx) ([]candidate, 
 		wg.tokens = map[string]float64{}
 		for i, c := range cs {
 			tokens[i] = routed.used[c.rest].now(now)
-			wg.tokens[candKey(c)] = tokens[i]
+			wg.tokens[c.rest] = tokens[i]
 		}
 		routed.Unlock()
 		idx := make([]int, len(cs))
