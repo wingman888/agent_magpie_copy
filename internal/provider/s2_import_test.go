@@ -87,7 +87,7 @@ func TestS2ImportRejections(t *testing.T) {
 		"magpie://import?name=A&chat=http://api.example.com/v1",       // plain http, public host
 		"magpie://import?name=A&chat=https://u:p@a.example/v1",        // credentials
 		"magpie://import?name=A&chat=https://a.example/v1?x=1",        // query
-		"magpie://import?name=A&chat=https://a.example/v1#frag",       // fragment
+		"magpie://import?name=A&chat=https://a.example/v1%23frag",     // fragment in the base
 		"magpie://import?name=A&chat=file:///etc/passwd",              // other scheme
 		"magpie://import?name=A&chat=a.example/v1",                    // no scheme
 		"magpie://import?name=magpie&chat=https://a.example/v1",       // id magpie
