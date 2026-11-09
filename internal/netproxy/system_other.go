@@ -2,5 +2,5 @@
 
 package netproxy
 
-// readSystem: on Linux the environment is the only proxy source.
-func readSystem() sysProxy { return sysProxy{} }
+// system: elsewhere the desktop's proxy reaches apps as *_PROXY variables.
+func system() Proxy { return Proxy{} }
