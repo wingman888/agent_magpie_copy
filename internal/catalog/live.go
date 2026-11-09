@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/extrahdr"
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
@@ -69,9 +71,9 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchWith is Fetch with extra request headers (name, value pairs, sent
-// with their casing kept, after the auth headers).
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers [][2]string) ([]Model, error) {
+// FetchWith is Fetch with extra request headers, sent after the auth
+// header on every list request (a custom provider's own headers).
+func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -98,7 +100,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers []
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key, anthropic, extra)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +117,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers []
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers [][2]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -131,16 +133,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers [][2
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	for _, h := range headers {
-		// keep the user's casing on the wire: a non-canonical key in the map
-		// is written as-is, and any earlier value under that name goes.
-		for k := range req.Header {
-			if strings.EqualFold(k, h[0]) {
-				delete(req.Header, k)
-			}
-		}
-		req.Header[h[0]] = []string{h[1]}
-	}
+	extrahdr.Set(req.Header, extra)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -186,9 +179,7 @@ type liveModel struct {
 }
 
 // Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order. A gateway may
-// prefix its ids with the vendor ("deepseek/deepseek-chat"); the part after
-// the last slash is then looked up. An id that matches nothing is kept as is.
+// catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
@@ -196,13 +187,7 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if !ok {
-			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
-				k, ok = byID[m.ID[i+1:]]
-			}
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

@@ -154,10 +154,6 @@ type accountStatusError struct{ status int }
 
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
-// claudeUsageURL is where a Claude account's usage windows come from; a var
-// so tests can point it elsewhere.
-var claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
-
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
 	token, err := claudeToken(ctx)
@@ -165,12 +161,7 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 		q.Error = err.Error()
 		return q
 	}
-	_, plan, _ := claudeIdentityOf()
-	return claudeUsageWith(ctx, q, token, plan)
-}
-
-// claudeUsageWith fills q with the usage windows of the account behind token.
-func claudeUsageWith(ctx context.Context, q SubscriptionQuota, token, plan string) SubscriptionQuota {
+	_, plan, _ := claudeIdentity()
 	q.Plan = plan
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
@@ -178,7 +169,7 @@ func claudeUsageWith(ctx context.Context, q SubscriptionQuota, token, plan strin
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err := accountJSON(ctx, claudeUsageURL, token, map[string]string{
+	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {

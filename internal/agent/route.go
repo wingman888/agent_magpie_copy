@@ -54,11 +54,7 @@ func isMagpie(v string) bool {
 func magpieModels() []catalog.Model {
 	var out []catalog.Model
 	for _, e := range provider.Catalog() {
-		catID := ""
-		if ids := provider.CatalogIDs(e.Provider.Catalog); len(ids) > 0 {
-			catID = ids[0]
-		}
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: catID, Efforts: e.Efforts})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Provider: e.Provider.Catalog, Efforts: e.Efforts})
 	}
 	return out
 }
