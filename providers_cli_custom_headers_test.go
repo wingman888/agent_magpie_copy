@@ -63,7 +63,7 @@ func TestCustomHdrsShowProviderLines(t *testing.T) {
 	text := string(out)
 	var lines []string
 	for _, l := range strings.Split(text, "\n") {
-		if strings.HasPrefix(l, "header  ") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "header  ") {
 			lines = append(lines, l)
 		}
 	}
