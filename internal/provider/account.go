@@ -56,7 +56,7 @@ var (
 	ErrCopilotSession  = errors.New("Copilot 会话已失效，请重新登录 Copilot")
 	errCodexWriteBack  = errors.New("写回 Codex 登录文件失败")
 	claudeReason       = "Claude Code 的订阅登录只供 Claude Code 自身使用，Anthropic 不允许把它当作 API 提供给其他工具，所以 dial 不将其作为 Provider 提供。"
-	claudeNoticeHeader = "Claude Code 已登录，但不提供为 Provider。原因："
+	claudeNoticeHeader = "Claude Code 已登录但不提供为 Provider。原因："
 )
 
 // Account says whose login an account provider uses.
