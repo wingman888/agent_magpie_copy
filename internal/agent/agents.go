@@ -32,9 +32,6 @@ func All() []*Agent {
 		cursor(home),
 		copilot(home),
 		crush(home, cfg),
-		dsh(home),
-		commandCode(home),
-		omp(home),
 	}
 }
 
@@ -134,17 +131,7 @@ func ownOptions(authFile string, cur string, extra ...string) []Option {
 	sort.Strings(providers)
 	var out []Option
 	for _, p := range providers {
-		name := catalog.ProviderName(p)
-		if name == "" {
-			name = p
-		}
-		opts := group(name, options(catalog.Provider(p), p+"/"))
-		if ic := providerIcon(p); ic != "" {
-			for i := range opts {
-				opts[i].GroupIcon = ic
-			}
-		}
-		out = append(out, opts...)
+		out = append(out, group(p, options(catalog.Provider(p), p+"/"))...)
 	}
 	return out
 }
@@ -176,11 +163,11 @@ func magpieProviderJSON(shape string) any {
 		var ms []map[string]any
 		for _, m := range models {
 			// reasoning lets Pi offer its thinking levels for the model
-			e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-			if levels := piThinkingLevels(m.Efforts); levels != nil {
-				e["thinkingLevelMap"] = levels
+			entry := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
+			if tl := piThinkingLevels(m.Efforts); tl != nil {
+				entry["thinkingLevelMap"] = tl
 			}
-			ms = append(ms, e)
+			ms = append(ms, entry)
 		}
 		if ms == nil {
 			ms = []map[string]any{}
@@ -190,20 +177,20 @@ func magpieProviderJSON(shape string) any {
 	return nil
 }
 
-// piThinkingLevels is the thinkingLevelMap for a model's efforts. Pi offers
-// xhigh and max only for models that map them, so without it a model whose
-// top level is max stopped at high in Pi.
-func piThinkingLevels(efforts []string) map[string]any {
-	var levels map[string]any
+// piThinkingLevels declares the levels Pi only offers when a model names
+// them: xhigh and max. Pi takes the names as they are. Other levels are
+// always offered, so they are not declared; nil when neither is supported.
+func piThinkingLevels(efforts []string) map[string]string {
+	var out map[string]string
 	for _, e := range efforts {
 		if e == "xhigh" || e == "max" {
-			if levels == nil {
-				levels = map[string]any{}
+			if out == nil {
+				out = map[string]string{}
 			}
-			levels[e] = e
+			out[e] = e
 		}
 	}
-	return levels
+	return out
 }
 
 func opencode(home, cfg string) *Agent {

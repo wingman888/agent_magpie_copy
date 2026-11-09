@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -19,22 +20,72 @@ import (
 var claudeEnv = []string{
 	"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
 	"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
-	"ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+	"CLAUDE_CODE_SUBAGENT_MODEL",
 }
 
-// claudeTiers are the aliases Claude Code resolves (/model opus, a
-// subagent's "model: haiku", …), each of which can have a model of its own.
-// A tier that has none follows the main model.
-var claudeTiers = []string{"opus", "sonnet", "haiku", "fable"}
+// claudeTiers are the model tiers Claude Code exposes besides the main model,
+// each with the env var it reads. A tier that is not picked on its own follows
+// the main model and holds the same value. haiku also decides the small, fast model.
+var claudeTiers = []struct{ name, env string }{
+	{"opus", "ANTHROPIC_DEFAULT_OPUS_MODEL"},
+	{"sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL"},
+	{"haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL"},
+	{"fable", "ANTHROPIC_DEFAULT_FABLE_MODEL"},
+}
 
-func tierEnv(tier string) string { return "ANTHROPIC_DEFAULT_" + strings.ToUpper(tier) + "_MODEL" }
+// claudeHaiku is the index of the haiku tier in claudeTiers.
+const claudeHaiku = 2
+
+// claudeTierPicks reads which tiers were picked on their own. An empty entry
+// is a tier that follows main. Without a main model every tier follows.
+func claudeTierPicks(env func(string) string, main string) []string {
+	out := make([]string, len(claudeTiers))
+	if main == "" {
+		return out
+	}
+	for i, t := range claudeTiers {
+		if v := env(t.env); v != "" && v != main {
+			out[i] = v
+		}
+	}
+	return out
+}
+
+// writeClaudeTiers stores the extra keys, the main model and every tier. An
+// empty pick follows main. CLAUDE_CODE_SUBAGENT_MODEL is written only while
+// every tier equals main, so a tier picked on its own is not overridden.
+func writeClaudeTiers(path, main string, picks []string, extra ...edit.KV) error {
+	kvs := append([]edit.KV{}, extra...)
+	same := true
+	for i, t := range claudeTiers {
+		v := picks[i]
+		if v == "" {
+			v = main
+		}
+		if v != main {
+			same = false
+		}
+		kvs = append(kvs, edit.KV{Path: "env." + t.env, Value: v})
+		if i == claudeHaiku {
+			kvs = append(kvs, edit.KV{Path: "env.ANTHROPIC_SMALL_FAST_MODEL", Value: v})
+		}
+	}
+	if same {
+		kvs = append(kvs, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: main})
+	} else if err := edit.DelJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL"); err != nil {
+		return err
+	}
+	return edit.SetJSON(path, kvs...)
+}
 
 func claude(home string) *Agent {
 	path := filepath.Join(home, ".claude", "settings.json")
 	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return v }
 	model := jsonGet(path, "model")
 	routed := func() bool { return env("ANTHROPIC_BASE_URL") == gateway.URL() }
+	// the main model is set while routed through the gateway
+	mainSet := func() bool { return routed() && env("ANTHROPIC_MODEL") != "" }
 
 	// the value shown: the catalog ref while routed, else Claude's own model.
 	get := func() string {
@@ -45,7 +96,6 @@ func claude(home string) *Agent {
 		}
 		return model()
 	}
-	var writeTiers func(main string, tiers map[string]string) error
 	set := func(v string) error {
 		if v == "" {
 			// Claude Code as installed: Anthropic's own endpoint and model
@@ -64,16 +114,17 @@ func claude(home string) *Agent {
 					"claude.auth_token": env("ANTHROPIC_AUTH_TOKEN"),
 				})
 			}
-			// tiers that followed the old model follow the new one; the
-			// ones given a model of their own keep it
-			tiers := map[string]string{}
-			for _, t := range claudeTiers {
-				tiers[t] = v
-				if w := env(tierEnv(t)); routed() && w != "" && w != env("ANTHROPIC_MODEL") && isMagpie(w) {
-					tiers[t] = w
-				}
+			// tiers picked on their own keep their model; the others follow v
+			prev := ""
+			if routed() {
+				prev = env("ANTHROPIC_MODEL")
 			}
-			return writeTiers(v, tiers)
+			return writeClaudeTiers(path, v, claudeTierPicks(env, prev),
+				edit.KV{Path: "env.ANTHROPIC_BASE_URL", Value: gateway.URL()},
+				edit.KV{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: gateway.Token},
+				edit.KV{Path: "env.ANTHROPIC_MODEL", Value: v},
+				edit.KV{Path: "model", Value: v},
+			)
 		}
 		if routed() {
 			keys := make([]string, len(claudeEnv))
@@ -100,93 +151,59 @@ func claude(home string) *Agent {
 		return edit.SetJSON(path, edit.KV{Path: "model", Value: v})
 	}
 
-	// writeTiers routes Claude Code through the gateway with main as its
-	// model and each tier on the model given.
-	writeTiers = func(main string, tiers map[string]string) error {
-		kvs := []edit.KV{
-			{Path: "env.ANTHROPIC_BASE_URL", Value: gateway.URL()},
-			{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: gateway.Token},
-			{Path: "env.ANTHROPIC_MODEL", Value: main},
-			{Path: "env.ANTHROPIC_SMALL_FAST_MODEL", Value: tiers["haiku"]},
-			{Path: "model", Value: main},
-		}
-		same := true
-		for _, t := range claudeTiers {
-			kvs = append(kvs, edit.KV{Path: "env." + tierEnv(t), Value: tiers[t]})
-			same = same && tiers[t] == main
-		}
-		if !same {
-			// one model for every subagent would override the tiers they ask for
-			if err := edit.DelJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL"); err != nil {
-				return err
+	// setTier picks a tier's model on its own; "" makes it follow the main model again.
+	setTier := func(i int, v string) error {
+		if !mainSet() {
+			if v == "" {
+				return nil
 			}
-		} else {
-			kvs = append(kvs, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: main})
+			return errors.New("Claude Code is not routed through magpie yet; set its main model first: magpie claude <provider/model>")
 		}
-		return edit.SetJSON(path, kvs...)
+		if v != "" && !isMagpie(v) {
+			return fmt.Errorf("%s is not a model magpie provides; use provider/model, see magpie models", v)
+		}
+		main := env("ANTHROPIC_MODEL")
+		picks := claudeTierPicks(env, main)
+		picks[i] = v
+		return writeClaudeTiers(path, main, picks)
+	}
+
+	options := func(map[string]string) []Option {
+		var own []Option
+		for _, m := range catalog.Provider("anthropic") {
+			if strings.HasPrefix(m.ID, "claude") {
+				own = append(own, Option{Value: m.ID, Note: m.Name, Icon: "claude-color"})
+			}
+		}
+		name := "Claude Code"
+		if u := env("ANTHROPIC_BASE_URL"); u != "" && !routed() {
+			name += " · " + hostOf(u)
+		}
+		// Only the catalog's models; Claude Code's own short aliases are
+		// not something any API lists, and a compiled-in copy would just
+		// go stale.
+		return append(group(name, own), viaMagpie("")...)
 	}
 
 	fields := []Field{{
 		Key: "model", Label: "model",
-		Get: get,
-		Set: set,
-		Options: func(map[string]string) []Option {
-			var own []Option
-			for _, m := range catalog.Provider("anthropic") {
-				if strings.HasPrefix(m.ID, "claude") {
-					own = append(own, Option{Value: m.ID, Note: m.Name, Icon: "claude-color"})
-				}
-			}
-			name := "Claude Code"
-			if u := env("ANTHROPIC_BASE_URL"); u != "" && !routed() {
-				name += " · " + hostOf(u)
-			}
-			// Only the catalog's models; Claude Code's own short aliases are
-			// not something any API lists, and a compiled-in copy would just
-			// go stale.
-			return append(group(name, own), viaMagpie("")...)
-		},
+		Get:     get,
+		Set:     set,
+		Options: options,
 	}}
-	for _, tier := range claudeTiers {
+	for i := range claudeTiers {
+		i := i
 		fields = append(fields, Field{
-			Key: tier, Label: tier, Quiet: true,
-			// empty while the tier follows the main model
+			Key: claudeTiers[i].name, Label: claudeTiers[i].name, Optional: true,
+			// a tier shows only while it is picked on its own
 			Get: func() string {
-				if w := env(tierEnv(tier)); routed() && w != env("ANTHROPIC_MODEL") {
-					return w
+				if !mainSet() {
+					return ""
 				}
-				return ""
+				return claudeTierPicks(env, env("ANTHROPIC_MODEL"))[i]
 			},
-			Set: func(v string) error {
-				if !routed() {
-					if v == "" {
-						return nil
-					}
-					return fmt.Errorf("pick a model through magpie for Claude Code first; %s can then have its own", tier)
-				}
-				if v != "" && !isMagpie(v) {
-					return fmt.Errorf("%s: %q is not a model magpie serves", tier, v)
-				}
-				main := env("ANTHROPIC_MODEL")
-				tiers := map[string]string{}
-				for _, t := range claudeTiers {
-					tiers[t] = env(tierEnv(t))
-					if tiers[t] == "" {
-						tiers[t] = main
-					}
-				}
-				tiers[tier] = v
-				if v == "" {
-					tiers[tier] = main
-				}
-				return writeTiers(main, tiers)
-			},
-			Options: func(map[string]string) []Option {
-				if !routed() {
-					return nil
-				}
-				return viaMagpie("")
-			},
+			Set:     func(v string) error { return setTier(i, v) },
+			Options: options,
 		})
 	}
 

@@ -111,8 +111,8 @@ func Apply(p Profile) (int, error) {
 	for k := range p {
 		keys = append(keys, k)
 	}
-	// providers first: switching one re-settles the model behind it; then
-	// models, which settle what the other fields (Claude Code's tiers) hang on
+	// provider, then model, then the rest: switching a provider re-settles
+	// the model behind it, and per-tier models are set on top of the model
 	rank := func(k string) int {
 		switch {
 		case strings.HasSuffix(k, ".provider"):
