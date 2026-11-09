@@ -181,9 +181,23 @@ func modelObject(e provider.Entry) map[string]any {
 		"owned_by": e.Provider.ID, "display_name": e.Name}
 }
 
+// groupObject is a routing group's model object: it is owned by the
+// provider of its first usable member, which answers for it.
+func groupObject(e provider.Entry) map[string]any {
+	o := modelObject(e)
+	if m, ok := firstMember(e); ok {
+		o["owned_by"] = m.Provider.ID
+	}
+	return o
+}
+
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	data := []map[string]any{}
 	for _, e := range provider.Catalog() {
+		if e.Group {
+			data = append(data, groupObject(e))
+			continue
+		}
 		data = append(data, modelObject(e))
 	}
 	out := map[string]any{"object": "list", "data": data, "has_more": false}
@@ -197,6 +211,10 @@ func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	for _, e := range provider.Catalog() {
 		if e.ID == id {
+			if e.Group {
+				writeJSON(w, 200, groupObject(e))
+				return
+			}
 			writeJSON(w, 200, modelObject(e))
 			return
 		}
@@ -349,24 +367,43 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	p, model, ok := provider.Resolve(call.Model)
-	if !ok {
-		call.Status, call.Error = 404, "unknown model"
-		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
-		if ids := provider.IDs(); len(ids) > 0 {
-			msg += "; it has " + strings.Join(ids, ", ")
-		} else {
-			msg += "; add a provider in magpie first"
+	// where the conversation stands, for routing and affinity
+	t := turnOf(r, from, body, call.Model)
+	var model string
+	var pr request
+	if gid, isGroup := strings.CutPrefix(call.Model, provider.GroupPrefix); isGroup {
+		g, ms, ok := provider.FindGroup(gid)
+		if !ok {
+			call.Status, call.Error = 404, "routing group has no model ready"
+			writeError(w, from, 404, fmt.Sprintf("routing group %s has no model ready", call.Model))
+			finishCapture()
+			s.record(call)
+			return
 		}
-		writeError(w, from, 404, msg)
-		finishCapture()
-		s.record(call)
-		return
+		pr = s.groupRequest(g, ms, from, t)
+	} else {
+		p, m, ok := provider.Resolve(call.Model)
+		if !ok {
+			call.Status, call.Error = 404, "unknown model"
+			msg := fmt.Sprintf("magpie knows no model %q", call.Model)
+			if ids := provider.IDs(); len(ids) > 0 {
+				msg += "; it has " + strings.Join(ids, ", ")
+			} else {
+				msg += "; add a provider in magpie first"
+			}
+			writeError(w, from, 404, msg)
+			finishCapture()
+			s.record(call)
+			return
+		}
+		model = m
+		pr = s.providerRequest(p, model, from, t)
 	}
 	// the primary, then its fallbacks while it can't take the request and
-	// nothing has been sent yet
-	cands, pl := s.plan(p, model, from)
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Order: pl.order, Left: pl.left})
+	// nothing has been sent yet; a routing group's members are its candidates
+	cands := pr.cands
+	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: pr.owner,
+		Order: pr.pl.order, Left: pr.pl.left, Group: pr.group, Affinity: pr.aff})
 	var skipped []string
 	for i, c := range cands {
 		last := i == len(cands)-1 || r.Context().Err() != nil
@@ -387,6 +424,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+			answered(t, c, call.Usage.CacheRead)
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}

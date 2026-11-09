@@ -234,30 +234,44 @@ type left struct {
 	renews []time.Time
 }
 
+// lkey is the key a candidate's allowance is known by: its rest and model,
+// since one account can serve several models of a routing group.
+func lkey(c candidate) string { return c.rest + "\x00" + c.model }
+
 // weigh orders one provider's candidates as its routing says, and tells
 // what it went by.
 func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
+	return weighTurn(p, cs, model, from, turn{})
+}
+
+// weighTurn is weigh for a request placed in its conversation: a rotating
+// routing turns in the conversation's turns, see turn.rotate. Without one
+// (a zero turn) it turns per request.
+func weighTurn(p provider.Provider, cs []candidate, model string, from provider.Protocol, t turn) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
 	}
-	var known map[string]provider.Allowance
-	if p.Account != nil {
-		known = allowances(p.Account.Agent)
-	}
 	now := time.Now()
 	wg.lefts = map[string]left{}
+	known := map[string]map[string]provider.Allowance{} // by agent, as each candidate's account asks
 	for _, c := range cs {
 		if c.p.Account == nil {
 			continue
 		}
-		if a, ok := known[c.p.Account.User]; ok {
+		ag := c.p.Account.Agent
+		k, ok := known[ag]
+		if !ok {
+			k = allowances(ag)
+			known[ag] = k
+		}
+		if a, ok := k[c.p.Account.User]; ok {
 			u, r := a.For(c.model, now)
-			wg.lefts[c.rest] = left{u, r} // one not known counts as unused
+			wg.lefts[lkey(c)] = left{u, r} // one not known counts as unused
 		}
 	}
 	lefts := wg.lefts
-	shareOf := func(c candidate) float64 { return lefts[c.rest].used }
+	shareOf := func(c candidate) float64 { return lefts[lkey(c)].used }
 	switch p.Routing {
 	case "":
 		// of those with quota to spare, the one whose allowance renews
@@ -281,7 +295,7 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 			}
 		}
 		sort.SliceStable(fine, func(i, j int) bool {
-			ri, rj := lefts[fine[i].rest].renews, lefts[fine[j].rest].renews
+			ri, rj := lefts[lkey(fine[i])].renews, lefts[lkey(fine[j])].renews
 			for k := 0; k < len(ri) || k < len(rj); k++ {
 				var a, b time.Time // to the hour, so a few minutes don't reorder
 				if k < len(ri) {
@@ -309,6 +323,10 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 	case provider.Ordered:
 		return cs, wg
 	case provider.Rotate:
+		if t.conv != "" {
+			cs = t.rotate(p.ID, cs)
+			break
+		}
 		routed.Lock()
 		n := routed.turn[p.ID] % len(cs)
 		routed.turn[p.ID]++

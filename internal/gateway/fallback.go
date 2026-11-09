@@ -187,6 +187,11 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 // plan is candidates, and for the routing trace what each stood where it
 // did by, and those left out.
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
+	return s.planTurn(p, model, from, turn{})
+}
+
+// planTurn is plan for a request placed in its conversation (see turn).
+func (s *Server) planTurn(p provider.Provider, model string, from provider.Protocol, t turn) ([]candidate, planned) {
 	var pl planned
 	add := func(q provider.Provider, m string, fallback bool) []candidate {
 		cs, left := perKeyOf(q, m, from)
@@ -198,7 +203,7 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 				break
 			}
 		}
-		main, wg := weigh(q, main, m, from)
+		main, wg := weighTurn(q, main, m, from, t)
 		cs = append(append([]candidate{}, main...), cs[len(main):]...)
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
@@ -229,7 +234,14 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 		}
 		return out, pl
 	}
-	// ready ones before resting ones, and the asides after the pool
+	ordered, order := arrange(out, pl.order)
+	pl.order = order
+	return ordered, pl
+}
+
+// arrange puts candidates in the order they try: ready ones before resting
+// ones, and the asides after the pool. It marks those resting in order.
+func arrange(out []candidate, order []Weighed) ([]candidate, []Weighed) {
 	var cls [4][]candidate
 	var wcls [4][]Weighed
 	for i, c := range out {
@@ -238,18 +250,18 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 			k = 2
 		}
 		if r, ok := restOf(c.rest); ok {
-			pl.order[i].Rest = &r
+			order[i].Rest = &r
 			k++
 		}
-		cls[k], wcls[k] = append(cls[k], c), append(wcls[k], pl.order[i])
+		cls[k], wcls[k] = append(cls[k], c), append(wcls[k], order[i])
 	}
 	var ordered []candidate
-	pl.order = nil
+	var order []Weighed
 	for k := range cls {
 		ordered = append(ordered, cls[k]...)
-		pl.order = append(pl.order, wcls[k]...)
+		order = append(order, wcls[k]...)
 	}
-	return ordered, pl
+	return ordered, order
 }
 
 var restingUntil = struct {

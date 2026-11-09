@@ -21,20 +21,44 @@ const traceKeep = 60
 
 // Route is one request's way through routing.
 type Route struct {
-	Seq      int64     `json:"seq"` // the trace's count when it last changed
-	ID       int64     `json:"id"`
-	Time     time.Time `json:"time"`
-	Agent    string    `json:"agent"`
-	Model    string    `json:"model"`    // as the agent asked
-	Provider string    `json:"provider"` // the provider the model resolved to
-	Order    []Weighed `json:"order"`    // who was to try it, first first
-	Left     []Weighed `json:"left,omitempty"`
-	Tries    []Try     `json:"tries"`
-	Done     bool      `json:"done"`
-	Status   int       `json:"status,omitempty"`
-	Error    string    `json:"error,omitempty"`
-	Millis   int64     `json:"ms,omitempty"`
-	Tokens   int       `json:"tokens,omitempty"`
+	Seq      int64          `json:"seq"` // the trace's count when it last changed
+	ID       int64          `json:"id"`
+	Time     time.Time      `json:"time"`
+	Agent    string         `json:"agent"`
+	Model    string         `json:"model"`    // as the agent asked
+	Provider string         `json:"provider"` // the provider the model resolved to
+	Order    []Weighed      `json:"order"`    // who was to try it, first first
+	Left     []Weighed      `json:"left,omitempty"`
+	Tries    []Try          `json:"tries"`
+	Done     bool           `json:"done"`
+	Status   int            `json:"status,omitempty"`
+	Error    string         `json:"error,omitempty"`
+	Millis   int64          `json:"ms,omitempty"`
+	Tokens   int            `json:"tokens,omitempty"`
+	Group    *GroupRoute    `json:"group,omitempty"`    // a routing group the request named
+	Affinity *AffinityRoute `json:"affinity,omitempty"` // how the conversation stuck to its last answerer
+}
+
+// GroupRoute is the routing group a request was routed as.
+type GroupRoute struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Routing  string   `json:"routing"`  // as the group has it: "" smart, order, rotate or least-used
+	Affinity string   `json:"affinity"` // as the group has it; "" takes its members' providers'
+	Auto     bool     `json:"auto"`     // magpie found it itself
+	Members  []string `json:"members"`  // the members that can be used now: provider/model
+}
+
+// AffinityRoute is how a conversation's affinity to its last answerer
+// was decided. Why says what kept it, or what did not.
+type AffinityRoute struct {
+	Mode      string `json:"mode"`   // "auto", "session", "turn" or "off"
+	Turn      int    `json:"turn"`   // user turns in the conversation, this one included
+	Within    bool   `json:"within"` // a tool result sent back within the turn
+	Last      string `json:"last,omitempty"`
+	CacheRead int    `json:"cacheRead"` // what the last answer read from the vendor's cache
+	Kept      bool   `json:"kept"`
+	Why       string `json:"why"`
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -95,7 +119,7 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	default:
 		w.Kind = "provider"
 	}
-	if l, ok := wg.lefts[c.rest]; ok {
+	if l, ok := wg.lefts[lkey(c)]; ok {
 		w.Known, w.Used, w.Renews = true, l.used, l.renews
 	}
 	if wg.tokens != nil {
