@@ -234,7 +234,7 @@ func TestF07ImportLinkModels(t *testing.T) {
 		t.Errorf("200 models: got %d", len(p.Models))
 	}
 	many = append(many, "m200", "m201")
-	p := f07TestMust(t, "magpie://import?preset=deepseek&models="+strings.Join(many, ","))
+	p = f07TestMust(t, "magpie://import?preset=deepseek&models="+strings.Join(many, ","))
 	if len(p.Models) != 200 {
 		t.Fatalf("202 models: got %d, want truncation to 200", len(p.Models))
 	}
