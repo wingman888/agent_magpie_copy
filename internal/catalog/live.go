@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -67,11 +66,6 @@ func SaveLive(provider, base string, models []Model) error {
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
 func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with the provider's own headers added to every request.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -98,7 +92,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := rsiFetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key, anthropic)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +109,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func rsiFetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -131,7 +125,6 @@ func rsiFetchOne(ctx context.Context, url, key string, anthropic bool, headers m
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	ApplyHeaders(req, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -170,40 +163,6 @@ func rsiFetchOne(ctx context.Context, url, key string, anthropic bool, headers m
 	return out, nil
 }
 
-// ApplyHeaders sets a vendor's own headers on a request, after the defaults
-// and replacing any default of the same name whatever its casing. Names keep
-// the casing the user typed, except User-Agent and Accept-Encoding: the
-// transport looks for those by their canonical names, so they go out
-// canonical.
-func ApplyHeaders(req *http.Request, extra map[string]string) {
-	names := make([]string, 0, len(extra))
-	for k := range extra {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		key := name
-		switch c := http.CanonicalHeaderKey(name); c {
-		case "User-Agent", "Accept-Encoding":
-			key = c
-		}
-		for have := range req.Header {
-			if strings.EqualFold(have, key) {
-				delete(req.Header, have)
-			}
-		}
-		req.Header[key] = []string{extra[name]}
-	}
-}
-
-// bareID is a model id without its "vendor/" prefix.
-func rsiBareID(id string) string {
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		return id[i+1:]
-	}
-	return id
-}
-
 type liveModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -211,9 +170,7 @@ type liveModel struct {
 }
 
 // Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order. A gateway that
-// resells other vendors names their models "vendor/model"; when the id
-// itself is not in the catalog, the part after the last slash is looked up.
+// catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
@@ -221,11 +178,7 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if !ok {
-			k, ok = byID[rsiBareID(m.ID)]
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

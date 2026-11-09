@@ -7,23 +7,13 @@
 package provider
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
-	"time"
-
-	"github.com/yetone/magpie/internal/catalog"
 )
 
 // Protocol is a wire API magpie can speak to an upstream.
@@ -47,12 +37,6 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName names the current key; KeyProtocol limits it to one protocol
-	// ("" is any). Keys are the other keys, tried in order after it.
-	KeyName     string     `json:"keyName,omitempty"`
-	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
-	Keys        []KeyEntry `json:"keys,omitempty"`
-
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -64,17 +48,7 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Headers are extra request headers for a custom provider, sent with
-	// every request magpie makes to it (forwarding, the test, the model list).
-	Headers map[string]string `json:"headers,omitempty"`
-
-	// Fallback lists "provider/model" ids tried, in order, when this
-	// provider fails before it has replied.
-	Fallback []string `json:"fallback,omitempty"`
-
-	// Catalog is one or more models.dev ids, comma-separated, searched in
-	// order for names and reasoning levels.
-	Catalog string `json:"catalog,omitempty"`
+	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
@@ -143,7 +117,6 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -204,14 +177,10 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if strings.HasPrefix(p.Icon, "file:") && IconFile(strings.TrimPrefix(p.Icon, "file:")) == "" {
-		return fmt.Errorf("icon %q is not an icon magpie stored", p.Icon)
-	}
 	if a, ok := find(Accounts(), p.ID); ok {
-		// an account keeps only the user's model picks and fallback; the
-		// rest is the agent's own sign-in. Saving it again brings a removed
-		// one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+		// an account keeps only the user's model picks; the rest is the
+		// agent's own sign-in. Saving it again brings a removed one back.
+		p = Provider{ID: a.ID, Models: p.Models}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -219,230 +188,16 @@ func Save(p Provider) error {
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
-		if err := rsiCheckHeaders(p.Headers); err != nil {
-			return err
-		}
-		if err := rsiCheckKeys(p); err != nil {
-			return err
-		}
 	}
 	f := load()
-	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			replaced = true
-			break
+			return store(f)
 		}
 	}
-	if !replaced {
-		f.Providers = append(f.Providers, p)
-	}
-	if err := store(f); err != nil {
-		return err
-	}
-	rsiPruneIcons(f)
-	return nil
-}
-
-// tokenRe is what an HTTP header name may contain (RFC 9110 "token").
-var rsiTokenRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
-
-// checkHeaders refuses header names HTTP cannot carry and values with line
-// breaks, which would let one header smuggle another.
-func rsiCheckHeaders(m map[string]string) error {
-	for k, v := range m {
-		if !rsiTokenRe.MatchString(k) {
-			return fmt.Errorf("header name %q is not a valid HTTP header name", k)
-		}
-		if strings.ContainsAny(v, "\r\n\x00") {
-			return fmt.Errorf("header %s has a line break in its value", k)
-		}
-	}
-	return nil
-}
-
-// cleanHeaders trims names and values and drops entries with no name. An
-// empty map is nil, so providers.json does not carry it.
-func rsiCleanHeaders(m map[string]string) map[string]string {
-	var out map[string]string
-	for k, v := range m {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" {
-			continue
-		}
-		if out == nil {
-			out = map[string]string{}
-		}
-		out[k] = v
-	}
-	return out
-}
-
-// ExtraHeaders are the headers the user set on a custom provider. Presets and
-// signed-in accounts have none.
-func (p Provider) ExtraHeaders() map[string]string {
-	if p.Preset != "" || p.Account != nil {
-		return nil
-	}
-	return p.Headers
-}
-
-// ApplyHeaders puts the provider's own headers on a request. Call it after
-// the auth headers are set, so these can override the defaults.
-func (p Provider) ApplyHeaders(req *http.Request) {
-	catalog.ApplyHeaders(req, p.ExtraHeaders())
-}
-
-// Catalogs lists the models.dev ids the provider reads names and reasoning
-// levels from, in the order they are searched.
-func (p Provider) Catalogs() []string {
-	var out []string
-	for _, c := range strings.Split(p.Catalog, ",") {
-		if c = strings.TrimSpace(c); c != "" && !contains(out, c) {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// MaxIcon is the largest picture magpie keeps as a provider icon.
-const MaxIcon = 1 << 20
-
-// IconDir is where stored icons live: icons/ beside providers.json.
-func IconDir() string { return filepath.Join(filepath.Dir(Path()), "icons") }
-
-// iconName is what a stored icon is called: 16 lowercase hex digits (the
-// first 8 bytes of the content's SHA-256) and a known extension.
-var rsiIconName = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
-
-// IconFile turns a stored icon's file name into its path on disk. Anything
-// that is not exactly a name StoreIcon could have written gives "".
-func IconFile(name string) string {
-	if !rsiIconName.MatchString(name) {
-		return ""
-	}
-	return filepath.Join(IconDir(), name)
-}
-
-// StoreIcon keeps a picture as a provider icon and returns the value to put
-// in Provider.Icon ("file:<name>"). The same picture is stored once; storing
-// it again makes it fresh, so pruneIcons leaves it alone for an hour.
-func StoreIcon(data []byte) (string, error) {
-	if len(data) == 0 {
-		return "", errors.New("the image is empty")
-	}
-	if len(data) > MaxIcon {
-		return "", fmt.Errorf("the image is larger than %d KB", MaxIcon>>10)
-	}
-	ext := rsiSniffIcon(data)
-	if ext == "" {
-		return "", errors.New("not an image magpie can show: PNG, JPEG, GIF, WebP, ICO or SVG")
-	}
-	sum := sha256.Sum256(data)
-	name := hex.EncodeToString(sum[:8]) + ext
-	dir := IconDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, name)
-	if _, err := os.Stat(path); err == nil {
-		now := time.Now()
-		if err := os.Chtimes(path, now, now); err != nil {
-			return "", err
-		}
-	} else if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", err
-	}
-	return "file:" + name, nil
-}
-
-// sniffIcon names the format of a picture by its content, or "" when it is
-// none of the formats magpie shows.
-func rsiSniffIcon(b []byte) string {
-	switch {
-	case bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")):
-		return ".png"
-	case bytes.HasPrefix(b, []byte{0xFF, 0xD8, 0xFF}):
-		return ".jpg"
-	case bytes.HasPrefix(b, []byte("GIF87a")), bytes.HasPrefix(b, []byte("GIF89a")):
-		return ".gif"
-	case len(b) >= 12 && bytes.HasPrefix(b, []byte("RIFF")) && bytes.Equal(b[8:12], []byte("WEBP")):
-		return ".webp"
-	case bytes.HasPrefix(b, []byte{0, 0, 1, 0}):
-		return ".ico"
-	case rsiIsSVG(b):
-		return ".svg"
-	}
-	return ""
-}
-
-// isSVG is true when the document is an SVG picture: after any leading space
-// and byte-order mark it opens with an XML declaration, a doctype, a comment or
-// <svg>, and its first element is <svg>. Text that only mentions <svg> is not.
-func rsiIsSVG(b []byte) bool {
-	s := bytes.TrimLeft(b, " \t\r\n")
-	s = bytes.TrimLeft(bytes.TrimPrefix(s, []byte("\xEF\xBB\xBF")), " \t\r\n")
-	opens := false
-	for _, p := range []string{"<?xml", "<!DOCTYPE", "<!--", "<svg"} {
-		if bytes.HasPrefix(s, []byte(p)) {
-			opens = true
-			break
-		}
-	}
-	if !opens {
-		return false
-	}
-	d := xml.NewDecoder(bytes.NewReader(s))
-	d.CharsetReader = func(_ string, in io.Reader) (io.Reader, error) { return in, nil }
-	for {
-		tok, err := d.Token()
-		if err != nil {
-			return false
-		}
-		if se, ok := tok.(xml.StartElement); ok {
-			return strings.EqualFold(se.Name.Local, "svg")
-		}
-	}
-}
-
-// pruneIcons deletes stored icons that no provider refers to and that are
-// over an hour old. The hour lets the user save a provider after choosing
-// its picture.
-func rsiPruneIcons(f file) {
-	used := map[string]bool{}
-	for _, p := range f.Providers {
-		if n, ok := strings.CutPrefix(p.Icon, "file:"); ok {
-			used[n] = true
-		}
-	}
-	ents, err := os.ReadDir(IconDir())
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().Add(-time.Hour)
-	for _, e := range ents {
-		name := e.Name()
-		if e.IsDir() || used[name] || IconFile(name) == "" {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || info.ModTime().After(cutoff) {
-			continue
-		}
-		os.Remove(filepath.Join(IconDir(), name))
-	}
-}
-
-// HeaderNames lists header names in a stable order, for display and
-// for sending.
-func HeaderNames(m map[string]string) []string {
-	names := make([]string, 0, len(m))
-	for k := range m {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return names
+	f.Providers = append(f.Providers, p)
+	return store(f)
 }
 
 // Delete removes a provider. An account is only hidden from magpie (its
@@ -489,8 +244,6 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = rsiCleanKeys(p.Keys)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -498,12 +251,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = strings.Join(p.Catalogs(), ",")
-	p.Headers = rsiCleanHeaders(p.Headers)
-	if p.Preset != "" {
-		p.Headers = nil // presets speak for themselves; extra headers are ignored
-	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
