@@ -297,19 +297,14 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 				Reason string `json:"reason"`
 			} `json:"incomplete_details"`
 			Error *struct {
-				Message string          `json:"message"`
-				Code    json.RawMessage `json:"code"`
-				Type    string          `json:"type"`
+				Message string `json:"message"`
 			} `json:"error"`
 			Output []rItem `json:"output"`
 		} `json:"response"`
 		Error *struct {
-			Message string          `json:"message"`
-			Code    json.RawMessage `json:"code"`
-			Type    string          `json:"type"`
+			Message string `json:"message"`
 		} `json:"error"`
-		Message string          `json:"message"`
-		Code    json.RawMessage `json:"code"`
+		Message string `json:"message"`
 	}
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		return nil
@@ -338,11 +333,7 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		}
 	case "response.completed", "response.incomplete", "response.failed":
 		if ev.Response.Error != nil {
-			emit(Event{Kind: KError, Text: ev.Response.Error.Message, Status: errorStatus(ev.Response.Error.Type, ev.Response.Error.Code)})
-			return nil
-		}
-		if ev.Type == "response.failed" {
-			emit(Event{Kind: KError, Text: "response failed", Status: errorStatus("", nil)})
+			emit(Event{Kind: KError, Text: ev.Response.Error.Message})
 			return nil
 		}
 		stop := "stop"
@@ -361,11 +352,11 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStop, Stop: stop})
 		emit(Event{Kind: KUsage, Usage: ev.Response.Usage.usage()})
 	case "error":
-		msg, typ, code := ev.Message, "", ev.Code
+		msg := ev.Message
 		if ev.Error != nil {
-			msg, typ, code = ev.Error.Message, ev.Error.Type, ev.Error.Code
+			msg = ev.Error.Message
 		}
-		emit(Event{Kind: KError, Text: msg, Status: errorStatus(typ, code)})
+		emit(Event{Kind: KError, Text: msg})
 	}
 	return nil
 }
@@ -499,10 +490,8 @@ func (e *responsesEncoder) event(ev Event) {
 		if ev.ID == "" {
 			ev.ID = "call_" + newID()
 		}
-		// Open (and so close the previous item) before recording this call:
-		// closeItem reads the call ID from e.col.last(ToolCall).
-		e.openItem(ToolCall, "fc_", map[string]any{"type": "function_call", "call_id": ev.ID, "name": ev.Name, "arguments": ""})
 		e.col.add(ev)
+		e.openItem(ToolCall, "fc_", map[string]any{"type": "function_call", "call_id": ev.ID, "name": ev.Name, "arguments": ""})
 		return
 	case KToolArgs:
 		if e.open == ToolCall && ev.Text != "" {

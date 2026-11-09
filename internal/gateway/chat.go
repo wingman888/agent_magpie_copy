@@ -332,16 +332,14 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		} `json:"choices"`
 		Usage *cUsage `json:"usage"`
 		Error *struct {
-			Message string          `json:"message"`
-			Type    string          `json:"type"`
-			Code    json.RawMessage `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(data), &ch); err != nil {
 		return nil
 	}
 	if ch.Error != nil {
-		emit(Event{Kind: KError, Text: ch.Error.Message, Status: errorStatus(ch.Error.Type, ch.Error.Code)})
+		emit(Event{Kind: KError, Text: ch.Error.Message})
 		return nil
 	}
 	if !d.started {
@@ -349,12 +347,7 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStart, MsgID: ch.ID, Model: ch.Model})
 	}
 	for _, c := range ch.Choices {
-		// Some relays send the same thought under both names; one is enough.
-		t := c.Delta.ReasoningContent
-		if t == "" {
-			t = c.Delta.Reasoning
-		}
-		if t != "" {
+		if t := c.Delta.ReasoningContent + c.Delta.Reasoning; t != "" {
 			emit(Event{Kind: KThink, Text: t})
 		}
 		if c.Delta.Content != nil && *c.Delta.Content != "" {
