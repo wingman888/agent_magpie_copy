@@ -1,9 +1,9 @@
-// Package provider holds the model vendors dial can reach: where each one
+// Package provider holds the model vendors magpie can reach: where each one
 // lives, which protocols it speaks, the API key the user typed in, and which
 // of its models should show up in the agents' pickers.
 //
 // Nothing here reads environment variables. A provider is exactly what the
-// user entered, kept in ~/.config/dial/providers.json (mode 0600).
+// user entered, kept in ~/.config/magpie/providers.json (mode 0600).
 package provider
 
 import (
@@ -16,16 +16,17 @@ import (
 	"strings"
 )
 
-// Protocol is a wire API dial can speak to an upstream.
+// Protocol is a wire API magpie can speak to an upstream.
 type Protocol string
 
 const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
+	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
-// Protocols in the order dial prefers them when it has to translate.
+// Protocols in the order magpie prefers them when it has to translate.
 var Protocols = []Protocol{Chat, Responses, Anthropic}
 
 // Provider is one configured vendor.
@@ -34,9 +35,15 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key"`              // the current API key, as typed by the user
 
-	// Base URLs, one per protocol the vendor serves natively. dial appends
+	// KeyName names the current key, and KeyProtocol limits it to one
+	// protocol's endpoint ("" = any). Keys holds the other keys, in order.
+	KeyName     string   `json:"keyName,omitempty"`
+	KeyProtocol Protocol `json:"keyProtocol,omitempty"`
+	Keys        []SubKey `json:"keys,omitempty"`
+
+	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
 	Chat      string `json:"chat,omitempty"`
@@ -47,12 +54,27 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
+	// Headers are extra request headers sent with every call to a custom
+	// provider (forwarding, tests, model lists). Presets and signed-in
+	// accounts ignore them; see CustomHeaders.
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// Catalog names the models.dev catalogs to read names and reasoning levels
+	// from, comma separated and searched in order ("openai,deepseek").
+	Catalog string `json:"catalog,omitempty"`
 	Website string `json:"website,omitempty"`
+
+	// Fallback lists "provider/model" ids tried, in order, when this provider
+	// cannot serve a request. Signed-in accounts keep their list too.
+	Fallback []string `json:"fallback,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
-	// Account is set for providers backed by another agent's login (codex,
-	// copilot). It is derived from that login at read time and never saved.
+	// Hidden is set on an account the user removed from magpie; the
+	// agent stays signed in, magpie just leaves it alone.
+	Hidden bool `json:"hidden,omitempty"`
+
+	// Account is set when the provider is an agent the user signed in to
+	// (see account.go); it is derived, never stored.
 	Account *Account `json:"-"`
 }
 
@@ -63,10 +85,10 @@ type file struct {
 // Path is the file the user's providers live in.
 func Path() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "dial", "providers.json")
+		return filepath.Join(x, "magpie", "providers.json")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "dial", "providers.json")
+	return filepath.Join(home, ".config", "magpie", "providers.json")
 }
 
 func load() file {
@@ -92,29 +114,52 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added, then the
-// account providers whose agents are signed in. Stored account records only
-// carry model picks; a signed-out account's picks are ignored.
+// All lists the configured providers in the order they were added, then
+// the signed-in agents. An entry in the file with no URL is only the
+// model picks for one of those accounts.
 func All() []Provider {
+	stored := load().Providers
+	picks := map[string]Provider{}
 	var out []Provider
-	models := map[string][]string{}
-	for _, p := range load().Providers {
+	for _, p := range stored {
 		p = normalize(p)
-		if IsAccountID(p.ID) {
-			models[p.ID] = p.Models
-			continue
-		}
-		if p.ID == ClaudeID {
+		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+			picks[p.ID] = p
 			continue
 		}
 		out = append(out, p)
 	}
-	for _, id := range []string{CodexID, CopilotID} {
-		if a, ok := AccountOf(id); ok {
-			out = append(out, accountProvider(id, a, models[id]))
+	for _, a := range accountProviders(false) {
+		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
+			continue
+		}
+		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
+		out = append(out, a)
+	}
+	return out
+}
+
+// Hidden lists the signed-in accounts the user removed from magpie.
+func Hidden() []Provider {
+	var out []Provider
+	for _, a := range Accounts() {
+		for _, p := range load().Providers {
+			if p.ID == a.ID && p.Hidden {
+				out = append(out, a)
+			}
 		}
 	}
 	return out
+}
+
+func find(ps []Provider, id string) (Provider, bool) {
+	for _, p := range ps {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return Provider{}, false
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -125,7 +170,7 @@ func Find(id string) (*Provider, error) {
 			return &p, nil
 		}
 	}
-	return nil, fmt.Errorf("no provider %q — dial providers lists them", id)
+	return nil, fmt.Errorf("no provider %q — magpie providers lists them", id)
 }
 
 var idRe = regexp.MustCompile(`[^a-z0-9]+`)
@@ -144,63 +189,62 @@ func Save(p Provider) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
-	if p.ID == ClaudeID {
-		return errors.New(`"claude": Claude Code's login is not offered as a provider; dial only checks that it exists`)
-	}
-	if IsAccountID(p.ID) {
-		return saveAccount(p)
-	}
-	if p.ID == "dial" {
-		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
+	if p.ID == "magpie" {
+		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-		return errors.New("a provider needs a base URL")
+	if a, ok := find(accountProviders(true), p.ID); ok {
+		// an account keeps only the user's model picks; the rest is the
+		// agent's own sign-in. Saving it again brings a removed one back.
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
+	} else {
+		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+			return errors.New("a provider needs a base URL")
+		}
+		if p.Key == "" && !keyOptional(p) {
+			return fmt.Errorf("%s needs an API key", p.Name)
+		}
 	}
-	if p.Key == "" && !keyOptional(p) {
-		return fmt.Errorf("%s needs an API key", p.Name)
+	if strings.HasPrefix(p.Icon, "file:") && IconFile(strings.TrimPrefix(p.Icon, "file:")) == "" {
+		return fmt.Errorf("%s has an invalid icon %q", p.Name, p.Icon)
+	}
+	if err := checkKeys(p); err != nil {
+		return err
 	}
 	f := load()
+	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
+			carryKeys(&p, f.Providers[i])
 			f.Providers[i] = p
-			return store(f)
+			replaced = true
+			break
 		}
 	}
-	f.Providers = append(f.Providers, p)
-	return store(f)
-}
-
-// saveAccount keeps only the model picks of an account provider. The login
-// stays with the agent, and no token or name is written here.
-func saveAccount(p Provider) error {
-	rec := Provider{ID: p.ID, Models: cleanList(p.Models)}
-	f := load()
-	for i := range f.Providers {
-		if f.Providers[i].ID == p.ID {
-			f.Providers[i] = rec
-			return store(f)
-		}
+	if !replaced {
+		f.Providers = append(f.Providers, p)
 	}
-	f.Providers = append(f.Providers, rec)
-	return store(f)
+	if err := store(f); err != nil {
+		return err
+	}
+	pruneIcons()
+	return nil
 }
 
-// Delete removes a provider. For an account provider that clears the model
-// picks only: the login stays with the agent, so the provider is still
-// listed while the agent is signed in.
+// Delete removes a provider. An account is only hidden from magpie (its
+// model picks kept); signing out is the agent's job.
 func Delete(id string) error {
-	if IsAccountID(id) {
+	if _, ok := find(accountProviders(true), id); ok {
 		f := load()
-		keep := f.Providers[:0]
-		for _, p := range f.Providers {
-			if p.ID != id {
-				keep = append(keep, p)
+		for i := range f.Providers {
+			if f.Providers[i].ID == id {
+				f.Providers[i].Hidden = true
+				return store(f)
 			}
 		}
-		f.Providers = keep
+		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
 		return store(f)
 	}
 	f := load()
@@ -240,6 +284,10 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = strings.Join(catalogIDs(p.Catalog), ",")
+	p.Headers = cleanHeaders(p.Headers)
+	p = cleanKeys(p)
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -257,6 +305,38 @@ func normalize(p Provider) Provider {
 	return p
 }
 
+// catalogIDs splits a catalog field such as "openai,deepseek" into the
+// models.dev ids it names, in the order given, without repeats.
+func catalogIDs(s string) []string {
+	var out []string
+	for _, c := range strings.Split(s, ",") {
+		if c = strings.ToLower(strings.TrimSpace(c)); c != "" && !contains(out, c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// SetFallback replaces a provider's fallback list ("provider/model" ids, in
+// priority order). Blanks and repeats are dropped; an empty list clears it.
+func SetFallback(id string, list []string) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	list = cleanList(list)
+	f := load()
+	for i := range f.Providers {
+		if f.Providers[i].ID == p.ID {
+			f.Providers[i].Fallback = list
+			return store(f)
+		}
+	}
+	// a signed-in account the user has not picked for yet
+	f.Providers = append(f.Providers, Provider{ID: p.ID, Fallback: list})
+	return store(f)
+}
+
 func cleanList(xs []string) []string {
 	var out []string
 	for _, x := range xs {
@@ -265,6 +345,32 @@ func cleanList(xs []string) []string {
 		}
 	}
 	return out
+}
+
+// cleanHeaders trims names and values and drops entries with no name. An
+// empty map is nil, so it is not written to the file.
+func cleanHeaders(m map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range m {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = strings.TrimSpace(v)
+	}
+	return out
+}
+
+// CustomHeaders are the extra request headers this provider sends. Only a
+// custom provider has them: presets and signed-in accounts send none.
+func (p Provider) CustomHeaders() map[string]string {
+	if p.Preset != "" || p.Account != nil {
+		return nil
+	}
+	return p.Headers
 }
 
 func contains(xs []string, x string) bool {
@@ -310,6 +416,14 @@ func (p Provider) Host() string {
 	return ""
 }
 
+// IsOpenCode reports whether the provider is OpenCode's gateway (Zen or Go),
+// which routes and caches by conversation and turns away requests that do
+// not name one in x-opencode-session.
+func (p Provider) IsOpenCode() bool {
+	h := p.Host()
+	return h == "opencode.ai" || strings.HasSuffix(h, ".opencode.ai")
+}
+
 // HostOf pulls the host out of a URL, for display.
 func HostOf(u string) string {
 	u = strings.TrimSpace(u)
@@ -330,5 +444,6 @@ func Mask(s string) string {
 	return s[:4] + "…" + s[len(s)-4:]
 }
 
-// Ready reports whether the provider can be used: it has a key, or needs none.
-func (p Provider) Ready() bool { return p.IsAccount() || p.Key != "" || keyOptional(p) }
+// Ready reports whether the provider can be used: it has a key, needs
+// none, or is a signed-in agent.
+func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
