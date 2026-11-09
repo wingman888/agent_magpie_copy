@@ -156,14 +156,16 @@ func TestProtoGate_BestFitKeyFirst(t *testing.T) {
 		}
 	}
 
-	// no Anthropic endpoint: the Anthropic-limited key is ignored, not an error
+	// no Anthropic endpoint: the Anthropic-limited key is ignored, not an
+	// error; the unlimited key needs translating, the chat key is another
+	// vendor's for a Claude model, so it comes last
 	noAnth := p
 	noAnth.Anthropic = ""
 	var got []string
 	for _, c := range usableCandidates(noAnth, "claude-opus-4-8", provider.Anthropic) {
 		got = append(got, c.p.Key)
 	}
-	if strings.Join(got, ",") != "chat-key,any-key" {
+	if strings.Join(got, ",") != "any-key,chat-key" {
 		t.Errorf("without an Anthropic endpoint: got %v", got)
 	}
 }
