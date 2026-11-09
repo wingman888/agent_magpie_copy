@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 )
 
 // Protocol is a wire API magpie can speak to an upstream.
@@ -38,6 +37,11 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
+	// KeyName names the front key, and Keys are the other keys in the order
+	// they are tried (see keys.go). Key is always the front one.
+	KeyName string     `json:"keyName,omitempty"`
+	Keys    []KeyEntry `json:"keys,omitempty"`
+
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
@@ -45,14 +49,23 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 
+	// Fallback is where a request goes when this provider can't take it —
+	// out of quota, rate limited, overloaded or down — before any of the
+	// reply has been sent: models as agents pick them (provider/model),
+	// tried in order.
+	Fallback []string `json:"fallback,omitempty"`
+
+	// Headers are extra HTTP request headers sent to the vendor, exactly as
+	// the user typed them. They ride on every request magpie makes to a plain
+	// key+URL provider — forwarded calls, connectivity tests, and model-list
+	// fetches — applied after the auth headers, so the user can override those
+	// when a gateway insists on a private scheme. Signed-in agent accounts
+	// ignore them: their auth is the agent's own.
+	Headers map[string]string `json:"headers,omitempty"`
+
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
-
-	// Headers are extra request headers sent with every request to a custom
-	// provider, after the auth headers (so they win on a clash). Names keep
-	// the case the user typed. Presets and accounts ignore them.
-	Headers map[string]string `json:"headers,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
@@ -100,19 +113,8 @@ func store(f file) error {
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := os.Chmod(p, 0o600); err != nil {
-		return err
-	}
-	// Stored icons nothing refers to any more are cleaned up here. This is
-	// best effort: a failed cleanup must not fail the save.
-	refs := map[string]bool{}
-	for _, q := range f.Providers {
-		if strings.HasPrefix(q.Icon, "file:") {
-			refs[q.Icon] = true
-		}
-	}
-	_ = pruneIcons(refs, time.Now())
-	return nil
+	pruneIcons(f)
+	return os.Chmod(p, 0o600)
 }
 
 // All lists the configured providers in the order they were added, then
@@ -134,7 +136,7 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models = picks[a.ID].Models
+		a.Models, a.Fallback = picks[a.ID].Models, picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -198,11 +200,8 @@ func Save(p Provider) error {
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
-		if p.Preset != "" {
-			p.Headers = nil // presets take no custom headers
-		}
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
@@ -213,6 +212,7 @@ func Save(p Provider) error {
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
+			p = mergeKeys(f.Providers[i], p)
 			f.Providers[i] = p
 			return store(f)
 		}
@@ -265,6 +265,8 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
+	p.KeyName = strings.TrimSpace(p.KeyName)
+	p.Keys = cleanKeys(p.Key, p.Keys)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
@@ -272,7 +274,14 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
+	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
+	if p.Preset != "" {
+		// Presets own their request shape; custom headers are supported only
+		// for user-defined providers.
+		p.Headers = nil
+	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -290,6 +299,13 @@ func normalize(p Provider) Provider {
 	return p
 }
 
+// Catalogs are the models.dev ids the provider's models are looked up in,
+// first match wins: a gateway that resells several vendors names them all
+// ("openai, deepseek").
+func (p Provider) Catalogs() []string {
+	return cleanList(strings.FieldsFunc(strings.ToLower(p.Catalog), func(r rune) bool { return r == ',' || r == ' ' }))
+}
+
 func cleanList(xs []string) []string {
 	var out []string
 	for _, x := range xs {
@@ -300,30 +316,19 @@ func cleanList(xs []string) []string {
 	return out
 }
 
-// cleanHeaders trims names and values and drops entries with no name. Names
-// differing only in case stay separate entries.
+// cleanHeaders trims header names and values and drops entries with an empty
+// name, returning nil when nothing is left so the field stays out of the JSON.
 func cleanHeaders(h map[string]string) map[string]string {
-	var out map[string]string
+	out := make(map[string]string, len(h))
 	for k, v := range h {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" {
-			continue
+		if k = strings.TrimSpace(k); k != "" {
+			out[k] = strings.TrimSpace(v)
 		}
-		if out == nil {
-			out = map[string]string{}
-		}
-		out[k] = v
 	}
-	return out
-}
-
-// customHeaders is what a request to the vendor carries beyond its auth:
-// the user's headers on a custom provider, nothing on a preset or account.
-func (p Provider) customHeaders() map[string]string {
-	if p.Account != nil || p.Preset != "" {
+	if len(out) == 0 {
 		return nil
 	}
-	return p.Headers
+	return out
 }
 
 func contains(xs []string, x string) bool {
