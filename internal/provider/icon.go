@@ -2,183 +2,244 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
-// MaxIcon is the largest image magpie keeps as a custom vendor's icon.
+// A provider's own picture lives in the icons folder beside providers.json,
+// named after its content, and the provider's Icon reads "file:<name>". The
+// built-in icons are plain names ("deepseek-color").
+const iconPrefix = "file:"
+
+// MaxIcon is the largest picture magpie keeps for a provider.
 const MaxIcon = 1 << 20
 
-// iconGrace is how long an unreferenced icon survives. A picture the user
-// just chose, but has not saved a provider with yet, must not be swept.
-const iconGrace = time.Hour
+var iconName = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
 
-// iconRefPrefix marks an icon value that points at a stored image.
-const iconRefPrefix = "file:"
+// IconDir is where pictures given to providers are kept.
+func IconDir() string { return filepath.Join(filepath.Dir(Path()), "icons") }
 
-// iconNameRe is the only shape of stored icon file name IconFile accepts:
-// 16 lowercase hex digits (the first 8 bytes of the content's SHA-256), a dot,
-// and one of the extensions iconExt can produce. Nothing else can name a path.
-var iconNameRe = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
-
-// builtinIconRe is the shape of a built-in icon name, such as "openai" or
-// "claude-color".
-var builtinIconRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
-// iconsDir is the icons folder next to providers.json.
-func iconsDir() string {
-	return filepath.Join(filepath.Dir(Path()), "icons")
-}
-
-// IconFile turns a stored icon's file name into its path on disk. Anything
-// that is not exactly a name StoreIcon could have produced yields "".
+// IconFile is the path of a stored picture, for a name as StoreIcon made it;
+// "" for anything else, so a request can't reach outside the folder.
 func IconFile(name string) string {
-	if !iconNameRe.MatchString(name) {
+	if !iconName.MatchString(name) {
 		return ""
 	}
-	return filepath.Join(iconsDir(), name)
+	return filepath.Join(IconDir(), name)
 }
 
-// iconExt names the image format by its content, or "" when it is none
-// magpie shows.
-func iconExt(data []byte) string {
-	switch {
-	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
-		return ".png"
-	case bytes.HasPrefix(data, []byte{0xFF, 0xD8, 0xFF}):
-		return ".jpg"
-	case bytes.HasPrefix(data, []byte("GIF87a")), bytes.HasPrefix(data, []byte("GIF89a")):
-		return ".gif"
-	case len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP":
-		return ".webp"
-	case bytes.HasPrefix(data, []byte{0, 0, 1, 0}):
-		return ".ico"
-	case utf8.Valid(data) && bytes.Contains(bytes.ToLower(data), []byte("<svg")):
-		return ".svg"
+// StoreIcon keeps a picture (PNG, JPEG, GIF, WebP, ICO or SVG) and returns
+// the Icon value that points at it. The same picture is stored once.
+func StoreIcon(data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", errors.New("the picture is empty")
+	}
+	if len(data) > MaxIcon {
+		return "", errors.New("the picture is over 1 MB; pick a smaller one")
+	}
+	ext := iconExt(data)
+	if ext == "" {
+		return "", errors.New("not a picture magpie can show: use PNG, JPEG, GIF, WebP, ICO or SVG")
+	}
+	sum := sha256.Sum256(data)
+	name := hex.EncodeToString(sum[:8]) + "." + ext
+	if err := os.MkdirAll(IconDir(), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(IconDir(), name), data, 0o644); err != nil {
+		return "", err
+	}
+	return iconPrefix + name, nil
+}
+
+// FetchIcon downloads the picture an import link named and keeps it like
+// any other, returning the Icon value that points at it. It runs when the
+// user confirms the import, never at parse time; the URL is re-checked here
+// so a crafted request can't point magpie at anything but a public https
+// picture, and the read stops one byte past MaxIcon so a huge body is
+// refused rather than buffered.
+func FetchIcon(ctx context.Context, rawURL string) (string, error) {
+	u, err := iconURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	return fetchIcon(ctx, guardClient(), u)
+}
+
+// guardClient is the http.Client icon fetches use: the default transport —
+// so the proxy settings still apply — but with dialing wrapped in publicDial.
+func guardClient() *http.Client {
+	c := *http.DefaultClient
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	dial := t.DialContext
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return publicDial(ctx, dial, network, addr)
+	}
+	c.Transport = t
+	return &c
+}
+
+// publicDial resolves the host and refuses to connect when any address it
+// maps to is not public. Checking the resolved address here, not just the
+// URL's hostname, closes the door on a name that answers public once and
+// private the next time (DNS rebinding): the same resolution this dial uses
+// is the one that is judged.
+func publicDial(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error), network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, errorf("could not resolve %s", host)
+	}
+	for _, ip := range ips {
+		if !publicIP(ip.IP) {
+			return nil, errorf("the icon host %s resolves to %s, which is not public", host, ip.IP)
+		}
+	}
+	// Dial each resolved address by IP, so nothing resolves twice.
+	var lastErr error
+	for _, ip := range ips {
+		conn, err := dial(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// publicIP is true for an address on the open internet: not loopback,
+// private, link-local, unspecified, multicast or otherwise reserved.
+func publicIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// 100.64/10 carrier NAT, 192.0.0.0/24, 192.0.2/24, 198.18/15 and
+		// friends: never a public web host.
+		switch {
+		case v4[0] == 100 && v4[1]&0xc0 == 64:
+			return false
+		case v4[0] == 192 && v4[1] == 0 && v4[2] == 0:
+			return false
+		case v4[0] == 192 && v4[1] == 0 && v4[2] == 2:
+			return false
+		case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19):
+			return false
+		case v4[0] == 198 && v4[1] == 51 && v4[2] == 100:
+			return false
+		case v4[0] == 203 && v4[1] == 0 && v4[2] == 113:
+			return false
+		}
+		return true
+	}
+	// IPv6: unique local (fc00::/7) and 6to4/teredo tunnels are not public
+	// web hosts either.
+	if len(ip) == net.IPv6len {
+		if ip[0]&0xfe == 0xfc {
+			return false
+		}
+		if ip[0] == 0x20 && ip[1] == 0x02 {
+			return false // 2002::/16 6to4
+		}
+	}
+	return true
+}
+
+// fetchIcon is the download itself, split out so tests can point it at a
+// local server; the URL has already passed iconURL.
+func fetchIcon(ctx context.Context, c *http.Client, u string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "image/*")
+	res, err := c.Do(req)
+	if err != nil {
+		return "", errorf("could not fetch the icon: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", errorf("the icon URL answered %s", res.Status)
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, MaxIcon+1))
+	if err != nil {
+		return "", errorf("could not read the icon: %v", err)
+	}
+	return StoreIcon(b)
+}
+
+// StoreIconFile is StoreIcon for a picture on disk.
+func StoreIconFile(path string) (string, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if st.Size() > MaxIcon {
+		return "", errors.New("the picture is over 1 MB; pick a smaller one")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return StoreIcon(b)
+}
+
+func iconExt(b []byte) string {
+	switch http.DetectContentType(b) {
+	case "image/png":
+		return "png"
+	case "image/jpeg":
+		return "jpg"
+	case "image/gif":
+		return "gif"
+	case "image/webp":
+		return "webp"
+	case "image/x-icon", "image/vnd.microsoft.icon":
+		return "ico"
+	}
+	head := bytes.ToLower(b[:min(len(b), 1024)])
+	if bytes.Contains(head, []byte("<svg")) {
+		return "svg"
 	}
 	return ""
 }
 
-// StoreIcon keeps an image in the icons folder and returns the icon value
-// that refers to it ("file:<name>"). The name comes from the content, so the
-// same picture is stored once; storing it again just refreshes its age.
-func StoreIcon(data []byte) (string, error) {
-	if len(data) == 0 {
-		return "", errors.New("the image is empty")
-	}
-	if len(data) > MaxIcon {
-		return "", fmt.Errorf("the image is %d bytes; icons are limited to %d", len(data), MaxIcon)
-	}
-	ext := iconExt(data)
-	if ext == "" {
-		return "", errors.New("not an image magpie can show (PNG, JPEG, GIF, WebP, ICO or SVG)")
-	}
-	sum := sha256.Sum256(data)
-	name := hex.EncodeToString(sum[:8]) + ext
-	dir := iconsDir()
-	path := filepath.Join(dir, name)
-	if _, err := os.Stat(path); err == nil {
-		now := time.Now()
-		_ = os.Chtimes(path, now, now)
-		return iconRefPrefix + name, nil
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	tmp, err := os.CreateTemp(dir, ".new-*")
-	if err != nil {
-		return "", err
-	}
-	tmpName := tmp.Name()
-	_, werr := tmp.Write(data)
-	cerr := tmp.Close()
-	if err := errors.Join(werr, cerr); err != nil {
-		os.Remove(tmpName)
-		return "", err
-	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		os.Remove(tmpName)
-		return "", err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
-		return "", err
-	}
-	return iconRefPrefix + name, nil
-}
-
-// CheckIcon reports whether an icon value is acceptable: "" (the generic
-// icon), a built-in name, or a file:<name> reference to an image that is
-// stored. A reference never reaches outside the icons folder.
-func CheckIcon(icon string) error {
-	if icon == "" {
-		return nil
-	}
-	if strings.HasPrefix(icon, iconRefPrefix) {
-		path := IconFile(strings.TrimPrefix(icon, iconRefPrefix))
-		if path == "" {
-			return fmt.Errorf("%q is not an icon magpie stored", icon)
-		}
-		if _, err := os.Stat(path); err != nil {
-			return fmt.Errorf("%q: the image is no longer stored", icon)
-		}
-		return nil
-	}
-	if !builtinIconRe.MatchString(icon) {
-		return fmt.Errorf("%q is neither an image file nor a built-in icon name", icon)
-	}
-	return nil
-}
-
-// SetIcon sets a custom vendor's icon. Presets and signed-in accounts keep
-// their own. "" restores the generic icon.
-func SetIcon(id, icon string) error {
-	p, err := Find(id)
-	if err != nil {
-		return err
-	}
-	if p.Preset != "" || p.Account != nil {
-		return fmt.Errorf("%s has its own icon; only custom providers can set one", p.Name)
-	}
-	icon = strings.TrimSpace(icon)
-	if err := CheckIcon(icon); err != nil {
-		return err
-	}
-	p.Icon = icon
-	return Save(*p)
-}
-
-// pruneIcons deletes stored images no provider refers to and that are older
-// than iconGrace. It runs after providers.json is written.
-func pruneIcons(ps []Provider) {
-	refs := map[string]bool{}
-	for _, p := range ps {
-		if strings.HasPrefix(p.Icon, iconRefPrefix) {
-			refs[strings.TrimPrefix(p.Icon, iconRefPrefix)] = true
+// pruneIcons removes pictures no provider points at any more. One picked in
+// the editor is stored before its provider is saved, so a fresh one stays.
+func pruneIcons(f file) {
+	used := map[string]bool{}
+	for _, p := range f.Providers {
+		if name, ok := strings.CutPrefix(p.Icon, iconPrefix); ok {
+			used[name] = true
 		}
 	}
-	dir := iconsDir()
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().Add(-iconGrace)
+	ents, _ := os.ReadDir(IconDir())
 	for _, e := range ents {
-		if !e.Type().IsRegular() || refs[e.Name()] {
+		if !iconName.MatchString(e.Name()) || used[e.Name()] {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil || !info.ModTime().Before(cutoff) {
-			continue
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > time.Hour {
+			os.Remove(filepath.Join(IconDir(), e.Name()))
 		}
-		_ = os.Remove(filepath.Join(dir, e.Name()))
 	}
 }
