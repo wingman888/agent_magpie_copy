@@ -65,7 +65,13 @@ func SaveLive(provider, base string, models []Model) error {
 // Anthropic version header, which the official API requires but which a
 // dual-protocol relay like OpenRouter reads as a request for its
 // Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWithHeaders(ctx, base, key, anthropic, nil)
+}
+
+// FetchWithHeaders is Fetch with the user's extra request headers (see
+// SetHeaders) sent on every list request.
+func FetchWithHeaders(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -125,11 +131,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	// The user's own headers, after the defaults so a private auth scheme
-	// wins. Written directly so the name keeps the exact case the user typed.
-	for k, v := range headers {
-		req.Header[k] = []string{v}
-	}
+	SetHeaders(req, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -195,4 +197,27 @@ func Decorate(live []Model, known []Model) []Model {
 		out = append(out, m)
 	}
 	return out
+}
+
+// SetHeaders writes the user's headers onto req after the auth headers, so
+// a same-named one wins. Names keep the user's exact casing: the map is
+// written directly, because Header.Set would canonicalize them. A header
+// the request already has under another casing (say "authorization" against
+// the auth header's "Authorization") is removed first, since HTTP treats
+// names case-insensitively and both would otherwise be sent.
+func SetHeaders(req *http.Request, hs map[string]string) {
+	for k := range req.Header {
+		if _, exact := hs[k]; exact {
+			continue
+		}
+		for name := range hs {
+			if strings.EqualFold(k, name) {
+				delete(req.Header, k)
+				break
+			}
+		}
+	}
+	for name, v := range hs {
+		req.Header[name] = []string{v}
+	}
 }
