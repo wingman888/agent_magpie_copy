@@ -408,7 +408,13 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, raw *string) (int, string) {
+func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	return s.passthroughRaw(w, r, p, proto, model, body, u, nil)
+}
+
+// passthroughRaw is passthrough that also reports the full upstream error
+// body through raw when it is non-nil.
+func (s *Server) passthroughRaw(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, raw *string) (int, string) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
@@ -420,7 +426,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		*raw = string(b)
+		if raw != nil {
+			*raw = string(b)
+		}
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, proto, res.StatusCode, msg), msg
 	}
@@ -549,7 +557,13 @@ func notChatModel(status int, body []byte) bool {
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
 // it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, raw *string) (int, string) {
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
+	return s.translateRaw(w, r, p, from, to, model, body, u, nil)
+}
+
+// translateRaw is translate that also reports the full upstream error body
+// through raw when it is non-nil.
+func (s *Server) translateRaw(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, raw *string) (int, string) {
 	request, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
@@ -563,7 +577,9 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		*raw = string(b)
+		if raw != nil {
+			*raw = string(b)
+		}
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}

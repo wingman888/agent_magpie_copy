@@ -124,7 +124,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
 	if relay {
 		a.to = from
-		a.status, a.msg = s.passthrough(w, r, p, from, model, body, &a.usage, &a.detail)
+		a.status, a.msg = s.passthroughRaw(w, r, p, from, model, body, &a.usage, &a.detail)
 		a.attempted = true
 		return a
 	}
@@ -135,7 +135,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		return a
 	}
 	a.to = to[0]
-	a.status, a.msg = s.translate(w, r, p, from, to[0], model, body, &a.usage, &a.detail)
+	a.status, a.msg = s.translateRaw(w, r, p, from, to[0], model, body, &a.usage, &a.detail)
 	a.attempted = true
 	return a
 }
