@@ -14,7 +14,7 @@ import (
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
-// models.dev lags and keeps legacy names around. dial asks the vendor when
+// models.dev lags and keeps legacy names around. magpie asks the vendor when
 // it has a key, remembers the answer next to the models.dev cache, and lets
 // the catalog fill in display names and reasoning levels.
 
@@ -61,8 +61,17 @@ func SaveLive(provider, base string, models []Model) error {
 
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
-// around it. The result keeps the server's order.
-func Fetch(ctx context.Context, base, key string) ([]Model, error) {
+// around it. The result keeps the server's order. anthropic sends the
+// Anthropic version header, which the official API requires but which a
+// dual-protocol relay like OpenRouter reads as a request for its
+// Anthropic-flavoured catalog — namespaced, differently named ids.
+func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
+	return FetchWith(ctx, base, key, anthropic, nil)
+}
+
+// FetchWith is Fetch with extra request headers, sent after the defaults and
+// the key so they can override them. Names keep the caller's casing.
+func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -89,7 +98,7 @@ func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key)
+		ms, err := fetchOne(ctx, u, key, anthropic, extra)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -106,7 +115,7 @@ func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -114,11 +123,19 @@ func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "dial")
+	req.Header.Set("User-Agent", "magpie")
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("x-api-key", key)
+	}
+	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
+	}
+	for name, v := range extra {
+		// Delete the canonical form first so the override replaces the
+		// default, then store the name exactly as the user typed it.
+		req.Header.Del(name)
+		req.Header[name] = []string{v}
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -167,17 +184,16 @@ type liveModel struct {
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
-	byID := make(map[string]Model, len(known))
-	for _, m := range known {
-		byID[m.ID] = m
-	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := byID[m.ID]; ok {
+		if k, ok := Lookup(known, m.ID); ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
 			m.Efforts, m.Released, m.Provider = k.Efforts, k.Released, k.Provider
+			if k.Temperature != nil {
+				m.Temperature = k.Temperature
+			}
 		}
 		out = append(out, m)
 	}
