@@ -9,13 +9,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
-// models.dev lags and keeps legacy names around. magpie asks the vendor when
+// models.dev lags and keeps legacy names around. dial asks the vendor when
 // it has a key, remembers the answer next to the models.dev cache, and lets
 // the catalog fill in display names and reasoning levels.
 
@@ -62,16 +61,8 @@ func SaveLive(provider, base string, models []Model) error {
 
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
-// around it. The result keeps the server's order. anthropic sends the
-// Anthropic version header, which the official API requires but which a
-// dual-protocol relay like OpenRouter reads as a request for its
-// Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with the provider's own headers added to every request.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+// around it. The result keeps the server's order.
+func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -98,7 +89,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +106,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -123,15 +114,12 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "magpie")
+	req.Header.Set("User-Agent", "dial")
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("x-api-key", key)
-	}
-	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	ApplyHeaders(req, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -170,40 +158,6 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	return out, nil
 }
 
-// ApplyHeaders sets a vendor's own headers on a request, after the defaults
-// and replacing any default of the same name whatever its casing. Names keep
-// the casing the user typed, except User-Agent and Accept-Encoding: the
-// transport looks for those by their canonical names, so they go out
-// canonical.
-func ApplyHeaders(req *http.Request, extra map[string]string) {
-	names := make([]string, 0, len(extra))
-	for k := range extra {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		key := name
-		switch c := http.CanonicalHeaderKey(name); c {
-		case "User-Agent", "Accept-Encoding":
-			key = c
-		}
-		for have := range req.Header {
-			if strings.EqualFold(have, key) {
-				delete(req.Header, have)
-			}
-		}
-		req.Header[key] = []string{extra[name]}
-	}
-}
-
-// bareID is a model id without its "vendor/" prefix.
-func bareID(id string) string {
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		return id[i+1:]
-	}
-	return id
-}
-
 type liveModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -211,9 +165,7 @@ type liveModel struct {
 }
 
 // Decorate fills in names and reasoning levels for live models from the
-// catalog's entry for the same id, keeping the live order. A gateway that
-// resells other vendors names their models "vendor/model"; when the id
-// itself is not in the catalog, the part after the last slash is looked up.
+// catalog's entry for the same id, keeping the live order.
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
@@ -221,18 +173,11 @@ func Decorate(live []Model, known []Model) []Model {
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if !ok {
-			k, ok = byID[bareID(m.ID)]
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
 			m.Efforts, m.Released, m.Provider = k.Efforts, k.Released, k.Provider
-			if k.Temperature != nil {
-				m.Temperature = k.Temperature
-			}
 		}
 		out = append(out, m)
 	}
