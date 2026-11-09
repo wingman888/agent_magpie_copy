@@ -9,11 +9,17 @@ import (
 )
 
 // ocCapture answers every request 200 and remembers the session header.
-type ocCapture struct{ session string }
+type ocCapture struct {
+	session string
+	seen    []string // method url session, one per request
+}
 
 func (c *ocCapture) RoundTrip(r *http.Request) (*http.Response, error) {
 	c.session = r.Header.Get(OpenCodeSessionHeader)
-	io.Copy(io.Discard, r.Body)
+	c.seen = append(c.seen, r.Method+" "+r.URL.String()+" ["+c.session+"]")
+	if r.Body != nil {
+		io.Copy(io.Discard, r.Body)
+	}
 	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}},
 		Body: io.NopCloser(strings.NewReader(`{}`)), Request: r}, nil
 }
@@ -108,19 +114,20 @@ func TestOCProbeSendsSessionHeader(t *testing.T) {
 	t.Cleanup(func() { http.DefaultClient = old })
 
 	p := Provider{ID: "oc", Name: "OC", Key: "k", Chat: "https://opencode.ai/zen/v1", Models: []string{"m1"}}
-	res := p.Test(context.Background())
-	if len(res) == 0 || !res[0].OK {
-		t.Fatalf("probe results %+v", res)
+	body := []byte(`{"model":"m1","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`)
+	pr := probe(context.Background(), p, Chat, p.Chat+"/chat/completions", body, "m1")
+	if !pr.OK {
+		t.Fatalf("probe %+v; requests %v", pr, rec.seen)
 	}
 	if !strings.HasPrefix(rec.session, "magpie-") {
-		t.Errorf("probe sent %q as %s", rec.session, OpenCodeSessionHeader)
+		t.Errorf("probe sent %q as %s; requests %v", rec.session, OpenCodeSessionHeader, rec.seen)
 	}
 
 	// a non-OpenCode provider must not get the header
 	rec.session = ""
 	q := Provider{ID: "other", Name: "Other", Key: "k", Chat: "https://api.example.com/v1", Models: []string{"m1"}}
-	q.Test(context.Background())
+	probe(context.Background(), q, Chat, q.Chat+"/chat/completions", body, "m1")
 	if rec.session != "" {
-		t.Errorf("non-OpenCode probe sent %q", rec.session)
+		t.Errorf("non-OpenCode probe sent %q; requests %v", rec.session, rec.seen)
 	}
 }
