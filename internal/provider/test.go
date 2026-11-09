@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,9 +24,6 @@ type Result struct {
 // Test sends the smallest possible request to each endpoint the vendor
 // serves, with the first exposed model, and reports what came back.
 func (p Provider) Test(ctx context.Context) []Result {
-	if IsAccount(p.ID) {
-		return accountProbe(p)
-	}
 	p.Fetch(ctx)
 	model := ""
 	if ms := p.Exposed(); len(ms) > 0 {
@@ -36,7 +34,6 @@ func (p Provider) Test(ctx context.Context) []Result {
 	var out []Result
 	for _, proto := range p.Speaks() {
 		var url, body string
-		headers := map[string]string{"Authorization": "Bearer " + p.Key}
 		switch proto {
 		case Chat:
 			url = p.Chat + "/chat/completions"
@@ -47,9 +44,8 @@ func (p Provider) Test(ctx context.Context) []Result {
 		case Anthropic:
 			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
-			headers = AuthHeaders(p, Anthropic)
 		}
-		out = append(out, probe(ctx, proto, url, body, model, headers))
+		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
 	}
 	return out
 }
@@ -69,7 +65,7 @@ func AuthHeaders(p Provider, proto Protocol) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + p.Key}
 }
 
-func probe(ctx context.Context, proto Protocol, url, body, model string, headers map[string]string) Result {
+func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string) Result {
 	r := Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -77,15 +73,19 @@ func probe(ctx context.Context, proto Protocol, url, body, model string, headers
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		r.Error = err.Error()
 		return r
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	for k, v := range headers {
-		req.Header.Set(k, v)
+	if p.IsOpenCode() {
+		req.Header.Set("x-opencode-session", "magpie-test-"+randomUUID())
+	}
+	if err := p.Sign(ctx, req, proto, body); err != nil {
+		r.Error = err.Error()
+		return r
 	}
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
@@ -130,17 +130,4 @@ func APIError(b []byte, fallback string) string {
 		return fallback + ": " + s
 	}
 	return fallback
-}
-
-// accountProbe checks an account provider without calling its backend: it is
-// usable exactly while the agent's login is there.
-func accountProbe(p Provider) []Result {
-	if accountFor(p.ID) == nil {
-		return []Result{{Protocol: "account", Error: accountNames[p.ID] + " is not signed in; sign in with the agent first"}}
-	}
-	r := Result{Protocol: "account", OK: true}
-	if ms := p.Exposed(); len(ms) > 0 {
-		r.Model = ms[0].ID
-	}
-	return []Result{r}
 }
