@@ -87,6 +87,7 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 		r.Error = err.Error()
 		return r
 	}
+	p.ApplyHeaders(req)
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
 	r.Millis = time.Since(start).Milliseconds()
