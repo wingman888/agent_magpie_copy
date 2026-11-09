@@ -14,16 +14,12 @@ import (
 	"time"
 )
 
-// The routings besides the default, smart, in order. LeastUsed was once
-// stored as "usage"; normalize reads that spelling as LeastUsed still.
+// The routings besides the default, smart, in order.
 const (
 	Ordered   = "order"
 	Rotate    = "rotate"
 	LeastUsed = "least-used"
 )
-
-// legacyLeastUsed is the stored spelling of LeastUsed before it was renamed.
-const legacyLeastUsed = "usage"
 
 // SetRouting changes how a provider's requests spread over its keys or
 // accounts.

@@ -63,15 +63,14 @@ type Provider struct {
 	// Routing is how requests spread over the keys or accounts it has on:
 	// "" smart, the first while it has quota to spare, then whichever has
 	// the most; "order" in order, the next one only when the one before
-	// can't take it; "rotate" each in turn; "usage" the least used first.
-	// Whichever it is, one out of credit, out of quota, rate limited or
-	// failing is passed over for as long as that lasts.
+	// can't take it; "rotate" each in turn; "least-used" the least used
+	// first. Whichever it is, one out of credit, out of quota, rate limited
+	// or failing is passed over for as long as that lasts.
 	Routing string `json:"routing,omitempty"`
 
-	// Affinity is whether a conversation stays on the key or account that
+	// Affinity is how a conversation sticks to the key or account that
 	// answered it last, so the vendor's prompt cache can hit: "" automatic,
-	// "session" the whole conversation, "turn" only within one user turn,
-	// "off" never (see groups.go).
+	// "session" the whole conversation, "turn" one user turn, "off" never.
 	Affinity string `json:"affinity,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
@@ -113,10 +112,9 @@ type Provider struct {
 
 type file struct {
 	Providers []Provider `json:"providers"`
-	// Groups are the routing groups the user made or changed, and
-	// HiddenGroups the discovered ones the user removed (see groups.go).
-	Groups       []Group  `json:"groups,omitempty"`
-	HiddenGroups []string `json:"hiddenGroups,omitempty"`
+	// Groups are the user's routing groups, and the discovered ones the
+	// user hid (see groups.go).
+	Groups []Group `json:"groups,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -171,7 +169,8 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback, a.Routing, a.Affinity = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing, picks[a.ID].Affinity
+		pick := picks[a.ID]
+		a.Models, a.Fallback, a.Routing, a.Affinity = pick.Models, pick.Fallback, pick.Routing, pick.Affinity
 		out = append(out, a)
 	}
 	return out
@@ -230,8 +229,8 @@ func Save(p Provider) error {
 	if p.ID == "magpie" {
 		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
 	}
-	if p.ID == groupScheme {
-		return errors.New(`"group" is how agents name a routing group (group/<id>); pick another id`)
+	if p.ID == reservedProviderID {
+		return errors.New(`"group" is the prefix of routing groups (group/<id>); pick another id`)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
@@ -340,13 +339,8 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	if p.Routing == legacyLeastUsed {
-		p.Routing = LeastUsed
-	}
-	if !validRouting(p.Routing) {
-		p.Routing = ""
-	}
-	p.Affinity = normalizeAffinity(p.Affinity)
+	p.Routing = cleanRouting(p.Routing)
+	p.Affinity = cleanAffinity(p.Affinity)
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	p.Headers = cleanHeaders(p.Headers)
 	if p.Preset != "" {

@@ -29,36 +29,36 @@ type Route struct {
 	Provider string         `json:"provider"` // the provider the model resolved to
 	Order    []Weighed      `json:"order"`    // who was to try it, first first
 	Left     []Weighed      `json:"left,omitempty"`
+	Group    *GroupTrace    `json:"group,omitempty"`    // the routing group it was for
+	Affinity *AffinityTrace `json:"affinity,omitempty"` // how the conversation stuck to its last answerer
 	Tries    []Try          `json:"tries"`
 	Done     bool           `json:"done"`
 	Status   int            `json:"status,omitempty"`
 	Error    string         `json:"error,omitempty"`
 	Millis   int64          `json:"ms,omitempty"`
 	Tokens   int            `json:"tokens,omitempty"`
-	Group    *GroupRoute    `json:"group,omitempty"`    // a routing group the request named
-	Affinity *AffinityRoute `json:"affinity,omitempty"` // how the conversation stuck to its last answerer
 }
 
-// GroupRoute is the routing group a request was routed as.
-type GroupRoute struct {
+// GroupTrace is the routing group a request was for, as it was when routed.
+type GroupTrace struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
-	Routing  string   `json:"routing"`  // as the group has it: "" smart, order, rotate or least-used
-	Affinity string   `json:"affinity"` // as the group has it; "" takes its members' providers'
-	Auto     bool     `json:"auto"`     // magpie found it itself
-	Members  []string `json:"members"`  // the members that can be used now: provider/model
+	Routing  string   `json:"routing"`
+	Affinity string   `json:"affinity"`
+	Auto     bool     `json:"auto"`
+	Members  []string `json:"members"` // the members that can take a request, "provider/model"
 }
 
-// AffinityRoute is how a conversation's affinity to its last answerer
-// was decided. Why says what kept it, or what did not.
-type AffinityRoute struct {
-	Mode      string `json:"mode"`   // "auto", "session", "turn" or "off"
-	Turn      int    `json:"turn"`   // user turns in the conversation, this one included
-	Within    bool   `json:"within"` // a tool result sent back within the turn
+// AffinityTrace is how a request's conversation stuck to the key or account
+// that answered it last: Why says what decided it, Kept whether it stuck.
+type AffinityTrace struct {
+	Mode      string `json:"mode"`   // the provider's or group's affinity; "" is automatic
+	Turn      int    `json:"turn"`   // user turns the conversation has had
+	Within    bool   `json:"within"` // sends back tool results of the current turn
 	Last      string `json:"last,omitempty"`
-	CacheRead int    `json:"cacheRead"` // what the last answer read from the vendor's cache
+	CacheRead int    `json:"cacheRead"`
 	Kept      bool   `json:"kept"`
-	Why       string `json:"why"`
+	Why       string `json:"why"` // session, turn or cache when kept; off, first, new-turn, no-cache, cold, resting, spent or gone when not
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -73,7 +73,7 @@ type Weighed struct {
 	Agent    string            `json:"agent,omitempty"`
 	Plan     string            `json:"plan,omitempty"`
 	Model    string            `json:"model"`
-	Routing  string            `json:"routing"` // its provider's: "", order, rotate, usage
+	Routing  string            `json:"routing"` // its provider's: "", order, rotate, least-used
 	Fallback bool              `json:"fallback,omitempty"`
 	Shared   bool              `json:"shared,omitempty"` // its provider has more than one on
 	Known    bool              `json:"known,omitempty"`  // the vendor said what the account has left
@@ -82,10 +82,10 @@ type Weighed struct {
 	Tokens   float64           `json:"tokens,omitempty"` // least used: tokens it served lately
 	Turn     bool              `json:"turn,omitempty"`   // in turn: it was this one's turn
 	Fit      int               `json:"fit,omitempty"`    // keyFit
+	Aside    bool              `json:"aside,omitempty"`  // a key made for another protocol, tried after the rest
 	Speaks   provider.Protocol `json:"speaks,omitempty"` // a key made for one protocol only
 	Rest     *Rest             `json:"rest,omitempty"`   // resting after a failure, when the request came
 	Unlisted bool              `json:"unlisted,omitempty"`
-	Aside    bool              `json:"aside,omitempty"` // another protocol's key: tried only after the pool that suits
 }
 
 // Try is one candidate trying the request.
@@ -102,6 +102,9 @@ type Try struct {
 
 type planned struct {
 	order, left []Weighed
+	group       *GroupTrace
+	aff         *AffinityTrace
+	scope       string // what the conversation's affinity is kept for
 }
 
 func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
@@ -119,11 +122,12 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	default:
 		w.Kind = "provider"
 	}
-	if l, ok := wg.lefts[lkey(c)]; ok {
+	w.Aside = c.aside
+	if l, ok := wg.lefts[candKey(c)]; ok {
 		w.Known, w.Used, w.Renews = true, l.used, l.renews
 	}
 	if wg.tokens != nil {
-		w.Tokens = wg.tokens[c.rest]
+		w.Tokens = wg.tokens[candKey(c)]
 	}
 	return w
 }

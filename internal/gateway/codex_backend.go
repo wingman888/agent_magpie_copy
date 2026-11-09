@@ -260,16 +260,11 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 		if e.Provider.Account != nil && e.Provider.Account.Agent == "codex" {
 			continue
 		}
-		if e.Group {
-			// a routing group answers for its first usable member
-			efforts := e.Efforts
-			if m, ok := firstMember(e); ok {
-				efforts = m.Efforts
-			}
-			ms = append(ms, catalog.Model{ID: e.ID, Name: e.Name + " · routing group", Efforts: efforts})
-			continue
+		name := e.Name
+		if e.Group == nil { // a routing group has no provider to name
+			name += " · " + e.Provider.Name
 		}
-		ms = append(ms, catalog.Model{ID: e.ID, Name: e.Name + " · " + e.Provider.Name, Efforts: e.Efforts})
+		ms = append(ms, catalog.Model{ID: e.ID, Name: name, Efforts: e.Efforts}) // listed: a group's overlap
 	}
 	if etag != "" {
 		w.Header().Set("ETag", etag)
