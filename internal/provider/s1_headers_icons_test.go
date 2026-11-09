@@ -121,8 +121,13 @@ func TestS1HeadersSentRawOnTestAndModelList(t *testing.T) {
 
 func TestS1PresetIgnoresHeaders(t *testing.T) {
 	s1Isolate(t)
-	if err := Save(Provider{ID: "deepseek", Preset: "deepseek", Key: "sk-s1",
-		Headers: map[string]string{"X-Org-Id": "acme"}}); err != nil {
+	pr, err := FromPreset("deepseek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr.Key = "sk-s1"
+	pr.Headers = map[string]string{"X-Org-Id": "acme"}
+	if err := Save(pr); err != nil {
 		t.Fatal(err)
 	}
 	saved, err := Find("deepseek")
@@ -242,7 +247,12 @@ func TestS1IconFileOnlyAcceptsStoredNames(t *testing.T) {
 
 func TestS1SetIconOnlyForCustomProviders(t *testing.T) {
 	s1Isolate(t)
-	if err := Save(Provider{ID: "deepseek", Preset: "deepseek", Key: "sk-s1"}); err != nil {
+	pr, err := FromPreset("deepseek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr.Key = "sk-s1"
+	if err := Save(pr); err != nil {
 		t.Fatal(err)
 	}
 	if err := SetIcon("deepseek", "claude-color"); err == nil {
