@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -109,6 +110,37 @@ func parseChat(body []byte) (*Request, error) {
 		}
 	}
 	return r, nil
+}
+
+// developerToSystem renames the `developer` role to `system` in a Chat
+// Completions body, which some backends reject. A body without developer
+// messages comes back as the same bytes.
+func developerToSystem(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"developer"`)) {
+		return body
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return body
+	}
+	msgs, _ := m["messages"].([]any)
+	changed := false
+	for _, mm := range msgs {
+		if obj, ok := mm.(map[string]any); ok && obj["role"] == "developer" {
+			obj["role"] = "system"
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // chatParts reads a message's content: a string, or an array of parts.
@@ -347,12 +379,7 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStart, MsgID: ch.ID, Model: ch.Model})
 	}
 	for _, c := range ch.Choices {
-		// Some relays send the same thought under both names; one is enough.
-		t := c.Delta.ReasoningContent
-		if t == "" {
-			t = c.Delta.Reasoning
-		}
-		if t != "" {
+		if t := c.Delta.ReasoningContent + c.Delta.Reasoning; t != "" {
 			emit(Event{Kind: KThink, Text: t})
 		}
 		if c.Delta.Content != nil && *c.Delta.Content != "" {
