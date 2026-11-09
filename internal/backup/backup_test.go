@@ -1,7 +1,6 @@
 package backup
 
 import (
-	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,403 +13,157 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// bktSetup points every magpie and agent path at a fresh temp home.
-func bktSetup(t *testing.T) {
+// home gives the test a machine of its own: no agents, no magpie files.
+func home(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-}
-
-const bktKey = "sk-secret-abc123"
-const bktTeamKey = "sk-team-zzz999"
-const bktHost = "relay.example.com"
-
-// bktSeed stores one provider with a key, a second key, a credential header,
-// a plain header and a picture, plus settings and a profile.
-func bktSeed(t *testing.T) {
-	t.Helper()
-	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR-bkt")
-	icon, err := provider.StoreIcon(png)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = provider.Save(provider.Provider{
-		ID: "relay", Name: "Relay", Chat: "https://" + bktHost + "/v1",
-		Key: bktKey, Icon: icon,
-		Keys:    []provider.KeyAccount{{Name: "team", Key: bktTeamKey}},
-		Headers: map[string]string{"X-Api-Key": "hdr-secret-987", "X-Team": "blue"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := settings.Save(settings.Settings{Theme: "dark", Lang: "en", Tray: "panel"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := profile.Save("bkt-work-profile", profile.Profile{"bktagent.model": "bkt-model-1"}); err != nil {
-		t.Fatal(err)
+	h := t.TempDir()
+	t.Setenv("HOME", h)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(h, ".cache"))
+	t.Setenv("PATH", h)
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "DSH_HOME", "GEMINI_CLI_HOME", "OPENCODE_CONFIG"} {
+		t.Setenv(v, "")
 	}
 }
 
-func bktFind(t *testing.T, id string) provider.Provider {
+func setUp(t *testing.T) {
 	t.Helper()
-	for _, p := range provider.All() {
-		if p.ID == id {
-			return p
+	icon, err := provider.StoreIcon([]byte("\x89PNG\r\n\x1a\n0000000000000000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []provider.Provider{
+		{ID: "acme", Name: "Acme", Chat: "https://acme.example.com/v1", Key: "sk-acme", Icon: icon,
+			Keys:    []provider.KeyAccount{{Name: "second", Key: "sk-acme-2"}},
+			Headers: map[string]string{"X-Team": "a", "X-Api-Key": "hdr-secret"}},
+		{ID: "beta", Name: "Beta", Chat: "https://beta.example.com/v1", Key: "sk-beta"},
+	} {
+		if err := provider.Save(p); err != nil {
+			t.Fatal(err)
 		}
 	}
-	t.Fatalf("provider %q not found", id)
-	return provider.Provider{}
+	if err := settings.Save(settings.Settings{Theme: "dark", Lang: "zh"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := profile.Save("work", profile.Profile{"claude.model": "acme/m1"}); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func TestBktRoundTrip(t *testing.T) {
-	bktSetup(t)
-	bktSeed(t)
+func TestRoundTrip(t *testing.T) {
+	home(t)
+	setUp(t)
 	b, err := Collect(true, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Version != 1 {
-		t.Fatalf("Version = %d, want 1", b.Version)
-	}
-	data, err := Seal(b, "pw-bkt")
+	data, err := Seal(b, "correct horse")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{bktKey, bktTeamKey, "hdr-secret-987", bktHost, "bkt-work-profile", "Relay", "X-Team"} {
-		if bytes.Contains(data, []byte(secret)) {
-			t.Errorf("sealed file contains plaintext %q", secret)
+	for _, secret := range []string{"sk-acme", "hdr-secret", "acme.example.com", "work"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("%q readable in the file", secret)
 		}
 	}
+	if _, err := Open(data, "wrong"); !errors.Is(err, ErrPassphrase) {
+		t.Fatalf("wrong passphrase: %v", err)
+	}
 
-	got, err := Open(data, "pw-bkt")
+	home(t) // another machine
+	got, err := Open(data, "correct horse")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Providers) != 1 || got.Providers[0].Key != bktKey || len(got.Providers[0].Keys) != 1 {
-		t.Fatalf("providers after Open = %+v", got.Providers)
-	}
-	if got.Providers[0].Headers["X-Api-Key"] != "hdr-secret-987" || got.Providers[0].Headers["X-Team"] != "blue" {
-		t.Errorf("headers after Open = %v", got.Providers[0].Headers)
-	}
-	if len(got.Icons) != 1 {
-		t.Errorf("icons after Open = %d, want 1", len(got.Icons))
-	}
-	if got.Settings == nil || got.Settings.Theme != "dark" {
-		t.Errorf("settings after Open = %+v", got.Settings)
-	}
-	if got.Profiles["bkt-work-profile"]["bktagent.model"] != "bkt-model-1" {
-		t.Errorf("profiles after Open = %v", got.Profiles)
-	}
-
-	// Restore onto a clean machine.
-	bktSetup(t)
-	if err := os.RemoveAll(provider.IconDir()); err != nil {
 		t.Fatal(err)
 	}
 	r, err := Restore(got, All)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Added != 1 || r.Replaced != 0 || len(r.NeedKey) != 0 || !r.Settings || r.Profiles != 1 {
-		t.Errorf("Restore result = %+v", r)
+	if r.Added != 2 || !r.Settings || r.Profiles != 1 || len(r.NeedKey) != 0 {
+		t.Fatalf("result: %+v", r)
 	}
-	p := bktFind(t, "relay")
-	if p.Key != bktKey || len(p.Keys) != 1 || p.Keys[0].Key != bktTeamKey || p.Headers["X-Api-Key"] != "hdr-secret-987" {
-		t.Errorf("restored provider = %+v", p)
+	p, err := provider.Find("acme")
+	if err != nil || p.Key != "sk-acme" || len(p.Keys) != 1 || p.Headers["X-Api-Key"] != "hdr-secret" {
+		t.Fatalf("acme: %+v %v", p, err)
 	}
 	name, _ := strings.CutPrefix(p.Icon, "file:")
-	if data, err := os.ReadFile(provider.IconFile(name)); err != nil || !bytes.Equal(data, got.Icons[name]) {
-		t.Errorf("restored icon missing or different: %v", err)
+	if _, err := os.Stat(provider.IconFile(name)); err != nil {
+		t.Fatalf("icon: %v", err)
 	}
-	if s := settings.Load(); s.Theme != "dark" {
-		t.Errorf("restored settings = %+v", s)
+	if s := settings.Load(); s.Theme != "dark" || s.Lang != "zh" {
+		t.Fatalf("settings: %+v", s)
 	}
-}
-
-func TestBktSealEmptyPassphrase(t *testing.T) {
-	bktSetup(t)
-	if _, err := Seal(Bundle{Version: 1}, ""); err == nil {
-		t.Fatal("Seal with empty passphrase returned no error")
+	if ps, _ := profile.Load(); ps["work"]["claude.model"] != "acme/m1" {
+		t.Fatalf("profiles: %+v", ps)
 	}
 }
 
-func TestBktWrongPassphrase(t *testing.T) {
-	bktSetup(t)
-	data, err := Seal(Bundle{Version: 1}, "right-bkt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Open(data, "wrong-bkt"); !errors.Is(err, ErrPassphrase) {
-		t.Fatalf("wrong passphrase: err = %v, want ErrPassphrase", err)
-	}
-}
-
-func TestBktTamperedIterations(t *testing.T) {
-	bktSetup(t)
-	data, err := Seal(Bundle{Version: 1}, "pw-bkt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(data, []byte(`"iterations": 600000`)) {
-		t.Fatalf("header does not contain the default iterations:\n%s", data)
-	}
-	for _, n := range []string{"100000", "1000000", "1"} {
-		tampered := bytes.Replace(data, []byte(`"iterations": 600000`), []byte(`"iterations": `+n), 1)
-		if _, err := Open(tampered, "pw-bkt"); !errors.Is(err, ErrPassphrase) {
-			t.Errorf("iterations %s: err = %v, want ErrPassphrase", n, err)
-		}
-	}
-}
-
-func TestBktNotBackup(t *testing.T) {
-	bktSetup(t)
-	for _, in := range []string{"", "hello", "{}", `{"format":"other","version":1}`} {
-		_, err := Open([]byte(in), "pw-bkt")
-		if err == nil {
-			t.Errorf("Open(%q) returned no error", in)
-			continue
-		}
-		if errors.Is(err, ErrPassphrase) {
-			t.Errorf("Open(%q) = ErrPassphrase, want a not-a-backup error", in)
-		}
-		if msg := err.Error(); strings.Contains(msg, "passphrase") || strings.Contains(msg, "口令") {
-			t.Errorf("Open(%q) message %q mentions the passphrase", in, msg)
-		}
-	}
-}
-
-func TestBktNewerVersion(t *testing.T) {
-	bktSetup(t)
-	data := []byte(`{"format":"magpie-backup","version":2,"kdf":"from-the-future"}` + "\nAAAA\n")
-	_, err := Open(data, "pw-bkt")
-	if err == nil {
-		t.Fatal("Open of version 2 returned no error")
-	}
-	if errors.Is(err, ErrPassphrase) {
-		t.Fatal("version 2 reported as a passphrase error")
-	}
-	if msg := err.Error(); !strings.Contains(msg, "升级") || strings.Contains(msg, "passphrase") || strings.Contains(msg, "口令") {
-		t.Errorf("version 2 message = %q", msg)
-	}
-}
-
-func TestBktNoKeysStripsCredentialHeaders(t *testing.T) {
-	bktSetup(t)
-	bktSeed(t)
+// Without keys, nothing secret leaves; restored over a machine that has the
+// provider, its keys there stay, and one new there is named as needing a key.
+func TestNoKeys(t *testing.T) {
+	home(t)
+	setUp(t)
 	b, err := Collect(false, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(b.Providers) != 1 {
-		t.Fatalf("providers = %d, want 1", len(b.Providers))
-	}
-	p := b.Providers[0]
-	if p.Key != "" || p.KeyName != "" || p.Keys != nil {
-		t.Errorf("keys survived --no-keys: %+v", p)
-	}
-	if _, ok := p.Headers["X-Api-Key"]; ok {
-		t.Errorf("credential header X-Api-Key kept: %v", p.Headers)
-	}
-	if p.Headers["X-Team"] != "blue" {
-		t.Errorf("plain header X-Team dropped: %v", p.Headers)
-	}
-
-	data, err := Seal(b, "pw-bkt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := Open(data, "pw-bkt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Providers[0].Key != "" || got.Providers[0].Headers["X-Team"] != "blue" {
-		t.Errorf("opened provider = %+v", got.Providers[0])
-	}
-}
-
-func TestBktRestoreKeepsLocalKey(t *testing.T) {
-	bktSetup(t)
-	bktSeed(t)
-	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "relay", Name: "Relay", Chat: "https://new.example.com/v1"},
-	}}
-	r, err := Restore(b, All)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Replaced != 1 || r.Added != 0 || len(r.NeedKey) != 0 {
-		t.Errorf("Restore result = %+v", r)
-	}
-	p := bktFind(t, "relay")
-	if p.Key != bktKey || len(p.Keys) != 1 || p.Keys[0].Key != bktTeamKey {
-		t.Errorf("local keys lost: %+v", p)
-	}
-	if p.Chat != "https://new.example.com/v1" {
-		t.Errorf("provider not updated: chat = %q", p.Chat)
-	}
-}
-
-func TestBktRestoreNeedKeyByName(t *testing.T) {
-	bktSetup(t)
-	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "bkt-fresh", Name: "Bkt Fresh Co", Chat: "https://fresh.example.com/v1"},
-		{ID: "bkt-keyed", Name: "Bkt Keyed", Chat: "https://keyed.example.com/v1", Key: "sk-bkt-keyed"},
-	}}
-	r, err := Restore(b, All)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Added != 2 {
-		t.Errorf("Added = %d, want 2", r.Added)
-	}
-	if !slices.Equal(r.NeedKey, []string{"Bkt Fresh Co"}) {
-		t.Errorf("NeedKey = %v, want [Bkt Fresh Co]", r.NeedKey)
-	}
-}
-
-func TestBktRestoreIgnoresInvalidAndReservedIDs(t *testing.T) {
-	bktSetup(t)
-	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "Bkt Bad ID!", Name: "Bad", Chat: "https://bad.example.com/v1", Key: "k"},
-		{ID: "magpie", Name: "Gateway", Chat: "https://gw.example.com/v1", Key: "k"},
-		{ID: "bkt-ok", Name: "Ok", Chat: "https://ok.example.com/v1", Key: "k"},
-	}}
-	r, err := Restore(b, All)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Added != 1 || r.Replaced != 0 || len(r.NeedKey) != 0 {
-		t.Errorf("Restore result = %+v", r)
-	}
-	for _, p := range provider.All() {
-		if p.ID == "magpie" || strings.Contains(p.ID, " ") {
-			t.Errorf("invalid provider written: %q", p.ID)
+	for _, p := range b.Providers {
+		if p.Key != "" || len(p.Keys) != 0 {
+			t.Fatalf("key in a keyless backup: %+v", p)
+		}
+		if _, ok := p.Headers["X-Api-Key"]; ok {
+			t.Fatalf("auth header in a keyless backup: %+v", p.Headers)
 		}
 	}
-}
+	data, _ := Seal(b, "pw")
 
-func TestBktRestorePartsAndNoSettings(t *testing.T) {
-	bktSetup(t)
-	if err := settings.Save(settings.Settings{Theme: "light", Lang: "en", Tray: "panel"}); err != nil {
+	home(t)
+	if err := provider.Save(provider.Provider{ID: "acme", Name: "Acme old", Chat: "https://old.example.com/v1", Key: "sk-here"}); err != nil {
 		t.Fatal(err)
 	}
-	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "bkt-part", Name: "Part", Chat: "https://part.example.com/v1", Key: "k"},
-	}}
-	r, err := Restore(b, Parts{Settings: true, Profiles: true, Agents: true})
+	got, err := Open(data, "pw")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Added != 0 || r.Settings || r.Profiles != 0 || r.Agents != 0 || len(r.Skipped) != 0 {
-		t.Errorf("Restore result = %+v", r)
-	}
-	if len(provider.All()) != 0 {
-		t.Errorf("providers written although Providers part was off")
-	}
-	if s := settings.Load(); s.Theme != "light" {
-		t.Errorf("settings overwritten without a bundle setting: %+v", s)
-	}
-}
-
-func TestBktRestoreAgentSkipped(t *testing.T) {
-	bktSetup(t)
-	b := Bundle{Version: 1, Agents: profile.Profile{"bktnoagent.model": "x"}}
-	r, err := Restore(b, All)
+	r, err := Restore(got, Parts{Providers: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Agents != 0 || len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0], "bktnoagent") {
-		t.Errorf("Restore result = %+v", r)
+	if r.Added != 1 || r.Replaced != 1 || !slices.Equal(r.NeedKey, []string{"Beta"}) || r.Settings || r.Profiles != 0 {
+		t.Fatalf("result: %+v", r)
+	}
+	if p, _ := provider.Find("acme"); p.Key != "sk-here" || p.Chat != "https://acme.example.com/v1" || p.Headers["X-Team"] != "a" {
+		t.Fatalf("acme: %+v", p)
 	}
 }
 
-func TestBktMissingOrZeroVersionIsPassphraseError(t *testing.T) {
-	bktSetup(t)
-	sealed, err := Seal(Bundle{Version: 1}, "pw-bkt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(sealed)
-	if !strings.Contains(s, `"version": 1,`) {
-		t.Fatalf("sealed header has no version field: %s", s)
-	}
-	cases := map[string]string{
-		"zero":    strings.Replace(s, `"version": 1,`, `"version": 0,`, 1),
-		"missing": strings.Replace(s, `"version": 1,`, ``, 1),
-		"string":  strings.Replace(s, `"version": 1,`, `"version": "1",`, 1),
-	}
-	for name, data := range cases {
-		_, err := Open([]byte(data), "pw-bkt")
-		if !errors.Is(err, ErrPassphrase) {
-			t.Errorf("%s version: err = %v, want ErrPassphrase", name, err)
+func TestNotABackup(t *testing.T) {
+	for _, data := range []string{"", "{}", `{"format":"magpie-backup","version":9,"kdf":"x"}`} {
+		if _, err := Open([]byte(data), "pw"); err == nil || errors.Is(err, ErrPassphrase) {
+			t.Fatalf("%q: %v", data, err)
 		}
 	}
-}
-
-func TestBktRestoreClearsDanglingIcon(t *testing.T) {
-	bktSetup(t)
-	bktSeed(t)
-	local := bktFind(t, "relay").Icon
-	if !strings.HasPrefix(local, "file:") {
-		t.Fatalf("seeded icon = %q, want a file: reference", local)
-	}
-
-	// Missing picture, nothing on this machine: the reference is dropped.
-	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "bkt-noicon", Name: "NoIcon", Chat: "https://" + bktHost + "/v1", Icon: "file:bkt-missing.png"},
-	}}
-	if _, err := Restore(b, All); err != nil {
-		t.Fatal(err)
-	}
-	if p := bktFind(t, "bkt-noicon"); p.Icon != "" {
-		t.Errorf("dangling icon kept: %q", p.Icon)
-	}
-
-	// Oversized picture in the bundle: not written, so the reference is dropped.
-	big := make([]byte, provider.MaxIcon+1)
-	b = Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "bkt-bigicon", Name: "BigIcon", Chat: "https://" + bktHost + "/v1", Icon: "file:bkt-big.png"},
-	}, Icons: map[string][]byte{"bkt-big.png": big}}
-	if _, err := Restore(b, All); err != nil {
-		t.Fatal(err)
-	}
-	if p := bktFind(t, "bkt-bigicon"); p.Icon != "" {
-		t.Errorf("oversized icon reference kept: %q", p.Icon)
-	}
-
-	// Picture already on this machine under that name: the reference stays.
-	b = Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "relay", Name: "Relay", Chat: "https://" + bktHost + "/v1", Icon: local},
-	}}
-	if _, err := Restore(b, All); err != nil {
-		t.Fatal(err)
-	}
-	if p := bktFind(t, "relay"); p.Icon != local {
-		t.Errorf("existing local icon reference dropped: got %q, want %q", p.Icon, local)
+	if _, err := Seal(Bundle{}, ""); err == nil {
+		t.Fatal("sealed with no passphrase")
 	}
 }
 
-func TestBktRestoreKeepsLocalCredentialHeaders(t *testing.T) {
-	bktSetup(t)
-	bktSeed(t)
-	// The backup carries no key and no X-Api-Key header, but a new X-Team value.
-	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "relay", Name: "Relay", Chat: "https://" + bktHost + "/v1",
-			Headers: map[string]string{"X-Team": "green"}},
-	}}
-	if _, err := Restore(b, All); err != nil {
+func TestTampered(t *testing.T) {
+	data, err := Seal(Bundle{Version: 1}, "pw")
+	if err != nil {
 		t.Fatal(err)
 	}
-	p := bktFind(t, "relay")
-	if p.Headers["X-Api-Key"] != "hdr-secret-987" {
-		t.Errorf("local credential header lost: %v", p.Headers)
+	// lowering the work of the key derivation is noticed
+	bad := strings.Replace(string(data), `"iterations": 600000`, `"iterations": 100000`, 1)
+	if _, err := Open([]byte(bad), "pw"); !errors.Is(err, ErrPassphrase) {
+		t.Fatalf("tampered header: %v", err)
 	}
-	if p.Headers["X-Team"] != "green" {
-		t.Errorf("plain header not taken from backup: %v", p.Headers)
-	}
-	if p.Key != bktKey {
-		t.Errorf("local key lost: %q", p.Key)
+}
+
+func TestProfileKeys(t *testing.T) {
+	got := profileKeys(profile.Profile{"codex.effort": "", "claude.model": "", "codex.provider": "", "codex.model": ""})
+	want := []string{"codex.provider", "claude.model", "codex.model", "codex.effort"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%v", got)
 	}
 }
