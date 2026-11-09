@@ -69,9 +69,9 @@ func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, erro
 	return FetchWith(ctx, base, key, anthropic, nil)
 }
 
-// FetchWith is Fetch with extra request headers, sent after the defaults and
-// the key so they can override them. Names keep the caller's casing.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[string]string) ([]Model, error) {
+// FetchWith is Fetch with extra request headers, sent under the names given
+// (their letter case kept) after the authentication headers.
+func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -98,7 +98,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, extra)
+		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +115,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, extra map[
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -131,12 +131,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[st
 	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	for name, v := range extra {
-		// Delete the canonical form first so the override replaces the
-		// default, then store the name exactly as the user typed it.
-		req.Header.Del(name)
-		req.Header[name] = []string{v}
-	}
+	SetRawHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -175,6 +170,20 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, extra map[st
 	return out, nil
 }
 
+// SetRawHeaders sets each header under exactly the name given, so the wire
+// keeps its letter case, and replaces any value already set under that name
+// in any case. Go's Header.Set would canonicalize the name.
+func SetRawHeaders(h http.Header, headers map[string]string) {
+	for name, value := range headers {
+		for k := range h {
+			if strings.EqualFold(k, name) {
+				delete(h, k)
+			}
+		}
+		h[name] = []string{value}
+	}
+}
+
 type liveModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -183,10 +192,26 @@ type liveModel struct {
 
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
+//
+// A live id may carry a "provider/" prefix, as a relay spells it ("deepseek/
+// deepseek-chat"); when the id itself is not in the catalog, the part after
+// the last "/" is looked up instead. The live id is kept as it is.
 func Decorate(live []Model, known []Model) []Model {
+	byID := make(map[string]Model, len(known))
+	for _, m := range known {
+		if _, dup := byID[m.ID]; !dup {
+			byID[m.ID] = m
+		}
+	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		if k, ok := Lookup(known, m.ID); ok {
+		k, ok := byID[m.ID]
+		if !ok {
+			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
+				k, ok = byID[m.ID[i+1:]]
+			}
+		}
+		if ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}

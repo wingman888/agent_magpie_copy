@@ -20,12 +20,7 @@ const manyModels = 24
 // for an account, whatever the agent's own sign-in can see).
 func (p Provider) Available() []catalog.Model {
 	signedIn := p.Account != nil && p.Account.models != nil
-	var known []catalog.Model
-	if signedIn {
-		known = p.Account.models()
-	} else {
-		known = p.knownModels()
-	}
+	known := p.knownModels()
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
 	}
@@ -41,30 +36,17 @@ func (p Provider) Available() []catalog.Model {
 	return out
 }
 
-// CatalogIDs splits a provider's catalog field, which may name several
-// models.dev providers separated by commas ("openai,deepseek"), into the
-// ids in the order given: trimmed, lowercased, empties and repeats dropped.
-func CatalogIDs(s string) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, part := range strings.Split(s, ",") {
-		id := strings.ToLower(strings.TrimSpace(part))
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		out = append(out, id)
-	}
-	return out
-}
-
-// knownModels is the models.dev list of every catalog the provider names,
-// in the order named; a model listed by an earlier catalog wins.
+// knownModels is what the catalogs say about the vendor's models: the
+// models.dev lists of every catalog the provider names, searched in the
+// order given, or the agent's own list for a signed-in account.
 func (p Provider) knownModels() []catalog.Model {
+	if p.Account != nil && p.Account.models != nil {
+		return p.Account.models()
+	}
 	var out []catalog.Model
 	seen := map[string]bool{}
-	for _, cid := range CatalogIDs(p.Catalog) {
-		for _, m := range catalog.Provider(cid) {
+	for _, name := range catalogNames(p.Catalog) {
+		for _, m := range catalog.Provider(name) {
 			if !seen[m.ID] {
 				seen[m.ID] = true
 				out = append(out, m)
@@ -87,7 +69,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.ExtraHeaders())
+		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.CustomHeaders())
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
@@ -103,13 +85,21 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
+	byID := make(map[string]catalog.Model, len(avail))
+	for _, m := range avail {
+		byID[m.ID] = m
+	}
+	known := p.knownModels()
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
-			if m, ok := catalog.Lookup(avail, id); ok {
+			if m, ok := byID[id]; ok {
 				out = append(out, m)
 			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: strings.Join(CatalogIDs(p.Catalog), ",")})
+				// not in the vendor's list: still name it from the catalogs,
+				// which also knows "provider/model" ids by their last part
+				m := catalog.Model{ID: id, Name: id, Provider: p.Catalog}
+				out = append(out, catalog.Decorate([]catalog.Model{m}, known)[0])
 			}
 		}
 		return out
@@ -131,8 +121,10 @@ func (p Provider) Exposed() []catalog.Model {
 // plus the vendor's own list — so a model released after this binary was
 // built is handled without a code change.
 func (p Provider) RejectsTemperature(model string) bool {
-	if m, ok := catalog.Lookup(p.Available(), model); ok && m.Temperature != nil {
-		return !*m.Temperature
+	for _, m := range p.Available() {
+		if m.ID == model && m.Temperature != nil {
+			return !*m.Temperature
+		}
 	}
 	return false
 }

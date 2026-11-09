@@ -35,10 +35,10 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // the current API key, as typed by the user
+	Key    string `json:"key"`              // API key, as typed by the user
 
-	// KeyName labels the current key; KeyProtocol limits it to one protocol
-	// ("" means any). Keys are the extra keys, tried after the current one.
+	// KeyName names the current key, and KeyProtocol limits it to one
+	// protocol ("" is any). Keys holds the others, in order (see keys.go).
 	KeyName     string     `json:"keyName,omitempty"`
 	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
 	Keys        []ExtraKey `json:"keys,omitempty"`
@@ -54,16 +54,16 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Headers are sent with every request to a custom vendor: forwarding,
-	// the connectivity test and the model list. Ignored for presets.
-	Headers map[string]string `json:"headers,omitempty"`
-
-	// Fallback lists "provider/model" entries tried, in order, once this
-	// provider's own keys have failed for a reason that allows a switch.
+	// Fallback is the "provider/model" list tried, in order, when this
+	// provider cannot answer. Kept for signed-in accounts too.
 	Fallback []string `json:"fallback,omitempty"`
 
-	// Catalog names the models.dev provider(s) used for names and reasoning
-	// levels: one id, or several separated by commas, searched in order.
+	// Headers are extra request headers a custom provider needs (an org id,
+	// a gateway's own auth). Presets and signed-in accounts ignore them.
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// Catalog is one or more comma-separated models.dev ids, for names and
+	// reasoning levels; they are searched in the order listed.
 	Catalog string `json:"catalog,omitempty"`
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
@@ -117,6 +117,7 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
+	_ = observeSignIns(false) // remember a sign-in that is new since last time
 	stored := load().Providers
 	picks := map[string]Provider{}
 	var out []Provider
@@ -128,11 +129,7 @@ func All() []Provider {
 		}
 		out = append(out, p)
 	}
-	accts := Accounts()
-	loginMu.Lock()
-	rememberLocked(accts)
-	loginMu.Unlock()
-	for _, a := range accts {
+	for _, a := range Accounts() {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
@@ -198,15 +195,6 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if err := validateHeaders(p.Headers); err != nil {
-		return err
-	}
-	if err := checkIcon(p.Icon); err != nil {
-		return err
-	}
-	if err := checkKeys(p); err != nil {
-		return err
-	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
@@ -219,11 +207,35 @@ func Save(p Provider) error {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
+	if !isAccount(p.ID) {
+		if !ValidKeyProtocol(p.KeyProtocol) {
+			return fmt.Errorf("key protocol %q is not one of chat, responses, anthropic, or none", p.KeyProtocol)
+		}
+		for _, k := range p.Keys {
+			if !ValidKeyProtocol(k.Protocol) {
+				return fmt.Errorf("key protocol %q is not one of chat, responses, anthropic, or none", k.Protocol)
+			}
+		}
+	}
 	f := load()
 	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
-			f.Providers[i] = keepKeys(f.Providers[i], p)
+			// a caller that does not know about the other keys keeps them
+			old := f.Providers[i]
+			if p.Keys == nil {
+				p.Keys = old.Keys
+			}
+			if p.Key == old.Key {
+				if p.KeyName == "" {
+					p.KeyName = old.KeyName
+				}
+				if p.KeyProtocol == "" {
+					p.KeyProtocol = old.KeyProtocol
+				}
+			}
+			tidyKeys(&p)
+			f.Providers[i] = p
 			replaced = true
 			break
 		}
@@ -234,7 +246,7 @@ func Save(p Provider) error {
 	if err := store(f); err != nil {
 		return err
 	}
-	pruneIcons(f.Providers)
+	pruneIcons(f)
 	return nil
 }
 
@@ -290,10 +302,13 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = strings.Join(catalogNames(p.Catalog), ",")
 	p.Headers = cleanHeaders(p.Headers)
 	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p.Keys)
-	p.Catalog = strings.Join(CatalogIDs(p.Catalog), ",")
+	tidyKeys(&p)
+	if name, ok := strings.CutPrefix(p.Icon, iconRefPrefix); ok && IconFile(name) == "" {
+		p.Icon = "" // a reference that is not a stored picture is not followed
+	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -309,6 +324,45 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
+}
+
+// cleanHeaders trims header names and values and drops entries with no
+// name. An empty map is nil, so it is not written.
+func cleanHeaders(hs map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range hs {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// catalogNames splits a catalog value ("openai,deepseek") into its
+// models.dev ids, lowercased, in the order given, without repeats.
+func catalogNames(s string) []string {
+	var out []string
+	for _, x := range strings.Split(s, ",") {
+		if x = strings.ToLower(strings.TrimSpace(x)); x != "" && !contains(out, x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// CustomHeaders are the extra request headers this provider sends with every
+// request to its vendor: those of a custom provider, none for a preset or a
+// signed-in agent.
+func (p Provider) CustomHeaders() map[string]string {
+	if p.Preset != "" || p.Account != nil {
+		return nil
+	}
+	return p.Headers
 }
 
 func cleanList(xs []string) []string {
