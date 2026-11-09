@@ -1,42 +1,31 @@
-// Package provider holds the model vendors magpie can reach: where each one
+// Package provider holds the model vendors dial can reach: where each one
 // lives, which protocols it speaks, the API key the user typed in, and which
 // of its models should show up in the agents' pickers.
 //
 // Nothing here reads environment variables. A provider is exactly what the
-// user entered, kept in ~/.config/magpie/providers.json (mode 0600).
+// user entered, kept in ~/.config/dial/providers.json (mode 0600).
 package provider
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
-	"time"
-
-	"github.com/yetone/magpie/internal/catalog"
 )
 
-// Protocol is a wire API magpie can speak to an upstream.
+// Protocol is a wire API dial can speak to an upstream.
 type Protocol string
 
 const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
 )
 
-// Protocols in the order magpie prefers them when it has to translate.
+// Protocols in the order dial prefers them when it has to translate.
 var Protocols = []Protocol{Chat, Responses, Anthropic}
 
 // Provider is one configured vendor.
@@ -47,7 +36,7 @@ type Provider struct {
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string `json:"key"`              // API key, as typed by the user
 
-	// Base URLs, one per protocol the vendor serves natively. magpie appends
+	// Base URLs, one per protocol the vendor serves natively. dial appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
 	// the Anthropic base is the root (what ANTHROPIC_BASE_URL takes).
 	Chat      string `json:"chat,omitempty"`
@@ -58,26 +47,12 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Headers are extra request headers for a custom provider, sent with
-	// every request magpie makes to it (forwarding, the test, the model list).
-	Headers map[string]string `json:"headers,omitempty"`
-
-	// Fallback lists "provider/model" ids tried, in order, when this
-	// provider fails before it has replied.
-	Fallback []string `json:"fallback,omitempty"`
-
-	// Catalog is one or more models.dev ids, comma-separated, searched in
-	// order for names and reasoning levels.
-	Catalog string `json:"catalog,omitempty"`
+	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
-	// Hidden is set on an account the user removed from magpie; the
-	// agent stays signed in, magpie just leaves it alone.
-	Hidden bool `json:"hidden,omitempty"`
-
-	// Account is set when the provider is an agent the user signed in to
-	// (see account.go); it is derived, never stored.
+	// Account is set on account providers (codex, copilot) while their agent
+	// is signed in. It comes from the agent's own file and is never stored.
 	Account *Account `json:"-"`
 }
 
@@ -88,10 +63,10 @@ type file struct {
 // Path is the file the user's providers live in.
 func Path() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "magpie", "providers.json")
+		return filepath.Join(x, "dial", "providers.json")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "magpie", "providers.json")
+	return filepath.Join(home, ".config", "dial", "providers.json")
 }
 
 func load() file {
@@ -107,7 +82,22 @@ func store(f file) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
+	// Account providers keep only their id and model picks on disk.
+	var list []any
+	if f.Providers != nil {
+		list = make([]any, 0, len(f.Providers))
+	}
+	for _, q := range f.Providers {
+		if isAccount(q.ID) {
+			list = append(list, struct {
+				ID     string   `json:"id"`
+				Models []string `json:"models,omitempty"`
+			}{q.ID, q.Models})
+			continue
+		}
+		list = append(list, q)
+	}
+	b, err := json.MarshalIndent(map[string]any{"providers": list}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -117,52 +107,39 @@ func store(f file) error {
 	return os.Chmod(p, 0o600)
 }
 
-// All lists the configured providers in the order they were added, then
-// the signed-in agents. An entry in the file with no URL is only the
-// model picks for one of those accounts.
+// All lists the configured providers in the order they were added, followed by
+// the account providers whose agent is signed in. An account provider appears
+// where the user's file mentions it; a stale mention while signed out is
+// ignored. Claude is never listed.
 func All() []Provider {
-	stored := load().Providers
-	picks := map[string]Provider{}
 	var out []Provider
-	for _, p := range stored {
+	placed := map[string]bool{}
+	for _, p := range load().Providers {
 		p = normalize(p)
-		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			picks[p.ID] = p
+		switch {
+		case p.ID == "claude":
 			continue
-		}
-		out = append(out, p)
-	}
-	for _, a := range Accounts() {
-		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
-			continue
-		}
-		a.Models = picks[a.ID].Models
-		a.Fallback = picks[a.ID].Fallback
-		out = append(out, a)
-	}
-	return out
-}
-
-// Hidden lists the signed-in accounts the user removed from magpie.
-func Hidden() []Provider {
-	var out []Provider
-	for _, a := range Accounts() {
-		for _, p := range load().Providers {
-			if p.ID == a.ID && p.Hidden {
-				out = append(out, a)
+		case isAccount(p.ID):
+			if placed[p.ID] {
+				continue
 			}
+			placed[p.ID] = true
+			if acc, ok := signedIn(p.ID); ok {
+				out = append(out, accountProvider(p.ID, acc, p.Models))
+			}
+		default:
+			out = append(out, p)
+		}
+	}
+	for _, id := range accountOrder {
+		if placed[id] {
+			continue
+		}
+		if acc, ok := signedIn(id); ok {
+			out = append(out, accountProvider(id, acc, nil))
 		}
 	}
 	return out
-}
-
-func find(ps []Provider, id string) (Provider, bool) {
-	for _, p := range ps {
-		if p.ID == id {
-			return p, true
-		}
-	}
-	return Provider{}, false
 }
 
 // Find looks a provider up by id (or name, case-insensitively).
@@ -173,7 +150,7 @@ func Find(id string) (*Provider, error) {
 			return &p, nil
 		}
 	}
-	return nil, fmt.Errorf("no provider %q — magpie providers lists them", id)
+	return nil, fmt.Errorf("no provider %q — dial providers lists them", id)
 }
 
 var idRe = regexp.MustCompile(`[^a-z0-9]+`)
@@ -192,251 +169,55 @@ func Save(p Provider) error {
 	if p.ID == "" || p.ID != Slug(p.ID) {
 		return fmt.Errorf("provider id must be lowercase letters, digits and dashes, not %q", p.ID)
 	}
-	if p.ID == "magpie" {
-		return errors.New(`"magpie" is what agents call the gateway itself; pick another id`)
+	if isAccount(p.ID) {
+		return saveAccount(p.ID, p.Models)
+	}
+	if p.ID == "claude" {
+		return errors.New(`"claude" is Claude Code's sign-in; dial does not offer it as a provider. Add an Anthropic key instead`)
+	}
+	if p.ID == "dial" {
+		return errors.New(`"dial" is what agents call the gateway itself; pick another id`)
 	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if strings.HasPrefix(p.Icon, "file:") && IconFile(strings.TrimPrefix(p.Icon, "file:")) == "" {
-		return fmt.Errorf("icon %q is not an icon magpie stored", p.Icon)
+	if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
+		return errors.New("a provider needs a base URL")
 	}
-	if a, ok := find(Accounts(), p.ID); ok {
-		// an account keeps only the user's model picks and fallback; the
-		// rest is the agent's own sign-in. Saving it again brings a removed
-		// one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
-	} else {
-		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
-			return errors.New("a provider needs a base URL")
-		}
-		if p.Key == "" && !keyOptional(p) {
-			return fmt.Errorf("%s needs an API key", p.Name)
-		}
-		if err := checkHeaders(p.Headers); err != nil {
-			return err
-		}
+	if p.Key == "" && !keyOptional(p) {
+		return fmt.Errorf("%s needs an API key", p.Name)
 	}
 	f := load()
-	replaced := false
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
-			replaced = true
-			break
+			return store(f)
 		}
 	}
-	if !replaced {
-		f.Providers = append(f.Providers, p)
-	}
-	if err := store(f); err != nil {
-		return err
-	}
-	pruneIcons(f)
-	return nil
+	f.Providers = append(f.Providers, p)
+	return store(f)
 }
 
-// tokenRe is what an HTTP header name may contain (RFC 9110 "token").
-var tokenRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
-
-// checkHeaders refuses header names HTTP cannot carry and values with line
-// breaks, which would let one header smuggle another.
-func checkHeaders(m map[string]string) error {
-	for k, v := range m {
-		if !tokenRe.MatchString(k) {
-			return fmt.Errorf("header name %q is not a valid HTTP header name", k)
-		}
-		if strings.ContainsAny(v, "\r\n\x00") {
-			return fmt.Errorf("header %s has a line break in its value", k)
-		}
-	}
-	return nil
-}
-
-// cleanHeaders trims names and values and drops entries with no name. An
-// empty map is nil, so providers.json does not carry it.
-func cleanHeaders(m map[string]string) map[string]string {
-	var out map[string]string
-	for k, v := range m {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" {
-			continue
-		}
-		if out == nil {
-			out = map[string]string{}
-		}
-		out[k] = v
-	}
-	return out
-}
-
-// ExtraHeaders are the headers the user set on a custom provider. Presets and
-// signed-in accounts have none.
-func (p Provider) ExtraHeaders() map[string]string {
-	if p.Preset != "" || p.Account != nil {
-		return nil
-	}
-	return p.Headers
-}
-
-// ApplyHeaders puts the provider's own headers on a request. Call it after
-// the auth headers are set, so these can override the defaults.
-func (p Provider) ApplyHeaders(req *http.Request) {
-	catalog.ApplyHeaders(req, p.ExtraHeaders())
-}
-
-// Catalogs lists the models.dev ids the provider reads names and reasoning
-// levels from, in the order they are searched.
-func (p Provider) Catalogs() []string {
-	var out []string
-	for _, c := range strings.Split(p.Catalog, ",") {
-		if c = strings.TrimSpace(c); c != "" && !contains(out, c) {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// MaxIcon is the largest picture magpie keeps as a provider icon.
-const MaxIcon = 1 << 20
-
-// IconDir is where stored icons live: icons/ beside providers.json.
-func IconDir() string { return filepath.Join(filepath.Dir(Path()), "icons") }
-
-// iconName is what a stored icon is called: 16 lowercase hex digits (the
-// first 8 bytes of the content's SHA-256) and a known extension.
-var iconName = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
-
-// IconFile turns a stored icon's file name into its path on disk. Anything
-// that is not exactly a name StoreIcon could have written gives "".
-func IconFile(name string) string {
-	if !iconName.MatchString(name) {
-		return ""
-	}
-	return filepath.Join(IconDir(), name)
-}
-
-// StoreIcon keeps a picture as a provider icon and returns the value to put
-// in Provider.Icon ("file:<name>"). The same picture is stored once; storing
-// it again makes it fresh, so pruneIcons leaves it alone for an hour.
-func StoreIcon(data []byte) (string, error) {
-	if len(data) == 0 {
-		return "", errors.New("the image is empty")
-	}
-	if len(data) > MaxIcon {
-		return "", fmt.Errorf("the image is larger than %d KB", MaxIcon>>10)
-	}
-	ext := sniffIcon(data)
-	if ext == "" {
-		return "", errors.New("not an image magpie can show: PNG, JPEG, GIF, WebP, ICO or SVG")
-	}
-	sum := sha256.Sum256(data)
-	name := hex.EncodeToString(sum[:8]) + ext
-	dir := IconDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, name)
-	if _, err := os.Stat(path); err == nil {
-		now := time.Now()
-		if err := os.Chtimes(path, now, now); err != nil {
-			return "", err
-		}
-	} else if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", err
-	}
-	return "file:" + name, nil
-}
-
-// sniffIcon names the format of a picture by its content, or "" when it is
-// none of the formats magpie shows.
-func sniffIcon(b []byte) string {
-	switch {
-	case bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")):
-		return ".png"
-	case bytes.HasPrefix(b, []byte{0xFF, 0xD8, 0xFF}):
-		return ".jpg"
-	case bytes.HasPrefix(b, []byte("GIF87a")), bytes.HasPrefix(b, []byte("GIF89a")):
-		return ".gif"
-	case len(b) >= 12 && bytes.HasPrefix(b, []byte("RIFF")) && bytes.Equal(b[8:12], []byte("WEBP")):
-		return ".webp"
-	case bytes.HasPrefix(b, []byte{0, 0, 1, 0}):
-		return ".ico"
-	case isSVG(b):
-		return ".svg"
-	}
-	return ""
-}
-
-// isSVG is true when the first element of the document is <svg>.
-func isSVG(b []byte) bool {
-	d := xml.NewDecoder(bytes.NewReader(b))
-	d.CharsetReader = func(_ string, in io.Reader) (io.Reader, error) { return in, nil }
-	for {
-		tok, err := d.Token()
-		if err != nil {
-			return false
-		}
-		if se, ok := tok.(xml.StartElement); ok {
-			return strings.EqualFold(se.Name.Local, "svg")
-		}
-	}
-}
-
-// pruneIcons deletes stored icons that no provider refers to and that are
-// over an hour old. The hour lets the user save a provider after choosing
-// its picture.
-func pruneIcons(f file) {
-	used := map[string]bool{}
-	for _, p := range f.Providers {
-		if n, ok := strings.CutPrefix(p.Icon, "file:"); ok {
-			used[n] = true
-		}
-	}
-	ents, err := os.ReadDir(IconDir())
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().Add(-time.Hour)
-	for _, e := range ents {
-		name := e.Name()
-		if e.IsDir() || used[name] || IconFile(name) == "" {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || info.ModTime().After(cutoff) {
-			continue
-		}
-		os.Remove(filepath.Join(IconDir(), name))
-	}
-}
-
-// HeaderNames lists header names in a stable order, for display and
-// for sending.
-func HeaderNames(m map[string]string) []string {
-	names := make([]string, 0, len(m))
-	for k := range m {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// Delete removes a provider. An account is only hidden from magpie (its
-// model picks kept); signing out is the agent's job.
+// Delete removes a provider. For an account provider it only clears the model
+// picks; the sign-in itself is the agent's and is left alone.
 func Delete(id string) error {
-	if _, ok := find(Accounts(), id); ok {
-		f := load()
+	f := load()
+	if isAccount(id) {
+		found := false
 		for i := range f.Providers {
 			if f.Providers[i].ID == id {
-				f.Providers[i].Hidden = true
-				return store(f)
+				f.Providers[i].Models = nil
+				found = true
 			}
 		}
-		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
+		if !found {
+			if _, ok := signedIn(id); !ok {
+				return fmt.Errorf("no provider %q", id)
+			}
+			return nil
+		}
 		return store(f)
 	}
-	f := load()
 	keep := f.Providers[:0]
 	found := false
 	for _, p := range f.Providers {
@@ -455,6 +236,9 @@ func Delete(id string) error {
 
 // keyOptional is true for local servers, which usually have no key.
 func keyOptional(p Provider) bool {
+	if isAccount(p.ID) {
+		return true // the agent's sign-in is the credential
+	}
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
 		return true
 	}
@@ -473,12 +257,6 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = strings.Join(p.Catalogs(), ",")
-	p.Headers = cleanHeaders(p.Headers)
-	if p.Preset != "" {
-		p.Headers = nil // presets speak for themselves; extra headers are ignored
-	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -549,14 +327,6 @@ func (p Provider) Host() string {
 	return ""
 }
 
-// IsOpenCode reports whether the provider is OpenCode's gateway (Zen or Go),
-// which routes and caches by conversation and turns away requests that do
-// not name one in x-opencode-session.
-func (p Provider) IsOpenCode() bool {
-	h := p.Host()
-	return h == "opencode.ai" || strings.HasSuffix(h, ".opencode.ai")
-}
-
 // HostOf pulls the host out of a URL, for display.
 func HostOf(u string) string {
 	u = strings.TrimSpace(u)
@@ -577,6 +347,5 @@ func Mask(s string) string {
 	return s[:4] + "…" + s[len(s)-4:]
 }
 
-// Ready reports whether the provider can be used: it has a key, needs
-// none, or is a signed-in agent.
-func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+// Ready reports whether the provider can be used: it has a key, or needs none.
+func (p Provider) Ready() bool { return p.Key != "" || keyOptional(p) }
