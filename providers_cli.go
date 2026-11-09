@@ -277,7 +277,13 @@ func addProvider(rest []string) error {
 	if err := applyPairs(&p, rest); err != nil {
 		return err
 	}
-	if err := provider.Save(p); err != nil {
+	return saveAndReport(p, provider.Save)
+}
+
+// saveAndReport stores a provider with save, then says what was added and
+// fetches its model list. `magpie provider add` and `magpie import` share it.
+func saveAndReport(p provider.Provider, save func(provider.Provider) error) error {
+	if err := save(p); err != nil {
 		return err
 	}
 	saved, err := provider.Find(p.ID)
