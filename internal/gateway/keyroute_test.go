@@ -69,9 +69,11 @@ func TestKeyRouteOrdersKeysByFit(t *testing.T) {
 		// GPT: OpenAI-class key first, Anthropic key last
 		{"gpt from anthropic", "gpt-5.5", provider.Anthropic, "chat,any-1,any-2,anth"},
 		{"gpt from chat", "o3-mini", provider.Chat, "chat,any-1,any-2,anth"},
-		// unknown family: the key that speaks the client's protocol wins
+		// unknown family: keys that speak the client's protocol directly
+		// (unrestricted ones too, the provider has that endpoint) keep their
+		// configured order ahead of the one that must be translated
 		{"unknown from chat", "deepseek-chat", provider.Chat, "chat,any-1,any-2,anth"},
-		{"unknown from anthropic", "deepseek-chat", provider.Anthropic, "anth,any-1,any-2,chat"},
+		{"unknown from anthropic", "deepseek-chat", provider.Anthropic, "any-1,anth,any-2,chat"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := names(routeKeys(p, p.KeysOn(), tc.model, tc.from))
