@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/extrahdr"
 )
 
 // Account is the signed-in agent behind a provider.
@@ -56,6 +57,8 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
 	}
+	// the user's own headers go last, so they can override the defaults
+	extrahdr.Set(req.Header, p.CustomHeaders())
 	return nil
 }
 

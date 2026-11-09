@@ -413,7 +413,6 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
-	p.ApplyHeaders(req)
 	return s.client.Do(req)
 }
 
