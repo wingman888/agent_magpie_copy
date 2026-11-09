@@ -401,15 +401,25 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Affinity: aff, Order: pl.order, Left: pl.left})
 	var skipped []string
 	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		last := i == len(cands)-1
+		call.Provider, call.To = c.p.ID, ""
 		began := time.Now()
-		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
+		try := Try{ID: c.rest, Start: began}
+		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, try) })
+		hw, retries, gone := s.try(w, r, from, c, body, &call, last)
+		try.Done, try.Status, try.Millis, try.Error = true, call.Status, time.Since(began).Milliseconds(), call.Error
+		try.Retries = retries
+		if gone {
+			// the agent went away: no provider is at fault, and none else is asked
+			call.Status, call.Error = statusCanceled, failCanceled
+			try.Status, try.Error, try.Fail = statusCanceled, failCanceled, failCanceled
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			break
+		}
 		if !last && hw.failed() {
-			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
+			status, header, held := hw.reply()
+			hw.discard()
+			rest := s.restAfter(c, status, header, held)
 			try.Fail, try.Rest = rest.Why, &rest
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
@@ -499,6 +509,47 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	return status, msg
 }
 
+// try sends the request to one candidate and returns its reply, held back
+// while another candidate may still take the request. The last candidate is
+// tried again while its failure may pass by itself (see holdWriter.retryWait);
+// the retries it made come back with the reply. gone says the agent went away
+// meanwhile, and then there is no reply.
+func (s *Server) try(w http.ResponseWriter, r *http.Request, from provider.Protocol, c candidate, body []byte, call *Call, last bool) (hw *holdWriter, retries []Retry, gone bool) {
+	for n := 0; ; n++ {
+		call.Usage = Usage{}
+		hw = newHoldWriter(w, true)
+		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, call)
+		if r.Context().Err() != nil && !hw.sent() {
+			hw.discard()
+			return nil, retries, true
+		}
+		if !last || !hw.failed() {
+			return hw, retries, false
+		}
+		wait, again := hw.retryWait(n)
+		if !again {
+			return hw, retries, false
+		}
+		retries = append(retries, Retry{Status: call.Status, Error: call.Error, WaitMs: wait.Milliseconds()})
+		hw.discard()
+		if !sleepCtx(r.Context(), wait) {
+			return nil, retries, true
+		}
+	}
+}
+
+// sleepCtx waits d, or until ctx ends; it reports whether the wait ran out.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // sendTo makes one attempt on one endpoint: relayed as the client sent it
 // when proto is the client's own protocol, else translated. more says another
 // endpoint is left to try; when it is and the endpoint refuses the model,
@@ -569,6 +620,13 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Accel-Buffering", "no")
 	}
+	// a stream's opening is held until its text, so a failure before it can
+	// still be answered by another candidate; see relayWatch
+	var watch *relayWatch
+	if hw := holdOf(w); hw != nil && sse {
+		hw.openStream()
+		watch = newRelayWatch(hw, p, proto)
+	}
 	w.WriteHeader(res.StatusCode)
 	f, _ := w.(http.Flusher)
 	sniff := newSniffer(proto, res.Header.Get("Content-Type"))
@@ -580,6 +638,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			sniff.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return res.StatusCode, "", false
+			}
+			if watch != nil && watch.write(buf[:n]) {
+				return watch.status, watch.msg, false
 			}
 			if f != nil {
 				f.Flush()
@@ -657,10 +718,31 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return writeError(w, from, 502, msg), msg, false
 	}
 	if stream {
+		// the opening is held until its text: an error before it is the
+		// candidate's failure, and nothing of the opening reaches the agent
+		hw := holdOf(w)
+		hw.openStream()
 		enc := encoder(from, newSSEWriter(w), request.Model)
 		var failed string
+		var status int
+		var stopped bool
 		readSSE(rd, func(_, data string) error {
+			if stopped {
+				return errReplyStopped
+			}
 			return dec(data, func(ev Event) {
+				if stopped {
+					return
+				}
+				if ev.Kind == KError {
+					if st, msg := streamFailure(p, data); hw.streamFail(from, st, msg) {
+						stopped, status, failed = true, st, msg
+						return
+					}
+				}
+				if startsText(ev) {
+					hw.content()
+				}
 				switch ev.Kind {
 				case KError:
 					failed = ev.Text
@@ -670,15 +752,25 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 				enc.event(ev)
 			})
 		})
+		if stopped {
+			return status, failed, false
+		}
 		enc.finish()
 		return 200, failed, false
 	}
 	var col collector
+	var errData string // the first error event, while the reply has no text yet
 	readSSE(rd, func(_, data string) error {
-		return dec(data, col.add)
+		return dec(data, func(ev Event) {
+			if ev.Kind == KError && errData == "" {
+				errData = data
+			}
+			col.add(ev)
+		})
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {
-		return writeError(w, from, 502, p.Name+": "+col.err), col.err, false
+		st, msg := streamFailure(p, errData)
+		return writeError(w, from, st, msg), msg, false
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)
