@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -45,19 +44,11 @@ func TestF05FallbackNormalizeOnSave(t *testing.T) {
 }
 
 func TestF05FallbackOmittedWhenEmpty(t *testing.T) {
-	b, err := json.Marshal(Provider{ID: "f05b", Fallback: []string{"  ", ""}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(b), "fallback") {
-		t.Fatalf("empty fallback should be omitted, got %s", b)
-	}
-
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	if err := Save(Provider{ID: "f05b", Name: "F05B", Chat: "https://example.com/v1", Key: "k", Fallback: []string{" "}}); err != nil {
+	if err := Save(Provider{ID: "f05b", Name: "F05B", Chat: "https://example.com/v1", Key: "k", Fallback: []string{" ", ""}}); err != nil {
 		t.Fatal(err)
 	}
 	p, err := Find("f05b")
@@ -66,5 +57,12 @@ func TestF05FallbackOmittedWhenEmpty(t *testing.T) {
 	}
 	if len(p.Fallback) != 0 {
 		t.Fatalf("Fallback = %q, want empty", p.Fallback)
+	}
+	raw, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "fallback") {
+		t.Fatalf("empty fallback should be omitted from providers.json:\n%s", raw)
 	}
 }
