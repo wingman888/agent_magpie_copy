@@ -45,6 +45,20 @@ func readSSE(r io.Reader, fn func(event, data string) error) error {
 	return sc.Err()
 }
 
+// streamBody says whether an upstream reply is an event stream. The header
+// decides when it is set; some upstreams (the ChatGPT Codex backend among
+// them) send none, so then the first bytes of the body decide. The returned
+// reader replays everything that was read to look.
+func streamBody(res *http.Response) (io.Reader, bool) {
+	br := bufio.NewReaderSize(res.Body, 4<<10)
+	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+		return br, true
+	}
+	head, _ := br.Peek(6)
+	head = bytes.TrimLeft(head, " \t\r\n")
+	return br, bytes.HasPrefix(head, []byte("event:")) || bytes.HasPrefix(head, []byte("data:"))
+}
+
 // sseWriter writes events to a client and flushes each one.
 type sseWriter struct {
 	w     http.ResponseWriter

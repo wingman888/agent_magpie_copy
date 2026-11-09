@@ -14,7 +14,7 @@ import (
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
-// models.dev lags and keeps legacy names around. magpie asks the vendor when
+// models.dev lags and keeps legacy names around. dial asks the vendor when
 // it has a key, remembers the answer next to the models.dev cache, and lets
 // the catalog fill in display names and reasoning levels.
 
@@ -61,17 +61,8 @@ func SaveLive(provider, base string, models []Model) error {
 
 // Fetch asks an endpoint for its models. base is an API base URL of any
 // flavour (…/v1, …/anthropic, …/api); the usual list paths are tried
-// around it. The result keeps the server's order. anthropic sends the
-// Anthropic version header, which the official API requires but which a
-// dual-protocol relay like OpenRouter reads as a request for its
-// Anthropic-flavoured catalog — namespaced, differently named ids.
-func Fetch(ctx context.Context, base, key string, anthropic bool) ([]Model, error) {
-	return FetchWith(ctx, base, key, anthropic, nil)
-}
-
-// FetchWith is Fetch with extra request headers, sent under the names given
-// (their letter case kept) after the authentication headers.
-func FetchWith(ctx context.Context, base, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+// around it. The result keeps the server's order.
+func Fetch(ctx context.Context, base, key string) ([]Model, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil, errors.New("no base URL")
@@ -98,7 +89,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOne(ctx, u, key, anthropic, headers)
+		ms, err := fetchOne(ctx, u, key)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -115,7 +106,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 	return nil, lastErr
 }
 
-func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+func fetchOne(ctx context.Context, url, key string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -123,15 +114,12 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "magpie")
+	req.Header.Set("User-Agent", "dial")
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("x-api-key", key)
-	}
-	if anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	SetRawHeaders(req.Header, headers)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -170,20 +158,6 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	return out, nil
 }
 
-// SetRawHeaders sets each header under exactly the name given, so the wire
-// keeps its letter case, and replaces any value already set under that name
-// in any case. Go's Header.Set would canonicalize the name.
-func SetRawHeaders(h http.Header, headers map[string]string) {
-	for name, value := range headers {
-		for k := range h {
-			if strings.EqualFold(k, name) {
-				delete(h, k)
-			}
-		}
-		h[name] = []string{value}
-	}
-}
-
 type liveModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -192,33 +166,18 @@ type liveModel struct {
 
 // Decorate fills in names and reasoning levels for live models from the
 // catalog's entry for the same id, keeping the live order.
-//
-// A live id may carry a "provider/" prefix, as a relay spells it ("deepseek/
-// deepseek-chat"); when the id itself is not in the catalog, the part after
-// the last "/" is looked up instead. The live id is kept as it is.
 func Decorate(live []Model, known []Model) []Model {
 	byID := make(map[string]Model, len(known))
 	for _, m := range known {
-		if _, dup := byID[m.ID]; !dup {
-			byID[m.ID] = m
-		}
+		byID[m.ID] = m
 	}
 	out := make([]Model, 0, len(live))
 	for _, m := range live {
-		k, ok := byID[m.ID]
-		if !ok {
-			if i := strings.LastIndex(m.ID, "/"); i >= 0 {
-				k, ok = byID[m.ID[i+1:]]
-			}
-		}
-		if ok {
+		if k, ok := byID[m.ID]; ok {
 			if m.Name == "" || m.Name == m.ID {
 				m.Name = k.Name
 			}
 			m.Efforts, m.Released, m.Provider = k.Efforts, k.Released, k.Provider
-			if k.Temperature != nil {
-				m.Temperature = k.Temperature
-			}
 		}
 		out = append(out, m)
 	}
