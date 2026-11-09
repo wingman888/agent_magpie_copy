@@ -1092,7 +1092,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 			Name               string   `json:"name"`
 			SupportedEndpoints []string `json:"supported_endpoints"`
 			Picker             bool     `json:"model_picker_enabled"`
-			Capabilities struct {
+			Capabilities       struct {
 				Type     string `json:"type"`
 				Supports struct {
 					Efforts []string `json:"reasoning_effort"`
