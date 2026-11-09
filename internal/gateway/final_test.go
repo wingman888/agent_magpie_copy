@@ -60,7 +60,9 @@ func TestFinalRotateFollowsTurnsFromBodies(t *testing.T) {
 	ask("final-m", turn2)
 	ask("final-m", turn2Tool)
 	ask("final-m", turn3)
-	if want := "final-k1 final-k1 final-k2 final-k2 final-k3"; strings.Join(got, " ") != want {
+	// the other model's request starts on its own rotation's first key, and
+	// leaves the conversation's own sequence as it was
+	if want := "final-k1 final-k1 final-k1 final-k2 final-k2 final-k3"; strings.Join(got, " ") != want {
 		t.Fatalf("rotation by turns: %v, want %s", got, want)
 	}
 }
