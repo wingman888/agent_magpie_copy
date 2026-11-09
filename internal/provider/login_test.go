@@ -335,6 +335,7 @@ func TestAcctxLoginUsagePerAccount(t *testing.T) {
 	b, _ := acctxCodex("b@example.com", "plus", "rb")
 	b["tokens"].(map[string]any)["access_token"] = tokB
 	writeFile(t, loginCreds("codex", "b@example.com"), b)
+	writeLogins([]loginRecord{{Agent: "codex", User: "b@example.com", Plan: "plus"}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
