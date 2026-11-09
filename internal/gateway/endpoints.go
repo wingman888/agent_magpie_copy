@@ -1,12 +1,5 @@
 package gateway
 
-// Endpoints: which of a provider's APIs a model's requests go to. A model
-// list that says which APIs a model is served on is trusted, and only those
-// are asked. Otherwise every API the provider has is a candidate, and one
-// that answers that it does not serve the model is remembered for that model
-// (only), so the request goes to the next API before any of the refused
-// reply reaches the agent, and later requests skip the refused one.
-
 import (
 	"regexp"
 	"slices"
@@ -15,91 +8,140 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// endpoint is one API a request is sent to: relay sends it as the agent sent
-// it, otherwise the request is translated to it.
-type endpoint struct {
-	proto provider.Protocol
-	relay bool
-}
-
-// notOnEndpoint matches a refusal naming the endpoint it came from, as in
-// "model x is not accessible via the /chat/completions endpoint".
-var notOnEndpoint = regexp.MustCompile(`not accessible via the\s+\S+\s+endpoint`)
-
-// servedAPIs are the APIs of p a model may be asked on: those the provider
-// has a base URL for, narrowed to the ones its model list names for the model
-// when the list names any.
-func servedAPIs(p provider.Provider, model string) []provider.Protocol {
+// offered lists the protocols a provider may be asked for model on, in the
+// provider's own order. When the vendor's model list says which APIs serve
+// the model, only those count, and nothing is probed on the others; when the
+// list says nothing about it, every protocol the provider speaks does.
+func offered(p provider.Provider, model string) []provider.Protocol {
+	speaks := p.Speaks()
 	declared := p.APIs(model)
+	if declared == nil {
+		return speaks
+	}
 	var out []provider.Protocol
-	for _, pr := range provider.Protocols {
-		if p.Base(pr) == "" || len(declared) > 0 && !slices.Contains(declared, pr) {
-			continue
+	for _, pr := range speaks {
+		if slices.Contains(declared, pr) {
+			out = append(out, pr)
 		}
-		out = append(out, pr)
 	}
 	return out
 }
 
-// translationOrder is the order APIs are tried in when a request has to be
-// translated: Responses first, then Chat, for OpenAI's own API and for OpenAI
-// models on Copilot; Chat first for every other vendor.
-func translationOrder(p provider.Provider, model string) []provider.Protocol {
-	h := p.Host()
-	if h == "api.openai.com" || (strings.HasSuffix(h, "githubcopilot.com") && modelFamily(model) == provider.Chat) {
+// usable is offered without the endpoints that refused model before.
+func (s *Server) usable(p provider.Provider, model string) []provider.Protocol {
+	var out []provider.Protocol
+	for _, pr := range offered(p, model) {
+		if !s.refusedBefore(p.ID, model, pr) {
+			out = append(out, pr)
+		}
+	}
+	return out
+}
+
+// endpoints orders the protocols a request for model is tried on. When the
+// client's own protocol is among them it goes first, so the request is relayed
+// as it came; the rest follow the provider's translation preference. An
+// endpoint is left out for good once it has refused the model. When every
+// endpoint has refused it, the offered ones are tried again rather than none.
+// prefer may be "" to leave the client's protocol out of the first place.
+func (s *Server) endpoints(p provider.Provider, model string, prefer provider.Protocol) []provider.Protocol {
+	set := s.usable(p, model)
+	if len(set) == 0 {
+		set = offered(p, model)
+	}
+	var out []provider.Protocol
+	if prefer != "" && slices.Contains(set, prefer) {
+		out = append(out, prefer)
+	}
+	for _, pr := range preference(p, model) {
+		if slices.Contains(set, pr) && !slices.Contains(out, pr) {
+			out = append(out, pr)
+		}
+	}
+	return out
+}
+
+// preference is the order a translated request tries the protocols in.
+// OpenAI's own API and Copilot's OpenAI models prefer Responses; other
+// vendors prefer Chat Completions. Anthropic Messages comes last.
+func preference(p provider.Provider, model string) []provider.Protocol {
+	if p.Host() == "api.openai.com" || (isCopilot(p) && openAIModel(model)) {
 		return []provider.Protocol{provider.Responses, provider.Chat, provider.Anthropic}
 	}
 	return []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic}
 }
 
-// endpoints are the APIs a request for model goes to, in the order to try
-// them. The agent's own API comes first when relay allows it and the provider
-// serves the model on it, so the request is forwarded as it is; the rest
-// follow in translationOrder. APIs remembered as refusing the model are left
-// out, unless that leaves none, in which case they are tried after all.
-func (s *Server) endpoints(p provider.Provider, model string, from provider.Protocol, relay bool) []endpoint {
-	avail := servedAPIs(p, model)
-	var out []endpoint
-	if relay && slices.Contains(avail, from) {
-		out = append(out, endpoint{from, true})
+func isCopilot(p provider.Provider) bool {
+	return p.ID == "copilot" || (p.Account != nil && p.Account.Agent == "copilot")
+}
+
+// openAIModel reports whether a model name is one of OpenAI's: gpt-*, codex*,
+// or o followed by a digit (o4-mini). A "vendor/" prefix is ignored.
+func openAIModel(model string) bool {
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		model = model[i+1:]
 	}
-	relayed := len(out) > 0
-	for _, pr := range translationOrder(p, model) {
-		if slices.Contains(avail, pr) && !(relayed && pr == from) {
-			out = append(out, endpoint{pr, false})
-		}
+	model = strings.ToLower(model)
+	if strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "codex") {
+		return true
 	}
-	var ready, refused []endpoint
-	for _, e := range out {
-		if s.isRefused(p.ID, model, e.proto) {
-			refused = append(refused, e)
-		} else {
-			ready = append(ready, e)
-		}
-	}
-	if len(ready) == 0 {
-		return refused
-	}
-	return ready
+	return len(model) >= 2 && model[0] == 'o' && model[1] >= '0' && model[1] <= '9'
+}
+
+// refusedBefore reports whether endpoint proto already refused model at p.
+func (s *Server) refusedBefore(providerID, model string, proto provider.Protocol) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refused[refusalKey(providerID, model, proto)]
+}
+
+// markRefused remembers that endpoint proto does not serve model at p, for
+// this provider and this model only.
+func (s *Server) markRefused(providerID, model string, proto provider.Protocol) {
+	s.mu.Lock()
+	s.refused[refusalKey(providerID, model, proto)] = true
+	s.mu.Unlock()
 }
 
 func refusalKey(providerID, model string, proto provider.Protocol) string {
 	return providerID + "\x00" + model + "\x00" + string(proto)
 }
 
-// isRefused is whether the provider's model was refused on proto before.
-func (s *Server) isRefused(providerID, model string, proto provider.Protocol) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.refused[refusalKey(providerID, model, proto)]
+var notOnEndpointRE = regexp.MustCompile(`not accessible via the [a-z0-9_/. -]*endpoint`)
+
+// notOnEndpointPhrases are the ways OpenAI-compatible servers say a model is
+// not served on the endpoint asked, and that another endpoint would serve it.
+var notOnEndpointPhrases = []string{
+	"unsupported_api_for_model",
+	"not a chat model",
+	"not supported in the v1/chat/completions",
+	"not supported in /v1/chat/completions",
+	"not supported in the v1/responses",
+	"not supported in v1/responses",
+	"not supported in /v1/responses",
+	"use v1/responses",
+	"use /v1/responses",
+	"use v1/chat/completions",
+	"use /v1/chat/completions",
+	"use v1/completions",
+	"use /v1/completions",
 }
 
-// markRefused remembers that the provider's model is not served on proto.
-func (s *Server) markRefused(providerID, model string, proto provider.Protocol) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.refused == nil {
-		s.refused = map[string]bool{}
+// notChatModel reports whether a reply says the model is not served on the
+// endpoint it was asked on. Only a 4xx counts: a server error says nothing
+// about which endpoint the model is on.
+func notChatModel(status int, body []byte) bool {
+	if status < 400 || status >= 500 {
+		return false
 	}
-	s.refused[refusalKey(providerID, model, proto)] = true
+	msg := strings.ToLower(string(body))
+	if notOnEndpointRE.MatchString(msg) {
+		return true
+	}
+	for _, phrase := range notOnEndpointPhrases {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
 }

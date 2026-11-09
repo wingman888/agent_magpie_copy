@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -73,7 +72,8 @@ func (p Provider) keyFor(proto Protocol) (Provider, bool) {
 
 // testModel is the model a probe of proto's endpoint asks for: the first
 // exposed one q's key sees, else the first it sees at all — preferring a
-// Claude model on the Anthropic endpoint.
+// Claude model on the Anthropic endpoint, and never a model the vendor's list
+// says is not served on proto.
 func (p Provider) testModel(q Provider, proto Protocol) string {
 	k := q.first()
 	var pools [][]catalog.Model
@@ -87,20 +87,13 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 	} {
 		for _, pool := range pools {
 			for _, m := range pool {
-				if want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) && p.servesAPI(m.ID, proto) {
+				if want(m.ID) && p.declares(m.ID, proto) && (k.Key == "" || p.Serves(k, m.ID)) {
 					return m.ID
 				}
 			}
 		}
 	}
 	return ""
-}
-
-// servesAPI is whether model may be asked on proto: yes when the model list
-// does not say which APIs it has.
-func (p Provider) servesAPI(model string, proto Protocol) bool {
-	apis := p.APIs(model)
-	return len(apis) == 0 || slices.Contains(apis, proto)
 }
 
 func isClaude(id string) bool {

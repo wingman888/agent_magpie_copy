@@ -170,28 +170,34 @@ func (p Provider) Serves(k KeyAccount, model string) bool {
 	return true
 }
 
-// APIs are the protocols the last model list says model is served on, in
-// the list's order; nil when the list does not say (or has no such model).
+// APIs is the protocols the vendor's last model list declares model is served
+// on, in Protocols' order. nil when the list says nothing about it: no list
+// yet, no such model, or no API the list names that magpie speaks.
 func (p Provider) APIs(model string) []Protocol {
 	live, _, ok := catalog.Live(p.ID)
 	if !ok {
 		return nil
 	}
-	var out []Protocol
 	for _, m := range live {
 		if m.ID != model {
 			continue
 		}
-		for _, a := range m.APIs {
-			for _, pr := range Protocols {
-				if string(pr) == a && !slices.Contains(out, pr) {
-					out = append(out, pr)
-				}
+		var out []Protocol
+		for _, pr := range Protocols {
+			if slices.Contains(m.APIs, string(pr)) {
+				out = append(out, pr)
 			}
 		}
-		break
+		return out
 	}
-	return out
+	return nil
+}
+
+// declares reports whether the vendor's list lets model be asked on proto:
+// yes when the list names proto for it or says nothing about model at all.
+func (p Provider) declares(model string, proto Protocol) bool {
+	apis := p.APIs(model)
+	return apis == nil || slices.Contains(apis, proto)
 }
 
 // Exposed lists the models magpie offers to agents for this provider: the
