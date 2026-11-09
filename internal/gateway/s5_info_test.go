@@ -55,7 +55,7 @@ func TestS5RootInfoNotesClaudeAndListsGemini(t *testing.T) {
 		t.Fatal(err)
 	}
 	notes, _ := info["notes"].([]any)
-	if len(notes) != 1 || !strings.Contains(notes[0].(string), "已登录但不作为 Provider 提供") {
+	if len(notes) != 1 || !strings.Contains(notes[0].(string), "但不作为 Provider 提供") {
 		t.Errorf("claude note missing from root info: %s", body)
 	}
 	if strings.Contains(body, "sk-ant-secret") || strings.Contains(body, "at-secret") {

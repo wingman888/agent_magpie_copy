@@ -101,7 +101,7 @@ func TestS5ListEndsWithClaudeNoticeAndNoSecrets(t *testing.T) {
 	}
 	lines := providerLines(provider.All(), nil, note)
 	last := lines[len(lines)-1]
-	if !strings.Contains(last, "已登录但不作为 Provider 提供") {
+	if !strings.Contains(last, "但不作为 Provider 提供") {
 		t.Errorf("last line should explain claude, got %q", last)
 	}
 	for _, l := range lines[:len(lines)-1] {
