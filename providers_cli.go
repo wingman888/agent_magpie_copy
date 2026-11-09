@@ -29,7 +29,7 @@ const providerUsage = `usage:
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
-  magpie provider fallback <id> [provider/model…|none]   models to try, in order, when this one is out of quota or down
+  magpie provider fallback <id> [provider/model…|none]  backups tried in order when it can't answer; none clears
   magpie provider rm <id>                 remove a provider
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
@@ -69,7 +69,7 @@ func providers() error {
 			r.models = fmt.Sprintf("%d models", n)
 		}
 		if len(p.Fallback) > 0 {
-			r.models += muted.Render(" · fallback ") + strings.Join(p.Fallback, " → ")
+			r.models += "  " + muted.Render("↪ "+strings.Join(p.Fallback, " → "))
 		}
 		if u := uses[p.ID]; len(u) > 0 {
 			r.uses = green.Render("← " + strings.Join(u, ", "))
@@ -295,10 +295,9 @@ func providerCmd(args []string) error {
 }
 
 // fallbackCmd: `magpie provider fallback <id> [provider/model… | none]`.
-// With no models it shows the chain; "none" clears it; otherwise the given
-// list replaces it. Nothing is saved unless every model is recognised.
+// The list is replaced as a whole; nothing is saved if any entry is unknown.
 func fallbackCmd(rest []string) error {
-	const usageLine = "magpie provider fallback <id> [provider/model… | none]"
+	const usageLine = "magpie provider fallback <id> [provider/model…|none]"
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: %s", usageLine)
 	}
@@ -308,50 +307,55 @@ func fallbackCmd(rest []string) error {
 	}
 	args := rest[1:]
 	if len(args) == 0 {
-		return showFallback(*p)
+		if len(p.Fallback) == 0 {
+			fmt.Println(muted.Render(p.Name+":"), "没有 fallback")
+			fmt.Println(muted.Render("  usage: " + usageLine))
+			return nil
+		}
+		fmt.Println(bold.Render(p.Name), "fallback", strings.Join(p.Fallback, " → "))
+		return nil
 	}
-	if len(args) == 1 && args[0] == "none" {
+	if slices.Contains(args, "none") {
+		if len(args) > 1 {
+			return fmt.Errorf("none stands alone: %s", usageLine)
+		}
 		p.Fallback = nil
 		if err := provider.Save(*p); err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), p.Name, muted.Render("fallback cleared"))
+		fmt.Println(green.Render("✓"), p.Name, "fallback cleared")
 		return nil
 	}
 	var chain []string
 	for _, a := range args {
-		a = strings.TrimSpace(a)
-		if a == "none" {
-			return fmt.Errorf("none stands alone: magpie provider fallback %s none", p.ID)
+		id, err := fallbackID(a)
+		if err != nil {
+			return err
 		}
-		if !strings.Contains(a, "/") {
-			return fmt.Errorf("%q is not provider/model · magpie models lists them", a)
+		if !slices.Contains(chain, id) {
+			chain = append(chain, id)
 		}
-		rp, model, ok := provider.Resolve(a)
-		if !ok {
-			return fmt.Errorf("magpie doesn't know the model %q · magpie models lists them", a)
-		}
-		chain = append(chain, rp.ID+"/"+model)
 	}
 	p.Fallback = chain
 	if err := provider.Save(*p); err != nil {
 		return err
 	}
-	saved, err := provider.Find(p.ID)
-	if err != nil {
-		return err
-	}
-	return showFallback(*saved)
+	fmt.Println(green.Render("✓"), p.Name, "fallback", strings.Join(chain, " → "))
+	return nil
 }
 
-// showFallback prints a provider's fallback chain, or how to set one.
-func showFallback(p provider.Provider) error {
-	if len(p.Fallback) == 0 {
-		fmt.Println(muted.Render(p.Name + " 没有 fallback · magpie provider fallback " + p.ID + " <provider/model>…"))
-		return nil
+// fallbackID checks one provider/model entry and returns it spelled the way
+// the config stores it (provider id, then the model as typed).
+func fallbackID(arg string) (string, error) {
+	pid, model, ok := strings.Cut(strings.TrimSpace(arg), "/")
+	if !ok || pid == "" || model == "" {
+		return "", fmt.Errorf("unknown model %q · fallbacks are provider/model · magpie models lists them", arg)
 	}
-	fmt.Println(green.Render("✓"), p.Name, "fallback", strings.Join(p.Fallback, " → "))
-	return nil
+	p, err := provider.Find(pid)
+	if err != nil || !p.Ready() {
+		return "", fmt.Errorf("unknown model %q · no ready provider %q · magpie models lists them", arg, pid)
+	}
+	return p.ID + "/" + model, nil
 }
 
 // addProvider: `magpie provider add <preset> [key]` or `magpie provider add <name> k=v…`

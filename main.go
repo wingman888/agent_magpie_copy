@@ -44,7 +44,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
-  magpie provider fallback <id> [provider/model…|none]   models to try, in order, when this one is out of quota or down
+  magpie provider fallback <id> [provider/model…|none]   backups tried in order when it can't answer
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models                   every model agents can pick, as provider/model
   magpie accounts [agent]         the Claude Code and Codex subscriptions magpie remembers

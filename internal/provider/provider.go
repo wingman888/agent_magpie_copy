@@ -56,9 +56,9 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Fallback is the ordered list of "provider/model" ids a request is
-	// retried on when this provider cannot take it (out of quota, rate
-	// limited, overloaded, down). Empty means no fallback.
+	// Fallback is the backup list: provider/model ids the gateway tries, in
+	// order, when this provider cannot answer (quota spent, rate limited,
+	// overloaded, down). Blank and duplicate entries are dropped on save.
 	Fallback []string `json:"fallback,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
