@@ -155,6 +155,40 @@ func (p Provider) allKeys() []KeyAccount {
 	return out
 }
 
+// APIs are the protocols the vendor's most recent model list says model is
+// served on, in the list's order. nil means the list does not say: no list,
+// no such model, or none of the APIs magpie speaks.
+func (p Provider) APIs(model string) []Protocol {
+	live, _, ok := catalog.Live(p.ID)
+	if !ok {
+		return nil
+	}
+	for _, m := range live {
+		if m.ID != model {
+			continue
+		}
+		var out []Protocol
+		for _, a := range m.APIs {
+			var pr Protocol
+			switch a {
+			case "chat":
+				pr = Chat
+			case "responses":
+				pr = Responses
+			case "anthropic":
+				pr = Anthropic
+			default:
+				continue
+			}
+			if !slices.Contains(out, pr) {
+				out = append(out, pr)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // Serves reports whether key k can be asked for model: false only when the
 // vendor's lists say another of the provider's keys sees it and k doesn't.
 func (p Provider) Serves(k KeyAccount, model string) bool {

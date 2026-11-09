@@ -74,20 +74,11 @@ var (
 
 // Why a candidate failed, as rest tells it.
 const (
-	failCredit   = "credit"
-	failQuota    = "quota"
-	failRate     = "rate"
-	failOther    = "other"
-	failCanceled = "canceled" // the agent went away: nobody is to blame
+	failCredit = "credit"
+	failQuota  = "quota"
+	failRate   = "rate"
+	failOther  = "other"
 )
-
-// unrest lifts a candidate's rest: it has answered.
-func unrest(id string) {
-	restingUntil.Lock()
-	delete(restingUntil.m, id)
-	delete(restingUntil.note, id)
-	restingUntil.Unlock()
-}
 
 // failure says why a reply failed.
 func failure(status int, body []byte) string {

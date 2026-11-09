@@ -15,8 +15,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-
-	"github.com/yetone/magpie/internal/catalog"
 )
 
 // Protocol is a wire API magpie can speak to an upstream.
@@ -432,40 +430,6 @@ func (p Provider) Speaks() []Protocol {
 		}
 	}
 	return out
-}
-
-// APIs lists the wire APIs the provider's latest model list says serve
-// model, in the order the list gives them; nil when the list says nothing
-// about it.
-func (p Provider) APIs(model string) []Protocol {
-	live, _, ok := catalog.Live(p.ID)
-	if !ok {
-		return nil
-	}
-	for _, m := range live {
-		if m.ID != model {
-			continue
-		}
-		var out []Protocol
-		for _, a := range m.APIs {
-			var pr Protocol
-			switch a {
-			case "chat":
-				pr = Chat
-			case "responses":
-				pr = Responses
-			case "anthropic":
-				pr = Anthropic
-			default:
-				continue
-			}
-			if !slices.Contains(out, pr) {
-				out = append(out, pr)
-			}
-		}
-		return out
-	}
-	return nil
 }
 
 // Host is the vendor's API host, for display.

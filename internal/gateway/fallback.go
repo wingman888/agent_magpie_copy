@@ -316,43 +316,27 @@ func restOf(id string) (Rest, bool) {
 // status code doesn't: some answer 400 or 403 with it.
 var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
 
-// transferWords are how vendors say, in a 400 or 422, that the account or key
-// has run out of something: quota, money, rate. A context that is too long
-// is not one of them.
-var transferWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|rate.?limit|usage.?limit|limit.?reached|hit your .{0,20}limit|too many requests|exceeded.{0,30}(plan|limit|quota)|额度|配额|余额|欠费|限流|频率|套餐|用量`)
-
-// modelRefusedWords are how vendors say, in a 400 or 422, that the model is
-// not theirs to give this account: unknown, unsupported, not allowed, not
-// switched on for it.
-var modelRefusedWords = regexp.MustCompile(`(?i)model[_ ]?not[_ ]?found|model.{0,40}(does not exist|doesn't exist|not exist|not found|not supported|unsupported|not available|unavailable|not accessible|not activated|not enabled|no access)|unsupported model|invalid model|unknown model|no access to (the )?model|(do not|don't|does not) have access to|not (activated|enabled|authorized) for|无权限|无权访问|未开通|模型.{0,10}(不存在|不支持|不可用|无权|未开通)|不支持.{0,10}模型`)
-
 // retryable says whether another provider may do better with a request
-// that failed this way. A request the provider finds wrong in itself (a bad
-// parameter, a context too long) is the agent's to hear about.
+// that failed this way.
 func retryable(status int, body []byte) bool {
-	switch status {
-	case 401, 402, 403, 404, 408, 429:
+	switch {
+	case status == 402, status == 408, status == 429, status >= 500:
 		return true
-	case 400, 422:
-		return transferWords.Match(body) || modelRefusedWords.Match(body) || notChatModel(status, body)
+	case status == 400, status == 401, status == 403:
+		return quotaWords.Match(body)
 	}
-	return status >= 500
+	return false
 }
 
-// holdWriter keeps a reply back while another provider may still answer.
-// An error reply waits until release, or is dropped for the next try. With
-// streams set, a successful reply waits too, until its first content has
-// been committed (see commit): a provider that fails before saying anything
-// is never heard by the agent. Anything else goes straight through.
+// holdWriter keeps an error reply back while another provider may still
+// answer: headers and body wait until release, or are dropped for the next
+// try. Anything else goes straight through.
 type holdWriter struct {
 	w       http.ResponseWriter
-	hold    bool // error replies wait
-	streams bool // a 2xx reply waits for its first content
+	hold    bool
 	header  http.Header
 	status  int
 	passing bool
-	gating  bool      // a 2xx reply is waiting for its first content
-	since   time.Time // when it began to wait
 	held    bytes.Buffer
 }
 
@@ -367,11 +351,7 @@ func (h *holdWriter) WriteHeader(code int) {
 		return
 	}
 	h.status = code
-	switch {
-	case code >= 400 && h.hold:
-		return
-	case code < 400 && h.streams:
-		h.gating, h.since = true, time.Now()
+	if h.hold && code >= 400 {
 		return
 	}
 	h.pass()
@@ -390,9 +370,6 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	if h.status == 0 {
 		h.WriteHeader(http.StatusOK)
 	}
-	if h.gating && (h.held.Len()+len(b) > gateBytes || time.Since(h.since) > gateWait) {
-		h.commit() // too much waiting for content: the stream goes on
-	}
 	if !h.passing {
 		return h.held.Write(b)
 	}
@@ -410,51 +387,11 @@ func (h *holdWriter) failed() bool {
 	return !h.passing && h.status >= 400 && retryable(h.status, h.held.Bytes())
 }
 
-// recoverable reports a held error that may clear by itself, so that the
-// last provider may be asked again.
-func (h *holdWriter) recoverable() bool {
-	if h.passing || h.status < 400 {
-		return false
-	}
-	switch h.status {
-	case 408, 500, 502, 503, 504, 529:
-		return true
-	case 429:
-		_, ok := retryAfterOf(h.header, time.Now())
-		return ok
-	}
-	return false
-}
-
-// commit sends a waiting stream on: content has gone out, so the reply is
-// the agent's now and can no longer be given to another provider.
-func (h *holdWriter) commit() {
-	if h == nil || !h.gating {
-		return
-	}
-	h.gating = false
-	h.pass()
-	h.w.Write(h.held.Bytes())
-	h.held.Reset()
-}
-
-// failStream turns a waiting stream into the error it opened with: what it
-// sent so far is dropped, and the reply is status with payload as its body.
-func (h *holdWriter) failStream(status int, payload []byte) {
-	h.gating = false
-	h.status = status
-	h.header = http.Header{}
-	h.held.Reset()
-	h.held.Write(payload)
-}
-
 // release sends a held reply after all: nobody else is left to try.
 func (h *holdWriter) release() {
 	if h.passing || h.status == 0 {
 		return
 	}
-	h.gating = false
 	h.pass()
 	h.w.Write(h.held.Bytes())
-	h.held.Reset()
 }
