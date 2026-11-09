@@ -23,16 +23,15 @@ const providerUsage = `usage:
   magpie presets                          list the vendors magpie knows out of the box
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon
-                                                                 header.<name>=value sends an extra request header
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, header.<name>
   magpie provider key <id> <key>          change the API key
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
-       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
-       magpie provider add "Org Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme`
+       magpie provider add "Acme GW" url=https://gw.example.com/v1 key=sk-… header.X-Org-Id=acme
+       magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic`
 
 // providers: `magpie providers`
 func providers() error {
@@ -264,6 +263,9 @@ func providerCmd(args []string) error {
 	return showProvider(*p)
 }
 
+// headerPrefix starts a k=v key that adds a request header: header.X-Org-Id=acme.
+const headerPrefix = "header."
+
 // addProvider: `magpie provider add <preset> [key]` or `magpie provider add <name> k=v…`
 func addProvider(rest []string) error {
 	if len(rest) == 0 {
@@ -347,13 +349,14 @@ func showProvider(p provider.Provider) error {
 	kv("catalog", p.Catalog)
 	kv("website", p.Website)
 	kv("keys", p.KeysURL)
-	names := make([]string, 0, len(p.Headers))
-	for name := range p.Headers {
-		names = append(names, name)
+	hs := p.CustomHeaders()
+	names := make([]string, 0, len(hs))
+	for k := range hs {
+		names = append(names, k)
 	}
 	sort.Strings(names)
-	for _, name := range names {
-		fmt.Printf("  header  %s: %s\n", name, p.Headers[name])
+	for _, k := range names {
+		fmt.Printf("  %s  %s: %s\n", "header", k, hs[k])
 	}
 	ms := p.Exposed()
 	src := "models.dev"
@@ -386,13 +389,15 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 		if len(k) >= len(headerPrefix) && strings.EqualFold(k[:len(headerPrefix)], headerPrefix) {
-			// the name after header. keeps the case the user typed
-			if name := strings.TrimSpace(k[len(headerPrefix):]); name != "" {
-				if p.Headers == nil {
-					p.Headers = map[string]string{}
-				}
-				p.Headers[name] = v
+			// header.<name> is one request header; the name keeps its casing.
+			name := strings.TrimSpace(k[len(headerPrefix):])
+			if name == "" {
+				continue
 			}
+			if p.Headers == nil {
+				p.Headers = map[string]string{}
+			}
+			p.Headers[name] = v
 			continue
 		}
 		switch strings.ToLower(k) {
@@ -424,9 +429,6 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 	}
 	return nil
 }
-
-// headerPrefix marks a k=v pair as an extra request header: header.X-Org-Id=acme.
-const headerPrefix = "header."
 
 func ago(t time.Time) string {
 	d := time.Since(t)
