@@ -116,7 +116,7 @@ func DeleteGroup(id string) error {
 		f.Groups = slices.Delete(f.Groups, i, i+1)
 		return store(f)
 	}
-	if slices.Contains(f.HiddenGroups, id) || !slices.ContainsFunc(discover(All()), func(g Group) bool { return g.ID == id }) {
+	if slices.Contains(f.HiddenGroups, id) || !slices.ContainsFunc(discoverGroups(All()), func(g Group) bool { return g.ID == id }) {
 		return fmt.Errorf("no group %q", id)
 	}
 	f.HiddenGroups = append(f.HiddenGroups, id)
@@ -142,7 +142,7 @@ func FindGroup(id string) (Group, []Member, bool) {
 	ps := All()
 	for _, g := range visibleGroups(ps) {
 		if g.ID == id {
-			ms := usable(g, ps)
+			ms := groupUsable(g, ps)
 			return g, ms, len(ms) > 0
 		}
 	}
@@ -165,7 +165,7 @@ func SetAffinity(providerID, affinity string) error {
 func visibleGroups(ps []Provider) []Group {
 	f := load()
 	out := slices.Clone(f.Groups)
-	for _, g := range discover(ps) {
+	for _, g := range discoverGroups(ps) {
 		if slices.ContainsFunc(f.Groups, func(x Group) bool { return x.ID == g.ID }) || slices.Contains(f.HiddenGroups, g.ID) {
 			continue
 		}
@@ -178,12 +178,12 @@ func visibleGroups(ps []Provider) []Group {
 // the group lists them. A member named twice, or a model its provider is
 // named for twice, counts once. Nested groups, members whose provider is not
 // ready, and members whose provider does not offer the model are left out.
-func usable(g Group, ps []Provider) []Member {
+func groupUsable(g Group, ps []Provider) []Member {
 	avail := map[string][]catalog.Model{}
 	seen := map[string]bool{}
 	var out []Member
 	for _, ref := range g.Members {
-		pid, model, ok := splitRef(ref)
+		pid, model, ok := splitGroupRef(ref)
 		if !ok || seen[pid+"/"+model] {
 			continue
 		}
@@ -194,10 +194,10 @@ func usable(g Group, ps []Provider) []Member {
 		}
 		ms, ok := avail[pid]
 		if !ok {
-			ms = served(p)
+			ms = servedModels(p)
 			avail[pid] = ms
 		}
-		m, ok := modelNamed(ms, model)
+		m, ok := groupModelNamed(ms, model)
 		if !ok {
 			continue
 		}
@@ -208,7 +208,7 @@ func usable(g Group, ps []Provider) []Member {
 
 // splitRef reads a member "provider/model". The model may hold slashes of
 // its own, as vendor prefixes do.
-func splitRef(ref string) (string, string, bool) {
+func splitGroupRef(ref string) (string, string, bool) {
 	pid, model, ok := strings.Cut(strings.TrimSpace(ref), "/")
 	pid, model = strings.ToLower(strings.TrimSpace(pid)), strings.TrimSpace(model)
 	if !ok || pid == "" || model == "" || pid == groupScheme {
@@ -233,7 +233,7 @@ func cleanGroupMembers(xs []string) []string {
 
 // served lists the models a provider offers: what its catalog says, and the
 // models the user picked, which magpie takes on trust.
-func served(p Provider) []catalog.Model {
+func servedModels(p Provider) []catalog.Model {
 	seen := map[string]bool{}
 	var out []catalog.Model
 	for _, m := range p.Available() {
@@ -251,7 +251,7 @@ func served(p Provider) []catalog.Model {
 	return out
 }
 
-func modelNamed(ms []catalog.Model, id string) (catalog.Model, bool) {
+func groupModelNamed(ms []catalog.Model, id string) (catalog.Model, bool) {
 	for _, m := range ms {
 		if m.ID == id {
 			return m, true
@@ -263,7 +263,7 @@ func modelNamed(ms []catalog.Model, id string) (catalog.Model, bool) {
 // discover finds the models two or more ready providers offer under one
 // normalized name (see NormalizeModelKey), and makes a group of each: id
 // auto-<name>, members in the order the providers were added.
-func discover(ps []Provider) []Group {
+func discoverGroups(ps []Provider) []Group {
 	type found struct {
 		provs  map[string]bool
 		refs   []string
@@ -276,7 +276,7 @@ func discover(ps []Provider) []Group {
 		if !p.Ready() {
 			continue
 		}
-		for _, m := range served(p) {
+		for _, m := range servedModels(p) {
 			key := NormalizeModelKey(m.ID)
 			if key == "" {
 				continue
@@ -319,21 +319,21 @@ func groupName(key string, names, models []string) string {
 			return n
 		}
 	}
-	return titleKey(key)
+	return groupTitleKey(key)
 }
 
 // titleKey spells a normalized model name for people: "claude-opus-5-5"
 // reads "Claude Opus 5.5".
-func titleKey(key string) string {
+func groupTitleKey(key string) string {
 	var words []string
 	parts := strings.Split(key, "-")
 	for i := 0; i < len(parts); i++ {
 		if parts[i] == "" {
 			continue
 		}
-		if allDigits(parts[i]) {
+		if groupAllDigits(parts[i]) {
 			nums := []string{parts[i]}
-			for i+1 < len(parts) && allDigits(parts[i+1]) {
+			for i+1 < len(parts) && groupAllDigits(parts[i+1]) {
 				i++
 				nums = append(nums, parts[i])
 			}
@@ -347,12 +347,12 @@ func titleKey(key string) string {
 	return strings.Join(words, " ")
 }
 
-func allDigits(s string) bool {
+func groupAllDigits(s string) bool {
 	if s == "" {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		if !isDigit(s[i]) {
+		if !modelKeyDigit(s[i]) {
 			return false
 		}
 	}
@@ -361,7 +361,7 @@ func allDigits(s string) bool {
 
 // commonEfforts are the reasoning efforts every member takes, in the order
 // the first member lists them.
-func commonEfforts(ms []Member) []string {
+func groupCommonEfforts(ms []Member) []string {
 	if len(ms) == 0 {
 		return nil
 	}
@@ -386,11 +386,11 @@ func commonEfforts(ms []Member) []string {
 func groupEntries(ps []Provider) []Entry {
 	var out []Entry
 	for _, g := range visibleGroups(ps) {
-		ms := usable(g, ps)
+		ms := groupUsable(g, ps)
 		if len(ms) == 0 {
 			continue
 		}
-		out = append(out, Entry{ID: GroupPrefix + g.ID, Model: GroupPrefix + g.ID, Name: g.Name, Efforts: commonEfforts(ms), Group: true})
+		out = append(out, Entry{ID: GroupPrefix + g.ID, Model: GroupPrefix + g.ID, Name: g.Name, Efforts: groupCommonEfforts(ms), Group: true})
 	}
 	return out
 }

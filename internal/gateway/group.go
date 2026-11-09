@@ -55,7 +55,7 @@ var conversations = struct {
 
 // sweepLocked forgets what has not been used for memoryKeep, at most once a
 // minute.
-func sweepLocked(now time.Time) {
+func sweepConversationsLocked(now time.Time) {
 	if now.Sub(conversations.swept) < time.Minute {
 		return
 	}
@@ -76,7 +76,7 @@ func sweepLocked(now time.Time) {
 // the first of sessionHeaders that is set, or "" when the agent sends none.
 // Affinity and rotation go by this id alone; a request without one stands on
 // its own (see turn.conv).
-func sessionOf(in http.Header) string {
+func requestSession(in http.Header) string {
 	for _, h := range sessionHeaders {
 		if v := strings.TrimSpace(in.Get(h)); v != "" {
 			return v
@@ -87,27 +87,27 @@ func sessionOf(in http.Header) string {
 
 // turnOf places a request in its conversation: how many user turns it has,
 // and whether it sends tool results back within one.
-func turnOf(r *http.Request, from provider.Protocol, body []byte, model string) turn {
-	t := turn{conv: sessionOf(r.Header), model: model}
+func requestTurn(r *http.Request, from provider.Protocol, body []byte, model string) turn {
+	t := turn{conv: requestSession(r.Header), model: model}
 	req, err := parse(from, body)
 	if err != nil {
 		return t
 	}
 	for _, m := range req.Messages {
-		if m.Role == "user" && !hasResult(m.Parts) {
+		if m.Role == "user" && !turnHasResult(m.Parts) {
 			t.turn++
 		}
 	}
 	if n := len(req.Messages); n > 0 {
 		last := req.Messages[n-1]
-		t.within = last.Role == "user" && hasResult(last.Parts)
+		t.within = last.Role == "user" && turnHasResult(last.Parts)
 	}
 	return t
 }
 
 // hasResult says whether a message carries tool results: the ones an agent
 // sends back within a turn.
-func hasResult(parts []Part) bool {
+func turnHasResult(parts []Part) bool {
 	for _, p := range parts {
 		if p.Kind == ToolResult {
 			return true
@@ -117,7 +117,7 @@ func hasResult(parts []Part) bool {
 }
 
 // ident names a candidate for the turn and affinity memory.
-func ident(c candidate) string { return c.rest + "\x00" + c.model }
+func candIdent(c candidate) string { return c.rest + "\x00" + c.model }
 
 // rotate turns cs for owner: within a turn the candidate that led it stays
 // first, and each new turn leads with the next one, k1, k2, k3, k1.
@@ -126,7 +126,7 @@ func (t turn) rotate(owner string, cs []candidate) []candidate {
 	key := owner + "\x00" + t.conv + "\x00" + t.model
 	conversations.Lock()
 	defer conversations.Unlock()
-	sweepLocked(now)
+	sweepConversationsLocked(now)
 	st := conversations.rot[key]
 	if st == nil {
 		st = &rotation{}
@@ -135,7 +135,7 @@ func (t turn) rotate(owner string, cs []candidate) []candidate {
 	idx := -1
 	if t.within && st.start != "" {
 		for i, c := range cs {
-			if ident(c) == st.start {
+			if candIdent(c) == st.start {
 				idx = i
 				break
 			}
@@ -145,20 +145,20 @@ func (t turn) rotate(owner string, cs []candidate) []candidate {
 		idx = st.n % len(cs)
 		st.n++
 	}
-	st.start, st.at = ident(cs[idx]), now
+	st.start, st.at = candIdent(cs[idx]), now
 	return append(append([]candidate{}, cs[idx:]...), cs[:idx]...)
 }
 
 // answered remembers which candidate answered a conversation's model, and
 // what it read from the vendor's cache.
-func answered(t turn, c candidate, cacheRead int) {
+func recordAnswer(t turn, c candidate, cacheRead int) {
 	if t.conv == "" {
 		return
 	}
 	now := time.Now()
 	conversations.Lock()
 	defer conversations.Unlock()
-	sweepLocked(now)
+	sweepConversationsLocked(now)
 	conversations.last[t.conv+"\x00"+t.model] = answer{rest: c.rest, model: c.model, cacheRead: cacheRead, at: now}
 }
 
@@ -167,7 +167,7 @@ func answered(t turn, c candidate, cacheRead int) {
 // candidate to the front of the pool when it keeps it; every candidate is
 // still tried in turn, so the affinity never decides whether a request
 // succeeds. A single candidate is no affinity at all.
-func affinityOf(cs []candidate, order []Weighed, mode string, t turn) ([]candidate, []Weighed, *AffinityRoute) {
+func applyAffinity(cs []candidate, order []Weighed, mode string, t turn) ([]candidate, []Weighed, *AffinityRoute) {
 	pool := 0
 	for _, c := range cs {
 		if !c.Aside {
@@ -227,14 +227,14 @@ func affinityOf(cs []candidate, order []Weighed, mode string, t turn) ([]candida
 	}
 	if keep && idx >= 0 {
 		a.Kept = true
-		cs = moveFront(cs, idx)
-		order = moveFront(order, idx)
+		cs = moveToFront(cs, idx)
+		order = moveToFront(order, idx)
 	}
 	return cs, order, a
 }
 
-// moveFront is xs with the element at i first, the others in their order.
-func moveFront[T any](xs []T, i int) []T {
+// moveToFront is xs with the element at i first, the others in their order.
+func moveToFront[T any](xs []T, i int) []T {
 	out := append([]T{xs[i]}, xs[:i]...)
 	return append(out, xs[i+1:]...)
 }
@@ -251,7 +251,7 @@ type request struct {
 // providerRequest plans a request to one of a provider's models.
 func (s *Server) providerRequest(p provider.Provider, model string, from provider.Protocol, t turn) request {
 	cands, pl := s.planTurn(p, model, from, t)
-	cands, order, aff := affinityOf(cands, pl.order, p.Affinity, t)
+	cands, order, aff := applyAffinity(cands, pl.order, p.Affinity, t)
 	pl.order = order
 	return request{owner: p.ID, cands: cands, pl: pl, aff: aff}
 }
@@ -270,7 +270,7 @@ func (s *Server) groupRequest(g provider.Group, ms []provider.Member, from provi
 	for _, m := range ms {
 		gr.Members = append(gr.Members, m.Ref())
 	}
-	cands, order, aff := affinityOf(cands, pl.order, mode, t)
+	cands, order, aff := applyAffinity(cands, pl.order, mode, t)
 	pl.order = order
 	return request{owner: provider.GroupPrefix + g.ID, cands: cands, pl: pl, group: gr, aff: aff}
 }
@@ -294,10 +294,10 @@ func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider
 			n++
 		}
 		for _, c := range cs {
-			base[ident(c)] = m.Provider
+			base[candIdent(c)] = m.Provider
 		}
 		for _, c := range left {
-			base[ident(c)] = m.Provider
+			base[candIdent(c)] = m.Provider
 			w := weighed(c, m.Provider, weighing{}, false, from)
 			w.Unlisted = true
 			pl.left = append(pl.left, w)
@@ -308,7 +308,7 @@ func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider
 			pool = append(pool, main...)
 			continue
 		}
-		main, wg := weighTurn(m.Provider, main, m.Model, from, t)
+		main, wg := weighByTurn(m.Provider, main, m.Model, from, t)
 		for j, c := range main {
 			w := weighed(c, m.Provider, wg, false, from)
 			w.Turn = j == 0 && m.Provider.Routing == provider.Rotate && len(main) > 1
@@ -318,9 +318,9 @@ func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider
 	}
 	if !ordered {
 		var wg weighing
-		pool, wg = weighTurn(provider.Provider{ID: owner, Routing: g.Routing}, pool, "", from, t)
+		pool, wg = weighByTurn(provider.Provider{ID: owner, Routing: g.Routing}, pool, "", from, t)
 		for i, c := range pool {
-			w := weighed(c, base[ident(c)], wg, false, from)
+			w := weighed(c, base[candIdent(c)], wg, false, from)
 			w.Turn = i == 0 && g.Routing == provider.Rotate && len(pool) > 1
 			poolW = append(poolW, w)
 		}
@@ -328,18 +328,18 @@ func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider
 	out := append(pool, asides...)
 	order := poolW
 	for _, c := range asides {
-		order = append(order, weighed(c, base[ident(c)], weighing{}, false, from))
+		order = append(order, weighed(c, base[candIdent(c)], weighing{}, false, from))
 	}
 	for i := range out {
 		order[i].Aside = out[i].Aside
 	}
-	cs, ord := arrange(out, order)
+	cs, ord := arrangeWeighed(out, order)
 	pl.order = ord
 	return cs, pl
 }
 
 // firstMember is the member a routing group answers for: its first usable one.
-func firstMember(e provider.Entry) (provider.Member, bool) {
+func firstGroupMember(e provider.Entry) (provider.Member, bool) {
 	_, ms, ok := provider.FindGroup(strings.TrimPrefix(e.ID, provider.GroupPrefix))
 	if !ok || len(ms) == 0 {
 		return provider.Member{}, false

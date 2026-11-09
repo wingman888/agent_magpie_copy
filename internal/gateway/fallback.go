@@ -136,14 +136,14 @@ func keyFit(q provider.Provider, model string, from provider.Protocol) int {
 	switch {
 	case q.KeyProtocol == "":
 		return 1
-	case sameWire(q.KeyProtocol, homeOf(model, from)):
+	case sameWireProto(q.KeyProtocol, protoHome(model, from)):
 		return 0
 	}
 	return 2
 }
 
 // homeOf is the protocol a request is at home in, see keyFit.
-func homeOf(model string, from provider.Protocol) provider.Protocol {
+func protoHome(model string, from provider.Protocol) provider.Protocol {
 	if f := modelFamily(model); f != "" {
 		return f
 	}
@@ -152,7 +152,7 @@ func homeOf(model string, from provider.Protocol) provider.Protocol {
 
 // sameWire says whether two protocols are the same wire API: OpenAI's Chat
 // Completions and Responses both are an OpenAI key.
-func sameWire(a, b provider.Protocol) bool {
+func sameWireProto(a, b provider.Protocol) bool {
 	if a == b {
 		return true
 	}
@@ -203,7 +203,7 @@ func (s *Server) planTurn(p provider.Provider, model string, from provider.Proto
 				break
 			}
 		}
-		main, wg := weighTurn(q, main, m, from, t)
+		main, wg := weighByTurn(q, main, m, from, t)
 		cs = append(append([]candidate{}, main...), cs[len(main):]...)
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
@@ -234,14 +234,14 @@ func (s *Server) planTurn(p provider.Provider, model string, from provider.Proto
 		}
 		return out, pl
 	}
-	ordered, order := arrange(out, pl.order)
+	ordered, order := arrangeWeighed(out, pl.order)
 	pl.order = order
 	return ordered, pl
 }
 
 // arrange puts candidates in the order they try: ready ones before resting
 // ones, and the asides after the pool. It marks those resting in order.
-func arrange(out []candidate, weighed []Weighed) ([]candidate, []Weighed) {
+func arrangeWeighed(out []candidate, weighed []Weighed) ([]candidate, []Weighed) {
 	var cls [4][]candidate
 	var wcls [4][]Weighed
 	for i, c := range out {

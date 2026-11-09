@@ -236,18 +236,18 @@ type left struct {
 
 // lkey is the key a candidate's allowance is known by: its rest and model,
 // since one account can serve several models of a routing group.
-func lkey(c candidate) string { return c.rest + "\x00" + c.model }
+func leftKey(c candidate) string { return c.rest + "\x00" + c.model }
 
 // weigh orders one provider's candidates as its routing says, and tells
 // what it went by.
 func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
-	return weighTurn(p, cs, model, from, turn{})
+	return weighByTurn(p, cs, model, from, turn{})
 }
 
 // weighTurn is weigh for a request placed in its conversation: a rotating
 // routing turns in the conversation's turns, see turn.rotate. Without one
 // (a zero turn) it turns per request.
-func weighTurn(p provider.Provider, cs []candidate, model string, from provider.Protocol, t turn) ([]candidate, weighing) {
+func weighByTurn(p provider.Provider, cs []candidate, model string, from provider.Protocol, t turn) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) < 2 {
 		return cs, wg
@@ -267,11 +267,11 @@ func weighTurn(p provider.Provider, cs []candidate, model string, from provider.
 		}
 		if a, ok := k[c.p.Account.User]; ok {
 			u, r := a.For(c.model, now)
-			wg.lefts[lkey(c)] = left{u, r} // one not known counts as unused
+			wg.lefts[leftKey(c)] = left{u, r} // one not known counts as unused
 		}
 	}
 	lefts := wg.lefts
-	shareOf := func(c candidate) float64 { return lefts[lkey(c)].used }
+	shareOf := func(c candidate) float64 { return lefts[leftKey(c)].used }
 	switch p.Routing {
 	case "":
 		// of those with quota to spare, the one whose allowance renews
@@ -295,7 +295,7 @@ func weighTurn(p provider.Provider, cs []candidate, model string, from provider.
 			}
 		}
 		sort.SliceStable(fine, func(i, j int) bool {
-			ri, rj := lefts[lkey(fine[i])].renews, lefts[lkey(fine[j])].renews
+			ri, rj := lefts[leftKey(fine[i])].renews, lefts[leftKey(fine[j])].renews
 			for k := 0; k < len(ri) || k < len(rj); k++ {
 				var a, b time.Time // to the hour, so a few minutes don't reorder
 				if k < len(ri) {

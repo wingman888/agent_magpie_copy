@@ -275,7 +275,7 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 		if e.Group {
 			// a routing group answers for its first usable member
 			efforts := e.Efforts
-			if m, ok := firstMember(e); ok {
+			if m, ok := firstGroupMember(e); ok {
 				efforts = m.Efforts
 			}
 			ms = append(ms, catalog.Model{ID: e.ID, Name: e.Name + " · routing group · via magpie", Efforts: efforts})

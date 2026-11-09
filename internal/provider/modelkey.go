@@ -33,11 +33,11 @@ func NormalizeModelKey(model string) string {
 func versionPoints(s string) string {
 	b := []byte(s)
 	for i := 1; i+1 < len(b); i++ {
-		if b[i] == '.' && isDigit(b[i-1]) && isDigit(b[i+1]) {
+		if b[i] == '.' && modelKeyDigit(b[i-1]) && modelKeyDigit(b[i+1]) {
 			b[i] = '-'
 		}
 	}
 	return string(b)
 }
 
-func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+func modelKeyDigit(c byte) bool { return c >= '0' && c <= '9' }

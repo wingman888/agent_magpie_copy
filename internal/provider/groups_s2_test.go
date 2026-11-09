@@ -75,7 +75,7 @@ func TestS2GroupNamesAndVariants(t *testing.T) {
 	s2Save(t, Provider{ID: "a", Name: "A", Key: "ka", Chat: "https://a.example/v1", Models: []string{"claude-opus-5-5", "m:batch"}})
 	s2Save(t, Provider{ID: "b", Name: "B", Key: "kb", Chat: "https://b.example/v1", Models: []string{"anthropic/claude-opus-5.5", "m"}})
 
-	gs := discover(All())
+	gs := discoverGroups(All())
 	var ids []string
 	for _, g := range gs {
 		ids = append(ids, g.ID)
@@ -87,7 +87,7 @@ func TestS2GroupNamesAndVariants(t *testing.T) {
 	if gs[0].Name != "Claude Opus 5.5" {
 		t.Fatalf("group name: %q", gs[0].Name)
 	}
-	if got := titleKey("claude-opus-5-5"); got != "Claude Opus 5.5" {
+	if got := groupTitleKey("claude-opus-5-5"); got != "Claude Opus 5.5" {
 		t.Fatalf("titleKey: %q", got)
 	}
 }

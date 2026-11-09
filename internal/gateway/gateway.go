@@ -185,7 +185,7 @@ func modelObject(e provider.Entry) map[string]any {
 // provider of its first usable member, which answers for it.
 func groupObject(e provider.Entry) map[string]any {
 	o := modelObject(e)
-	if m, ok := firstMember(e); ok {
+	if m, ok := firstGroupMember(e); ok {
 		o["owned_by"] = m.Provider.ID
 	}
 	return o
@@ -368,7 +368,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseTruncated = capture.body.truncated
 	}
 	// where the conversation stands, for routing and affinity
-	t := turnOf(r, from, body, call.Model)
+	t := requestTurn(r, from, body, call.Model)
 	var model string
 	var pr request
 	if gid, isGroup := strings.CutPrefix(call.Model, provider.GroupPrefix); isGroup {
@@ -424,7 +424,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			answered(t, c, call.Usage.CacheRead)
+			recordAnswer(t, c, call.Usage.CacheRead)
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}
@@ -861,7 +861,7 @@ var sessionHeaders = []string{
 // It is the agent's own session id when it sends one; otherwise it is derived
 // from the conversation's first user message, which every later turn repeats.
 func conversationID(in http.Header, body []byte) string {
-	if s := sessionOf(in); s != "" {
+	if s := requestSession(in); s != "" {
 		return s
 	}
 	var m struct {
