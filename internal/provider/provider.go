@@ -10,10 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+
+	"github.com/yetone/magpie/internal/catalog"
 )
 
 // Protocol is a wire API magpie can speak to an upstream.
@@ -48,11 +52,17 @@ type Provider struct {
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
 
-	// Headers are sent with every request to a custom vendor: forwarding,
-	// the connectivity test and the model list. Ignored for presets.
+	// Headers are extra request headers sent with every request to a custom
+	// provider (forwarding, tests, model lists). Names keep the user's case.
 	Headers map[string]string `json:"headers,omitempty"`
 
-	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
+	// Fallback lists "provider/model" ids to try, in order, when this
+	// provider cannot answer (see the gateway).
+	Fallback []string `json:"fallback,omitempty"`
+
+	// Catalog is one or more models.dev ids, comma-separated, searched in
+	// order for names and reasoning levels.
+	Catalog string `json:"catalog,omitempty"`
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
@@ -121,6 +131,7 @@ func All() []Provider {
 			continue
 		}
 		a.Models = picks[a.ID].Models
+		a.Fallback = picks[a.ID].Fallback
 		out = append(out, a)
 	}
 	return out
@@ -181,22 +192,20 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if err := validateHeaders(p.Headers); err != nil {
-		return err
-	}
-	if err := checkIcon(p.Icon); err != nil {
-		return err
-	}
 	if a, ok := find(Accounts(), p.ID); ok {
-		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models}
+		// an account keeps only the user's model picks and fallbacks; the
+		// rest is the agent's own sign-in. Saving it again brings a removed
+		// one back.
+		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback}
 	} else {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
+		}
+		if strings.HasPrefix(p.Icon, FilePrefix) && IconFile(strings.TrimPrefix(p.Icon, FilePrefix)) == "" {
+			return fmt.Errorf("%s: %q is not a stored icon", p.Name, p.Icon)
 		}
 	}
 	f := load()
@@ -211,6 +220,11 @@ func Save(p Provider) error {
 	if !replaced {
 		f.Providers = append(f.Providers, p)
 	}
+	return commit(f)
+}
+
+// commit stores the file and then drops icon images nothing refers to.
+func commit(f file) error {
 	if err := store(f); err != nil {
 		return err
 	}
@@ -226,11 +240,11 @@ func Delete(id string) error {
 		for i := range f.Providers {
 			if f.Providers[i].ID == id {
 				f.Providers[i].Hidden = true
-				return store(f)
+				return commit(f)
 			}
 		}
 		f.Providers = append(f.Providers, Provider{ID: id, Hidden: true})
-		return store(f)
+		return commit(f)
 	}
 	f := load()
 	keep := f.Providers[:0]
@@ -246,7 +260,7 @@ func Delete(id string) error {
 		return fmt.Errorf("no provider %q", id)
 	}
 	f.Providers = keep
-	return store(f)
+	return commit(f)
 }
 
 // keyOptional is true for local servers, which usually have no key.
@@ -269,7 +283,13 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Models = cleanList(p.Models)
-	p.Headers = cleanHeaders(p.Headers)
+	p.Fallback = cleanList(p.Fallback)
+	p.Catalog = cleanCatalog(p.Catalog)
+	if p.Preset != "" {
+		p.Headers = nil // headers are for custom providers only
+	} else {
+		p.Headers = cleanHeaders(p.Headers)
+	}
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -285,6 +305,33 @@ func normalize(p Provider) Provider {
 		}
 	}
 	return p
+}
+
+// cleanCatalog trims a comma-separated list of models.dev ids.
+func cleanCatalog(s string) string {
+	return strings.Join(cleanList(strings.Split(s, ",")), ",")
+}
+
+// cleanHeaders trims header names and values, drops entries without a name,
+// and returns nil for an empty set so nothing is written.
+func cleanHeaders(h map[string]string) map[string]string {
+	var out map[string]string
+	names := make([]string, 0, len(h))
+	for k := range h {
+		names = append(names, k)
+	}
+	sort.Strings(names) // a stable winner when two names trim to the same thing
+	for _, k := range names {
+		name := strings.TrimSpace(k)
+		if name == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[name] = strings.TrimSpace(h[k])
+	}
+	return out
 }
 
 func cleanList(xs []string) []string {
@@ -304,6 +351,21 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// customHeaders are the headers to send with requests to this provider.
+// Presets and signed-in accounts never carry any.
+func (p Provider) customHeaders() map[string]string {
+	if p.Preset != "" || p.Account != nil {
+		return nil
+	}
+	return p.Headers
+}
+
+// ApplyHeaders sets the provider's own headers on req. Call it after the
+// auth headers: these may override a default with the same name.
+func (p Provider) ApplyHeaders(req *http.Request) {
+	catalog.ApplyHeaders(req, p.customHeaders())
 }
 
 // Base returns the base URL for a protocol, or "" when the vendor lacks it.

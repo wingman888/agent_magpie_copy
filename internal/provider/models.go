@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = catalog.Provider(p.Catalog)
+		known = catalogModels(p.Catalog)
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -36,6 +36,26 @@ func (p Provider) Available() []catalog.Model {
 	for _, m := range known {
 		if !strings.Contains(m.ID, "-exp") && !strings.Contains(m.ID, "preview") {
 			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// catalogModels merges the models.dev lists of a comma-separated catalog
+// field, in the order listed; the first list to name a model wins.
+func catalogModels(ids string) []catalog.Model {
+	var out []catalog.Model
+	seen := map[string]bool{}
+	for _, id := range strings.Split(ids, ",") {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		for _, m := range catalog.Provider(id) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out = append(out, m)
+			}
 		}
 	}
 	return out
@@ -54,7 +74,7 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	}
 	var lastErr error
 	for _, proto := range p.Speaks() {
-		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.ExtraHeaders())
+		ms, err := catalog.FetchWith(ctx, p.Base(proto), p.Key, proto == Anthropic, p.customHeaders())
 		if err == nil {
 			return ms, catalog.SaveLive(p.ID, p.Base(proto), ms)
 		}
