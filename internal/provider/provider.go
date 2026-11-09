@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -190,6 +191,7 @@ func Save(p Provider) error {
 	} else {
 		if p.Preset != "" {
 			p.Headers = nil // only custom providers take their own headers
+			p.Icon = ""     // a preset's icon comes from the preset itself (see normalize)
 		}
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
@@ -281,17 +283,26 @@ func normalize(p Provider) Provider {
 // cleanHeaders trims header names and values and drops entries with an
 // empty name. It returns nil when nothing is left, so the field is not
 // written out.
+//
+// Keys are visited in sorted order so the result is deterministic when two
+// raw keys trim to the same name (e.g. "X-A" and " X-A"): the one sorting
+// later in the raw key order wins, every run.
 func cleanHeaders(hs map[string]string) map[string]string {
 	var out map[string]string
-	for k, v := range hs {
-		k = strings.TrimSpace(k)
-		if k == "" {
+	keys := make([]string, 0, len(hs))
+	for k := range hs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		name := strings.TrimSpace(k)
+		if name == "" {
 			continue
 		}
 		if out == nil {
 			out = map[string]string{}
 		}
-		out[k] = strings.TrimSpace(v)
+		out[name] = strings.TrimSpace(hs[k])
 	}
 	return out
 }
