@@ -22,6 +22,16 @@ func groupRequest(model string) (string, bool) {
 	return m[len("group/"):], true
 }
 
+// viaGroup is the "group/<id>" a request asked for by its model, or "" when
+// it named a model instead. Usage keeps it apart from provider usage.
+func viaGroup(model string) string {
+	id, ok := groupRequest(model)
+	if !ok {
+		return ""
+	}
+	return "group/" + id
+}
+
 // groupScope is what a group's conversation rotation and affinity are kept for.
 func groupScope(id string) string { return "group/" + id }
 
