@@ -112,7 +112,8 @@ func copilotHasBlock(content any, typ string) bool {
 func copilotHasImage(v any) bool {
 	switch x := v.(type) {
 	case map[string]any:
-		if t, _ := x["type"].(string); t == "image_url" || t == "input_image" {
+		// image_url (Chat), input_image (Responses), image (Anthropic)
+		if t, _ := x["type"].(string); t == "image_url" || t == "input_image" || t == "image" {
 			return true
 		}
 		for _, c := range x {

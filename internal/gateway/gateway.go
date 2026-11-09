@@ -154,9 +154,14 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
+	notes := provider.Notes()
+	if notes == nil {
+		notes = []string{}
+	}
 	writeJSON(w, 200, map[string]any{"name": "dial", "version": Version, "models": len(provider.Catalog()),
 		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages",
-			"/v1beta/models", "/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:streamGenerateContent", "/v1beta/models/{model}:countTokens"}})
+			"/v1beta/models", "/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:streamGenerateContent", "/v1beta/models/{model}:countTokens"},
+		"notes": notes})
 }
 
 func modelObject(e provider.Entry) map[string]any {
