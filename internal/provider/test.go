@@ -33,6 +33,11 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
+		kp, ok := p.KeyFor(proto)
+		if !ok {
+			out = append(out, Result{Protocol: proto, Model: model, Error: "no key may speak this endpoint"})
+			continue
+		}
 		var url, body string
 		switch proto {
 		case Chat:
@@ -45,7 +50,7 @@ func (p Provider) Test(ctx context.Context) []Result {
 			url = p.Anthropic + "/v1/messages"
 			body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		}
-		out = append(out, probe(ctx, p, proto, url, p.Prepare([]byte(body)), model))
+		out = append(out, probe(ctx, kp, proto, url, kp.Prepare([]byte(body)), model))
 	}
 	return out
 }
@@ -87,6 +92,7 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 		r.Error = err.Error()
 		return r
 	}
+	p.ApplyHeaders(req)
 	start := time.Now()
 	res, err := http.DefaultClient.Do(req)
 	r.Millis = time.Since(start).Milliseconds()
