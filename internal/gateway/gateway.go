@@ -358,23 +358,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	call.Provider = p.ID
-	// A Claude Code subscription must run through the genuine binary. Direct
-	// OAuth HTTP requests are content-classified as third-party traffic when
-	// they carry another agent's harness (Pi, OpenCode, and others).
-	if p.Account != nil && p.Account.Agent == "claude" {
-		call.To = provider.Anthropic
-		call.Status, call.Error = s.serveClaudeSubscription(w, r, from, model, body, &call.Usage)
-		call.Millis = time.Since(start).Milliseconds()
-		finishCapture()
-		s.record(call)
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
-		return
-	}
-	// each enabled key is a candidate, tried in order; a retryable failure
-	// before the reply starts moves on to the next one
-	cands := s.keyOrder(p.KeyCandidates(from, model))
+	// each candidate is tried in order: the provider's enabled keys, then the
+	// fallback models. A retryable failure before the reply starts moves on to
+	// the next one; the last candidate's answer is what the client gets.
+	cands := s.keyOrder(candidates(p, from, model))
 	if len(cands) == 0 {
 		call.Status, call.Error = 502, p.Name+" has no key that can serve this request"
 		writeError(w, from, call.Status, call.Error)
@@ -384,24 +371,49 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		return
 	}
 	var failed []string
-	for i, c := range cands {
-		to, relay, ok := route(c, from, body)
-		if !ok {
-			call.Status, call.Error = 502, p.Name+" has no endpoint configured"
-			call.Fallback = strings.Join(failed, ", ")
-			writeError(w, from, call.Status, call.Error)
-			break
+	served := model // the model that answered: the primary's, or a fallback's
+	for i, cand := range cands {
+		c, m := cand.c, cand.model
+		last := i == len(cands)-1
+		// A Claude Code subscription must run through the genuine binary.
+		// Direct OAuth HTTP requests are content-classified as third-party
+		// traffic when they carry another agent's harness (Pi, OpenCode, and
+		// others).
+		sub := c.Account != nil && c.Account.Agent == "claude"
+		var to provider.Protocol
+		var relay bool
+		if sub {
+			to = provider.Anthropic
+		} else {
+			var ok bool
+			to, relay, ok = route(c, from, body)
+			if !ok {
+				if last {
+					call.Status, call.Error = 502, c.Name+" has no endpoint configured"
+					call.Fallback = strings.Join(failed, ", ")
+					writeError(w, from, call.Status, call.Error)
+					break
+				}
+				failed = append(failed, failedLabel(c))
+				continue
+			}
 		}
-		g := &gate{ResponseWriter: w}
+		g := &gate{ResponseWriter: w, probe: !last}
 		call.To = to
 		var status int
 		var msg string
-		if relay {
-			status, msg = s.passthrough(g, r, c, from, model, body, &call.Usage)
-		} else {
-			status, msg = s.translate(g, r, c, from, to, model, body, &call.Usage)
+		switch {
+		case sub:
+			status, msg = s.serveClaudeSubscription(g, r, from, m, body, &call.Usage)
+		case relay:
+			status, msg = s.passthrough(g, r, c, from, m, body, &call.Usage)
+		default:
+			status, msg = s.translate(g, r, c, from, to, m, body, &call.Usage)
 		}
-		last := i == len(cands)-1
+		if g.leadMsg != "" {
+			// the reply opened with a retryable error; it was held back
+			status, msg = g.code, g.leadMsg
+		}
 		if g.held && !last && retryable(status, msg) {
 			s.restKeyFor(c)
 			failed = append(failed, failedLabel(c))
@@ -411,15 +423,17 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		if status < 400 {
 			s.unrestKey(c)
 		}
+		call.Provider = c.ID
 		call.Status, call.Error = status, msg
 		call.KeyName = c.KeyLabel()
 		call.Fallback = strings.Join(failed, ", ")
+		served = m
 		break
 	}
 	call.Millis = time.Since(start).Milliseconds()
 	finishCapture()
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: p.ID, Model: model,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: served,
 		Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 		CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 }

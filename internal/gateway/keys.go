@@ -22,6 +22,15 @@ type gate struct {
 	code int
 	held bool
 	buf  bytes.Buffer
+
+	// probe is set when a later candidate may still take over: the first
+	// events of a reply are held back until they show whether the reply opens
+	// with a retryable error (then it is held like an error status) or not.
+	probe bool
+	head  bytes.Buffer
+	// leadMsg is the text of a retryable error the reply opened with; code is
+	// then 502 and the attempt's own status is not meaningful.
+	leadMsg string
 }
 
 // Header is the attempt's own header map, so a discarded error leaves no
@@ -40,6 +49,10 @@ func (g *gate) WriteHeader(code int) {
 	g.code = code
 	if code >= 400 {
 		g.held = true
+		return
+	}
+	if g.probe {
+		// sent once the first events show the reply is not an error
 		return
 	}
 	g.commit(code)
@@ -61,11 +74,16 @@ func (g *gate) Write(b []byte) (int, error) {
 	if g.held {
 		return g.buf.Write(b)
 	}
+	if g.probe {
+		g.head.Write(b)
+		g.lead()
+		return len(b), nil
+	}
 	return g.ResponseWriter.Write(b)
 }
 
 func (g *gate) Flush() {
-	if g.held {
+	if g.held || g.probe {
 		return
 	}
 	if f, ok := g.ResponseWriter.(http.Flusher); ok {
@@ -73,8 +91,39 @@ func (g *gate) Flush() {
 	}
 }
 
-// release sends a held error to the client.
+// lead decides, from the events held back so far, whether the reply opens
+// with a retryable error. A reply that does is held like an error status;
+// one that does not is sent with everything held back.
+func (g *gate) lead() {
+	msg, state := leadState(g.head.Bytes())
+	if state == leadUndecided {
+		return
+	}
+	g.probe = false
+	if state == leadError && retryText(msg) {
+		g.held = true
+		g.code = http.StatusBadGateway
+		g.leadMsg = msg
+		g.buf.Write(g.head.Bytes())
+		g.head.Reset()
+		return
+	}
+	g.commit(g.code)
+	g.ResponseWriter.Write(g.head.Bytes())
+	g.head.Reset()
+}
+
+// release sends a held error to the client, or the reply held back by probe.
 func (g *gate) release() {
+	if g.probe && !g.held {
+		g.probe = false
+		if g.code != 0 {
+			g.commit(g.code)
+			g.ResponseWriter.Write(g.head.Bytes())
+		}
+		g.head.Reset()
+		return
+	}
 	if !g.held {
 		return
 	}
@@ -136,21 +185,21 @@ func restKey(c provider.Provider) string {
 
 // keyOrder moves candidates that failed within keyRest to the back, keeping
 // the order otherwise.
-func (s *Server) keyOrder(cands []provider.Provider) []provider.Provider {
+func (s *Server) keyOrder(cands []candidate) []candidate {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	var fresh, resting []provider.Provider
-	for _, c := range cands {
-		t, ok := s.rested[restKey(c)]
+	var fresh, resting []candidate
+	for _, a := range cands {
+		t, ok := s.rested[restKey(a.c)]
 		switch {
 		case ok && now.Before(t):
-			resting = append(resting, c)
+			resting = append(resting, a)
 		case ok:
-			delete(s.rested, restKey(c))
-			fresh = append(fresh, c)
+			delete(s.rested, restKey(a.c))
+			fresh = append(fresh, a)
 		default:
-			fresh = append(fresh, c)
+			fresh = append(fresh, a)
 		}
 	}
 	return append(fresh, resting...)
