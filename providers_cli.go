@@ -35,6 +35,7 @@ func providers() error {
 	all := provider.All()
 	if len(all) == 0 {
 		fmt.Println(muted.Render("no providers yet ·"), "magpie provider add deepseek sk-…", muted.Render("· magpie presets lists the vendors"))
+		printExcluded()
 		return nil
 	}
 	uses := usesByProvider()
@@ -73,15 +74,20 @@ func providers() error {
 	for _, r := range rows {
 		fmt.Printf("  %s  %s  %s  %s  %s  %s\n", pad(r.name, w[0]), pad(r.id, w[1]), pad(r.host, w[2]), pad(r.key, w[3]), pad(r.models, w[4]), r.uses)
 	}
+	printExcluded()
+	return nil
+}
+
+// printExcluded notes the accounts the user removed, and how to bring them back.
+func printExcluded() {
 	for _, x := range provider.Excluded() {
 		name := x.Agent
 		if a, err := agent.Find(x.Agent); err == nil {
 			name = a.Name
 		}
 		fmt.Println()
-		fmt.Println(" ", muted.Render(name+" is signed in but not offered: "+x.Why))
+		fmt.Println(" ", muted.Render(name+" is hidden from magpie · magpie provider add "+x.Provider+" brings it back"))
 	}
-	return nil
 }
 
 // usesByProvider maps provider ids to the agents currently routed to them.
@@ -191,6 +197,10 @@ func providerCmd(args []string) error {
 		}
 		if err := provider.Delete(p.ID); err != nil {
 			return err
+		}
+		if p.Account != nil {
+			fmt.Println(green.Render("✓"), "removed", p.Name, muted.Render("· still signed in to "+p.Account.Agent+"; magpie provider add "+p.ID+" brings it back"))
+			return nil
 		}
 		fmt.Println(green.Render("✓"), "removed", p.Name)
 		return nil

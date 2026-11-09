@@ -63,11 +63,13 @@ func signIn(t *testing.T) string {
 // forgets anything a previous test cached.
 func isolate(t *testing.T) {
 	t.Helper()
-	oldKeychain, oldURL, oldBase := claudeKeychain, claudeTokenURL, claudeBase
+	oldKeychain, oldURL, oldBase, oldStatus := claudeKeychain, claudeTokenURL, claudeBase, claudeAuthStatus
 	claudeKeychain = false
+	// no `claude` on the test machine: the status is unknown, the credential decides
+	claudeAuthStatus = func(context.Context) ([]byte, error) { return nil, os.ErrNotExist }
 	forgetClaudeCredential()
 	t.Cleanup(func() {
-		claudeKeychain, claudeTokenURL, claudeBase = oldKeychain, oldURL, oldBase
+		claudeKeychain, claudeTokenURL, claudeBase, claudeAuthStatus = oldKeychain, oldURL, oldBase, oldStatus
 		forgetClaudeCredential()
 	})
 }
@@ -107,11 +109,27 @@ func TestAccountsAreProviders(t *testing.T) {
 	if len(codex.Exposed()) != 1 || codex.Exposed()[0].ID != "gpt-5.5" || codex.Responses == "" {
 		t.Fatalf("picks: %+v", codex.Exposed())
 	}
+	// removing an account hides it; its picks wait for a restore
 	if err := Delete("codex"); err != nil {
 		t.Fatal(err)
 	}
-	if codex, _ = find(All(), "codex"); len(codex.Models) != 0 || codex.Account == nil {
-		t.Fatalf("after delete: %+v", codex)
+	if _, ok := find(All(), "codex"); ok {
+		t.Fatal("codex still listed after removal")
+	}
+	if _, _, ok := Resolve("codex/gpt-5.5"); ok {
+		t.Fatal("codex/gpt-5.5 still resolves after removal")
+	}
+	if ex := Excluded(); len(ex) != 1 || ex[0].Provider != "codex" || ex[0].Agent != "codex" {
+		t.Fatalf("excluded: %+v", ex)
+	}
+	if err := Save(Provider{ID: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if codex, _ = find(All(), "codex"); len(codex.Exposed()) != 1 || codex.Exposed()[0].ID != "gpt-5.5" || codex.Account == nil {
+		t.Fatalf("after restore: %+v", codex)
+	}
+	if len(Excluded()) != 0 {
+		t.Fatalf("still excluded after restore: %+v", Excluded())
 	}
 
 	// signed out: gone, and a stale picks entry is not a provider
