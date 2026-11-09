@@ -64,7 +64,7 @@ func codexCacheVersion() string {
 	var c struct {
 		ClientVersion string `json:"client_version"`
 	}
-	if b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json")); err == nil && json.Unmarshal(b, &c) == nil && validCodexVersion(c.ClientVersion) {
+	if b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json")); err == nil && json.Unmarshal(b, &c) == nil && c.ClientVersion != "" {
 		return c.ClientVersion
 	}
 	return codexClientVersion
