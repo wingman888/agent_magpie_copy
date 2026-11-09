@@ -11,90 +11,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 )
 
-// chRawServer answers every request with a fixed JSON body and keeps the
-// request's header block byte for byte, so the tests can see the names as
-// they went over the wire (net/http would canonicalise them on the way in).
-type chRawServer struct {
-	ln    net.Listener
-	mu    sync.Mutex
-	heads []string
-}
-
-func chStartRawServer(t *testing.T, body string) *chRawServer {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &chRawServer{ln: ln}
-	t.Cleanup(func() { ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go s.serve(conn, body)
-		}
-	}()
-	return s
-}
-
-func (s *chRawServer) URL() string { return "http://" + s.ln.Addr().String() }
-
-// Heads returns the raw header block of every request seen so far.
-func (s *chRawServer) Heads() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.heads...)
-}
-
-func (s *chRawServer) serve(conn net.Conn, body string) {
-	defer conn.Close()
-	r := bufio.NewReader(conn)
-	var raw strings.Builder
-	length := 0
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			return
-		}
-		raw.WriteString(line)
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-		if name, value, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
-			length, _ = strconv.Atoi(strings.TrimSpace(value))
-		}
-	}
-	if length > 0 {
-		io.CopyN(io.Discard, r, int64(length))
-	}
-	s.mu.Lock()
-	s.heads = append(s.heads, raw.String())
-	s.mu.Unlock()
-	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
-}
-
-// chHeaderLines returns the header lines whose name matches case-insensitively,
-// exactly as sent (name and value, without the line ending).
-func chHeaderLines(raw, name string) []string {
-	var out []string
-	for _, line := range strings.Split(raw, "\r\n") {
-		if n, _, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(n), name) {
-			out = append(out, line)
-		}
-	}
-	return out
-}
-
-// chIsolate points config and cache at a temp dir so nothing touches the
-// real machine.
-func chIsolate(t *testing.T) {
+// customHdrsEnv points config and cache at a fresh directory for one test.
+func customHdrsEnv(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -102,142 +23,178 @@ func chIsolate(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 }
 
-func TestChCustomHeadersOnTheWire(t *testing.T) {
-	srv := chStartRawServer(t, `{"data":[{"id":"m1"}]}`)
-	p := Provider{
-		ID:    "chrelay",
-		Name:  "Relay",
-		Chat:  srv.URL() + "/v1",
-		Key:   "sk-real",
-		Headers: map[string]string{
-			"X-ORG-id":      "acme",
-			"authorization": "Bearer custom",
-			"X-Api-Token":   "t-1",
-		},
-	}
-	res := probe(context.Background(), p, Chat, p.Chat+"/chat/completions", []byte(`{"model":"m1"}`), "m1")
-	if !res.OK {
-		t.Fatalf("probe failed: %+v", res)
-	}
-	heads := srv.Heads()
-	if len(heads) != 1 {
-		t.Fatalf("want 1 request, got %d", len(heads))
-	}
-	raw := heads[0]
-	if !strings.Contains(raw, "\r\nX-ORG-id: acme\r\n") {
-		t.Errorf("X-ORG-id not sent with its case:\n%s", raw)
-	}
-	if strings.Contains(raw, "X-Org-Id:") {
-		t.Errorf("header name was canonicalised:\n%s", raw)
-	}
-	if !strings.Contains(raw, "\r\nX-Api-Token: t-1\r\n") {
-		t.Errorf("X-Api-Token missing:\n%s", raw)
-	}
-	auth := chHeaderLines(raw, "Authorization")
-	if len(auth) != 1 || auth[0] != "authorization: Bearer custom" {
-		t.Errorf("want exactly the user's authorization header, got %q", auth)
-	}
-}
-
-func TestChCustomHeadersOnModelList(t *testing.T) {
-	chIsolate(t)
-	srv := chStartRawServer(t, `{"data":[{"id":"m1"}]}`)
-	p := Provider{
-		ID:      "chrelay",
-		Chat:    srv.URL() + "/v1",
-		Key:     "sk-real",
-		Headers: map[string]string{"X-ORG-id": "acme"},
-	}
-	if _, err := p.Fetch(context.Background()); err != nil {
+// customHdrsServer answers every request with a small model list and sends
+// the raw request head (exact header casing, as on the wire) on heads.
+func customHdrsServer(t *testing.T) (base string, heads chan string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	heads := srv.Heads()
-	if len(heads) == 0 {
-		t.Fatal("no model list request reached the server")
-	}
-	for _, raw := range heads {
-		if !strings.Contains(raw, "\r\nX-ORG-id: acme\r\n") {
-			t.Errorf("model list request missing header:\n%s", raw)
+	t.Cleanup(func() { ln.Close() })
+	heads = make(chan string, 32)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				r := bufio.NewReader(conn)
+				var head strings.Builder
+				n := 0
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					head.WriteString(line)
+					if strings.HasPrefix(strings.ToLower(line), "content-length:") {
+						n, _ = strconv.Atoi(strings.TrimSpace(line[len("content-length:"):]))
+					}
+					if line == "\r\n" {
+						break
+					}
+				}
+				io.CopyN(io.Discard, r, int64(n))
+				heads <- head.String()
+				body := `{"data":[{"id":"m1"}]}`
+				fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+			}(conn)
 		}
+	}()
+	return "http://" + ln.Addr().String() + "/v1", heads
+}
+
+func TestCustomHdrsSaveKeepsCustomOnly(t *testing.T) {
+	customHdrsEnv(t)
+	err := Save(Provider{Name: "Acme Relay", Chat: "https://relay.example.com/v1", Key: "sk-test",
+		Headers: map[string]string{"  X-Org-Id ": " acme ", "": "dropped", "   ": "dropped too", "X-ORG-id": "other"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Find("acme-relay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"X-Org-Id": "acme", "X-ORG-id": "other"}
+	if len(p.Headers) != len(want) {
+		t.Fatalf("headers = %v, want %v", p.Headers, want)
+	}
+	for k, v := range want {
+		if p.Headers[k] != v {
+			t.Errorf("header %q = %q, want %q", k, p.Headers[k], v)
+		}
+	}
+	if got := p.CustomHeaders(); len(got) != 2 {
+		t.Errorf("CustomHeaders = %v", got)
+	}
+
+	// a provider with no headers must not write the field at all
+	if err := Save(Provider{ID: "plain", Chat: "https://plain.example.com/v1", Key: "sk"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(b), `"headers"`) != 1 {
+		t.Errorf("providers.json should write headers only for acme: %s", b)
 	}
 }
 
-func TestChCustomHeadersSkippedForPresetAndAccount(t *testing.T) {
-	hs := map[string]string{"X-Org-Id": "acme"}
-	for name, p := range map[string]Provider{
-		"preset":  {ID: "ds", Preset: "deepseek", Chat: "https://api.deepseek.com/v1", Key: "sk", Headers: hs},
-		"account": {ID: "codex", Account: &Account{Agent: "codex", User: "u"}, Responses: "https://x.example/v1", Headers: hs},
-	} {
-		req, _ := http.NewRequest(http.MethodPost, "https://x.example/v1/chat/completions", nil)
-		if err := p.Sign(context.Background(), req, Chat, nil); err != nil {
-			t.Fatal(err)
-		}
-		if v := req.Header.Values("X-Org-Id"); len(v) != 0 {
-			t.Errorf("%s sent custom header: %v", name, v)
-		}
-		if _, ok := req.Header["X-ORG-id"]; ok {
-			t.Errorf("%s sent custom header under its raw name", name)
-		}
+func TestCustomHdrsPresetDropsHeaders(t *testing.T) {
+	customHdrsEnv(t)
+	if err := Save(Provider{Preset: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "sk-test",
+		Headers: map[string]string{"X-Org-Id": "acme"}}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Find("deepseek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Headers) != 0 || len(p.CustomHeaders()) != 0 {
+		t.Errorf("preset kept headers: %v", p.Headers)
+	}
+	// even if a hand-edited file carries them, a preset sends none
+	q := Provider{Preset: "deepseek", Chat: "https://api.deepseek.com/v1", Headers: map[string]string{"X-A": "1"}}
+	if q.CustomHeaders() != nil {
+		t.Errorf("preset CustomHeaders = %v", q.CustomHeaders())
 	}
 }
 
-func TestChCustomHeadersSignOverridesAuth(t *testing.T) {
-	p := Provider{ID: "chrelay", Chat: "https://relay.example/v1", Key: "sk-real",
-		Headers: map[string]string{"Authorization": "Bearer mine", "x-org-id": "acme"}}
+func TestCustomHdrsSignOverridesAuthAndKeepsCase(t *testing.T) {
+	p := Provider{ID: "x", Chat: "https://relay.example.com/v1", Key: "sk-test",
+		Headers: map[string]string{"Authorization": "Token abc", "X-ORG-id": "acme"}}
 	req, _ := http.NewRequest(http.MethodPost, p.Chat+"/chat/completions", nil)
 	if err := p.Sign(context.Background(), req, Chat, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := req.Header["Authorization"]; len(got) != 1 || got[0] != "Bearer mine" {
-		t.Errorf("Authorization = %v, want the user's value only", got)
+	if got := req.Header["Authorization"]; len(got) != 1 || got[0] != "Token abc" {
+		t.Errorf("Authorization = %v", got)
 	}
-	if got := req.Header["x-org-id"]; len(got) != 1 || got[0] != "acme" {
-		t.Errorf("x-org-id = %v", got)
+	if got := req.Header["X-ORG-id"]; len(got) != 1 || got[0] != "acme" {
+		t.Errorf("X-ORG-id = %v", got)
+	}
+	if _, ok := req.Header["X-Org-Id"]; ok {
+		t.Errorf("header name was canonicalized: %v", req.Header)
+	}
+
+	// a lower-case user name replaces the auth header written under its
+	// canonical name, instead of being sent alongside it
+	q := Provider{ID: "y", Chat: "https://relay.example.com/v1", Key: "sk-test",
+		Headers: map[string]string{"authorization": "Token low"}}
+	req, _ = http.NewRequest(http.MethodPost, q.Chat, nil)
+	if err := q.Sign(context.Background(), req, Chat, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := req.Header["Authorization"]; ok {
+		t.Errorf("auth header survived a same-named user header: %v", req.Header)
+	}
+	if got := req.Header["authorization"]; len(got) != 1 || got[0] != "Token low" {
+		t.Errorf("authorization = %v", got)
 	}
 }
 
-func TestChSaveKeepsHeadersOnlyForCustom(t *testing.T) {
-	chIsolate(t)
-	hs := map[string]string{"  X-A  ": "  v  ", "": "dropped", "   ": "dropped too", "X-ORG-id": "b"}
+func TestCustomHdrsOnTheWire(t *testing.T) {
+	customHdrsEnv(t)
+	base, heads := customHdrsServer(t)
+	p := Provider{ID: "wire", Name: "Wire", Chat: base, Key: "sk-test",
+		Headers: map[string]string{"X-ORG-id": "acme", "Authorization": "Token abc"}}
 
-	if err := Save(Provider{Name: "Chrelay", Chat: "https://relay.example/v1", Key: "k", Headers: hs}); err != nil {
-		t.Fatal(err)
+	// the forwarded/tested request
+	if r := probe(context.Background(), p, Chat, base+"/chat/completions", []byte(`{}`), "m1"); !r.OK {
+		t.Fatalf("probe failed: %+v", r)
 	}
-	if err := Save(Provider{Name: "Chds", Preset: "deepseek", Chat: "https://api.deepseek.com/v1", Key: "k", Headers: hs}); err != nil {
-		t.Fatal(err)
+	head := <-heads
+	for _, want := range []string{"X-ORG-id: acme\r\n", "Authorization: Token abc\r\n"} {
+		if !strings.Contains(head, want) {
+			t.Errorf("request missing %q:\n%s", want, head)
+		}
 	}
-	stored := map[string]Provider{}
-	for _, p := range load().Providers {
-		stored[p.ID] = p
-	}
-	got := stored["chrelay"].Headers
-	if len(got) != 2 || got["X-A"] != "v" || got["X-ORG-id"] != "b" {
-		t.Errorf("custom headers stored as %v", got)
-	}
-	if h := stored["chds"].Headers; h != nil {
-		t.Errorf("preset kept headers: %v", h)
+	if strings.Contains(head, "Bearer sk-test") || strings.Contains(head, "X-Org-Id") {
+		t.Errorf("auth or canonical name leaked:\n%s", head)
 	}
 
-	b, err := os.ReadFile(Path())
-	if err != nil {
+	// the model list fetch
+	if _, err := p.Fetch(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(b), `"headers"`) != 1 {
-		t.Errorf("headers written for preset or empty map:\n%s", b)
+	head = <-heads
+	if !strings.Contains(head, "X-ORG-id: acme\r\n") {
+		t.Errorf("model list request missing header:\n%s", head)
 	}
 }
 
-func TestChEmptyHeadersNotWritten(t *testing.T) {
-	chIsolate(t)
-	if err := Save(Provider{Name: "Chplain", Chat: "https://relay.example/v1", Key: "k",
-		Headers: map[string]string{"  ": "x"}}); err != nil {
+func TestCustomHdrsNoneSendsNone(t *testing.T) {
+	// a provider without headers gets only its usual auth header
+	p := Provider{ID: "none", Chat: "https://relay.example.com/v1", Key: "sk-test"}
+	req, _ := http.NewRequest(http.MethodPost, p.Chat, nil)
+	if err := p.Sign(context.Background(), req, Chat, nil); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(Path())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(b), "headers") {
-		t.Errorf("empty headers were written:\n%s", b)
+	if got := req.Header.Get("Authorization"); got != "Bearer sk-test" {
+		t.Errorf("Authorization = %q", got)
 	}
 }
