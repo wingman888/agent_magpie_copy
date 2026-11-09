@@ -25,7 +25,12 @@ const providerUsage = `usage:
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
   magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.<Name>=value
-  magpie provider key <id> <key>          change the API key
+  magpie provider key <id> <key>          change the current API key
+  magpie provider key <id> add <name> <key> [chat|responses|anthropic|any]   add another key, on after the others
+  magpie provider key <id> use|on|off|rm <key>   make a key current, switch it on or off, or remove it
+  magpie provider key <id> rename <key> <name>   name a key
+  magpie provider key <id> protocol <key> chat|responses|anthropic|any   limit a key to one protocol
+                                          (<key> is a key's fingerprint or its name)
   magpie provider icon <id> <file|name|"">  set a custom vendor's icon: an image file, a built-in icon name, or "" for the generic one
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
   magpie provider test <id>               send a tiny request through each endpoint
@@ -176,19 +181,7 @@ func providerCmd(args []string) error {
 	case "add":
 		return addProvider(rest)
 	case "key":
-		if len(rest) != 2 {
-			return fmt.Errorf("magpie provider key <id> <key>")
-		}
-		p, err := provider.Find(rest[0])
-		if err != nil {
-			return err
-		}
-		p.Key = rest[1]
-		if err := provider.Save(*p); err != nil {
-			return err
-		}
-		fmt.Println(green.Render("✓"), p.Name, "key", muted.Render(provider.Mask(p.Key)))
-		return nil
+		return keyCmd(rest)
 	case "icon":
 		return iconCmd(rest)
 	case "rm", "remove", "delete":
@@ -264,6 +257,169 @@ func providerCmd(args []string) error {
 		return err
 	}
 	return showProvider(*p)
+}
+
+// keyCmd handles `magpie provider key …`. A bare key replaces the current
+// key; the other verbs work on keys named by fingerprint or by name.
+func keyCmd(rest []string) error {
+	usage := fmt.Errorf("usage:\n  magpie provider key <id> <key>\n  magpie provider key <id> add <name> <key> [chat|responses|anthropic|any]\n  magpie provider key <id> use|on|off|rm|rename|protocol <key> …")
+	if len(rest) < 2 {
+		return usage
+	}
+	id, verb, args := rest[0], strings.ToLower(rest[1]), rest[2:]
+	switch verb {
+	case "add", "use", "on", "off", "rm", "remove", "rename", "protocol":
+	default:
+		if len(rest) != 2 {
+			return usage
+		}
+		p, err := provider.Find(id)
+		if err != nil {
+			return err
+		}
+		p.Key = rest[1]
+		if err := provider.Save(*p); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), p.Name, "key", muted.Render(provider.Mask(p.Key)))
+		return nil
+	}
+	p, err := provider.Find(id)
+	if err != nil {
+		return err
+	}
+	switch verb {
+	case "add":
+		if len(args) < 2 || len(args) > 3 {
+			return usage
+		}
+		proto := provider.Protocol("")
+		if len(args) == 3 {
+			proto = keyProtoArg(args[2])
+		}
+		if err := provider.AddKey(p.ID, args[0], args[1], proto); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), "added key", muted.Render(provider.Mask(args[1])), "to", p.Name)
+	case "use", "on", "off", "rm", "remove":
+		if len(args) != 1 {
+			return usage
+		}
+		ref, err := keyRefArg(p, args[0])
+		if err != nil {
+			return err
+		}
+		switch verb {
+		case "use":
+			err = provider.UseKey(p.ID, ref)
+		case "on", "off":
+			err = provider.SetKeyOn(p.ID, ref, verb == "on")
+		default:
+			err = provider.RemoveKey(p.ID, ref)
+		}
+		if err != nil {
+			return err
+		}
+	case "rename":
+		if len(args) != 2 {
+			return usage
+		}
+		ref, err := keyRefArg(p, args[0])
+		if err != nil {
+			return err
+		}
+		if err := provider.RenameKey(p.ID, ref, args[1]); err != nil {
+			return err
+		}
+	case "protocol":
+		if len(args) != 2 {
+			return usage
+		}
+		ref, err := keyRefArg(p, args[0])
+		if err != nil {
+			return err
+		}
+		if err := provider.SetKeyProtocol(p.ID, ref, keyProtoArg(args[1])); err != nil {
+			return err
+		}
+	}
+	p2, err := provider.Find(id)
+	if err != nil {
+		return err
+	}
+	return showProvider(*p2)
+}
+
+// keyProtoArg reads a protocol the user typed; "any" lifts the limit.
+func keyProtoArg(s string) provider.Protocol {
+	if strings.EqualFold(s, "any") {
+		return ""
+	}
+	return provider.Protocol(strings.ToLower(s))
+}
+
+// keyRefArg turns a key's fingerprint, or its name, into the fingerprint.
+func keyRefArg(p *provider.Provider, arg string) (string, error) {
+	type entry struct{ key, name string }
+	var all []entry
+	if p.Key != "" {
+		all = append(all, entry{p.Key, p.KeyName})
+	}
+	for _, k := range p.Keys {
+		all = append(all, entry{k.Key, k.Name})
+	}
+	arg = strings.TrimSpace(arg)
+	for _, e := range all {
+		if provider.KeyRef(e.key) == strings.ToLower(arg) {
+			return provider.KeyRef(e.key), nil
+		}
+	}
+	var hits []string
+	for _, e := range all {
+		if e.name != "" && strings.EqualFold(e.name, arg) {
+			hits = append(hits, provider.KeyRef(e.key))
+		}
+	}
+	switch len(hits) {
+	case 0:
+		return "", fmt.Errorf("%s has no key %q; magpie provider %s lists them", p.Name, arg, p.ID)
+	case 1:
+		return hits[0], nil
+	}
+	return "", fmt.Errorf("more than one key of %s is named %q; use its fingerprint", p.Name, arg)
+}
+
+// showKeys lists a provider's keys when it has more than the current one:
+// the current key first, then the others in the order they are tried.
+func showKeys(p provider.Provider) {
+	if p.Account != nil || p.Key == "" || (len(p.Keys) == 0 && p.KeyName == "" && p.KeyProtocol == "") {
+		return
+	}
+	proto := func(pr provider.Protocol) string {
+		if pr == "" {
+			return "any"
+		}
+		return string(pr)
+	}
+	row := func(key, name string, pr provider.Protocol, off, current bool) {
+		state := green.Render("on")
+		if off {
+			state = faint.Render("off")
+		}
+		if name == "" {
+			name = "(unnamed)"
+		}
+		mark := ""
+		if current {
+			mark = muted.Render("  current")
+		}
+		fmt.Printf("             %s  %-16s %-10s %s%s\n", provider.KeyRef(key), name, proto(pr), state, mark)
+	}
+	fmt.Println(" ", muted.Render(pad("keys", 10)))
+	row(p.Key, p.KeyName, p.KeyProtocol, false, true)
+	for _, k := range p.Keys {
+		row(k.Key, k.Name, k.Protocol, k.Off, false)
+	}
 }
 
 // addProvider: `magpie provider add <preset> [key]` or `magpie provider add <name> k=v…`
@@ -349,6 +505,7 @@ func showProvider(p provider.Provider) error {
 	default:
 		kv("key", amber.Render("not set")+muted.Render("  magpie provider key "+p.ID+" …"))
 	}
+	showKeys(p)
 	for _, h := range p.ExtraHeaders() {
 		kv("header", h[0]+": "+h[1])
 	}

@@ -37,7 +37,14 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key"`              // current API key, as typed by the user
+
+	// KeyName names the current key, and KeyProtocol limits it to one
+	// protocol's endpoint ("" means any). Keys are the other keys, in the
+	// order they are tried; see keys.go.
+	KeyName     string     `json:"keyName,omitempty"`
+	KeyProtocol Protocol   `json:"keyProtocol,omitempty"`
+	Keys        []KeyEntry `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -184,6 +191,14 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
+	f := load()
+	var old *Provider
+	for i := range f.Providers {
+		if f.Providers[i].ID == p.ID {
+			old = &f.Providers[i]
+			break
+		}
+	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. Saving it again brings a removed one back.
@@ -192,11 +207,17 @@ func Save(p Provider) error {
 		if p.Chat == "" && p.Responses == "" && p.Anthropic == "" {
 			return errors.New("a provider needs a base URL")
 		}
+		if old != nil {
+			carryKeys(*old, &p)
+		}
+		if err := checkKeys(&p); err != nil {
+			return err
+		}
+		promoteKey(&p)
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
-	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
 			f.Providers[i] = p
@@ -260,6 +281,11 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
+	p.KeyName = strings.TrimSpace(p.KeyName)
+	for i := range p.Keys {
+		p.Keys[i].Key = strings.TrimSpace(p.Keys[i].Key)
+		p.Keys[i].Name = strings.TrimSpace(p.Keys[i].Name)
+	}
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
