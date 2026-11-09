@@ -52,7 +52,10 @@ const usage = `magpie — one place to pick every agent's model
   magpie accounts add <agent>     sign in to one more Claude or ChatGPT subscription
   magpie accounts switch <agent> <email>   sign the agent in to another of them
 
-  magpie serve                    run the gateway alone (the app runs it too)
+  magpie backup [--no-keys] [file]        save everything to one file sealed with a passphrase
+  magpie restore [--no-agents] <file>     restore a backup file on this machine
+
+  magpie serve                   run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
   magpie sync                     refresh the model catalog and vendor model lists
   magpie agents                   list every supported agent
@@ -142,6 +145,10 @@ func run(args []string) error {
 		return serve()
 	case "accounts", "account":
 		return accountsCmd(args)
+	case "backup":
+		return backupCmd(args[1:])
+	case "restore":
+		return restoreCmd(args[1:])
 	case "usage":
 		return usageCmd(args)
 	case "update":
