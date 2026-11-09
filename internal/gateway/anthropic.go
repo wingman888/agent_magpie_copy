@@ -206,10 +206,12 @@ func buildAnthropic(r *Request, model string) []byte {
 			maxTokens = budget + 4096
 		}
 		out["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
+	} else if r.TopP != nil {
+		// top_p is kept: newer Claude models reject temperature together with
+		// it, so when both come in, top_p wins and temperature is left out.
+		out["top_p"] = *r.TopP
 	} else if r.Temp != nil {
 		out["temperature"] = *r.Temp
-	} else if r.TopP != nil {
-		out["top_p"] = *r.TopP
 	}
 	out["max_tokens"] = maxTokens
 	if len(r.Stop) > 0 {

@@ -45,6 +45,24 @@ func readSSE(r io.Reader, fn func(event, data string) error) error {
 	return sc.Err()
 }
 
+// l4StreamBody says whether an upstream reply is an event stream. The header
+// decides when it is set. When sniff is true (account backends such as the
+// ChatGPT Codex one, which may send no Content-Type) and the header is
+// missing, the first bytes of the body decide. The returned reader replays
+// everything that was read to look.
+func l4StreamBody(res *http.Response, sniff bool) (io.Reader, bool) {
+	br := bufio.NewReaderSize(res.Body, 4<<10)
+	if strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+		return br, true
+	}
+	if !sniff {
+		return br, false
+	}
+	head, _ := br.Peek(6)
+	head = bytes.TrimLeft(head, " \t\r\n")
+	return br, bytes.HasPrefix(head, []byte("event:")) || bytes.HasPrefix(head, []byte("data:"))
+}
+
 // sseWriter writes events to a client and flushes each one.
 type sseWriter struct {
 	w     http.ResponseWriter
