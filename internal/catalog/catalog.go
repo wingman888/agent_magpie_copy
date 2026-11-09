@@ -297,37 +297,10 @@ func Codex() []Model {
 
 // Efforts returns the reasoning levels a model supports, if known.
 func Efforts(models []Model, id string) []string {
-	if m, ok := Lookup(models, id); ok && len(m.Efforts) > 0 {
-		return m.Efforts
+	for _, m := range models {
+		if m.ID == id && len(m.Efforts) > 0 {
+			return m.Efforts
+		}
 	}
 	return nil
-}
-
-// Lookup finds id in models. An exact match wins; otherwise a prefixed id
-// such as "deepseek/deepseek-chat" is matched by the part after its last
-// "/", so gateways that prefix their model ids still get names and reasoning
-// levels. An id that matches nothing reports false.
-func Lookup(models []Model, id string) (Model, bool) {
-	for _, m := range models {
-		if m.ID == id {
-			return m, true
-		}
-	}
-	if bare := BareID(id); bare != id {
-		for _, m := range models {
-			if m.ID == bare {
-				return m, true
-			}
-		}
-	}
-	return Model{}, false
-}
-
-// BareID is the model id without its "provider/" prefix: the part after the
-// last "/", or the id itself when it has none.
-func BareID(id string) string {
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		return id[i+1:]
-	}
-	return id
 }
