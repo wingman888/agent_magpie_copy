@@ -81,8 +81,8 @@ type Server struct {
 	client *http.Client
 	mu     sync.Mutex
 	recent []Call
-	// refused remembers the endpoints a provider said a model is not served
-	// on, so later requests skip them rather than probe again.
+	// refused remembers the endpoints a provider's model was rejected on
+	// (see endpoints.go), so no later request probes them again.
 	refused      map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
@@ -237,7 +237,8 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		p = q
 	}
-	if ok && p.Anthropic != "" && slices.Contains(s.usable(p, model), provider.Anthropic) {
+	// only where the model is served on Anthropic's API
+	if ok && p.Anthropic != "" && slices.Contains(servedAPIs(p, model), provider.Anthropic) {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
@@ -400,43 +401,62 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Affinity: aff, Order: pl.order, Left: pl.left})
 	var skipped []string
+	// settle records the last try, and that the agent went away when it did
+	settle := func(try Try) {
+		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+	}
+candidates:
 	for i, c := range cands {
 		last := i == len(cands)-1
-		call.Provider, call.To = c.p.ID, ""
-		began := time.Now()
-		try := Try{ID: c.rest, Start: began}
-		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, try) })
-		hw, retries, gone := s.try(w, r, from, c, body, &call, last)
-		try.Done, try.Status, try.Millis, try.Error = true, call.Status, time.Since(began).Milliseconds(), call.Error
-		try.Retries = retries
-		if gone {
-			// the agent went away: no provider is at fault, and none else is asked
-			call.Status, call.Error = statusCanceled, failCanceled
-			try.Status, try.Error, try.Fail = statusCanceled, failCanceled, failCanceled
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			break
-		}
-		if !last && hw.failed() {
-			status, header, held := hw.reply()
-			hw.discard()
-			rest := s.restAfter(c, status, header, held)
-			try.Fail, try.Rest = rest.Why, &rest
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			skipped = append(skipped, c.label()+": "+call.Error)
-			continue
-		}
-		hw.release()
-		model = c.model
-		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
-			if aff != nil {
-				answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
+		// the candidate's failed replies are held back while another try may
+		// follow; the last candidate is asked again for those that may mend
+		for n := 0; ; n++ {
+			hw := newHoldWriter(w, true)
+			call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+			began := time.Now()
+			s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
+			call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+			try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
+			// the agent went away: no other candidate is asked, and none rests
+			if r.Context().Err() != nil {
+				call.Status, call.Error = statusCanceled, "canceled"
+				try.Status, try.Error, try.Fail, try.Outcome = statusCanceled, "canceled", "canceled", outcomeCanceled
+				settle(try)
+				break candidates
 			}
-		} else {
-			try.Fail = failure(call.Status, []byte(call.Error))
+			if !last && hw.failed() {
+				rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
+				try.Fail, try.Rest, try.Outcome = rest.Why, &rest, outcomeTransferred
+				settle(try)
+				skipped = append(skipped, c.label()+": "+call.Error)
+				break
+			}
+			if last && hw.status >= 400 {
+				if d, ok := retryDelay(n, hw.status, hw.header, time.Now()); ok {
+					try.Fail, try.Outcome, try.Wait = failure(hw.status, hw.held.Bytes()), outcomeRetried, d.Milliseconds()
+					settle(try)
+					if retrySleep(r.Context(), d) != nil {
+						call.Status, call.Error = statusCanceled, "canceled"
+						try.Outcome, try.Fail, try.Status, try.Error = outcomeCanceled, "canceled", statusCanceled, "canceled"
+						settle(try)
+						break candidates
+					}
+					continue
+				}
+			}
+			hw.release()
+			model = c.model
+			if call.Status < 400 {
+				served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+				if aff != nil {
+					answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
+				}
+			} else {
+				try.Fail = failure(call.Status, []byte(call.Error))
+			}
+			settle(try)
+			break candidates
 		}
-		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-		break
 	}
 	if len(skipped) > 0 {
 		call.Fallback = strings.Join(skipped, "; ")
@@ -484,81 +504,34 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
 	relay := p.Account == nil || !p.Account.Stream || streamOf(body)
-	prefer := from
-	if !relay {
-		prefer = ""
-	}
-	protos := s.endpoints(p, model, prefer)
-	if len(protos) == 0 {
-		msg := p.Name + " has no endpoint configured"
+	eps := s.endpoints(p, model, from, relay)
+	if len(eps) == 0 {
+		msg := p.Name + " has no endpoint configured for " + model
 		return writeError(w, from, 502, msg), msg
 	}
-	// an endpoint that says the model is not served on it is left for the
-	// next one, before anything is written to the agent
-	last := len(protos) - 1
-	for _, proto := range protos[:last] {
-		call.To = proto
-		status, msg, refused := s.sendTo(w, r, from, p, model, body, proto, relay, &call.Usage, true)
-		if !refused {
-			return status, msg
+	// each endpoint's reply is held until it is known to stand: one that
+	// refuses the model is dropped for the next, so nothing of it reaches
+	// the agent; the last one's reply goes out as it is
+	var status int
+	var msg string
+	for i, e := range eps {
+		last := i == len(eps)-1
+		ew := newHoldWriter(w, !last)
+		call.To = e.proto
+		var raw []byte // the upstream's error body, as it said it
+		if e.relay {
+			status, msg = s.passthrough(ew, r, p, from, model, body, &call.Usage, &raw)
+		} else {
+			status, msg = s.translate(ew, r, p, from, e.proto, model, body, &call.Usage, &raw)
 		}
-		s.markRefused(p.ID, model, proto)
+		if !last && notChatModel(status, raw) {
+			s.markRefused(p.ID, model, e.proto)
+			continue
+		}
+		ew.release()
+		return status, msg
 	}
-	call.To = protos[last]
-	status, msg, _ := s.sendTo(w, r, from, p, model, body, protos[last], relay, &call.Usage, false)
 	return status, msg
-}
-
-// try sends the request to one candidate and returns its reply, held back
-// while another candidate may still take the request. The last candidate is
-// tried again while its failure may pass by itself (see holdWriter.retryWait);
-// the retries it made come back with the reply. gone says the agent went away
-// meanwhile, and then there is no reply.
-func (s *Server) try(w http.ResponseWriter, r *http.Request, from provider.Protocol, c candidate, body []byte, call *Call, last bool) (hw *holdWriter, retries []Retry, gone bool) {
-	for n := 0; ; n++ {
-		call.Usage = Usage{}
-		hw = newHoldWriter(w, true)
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, call)
-		if r.Context().Err() != nil && !hw.sent() {
-			hw.discard()
-			return nil, retries, true
-		}
-		if !last || !hw.failed() {
-			return hw, retries, false
-		}
-		wait, again := hw.retryWait(n)
-		if !again {
-			return hw, retries, false
-		}
-		retries = append(retries, Retry{Status: call.Status, Error: call.Error, WaitMs: wait.Milliseconds()})
-		hw.discard()
-		if !sleepCtx(r.Context(), wait) {
-			return nil, retries, true
-		}
-	}
-}
-
-// sleepCtx waits d, or until ctx ends; it reports whether the wait ran out.
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-// sendTo makes one attempt on one endpoint: relayed as the client sent it
-// when proto is the client's own protocol, else translated. more says another
-// endpoint is left to try; when it is and the endpoint refuses the model,
-// nothing has been written and refused reports it.
-func (s *Server) sendTo(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, proto provider.Protocol, relay bool, u *Usage, more bool) (status int, msg string, refused bool) {
-	if proto == from && relay {
-		return s.passthrough(w, r, p, from, model, body, u, more)
-	}
-	return s.translate(w, r, p, from, proto, model, body, u, more)
 }
 
 // forward sends a request to the provider.
@@ -590,24 +563,22 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, more bool) (int, string, bool) {
+func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage, upstream *[]byte) (int, string) {
 	body = rewriteModel(body, model)
 	if proto == provider.Chat {
 		body = developerAsSystem(body)
 	}
 	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
 	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), false
+		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		if more && notChatModel(res.StatusCode, b) {
-			return 0, "", true
-		}
+		*upstream = b
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		keepRetry(w.Header(), res.Header)
-		return writeError(w, proto, res.StatusCode, msg), msg, false
+		return writeError(w, proto, res.StatusCode, msg), msg
 	}
 	rd, sse := eventStream(res)
 	h := w.Header()
@@ -620,37 +591,43 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Accel-Buffering", "no")
 	}
-	// a stream's opening is held until its text, so a failure before it can
-	// still be answered by another candidate; see relayWatch
-	var watch *relayWatch
-	if hw := holdOf(w); hw != nil && sse {
-		hw.openStream()
-		watch = newRelayWatch(hw, p, proto)
+	ctx, stop := context.WithCancel(r.Context())
+	defer stop()
+	more := pumped(ctx, rd)
+	var pre []byte // read ahead while the body had not begun: the agent sees none of it until it has
+	if sse {
+		g := newStreamGate(decoder(proto), nil)
+		hold(more, g)
+		if g.fail > 0 {
+			msg := p.Name + ": " + g.failMsg
+			*upstream = []byte(g.failData)
+			return writeError(w, proto, g.fail, msg), msg
+		}
+		pre = g.raw
 	}
 	w.WriteHeader(res.StatusCode)
 	f, _ := w.(http.Flusher)
 	sniff := newSniffer(proto, res.Header.Get("Content-Type"))
 	defer func() { u.add(sniff.usage()) }()
-	buf := make([]byte, 32<<10)
-	for {
-		n, err := rd.Read(buf)
-		if n > 0 {
-			sniff.write(buf[:n])
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return res.StatusCode, "", false
-			}
-			if watch != nil && watch.write(buf[:n]) {
-				return watch.status, watch.msg, false
-			}
-			if f != nil {
-				f.Flush()
-			}
+	write := func(b []byte) bool {
+		sniff.write(b)
+		if _, werr := w.Write(b); werr != nil {
+			return false
 		}
-		if err != nil {
-			break
+		if f != nil {
+			f.Flush()
+		}
+		return true
+	}
+	if len(pre) > 0 && !write(pre) {
+		return res.StatusCode, ""
+	}
+	for b := range more {
+		if !write(b) {
+			return res.StatusCode, ""
 		}
 	}
-	return res.StatusCode, "", false
+	return res.StatusCode, ""
 }
 
 // eventStream reports whether a reply is server-sent events. The header
@@ -676,37 +653,65 @@ func eventStream(res *http.Response) (io.Reader, bool) {
 	return br, false
 }
 
-// forwardTranslated sends one translated, streaming request upstream on the
-// endpoint to. The provider is always streamed.
+// forwardTranslated sends one translated, streaming request upstream.
 func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to provider.Protocol, req *Request, model string, in http.Header) (*http.Response, error) {
 	body := build(to, req, model, p.Host(), p.RejectsTemperature(model))
 	return s.forward(ctx, p, to, pathOf(to), p.Prepare(body), in)
 }
 
+// notChatModel recognizes a 4xx whose words say the model is not served on
+// the endpoint it was asked on, so another endpoint of the provider may serve
+// it. A 5xx, or any other status, says nothing of the kind.
+func notChatModel(status int, body []byte) bool {
+	if status < 400 || status >= 500 {
+		return false
+	}
+	msg := strings.ToLower(string(body))
+	if notOnEndpoint.MatchString(msg) {
+		return true
+	}
+	for _, phrase := range []string{
+		"not a chat model",
+		"not supported in the v1/chat/completions",
+		"not supported in /v1/chat/completions",
+		"not supported in the v1/responses",
+		"not supported in /v1/responses",
+		"use v1/completions",
+		"use /v1/completions",
+		"use v1/responses",
+		"use /v1/responses",
+		"use v1/chat/completions",
+		"use /v1/chat/completions",
+		"unsupported_api_for_model",
+	} {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // translate serves a client API the provider lacks by speaking another
 // one to it. The provider is always streamed; the client gets whichever
-// it asked for. more says another endpoint is left to try; when it is and
-// the endpoint refuses the model, refused reports it and nothing is written.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, more bool) (int, string, bool) {
+// it asked for.
+func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage, upstream *[]byte) (int, string) {
 	request, err := parse(from, body)
 	if err != nil {
-		return writeError(w, from, 400, err.Error()), err.Error(), false
+		return writeError(w, from, 400, err.Error()), err.Error()
 	}
 	stream := request.Stream
 	request.Stream = true
 	res, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
 	if err != nil {
-		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error(), false
+		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		if more && notChatModel(res.StatusCode, b) {
-			return 0, "", true
-		}
+		*upstream = b
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
 		keepRetry(w.Header(), res.Header)
-		return writeError(w, from, res.StatusCode, msg), msg, false
+		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(to)
 	rd, sse := eventStream(res)
@@ -715,62 +720,44 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		// event stream would be wrong, so give up cleanly
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
-		return writeError(w, from, 502, msg), msg, false
+		return writeError(w, from, 502, msg), msg
 	}
 	if stream {
-		// the opening is held until its text: an error before it is the
-		// candidate's failure, and nothing of the opening reaches the agent
-		hw := holdOf(w)
-		hw.openStream()
 		enc := encoder(from, newSSEWriter(w), request.Model)
 		var failed string
-		var status int
-		var stopped bool
-		readSSE(rd, func(_, data string) error {
-			if stopped {
-				return errReplyStopped
+		g := newStreamGate(dec, func(ev Event) {
+			switch ev.Kind {
+			case KError:
+				failed = ev.Text
+			case KStart, KUsage:
+				u.add(ev.Usage)
 			}
-			return dec(data, func(ev Event) {
-				if stopped {
-					return
-				}
-				if ev.Kind == KError {
-					if st, msg := streamFailure(p, data); hw.streamFail(from, st, msg) {
-						stopped, status, failed = true, st, msg
-						return
-					}
-				}
-				if startsText(ev) {
-					hw.content()
-				}
-				switch ev.Kind {
-				case KError:
-					failed = ev.Text
-				case KStart, KUsage:
-					u.add(ev.Usage)
-				}
-				enc.event(ev)
-			})
+			enc.event(ev)
 		})
-		if stopped {
-			return status, failed, false
+		ctx, stop := context.WithCancel(r.Context())
+		defer stop()
+		more := pumped(ctx, rd)
+		// nothing reaches the agent until the body has begun; a reply that
+		// fails before that is dropped, and the next candidate answers instead
+		hold(more, g)
+		if g.fail > 0 {
+			msg := p.Name + ": " + g.failMsg
+			*upstream = []byte(g.failData)
+			return writeError(w, from, g.fail, msg), msg
 		}
+		for b := range more {
+			g.feed(b)
+		}
+		g.finish()
 		enc.finish()
-		return 200, failed, false
+		return 200, failed
 	}
 	var col collector
-	var errData string // the first error event, while the reply has no text yet
 	readSSE(rd, func(_, data string) error {
-		return dec(data, func(ev Event) {
-			if ev.Kind == KError && errData == "" {
-				errData = data
-			}
-			col.add(ev)
-		})
+		return dec(data, col.add)
 	})
 	if col.err != "" && len(col.res.Parts) == 0 {
-		st, msg := streamFailure(p, errData)
-		return writeError(w, from, st, msg), msg, false
+		return writeError(w, from, 502, p.Name+": "+col.err), col.err
 	}
 	res2 := col.finish()
 	u.add(res2.Usage)
@@ -778,7 +765,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(out)
-	return 200, col.err, false
+	return 200, col.err
 }
 
 // ---- protocol tables --------------------------------------------------------

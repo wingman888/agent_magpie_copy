@@ -819,7 +819,7 @@ var (
 type copilotApp struct {
 	User  string `json:"user"`
 	Token string `json:"oauth_token"`
-	cli   bool   // the standalone Copilot CLI's sign-in
+	cli   bool // the standalone Copilot CLI's sign-in
 }
 
 // copilotLogin finds the GitHub token Copilot's editors and CLI keep.
@@ -873,11 +873,9 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		req.Header.Set("Openai-Intent", "conversation-panel")
 		// a turn the user typed is billed as one; a tool's reply is not
-		req.Header.Set("X-Initiator", "agent")
-		if userTurn(body) {
-			req.Header.Set("X-Initiator", "user")
-		}
-		if hasImage(body) {
+		initiator, vision := copilotInitiator(req.URL.Path, body)
+		req.Header.Set("X-Initiator", initiator)
+		if vision {
 			req.Header.Set("Copilot-Vision-Request", "true")
 		}
 		return nil
@@ -889,98 +887,7 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		}
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
-	// Copilot serves all three wire APIs under one base; the paths
-	// (/chat/completions, /responses, /v1/messages) are added per request.
 	return Provider{ID: "copilot", Name: "Copilot", Icon: "githubcopilot", Chat: copilotBase, Responses: copilotBase, Anthropic: copilotBase, Website: "https://github.com/features/copilot", Account: acct}
-}
-
-// userTurn reports whether a request's last turn is one the user typed. It
-// reads Chat Completions and Anthropic Messages (messages) and Responses
-// (input). A turn that only carries tool results back is the agent's, and so
-// is anything not recognized.
-func userTurn(body []byte) bool {
-	var v struct {
-		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
-		Input json.RawMessage `json:"input"`
-	}
-	if json.Unmarshal(body, &v) != nil {
-		return false
-	}
-	if len(v.Messages) > 0 {
-		m := v.Messages[len(v.Messages)-1]
-		return m.Role == "user" && !toolResultsOnly(m.Content)
-	}
-	if len(v.Input) == 0 {
-		return false
-	}
-	// a bare string input is the user's text
-	var text string
-	if json.Unmarshal(v.Input, &text) == nil {
-		return true
-	}
-	var items []struct {
-		Role string `json:"role"`
-	}
-	if json.Unmarshal(v.Input, &items) != nil || len(items) == 0 {
-		return false
-	}
-	// function_call_output and its kin carry no role, so they are not the user's
-	return items[len(items)-1].Role == "user"
-}
-
-// toolResultsOnly reports whether a message's content is nothing but Anthropic
-// tool_result blocks, which the agent sends back after a tool ran.
-func toolResultsOnly(content json.RawMessage) bool {
-	var blocks []struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(content, &blocks) != nil || len(blocks) == 0 {
-		return false
-	}
-	for _, b := range blocks {
-		if b.Type != "tool_result" {
-			return false
-		}
-	}
-	return true
-}
-
-// hasImage reports whether a request carries an image in its messages or
-// input: a Chat image_url part, a Responses input_image, or an Anthropic image
-// block (also inside a tool_result).
-func hasImage(body []byte) bool {
-	var v struct {
-		Messages any `json:"messages"`
-		Input    any `json:"input"`
-	}
-	if json.Unmarshal(body, &v) != nil {
-		return false
-	}
-	return hasImageBlock(v.Messages) || hasImageBlock(v.Input)
-}
-
-func hasImageBlock(x any) bool {
-	switch t := x.(type) {
-	case map[string]any:
-		if ty, _ := t["type"].(string); ty == "image_url" || ty == "input_image" || ty == "image" {
-			return true
-		}
-		for _, v := range t {
-			if hasImageBlock(v) {
-				return true
-			}
-		}
-	case []any:
-		for _, v := range t {
-			if hasImageBlock(v) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func copilotToken(ctx context.Context, github string) (copilotSession, error) {
@@ -1041,12 +948,9 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	var v struct {
 		Data []struct {
-			ID     string `json:"id"`
-			Name   string `json:"name"`
-			Picker bool   `json:"model_picker_enabled"`
-			// Endpoints are the paths the model is served on, e.g.
-			// "/chat/completions"; absent when the list doesn't say.
-			Endpoints    []string `json:"supported_endpoints"`
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			Picker       bool   `json:"model_picker_enabled"`
 			Capabilities struct {
 				Type     string `json:"type"`
 				Supports struct {
@@ -1056,6 +960,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 			Policy *struct {
 				State string `json:"state"`
 			} `json:"policy"`
+			SupportedEndpoints []string `json:"supported_endpoints"`
 		} `json:"data"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(b, &v) != nil {
@@ -1070,7 +975,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		if !m.Picker && (m.Policy == nil || m.Policy.State != "enabled") {
 			continue
 		}
-		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: copilotAPIs(m.Endpoints)})
+		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: copilotAPIs(m.SupportedEndpoints)})
 	}
 	if len(out) == 0 {
 		return nil, errors.New("Copilot lists no chat model for this account")
@@ -1078,19 +983,15 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 	return out, nil
 }
 
-// copilotAPIs maps a model's supported_endpoints to the catalog's API names.
-// Other endpoints (websocket, embeddings…) are not wire APIs magpie speaks and
-// are left out; nil when none is left, i.e. the list says nothing usable.
+// copilotAPIs maps a model's supported_endpoints to the APIs magpie speaks;
+// other endpoints (websocket, embeddings…) are left out. Nothing listed, or
+// no field at all, is unknown: nil.
 func copilotAPIs(endpoints []string) []string {
+	names := map[string]string{"/chat/completions": "chat", "/responses": "responses", "/v1/messages": "anthropic"}
 	var out []string
 	for _, e := range endpoints {
-		switch e {
-		case "/chat/completions":
-			out = append(out, "chat")
-		case "/responses":
-			out = append(out, "responses")
-		case "/v1/messages":
-			out = append(out, "anthropic")
+		if api, ok := names[e]; ok && !contains(out, api) {
+			out = append(out, api)
 		}
 	}
 	return out
