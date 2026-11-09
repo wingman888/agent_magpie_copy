@@ -297,14 +297,19 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 				Reason string `json:"reason"`
 			} `json:"incomplete_details"`
 			Error *struct {
-				Message string `json:"message"`
+				Message string          `json:"message"`
+				Code    json.RawMessage `json:"code"`
+				Type    string          `json:"type"`
 			} `json:"error"`
 			Output []rItem `json:"output"`
 		} `json:"response"`
 		Error *struct {
-			Message string `json:"message"`
+			Message string          `json:"message"`
+			Code    json.RawMessage `json:"code"`
+			Type    string          `json:"type"`
 		} `json:"error"`
-		Message string `json:"message"`
+		Message string          `json:"message"`
+		Code    json.RawMessage `json:"code"`
 	}
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		return nil
@@ -333,7 +338,11 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		}
 	case "response.completed", "response.incomplete", "response.failed":
 		if ev.Response.Error != nil {
-			emit(Event{Kind: KError, Text: ev.Response.Error.Message})
+			emit(Event{Kind: KError, Text: ev.Response.Error.Message, Status: errorStatus(ev.Response.Error.Type, ev.Response.Error.Code)})
+			return nil
+		}
+		if ev.Type == "response.failed" {
+			emit(Event{Kind: KError, Text: "response failed", Status: errorStatus("", nil)})
 			return nil
 		}
 		stop := "stop"
@@ -352,11 +361,11 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStop, Stop: stop})
 		emit(Event{Kind: KUsage, Usage: ev.Response.Usage.usage()})
 	case "error":
-		msg := ev.Message
+		msg, typ, code := ev.Message, "", ev.Code
 		if ev.Error != nil {
-			msg = ev.Error.Message
+			msg, typ, code = ev.Error.Message, ev.Error.Type, ev.Error.Code
 		}
-		emit(Event{Kind: KError, Text: msg})
+		emit(Event{Kind: KError, Text: msg, Status: errorStatus(typ, code)})
 	}
 	return nil
 }

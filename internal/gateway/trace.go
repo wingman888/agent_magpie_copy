@@ -78,16 +78,27 @@ type Weighed struct {
 	Aside bool `json:"aside,omitempty"`
 }
 
-// Try is one candidate trying the request.
+// Try is one candidate trying the request. Fail says how it ended when it
+// did not answer: "canceled" when the agent went away, else why it failed
+// and handed the request on (and Rest how long it now sits out).
 type Try struct {
-	ID     string    `json:"id"`
-	Start  time.Time `json:"start"`
-	Done   bool      `json:"done"`
-	Status int       `json:"status,omitempty"`
-	Millis int64     `json:"ms,omitempty"`
-	Fail   string    `json:"fail,omitempty"` // why it failed, as rest tells it
-	Error  string    `json:"error,omitempty"`
-	Rest   *Rest     `json:"rest,omitempty"` // how long it now sits out; none when it was the last to try
+	ID      string    `json:"id"`
+	Start   time.Time `json:"start"`
+	Done    bool      `json:"done"`
+	Status  int       `json:"status,omitempty"`
+	Millis  int64     `json:"ms,omitempty"`
+	Retries []Retry   `json:"retries,omitempty"` // the tries again, when the last provider's failure might clear
+	Fail    string    `json:"fail,omitempty"`    // why it failed, as rest tells it; "canceled"
+	Error   string    `json:"error,omitempty"`
+	Rest    *Rest     `json:"rest,omitempty"` // how long it now sits out; none when it was the last to try
+}
+
+// Retry is one wait before a candidate is tried again: what its failed try
+// answered, and how long the wait was.
+type Retry struct {
+	Status int    `json:"status"`
+	Wait   int64  `json:"wait_ms"`
+	Error  string `json:"error,omitempty"`
 }
 
 type planned struct {

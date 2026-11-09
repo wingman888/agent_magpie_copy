@@ -80,9 +80,9 @@ type Server struct {
 	client *http.Client
 	mu     sync.Mutex
 	recent []Call
-	// responseOnly remembers models rejected by Chat Completions, avoiding a
-	// known-failing probe on every Claude Code turn.
-	responseOnly map[string]bool
+	// refused remembers the endpoints that said a model isn't served on them
+	// (see notServedKey), so no later request probes them again.
+	refused      map[string]bool
 	subscription *subscriptionBridge
 	debug        bool
 	trace        trace // what routing did with each request, for the Gateway view
@@ -98,7 +98,7 @@ func New() *Server {
 			IdleConnTimeout:       90 * time.Second,
 			ForceAttemptHTTP2:     true,
 		}},
-		responseOnly: make(map[string]bool),
+		refused:      make(map[string]bool),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
 	}
@@ -236,7 +236,8 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		p = q
 	}
-	if ok && p.Anthropic != "" {
+	// only a model that can be sent to the Anthropic API is counted there
+	if ok && p.Anthropic != "" && s.servesOn(p, model, provider.Anthropic) {
 		res, err := s.forward(r.Context(), p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, model), r.Header)
 		if err == nil {
 			defer res.Body.Close()
@@ -400,17 +401,43 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Affinity: aff, Order: pl.order, Left: pl.left})
 	var skipped []string
 	for i, c := range cands {
-		last := i == len(cands)-1 || r.Context().Err() != nil
-		hw := newHoldWriter(w, !last)
-		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		last := i == len(cands)-1 // the last one may be asked again, not moved on from
 		began := time.Now()
-		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Start: began}) })
-		call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
-		try := Try{ID: c.rest, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error}
+		try := Try{ID: c.rest, Start: began}
+		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, try) })
+		var hw *holdWriter
+		for n := 0; ; n++ {
+			hw = newHoldWriter(w, true)
+			call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+			call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, body, &call)
+			if r.Context().Err() != nil || !last || !hw.recoverable() {
+				break
+			}
+			wait, ok := retryWait(hw.header, n)
+			if !ok {
+				break
+			}
+			try.Retries = append(try.Retries, Retry{Status: call.Status, Wait: wait.Milliseconds(), Error: call.Error})
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			if !sleepFor(r.Context(), wait) {
+				break
+			}
+		}
+		done := func() {
+			try.Done, try.Status, try.Millis, try.Error = true, call.Status, time.Since(began).Milliseconds(), call.Error
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+		}
+		if r.Context().Err() != nil {
+			// the agent went away: nobody is to blame, and nobody else is asked
+			call.Status, call.Error = 499, "canceled"
+			try.Fail, try.Status, try.Error = failCanceled, call.Status, call.Error
+			done()
+			break
+		}
 		if !last && hw.failed() {
 			rest := s.restAfter(c, hw.status, hw.header, hw.held.Bytes())
 			try.Fail, try.Rest = rest.Why, &rest
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			done()
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
@@ -418,13 +445,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		model = c.model
 		if call.Status < 400 {
 			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+			unrest(c.rest)
 			if aff != nil {
 				answered(stuck, c.rest, aff.Turn, call.Usage.CacheRead)
 			}
 		} else {
 			try.Fail = failure(call.Status, []byte(call.Error))
 		}
-		s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+		done()
 		break
 	}
 	if len(skipped) > 0 {
@@ -473,17 +501,10 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// a backend that only streams gets a non-streaming request translated
 	// (the provider is always streamed on that path) rather than relayed
 	relay := p.Base(from) != "" && (p.Account == nil || !p.Account.Stream || streamOf(body))
-	if relay {
-		call.To = from
-		return s.passthrough(w, r, p, from, model, body, &call.Usage)
+	if hw, ok := w.(*holdWriter); ok {
+		hw.streams = true // a stream from a provider waits for its first content
 	}
-	to := p.Speaks()
-	if len(to) == 0 {
-		msg := p.Name + " has no endpoint configured"
-		return writeError(w, from, 502, msg), msg
-	}
-	call.To = to[0]
-	return s.translate(w, r, p, from, to[0], model, body, &call.Usage)
+	return s.serveEndpoints(w, r, from, p, model, body, relay, call)
 }
 
 // forward sends a request to the provider.
@@ -512,59 +533,6 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	return s.client.Do(req)
 }
 
-// passthrough relays a request the provider understands as-is, with the
-// model name swapped for the provider's own. The token counts the reply
-// carries are read on the way past into u.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.Provider, proto provider.Protocol, model string, body []byte, u *Usage) (int, string) {
-	body = rewriteModel(body, model)
-	if proto == provider.Chat {
-		body = developerAsSystem(body)
-	}
-	res, err := s.forward(r.Context(), p, proto, pathOf(proto), p.Prepare(body), r.Header)
-	if err != nil {
-		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error()
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
-		return writeError(w, proto, res.StatusCode, msg), msg
-	}
-	rd, sse := eventStream(res)
-	h := w.Header()
-	for _, k := range []string{"Content-Type", "Request-Id", "X-Request-Id"} {
-		if v := res.Header.Get(k); v != "" {
-			h.Set(k, v)
-		}
-	}
-	if sse {
-		h.Set("Cache-Control", "no-cache")
-		h.Set("X-Accel-Buffering", "no")
-	}
-	w.WriteHeader(res.StatusCode)
-	f, _ := w.(http.Flusher)
-	sniff := newSniffer(proto, res.Header.Get("Content-Type"))
-	defer func() { u.add(sniff.usage()) }()
-	buf := make([]byte, 32<<10)
-	for {
-		n, err := rd.Read(buf)
-		if n > 0 {
-			sniff.write(buf[:n])
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return res.StatusCode, ""
-			}
-			if f != nil {
-				f.Flush()
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
-	return res.StatusCode, ""
-}
-
 // eventStream reports whether a reply is server-sent events. The header
 // says so for most vendors; the ChatGPT backend sends none, so the body's
 // first bytes decide, and the header is filled in for whoever reads it.
@@ -586,134 +554,6 @@ func eventStream(res *http.Response) (io.Reader, bool) {
 		}
 	}
 	return br, false
-}
-
-func (s *Server) responseOnlyModel(providerID, model string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.responseOnly[providerID+"\x00"+model]
-}
-
-func (s *Server) markResponseOnly(providerID, model string) {
-	s.mu.Lock()
-	s.responseOnly[providerID+"\x00"+model] = true
-	s.mu.Unlock()
-}
-
-// forwardTranslated sends one translated, streaming request upstream. Chat is
-// preferred by most OpenAI-compatible providers, but some models are exposed
-// only by the Responses endpoint; retry that endpoint before failing, like
-// Alma's Claude Code provider proxy does.
-func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to provider.Protocol, req *Request, model string, in http.Header) (*http.Response, provider.Protocol, error) {
-	send := func(proto provider.Protocol) (*http.Response, error) {
-		body := build(proto, req, model, p.Host(), p.RejectsTemperature(model))
-		return s.forward(ctx, p, proto, pathOf(proto), p.Prepare(body), in)
-	}
-	if to == provider.Chat && p.Responses != "" && s.responseOnlyModel(p.ID, model) {
-		to = provider.Responses
-	}
-	res, err := send(to)
-	if err != nil {
-		return nil, to, err
-	}
-	if to != provider.Chat || p.Responses == "" || res.StatusCode < 400 {
-		return res, to, nil
-	}
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	res.Body.Close()
-	if !notChatModel(res.StatusCode, b) {
-		res.Body = io.NopCloser(bytes.NewReader(b))
-		return res, to, nil
-	}
-	s.markResponseOnly(p.ID, model)
-	res, err = send(provider.Responses)
-	return res, provider.Responses, err
-}
-
-// notChatModel recognizes the errors used by OpenAI-compatible servers when a
-// model can only be called through /responses.
-func notChatModel(status int, body []byte) bool {
-	if status < 400 {
-		return false
-	}
-	msg := strings.ToLower(string(body))
-	for _, phrase := range []string{
-		"not a chat model",
-		"not supported in the v1/chat/completions",
-		"not supported in /v1/chat/completions",
-		"use v1/completions",
-		"use /v1/completions",
-		"use v1/responses",
-		"use /v1/responses",
-	} {
-		if strings.Contains(msg, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-// translate serves a client API the provider lacks by speaking another
-// one to it. The provider is always streamed; the client gets whichever
-// it asked for.
-func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, model string, body []byte, u *Usage) (int, string) {
-	request, err := parse(from, body)
-	if err != nil {
-		return writeError(w, from, 400, err.Error()), err.Error()
-	}
-	stream := request.Stream
-	request.Stream = true
-	res, actual, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
-	if err != nil {
-		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
-		return writeError(w, from, res.StatusCode, msg), msg
-	}
-	dec := decoder(actual)
-	rd, sse := eventStream(res)
-	if !sse {
-		// the provider ignored stream:true; read the whole reply as one
-		// event stream would be wrong, so give up cleanly
-		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
-		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
-		return writeError(w, from, 502, msg), msg
-	}
-	if stream {
-		enc := encoder(from, newSSEWriter(w), request.Model)
-		var failed string
-		readSSE(rd, func(_, data string) error {
-			return dec(data, func(ev Event) {
-				switch ev.Kind {
-				case KError:
-					failed = ev.Text
-				case KStart, KUsage:
-					u.add(ev.Usage)
-				}
-				enc.event(ev)
-			})
-		})
-		enc.finish()
-		return 200, failed
-	}
-	var col collector
-	readSSE(rd, func(_, data string) error {
-		return dec(data, col.add)
-	})
-	if col.err != "" && len(col.res.Parts) == 0 {
-		return writeError(w, from, 502, p.Name+": "+col.err), col.err
-	}
-	res2 := col.finish()
-	u.add(res2.Usage)
-	out := render(from, res2, request.Model)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	w.Write(out)
-	return 200, col.err
 }
 
 // ---- protocol tables --------------------------------------------------------
@@ -919,6 +759,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // writeError answers in the client's own error shape.
 func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg string) int {
+	writeJSON(w, status, errorBody(proto, status, msg))
+	return status
+}
+
+// errorBody is an error in the client's own shape.
+func errorBody(proto provider.Protocol, status int, msg string) any {
 	typ := "api_error"
 	switch {
 	case status == 400:
@@ -948,6 +794,5 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 	default:
 		v = map[string]any{"error": map[string]any{"message": msg, "type": typ, "code": nil, "param": nil}}
 	}
-	writeJSON(w, status, v)
-	return status
+	return v
 }
