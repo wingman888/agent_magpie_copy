@@ -359,7 +359,7 @@ func TestBktRestoreClearsDanglingIcon(t *testing.T) {
 
 	// Missing picture, nothing on this machine: the reference is dropped.
 	b := Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "bkt-noicon", Name: "NoIcon", Icon: "file:bkt-missing.png"},
+		{ID: "bkt-noicon", Name: "NoIcon", Chat: "https://" + bktHost + "/v1", Icon: "file:bkt-missing.png"},
 	}}
 	if _, err := Restore(b, All); err != nil {
 		t.Fatal(err)
@@ -371,7 +371,7 @@ func TestBktRestoreClearsDanglingIcon(t *testing.T) {
 	// Oversized picture in the bundle: not written, so the reference is dropped.
 	big := make([]byte, provider.MaxIcon+1)
 	b = Bundle{Version: 1, Providers: []provider.Provider{
-		{ID: "bkt-bigicon", Name: "BigIcon", Icon: "file:bkt-big.png"},
+		{ID: "bkt-bigicon", Name: "BigIcon", Chat: "https://" + bktHost + "/v1", Icon: "file:bkt-big.png"},
 	}, Icons: map[string][]byte{"bkt-big.png": big}}
 	if _, err := Restore(b, All); err != nil {
 		t.Fatal(err)
