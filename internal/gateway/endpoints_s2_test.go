@@ -65,10 +65,19 @@ func (u *s2Upstream) count(path string) int {
 	return u.hits[path]
 }
 
-func s2Serve(t *testing.T, p provider.Provider, u *s2Upstream) *httptest.Server {
+// s2Env points config and cache at fresh directories. Call it before any
+// catalog or provider file is written.
+func s2Env(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+}
+
+// s2Serve saves p pointed at the scripted upstream and returns one gateway
+// handler to call through. The handler is shared by the test's requests, as
+// the one running gateway is: what it has learned carries from one to the next.
+func s2Serve(t *testing.T, p provider.Provider, u *s2Upstream) http.Handler {
+	t.Helper()
 	up := httptest.NewServer(u)
 	t.Cleanup(up.Close)
 	p.Key = "k"
@@ -85,29 +94,30 @@ func s2Serve(t *testing.T, p provider.Provider, u *s2Upstream) *httptest.Server 
 	if err := provider.Save(p); err != nil {
 		t.Fatal(err)
 	}
-	return up
+	return New().Handler()
 }
 
-func s2Call(path, body string) (int, string) {
+func s2Call(h http.Handler, path, body string) (int, string) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))
-	New().Handler().ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	return rec.Code, rec.Body.String()
 }
 
 func TestS2EndpointChatRefusedMovesToResponses(t *testing.T) {
 	u := &s2Upstream{hits: map[string]int{}, chat: 400,
 		chatMsg: `{"error":{"message":"model s2ep-m is not accessible via the /chat/completions endpoint"}}`}
-	s2Serve(t, provider.Provider{ID: "s2ep", Name: "S2", Models: []string{"s2ep-m"}, Chat: "x", Responses: "x"}, u)
+	s2Env(t)
+	h := s2Serve(t, provider.Provider{ID: "s2ep", Name: "S2", Models: []string{"s2ep-m"}, Chat: "x", Responses: "x"}, u)
 
 	body := `{"model":"s2ep-m","messages":[{"role":"user","content":"hi"}]}`
-	if code, out := s2Call("/v1/chat/completions", body); code != 200 || !strings.Contains(out, "responses ok") {
+	if code, out := s2Call(h, "/v1/chat/completions", body); code != 200 || !strings.Contains(out, "responses ok") {
 		t.Fatalf("first: %d %s", code, out)
 	}
 	if u.count("/v1/chat/completions") != 1 || u.count("/v1/responses") != 1 {
 		t.Fatalf("first calls: chat=%d responses=%d", u.count("/v1/chat/completions"), u.count("/v1/responses"))
 	}
-	if code, out := s2Call("/v1/chat/completions", body); code != 200 || !strings.Contains(out, "responses ok") {
+	if code, out := s2Call(h, "/v1/chat/completions", body); code != 200 || !strings.Contains(out, "responses ok") {
 		t.Fatalf("second: %d %s", code, out)
 	}
 	if u.count("/v1/chat/completions") != 1 || u.count("/v1/responses") != 2 {
@@ -118,13 +128,14 @@ func TestS2EndpointChatRefusedMovesToResponses(t *testing.T) {
 func TestS2EndpointResponsesRefusedMovesToChat(t *testing.T) {
 	u := &s2Upstream{hits: map[string]int{}, resp: 400,
 		respMsg: `{"error":{"code":"unsupported_api_for_model","message":"model not supported"}}`}
-	s2Serve(t, provider.Provider{ID: "s2ep", Name: "S2", Models: []string{"s2ep-m"}, Chat: "x", Responses: "x"}, u)
+	s2Env(t)
+	h := s2Serve(t, provider.Provider{ID: "s2ep", Name: "S2", Models: []string{"s2ep-m"}, Chat: "x", Responses: "x"}, u)
 
 	body := `{"model":"s2ep-m","input":"hi"}`
-	if code, out := s2Call("/v1/responses", body); code != 200 || !strings.Contains(out, "chat ok") {
+	if code, out := s2Call(h, "/v1/responses", body); code != 200 || !strings.Contains(out, "chat ok") {
 		t.Fatalf("first: %d %s", code, out)
 	}
-	if code, out := s2Call("/v1/responses", body); code != 200 || !strings.Contains(out, "chat ok") {
+	if code, out := s2Call(h, "/v1/responses", body); code != 200 || !strings.Contains(out, "chat ok") {
 		t.Fatalf("second: %d %s", code, out)
 	}
 	if u.count("/v1/responses") != 1 || u.count("/v1/chat/completions") != 2 {
@@ -134,9 +145,10 @@ func TestS2EndpointResponsesRefusedMovesToChat(t *testing.T) {
 
 func TestS2EndpointServerErrorDoesNotSwitch(t *testing.T) {
 	u := &s2Upstream{hits: map[string]int{}, chat: 500, chatMsg: `use v1/responses`}
-	s2Serve(t, provider.Provider{ID: "s2ep", Name: "S2", Models: []string{"s2ep-m"}, Chat: "x", Responses: "x"}, u)
+	s2Env(t)
+	h := s2Serve(t, provider.Provider{ID: "s2ep", Name: "S2", Models: []string{"s2ep-m"}, Chat: "x", Responses: "x"}, u)
 
-	code, _ := s2Call("/v1/chat/completions", `{"model":"s2ep-m","messages":[{"role":"user","content":"hi"}]}`)
+	code, _ := s2Call(h, "/v1/chat/completions", `{"model":"s2ep-m","messages":[{"role":"user","content":"hi"}]}`)
 	if code != 500 {
 		t.Fatalf("status %d, want 500", code)
 	}
@@ -146,6 +158,7 @@ func TestS2EndpointServerErrorDoesNotSwitch(t *testing.T) {
 }
 
 func TestS2EndpointDeclaredAPIsOnly(t *testing.T) {
+	s2Env(t)
 	if err := catalog.SaveLive("s2decl", "http://x", []catalog.Model{
 		{ID: "s2decl-gpt", APIs: []string{"responses"}},
 		{ID: "s2decl-claude", APIs: []string{"chat"}},
@@ -153,16 +166,16 @@ func TestS2EndpointDeclaredAPIsOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := &s2Upstream{hits: map[string]int{}}
-	s2Serve(t, provider.Provider{ID: "s2decl", Name: "S2", Models: []string{"s2decl-gpt", "s2decl-claude"},
+	h := s2Serve(t, provider.Provider{ID: "s2decl", Name: "S2", Models: []string{"s2decl-gpt", "s2decl-claude"},
 		Chat: "x", Responses: "x", Anthropic: "x"}, u)
 
-	if code, _ := s2Call("/v1/chat/completions", `{"model":"s2decl-gpt","messages":[{"role":"user","content":"hi"}]}`); code != 200 {
+	if code, _ := s2Call(h, "/v1/chat/completions", `{"model":"s2decl-gpt","messages":[{"role":"user","content":"hi"}]}`); code != 200 {
 		t.Fatalf("gpt via chat: %d", code)
 	}
 	if u.count("/v1/responses") != 1 || u.count("/v1/chat/completions") != 0 {
 		t.Fatalf("gpt calls: responses=%d chat=%d", u.count("/v1/responses"), u.count("/v1/chat/completions"))
 	}
-	if code, _ := s2Call("/v1/messages", `{"model":"s2decl-claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`); code != 200 {
+	if code, _ := s2Call(h, "/v1/messages", `{"model":"s2decl-claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`); code != 200 {
 		t.Fatalf("claude via anthropic: %d", code)
 	}
 	if u.count("/v1/chat/completions") != 1 || u.count("/v1/messages") != 0 {
