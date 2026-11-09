@@ -261,7 +261,7 @@ func TestFbgwReasonLeadsWithStatusOnce(t *testing.T) {
 	if got := reasonOf(p, 429, "Fbgw A: rate limited"); got != "429 rate limited" {
 		t.Fatalf("got %q", got)
 	}
-	if got := reasonOf(p, 502, "Fbgw A has no endpoint configured"); got != "502 has no endpoint configured" {
+	if got := reasonOf(p, 502, "Fbgw A has no endpoint configured"); got != "502 Fbgw A has no endpoint configured" {
 		t.Fatalf("got %q", got)
 	}
 }
