@@ -64,9 +64,9 @@ var (
 )
 
 func main() {
-	netproxy.Install()
 	gateway.Version = version
 	update.GUI = hasGUI
+	netproxy.Install()
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
 		os.Exit(1)
