@@ -501,7 +501,7 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "key":
 			p.Key = v
 		case "catalog":
-			p.Catalog = v
+			p.Catalog = strings.Join(provider.CatalogIDs(v), ",")
 		case "models":
 			p.Models = strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' })
 		case "website":

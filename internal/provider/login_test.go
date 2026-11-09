@@ -398,6 +398,38 @@ func TestAcctxAddLoginRemembersPreviousAndSwitchesNewOn(t *testing.T) {
 	}
 }
 
+// While `accounts add` has the sign-in page open, the copy magpie made of the
+// current sign-in survives, and the current token is not refreshed (which
+// would rotate the token the copy holds). Once the marker is gone, the agent
+// holds the sign-in alone again and the copy goes.
+func TestAcctxSignInWindowKeepsCopy(t *testing.T) {
+	home := acctxSetup(t)
+	a, _ := acctxCodex("a@example.com", "pro", "ra")
+	expired := fakeJWT(map[string]any{"exp": float64(time.Now().Add(-time.Hour).Unix()), "sub": "a"})
+	a["tokens"].(map[string]any)["access_token"] = expired
+	writeFile(t, acctxAuthPath(home), a)
+	writeFile(t, loginCreds("codex", "a@example.com"), a)
+	if err := os.WriteFile(signInMarker("codex"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	Logins("codex")
+	if !fileExists(loginCreds("codex", "a@example.com")) {
+		t.Fatal("the copy was dropped while the sign-in page was open")
+	}
+	// no network: the expired token is handed back as it is, not refreshed
+	tok, _, err := codexToken(context.Background(), acctxAuthPath(home))
+	if err != nil || tok != expired {
+		t.Fatalf("token during sign-in = %q, %v", tok, err)
+	}
+
+	os.Remove(signInMarker("codex"))
+	Logins("codex")
+	if fileExists(loginCreds("codex", "a@example.com")) {
+		t.Fatal("the agent holds this sign-in now, but magpie kept a copy")
+	}
+}
+
 func TestAcctxUnknownAgentIsRefused(t *testing.T) {
 	acctxSetup(t)
 	if _, ok := CanonicalAgent("gemini"); ok {

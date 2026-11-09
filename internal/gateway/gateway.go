@@ -58,23 +58,23 @@ func Running() bool {
 
 // Call is one request the gateway handled, for the status views.
 type Call struct {
-	Time              time.Time         `json:"time"`
-	Agent             string            `json:"agent"` // who called, from the client's User-Agent
-	Model             string            `json:"model"`
-	Provider          string            `json:"provider"`
-	From              provider.Protocol `json:"from"`
-	To                provider.Protocol `json:"to"`
-	Status            int               `json:"status"`
-	Millis            int64             `json:"ms"`
-	Error             string            `json:"error,omitempty"`
+	Time     time.Time         `json:"time"`
+	Agent    string            `json:"agent"` // who called, from the client's User-Agent
+	Model    string            `json:"model"`
+	Provider string            `json:"provider"`
+	From     provider.Protocol `json:"from"`
+	To       provider.Protocol `json:"to"`
+	Status   int               `json:"status"`
+	Millis   int64             `json:"ms"`
+	Error    string            `json:"error,omitempty"`
 	// Fallback names the candidates that failed before the one that answered:
 	// a provider id, with the key's name in brackets when the key has one.
-	Fallback          string            `json:"fallback,omitempty"`
-	Usage             Usage             `json:"usage"`
-	RequestBody       string            `json:"requestBody,omitempty"`
-	ResponseBody      string            `json:"responseBody,omitempty"`
-	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
-	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	Fallback          string `json:"fallback,omitempty"`
+	Usage             Usage  `json:"usage"`
+	RequestBody       string `json:"requestBody,omitempty"`
+	ResponseBody      string `json:"responseBody,omitempty"`
+	RequestTruncated  bool   `json:"requestTruncated,omitempty"`
+	ResponseTruncated bool   `json:"responseTruncated,omitempty"`
 }
 
 // Server is the gateway.

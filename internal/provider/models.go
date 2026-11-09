@@ -24,7 +24,7 @@ func (p Provider) Available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		known = catalog.Provider(p.Catalog)
+		known = p.knownModels()
 	}
 	if live, _, ok := catalog.Live(p.ID); ok {
 		return catalog.Decorate(live, known)
@@ -36,6 +36,39 @@ func (p Provider) Available() []catalog.Model {
 	for _, m := range known {
 		if !strings.Contains(m.ID, "-exp") && !strings.Contains(m.ID, "preview") {
 			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// CatalogIDs splits a provider's catalog field, which may name several
+// models.dev providers separated by commas ("openai,deepseek"), into the
+// ids in the order given: trimmed, lowercased, empties and repeats dropped.
+func CatalogIDs(s string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(s, ",") {
+		id := strings.ToLower(strings.TrimSpace(part))
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+// knownModels is the models.dev list of every catalog the provider names,
+// in the order named; a model listed by an earlier catalog wins.
+func (p Provider) knownModels() []catalog.Model {
+	var out []catalog.Model
+	seen := map[string]bool{}
+	for _, cid := range CatalogIDs(p.Catalog) {
+		for _, m := range catalog.Provider(cid) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out = append(out, m)
+			}
 		}
 	}
 	return out
@@ -70,17 +103,13 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 // user's picks; else the preset's; else everything, when that is few.
 func (p Provider) Exposed() []catalog.Model {
 	avail := p.Available()
-	byID := make(map[string]catalog.Model, len(avail))
-	for _, m := range avail {
-		byID[m.ID] = m
-	}
 	pick := func(ids []string) []catalog.Model {
 		out := make([]catalog.Model, 0, len(ids))
 		for _, id := range ids {
-			if m, ok := byID[id]; ok {
+			if m, ok := catalog.Lookup(avail, id); ok {
 				out = append(out, m)
 			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.Catalog})
+				out = append(out, catalog.Model{ID: id, Name: id, Provider: strings.Join(CatalogIDs(p.Catalog), ",")})
 			}
 		}
 		return out
@@ -102,10 +131,8 @@ func (p Provider) Exposed() []catalog.Model {
 // plus the vendor's own list — so a model released after this binary was
 // built is handled without a code change.
 func (p Provider) RejectsTemperature(model string) bool {
-	for _, m := range p.Available() {
-		if m.ID == model && m.Temperature != nil {
-			return !*m.Temperature
-		}
+	if m, ok := catalog.Lookup(p.Available(), model); ok && m.Temperature != nil {
+		return !*m.Temperature
 	}
 	return false
 }

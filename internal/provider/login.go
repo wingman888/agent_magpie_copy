@@ -54,9 +54,18 @@ var loginAgents = []string{"claude", "codex"}
 // It is taken before an agent's own lock (claudeMu, codexMu), never after.
 var loginMu sync.Mutex
 
-// loginAdding is set while `accounts add` waits for the agent's sign-in page,
-// so the account being replaced keeps the copy magpie made of it.
-var loginAdding = map[string]bool{}
+// signInMarker is left in the accounts directory while `accounts add` has the
+// agent's sign-in page open. Until it goes, the agent's current sign-in is not
+// refreshed and magpie's copy of it is not dropped, so the copy stays valid: a
+// refresh would rotate the token the copy holds. The marker is only honoured
+// for a quarter of an hour, in case the command was killed. It is a file, not
+// a flag, because the gateway may run in another process.
+func signInMarker(agent string) string { return filepath.Join(loginDir(), "signing-in-"+agent) }
+
+func signingIn(agent string) bool {
+	st, err := os.Stat(signInMarker(agent))
+	return err == nil && time.Since(st.ModTime()) < 15*time.Minute
+}
 
 // CanonicalAgent maps an agent name the user typed to the id magpie keeps:
 // claude (and its alias cc), or codex.
@@ -257,7 +266,7 @@ func rememberLocked(accts []Provider) {
 			i = len(rs) - 1
 		}
 		rs[i].Plan = cur.Account.Plan
-		if !loginAdding[agent] {
+		if !signingIn(agent) {
 			os.Remove(loginCreds(agent, cur.Account.User))
 		}
 	}
@@ -436,13 +445,20 @@ func AddLogin(agent string, login func() error) ([]Login, error) {
 			return nil, err
 		}
 	}
-	loginAdding[name] = true
+	if err := os.MkdirAll(loginDir(), 0o700); err != nil {
+		loginMu.Unlock()
+		return nil, err
+	}
+	if err := os.WriteFile(signInMarker(name), nil, 0o600); err != nil {
+		loginMu.Unlock()
+		return nil, err
+	}
 	loginMu.Unlock()
 
 	err := login()
 
 	loginMu.Lock()
-	loginAdding[name] = false
+	os.Remove(signInMarker(name))
 	accts = Accounts()
 	rememberLocked(accts)
 	rs := readLogins()

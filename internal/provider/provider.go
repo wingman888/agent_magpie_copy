@@ -62,7 +62,9 @@ type Provider struct {
 	// provider's own keys have failed for a reason that allows a switch.
 	Fallback []string `json:"fallback,omitempty"`
 
-	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
+	// Catalog names the models.dev provider(s) used for names and reasoning
+	// levels: one id, or several separated by commas, searched in order.
+	Catalog string `json:"catalog,omitempty"`
 	Website string `json:"website,omitempty"`
 	KeysURL string `json:"keysUrl,omitempty"`
 
@@ -291,6 +293,7 @@ func normalize(p Provider) Provider {
 	p.Headers = cleanHeaders(p.Headers)
 	p.KeyName = strings.TrimSpace(p.KeyName)
 	p.Keys = cleanKeys(p.Keys)
+	p.Catalog = strings.Join(CatalogIDs(p.Catalog), ",")
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon

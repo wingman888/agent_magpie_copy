@@ -477,6 +477,11 @@ func claudeToken(ctx context.Context) (string, error) {
 	if claudeFresh(c) {
 		return c.OAuth.AccessToken, nil
 	}
+	if signingIn("claude") {
+		// magpie keeps a copy of this sign-in for `accounts add`; refreshing
+		// would rotate the token the copy holds
+		return c.OAuth.AccessToken, nil
+	}
 	if c.OAuth.RefreshToken == "" {
 		return "", errors.New("Claude Code OAuth token expired; run claude auth login")
 	}
@@ -654,6 +659,10 @@ func codexToken(ctx context.Context, path string) (tok, accountID string, err er
 		accountID = claimString(jwtClaims(a.Tokens.IDToken), "https://api.openai.com/auth", "chatgpt_account_id")
 	}
 	if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
+		return a.Tokens.AccessToken, accountID, nil
+	}
+	if path == codexAuthFile() && signingIn("codex") {
+		// see claudeToken: the copy magpie keeps must not be left behind by a refresh
 		return a.Tokens.AccessToken, accountID, nil
 	}
 	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token",
