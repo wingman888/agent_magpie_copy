@@ -556,10 +556,10 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	_ = os.RemoveAll(run.tmp)
 }
 
-func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) (int, string) {
+func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) attemptResult {
 	req, err := parse(from, body)
 	if err != nil {
-		return writeError(w, from, 400, err.Error()), err.Error()
+		return attemptResult{status: 400, err: err.Error(), client: err.Error()}
 	}
 	stream := req.Stream
 	req.Model = model
@@ -572,7 +572,8 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 		run, events, err = s.subscription.start(r.Context(), req, model)
 	}
 	if err != nil {
-		return writeError(w, from, 502, "Claude Code: "+err.Error()), err.Error()
+		// the CLI could not be started or resumed: a failure of the provider, not of the request
+		return attemptResult{status: 502, err: err.Error(), client: "Claude Code: " + err.Error(), retry: true}
 	}
 
 	if stream {
@@ -588,7 +589,7 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 			enc.event(ev)
 		}
 		enc.finish()
-		return 200, failed
+		return attemptResult{status: 200, err: failed}
 	}
 	var col collector
 	for ev := range events {
@@ -596,12 +597,13 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 	if col.err != "" && len(col.res.Parts) == 0 {
 		run.abort()
-		return writeError(w, from, 502, "Claude Code: "+col.err), col.err
+		// a reply with no content yet: an upstream failure, so another provider may answer
+		return attemptResult{status: 502, err: col.err, client: "Claude Code: " + col.err, retry: true}
 	}
 	res := col.finish()
 	usage.add(res.Usage)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	_, _ = w.Write(render(from, res, req.Model))
-	return 200, col.err
+	return attemptResult{status: 200, err: col.err}
 }
