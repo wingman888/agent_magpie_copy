@@ -31,11 +31,6 @@ type SubscriptionQuota struct {
 	Plan     string        `json:"plan,omitempty"`
 	Windows  []QuotaWindow `json:"windows"`
 	Error    string        `json:"error,omitempty"`
-	// FiveHour and Weekly are the used share of the 5-hour and the weekly
-	// window, in percent. Only LoginUsage fills them; the other lookups leave
-	// them zero, which is omitted from the JSON.
-	FiveHour float64 `json:"fiveHour,omitempty"`
-	Weekly   float64 `json:"weekly,omitempty"`
 }
 
 var subscriptionUsageCache struct {

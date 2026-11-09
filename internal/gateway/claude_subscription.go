@@ -102,15 +102,7 @@ func callbackBaseURL() string {
 	return "http://" + host + ":" + port
 }
 
-// start runs the claude binary for one request, signed in with the agent's
-// own login.
 func (b *subscriptionBridge) start(ctx context.Context, req *Request, model string) (*subscriptionRun, <-chan Event, error) {
-	return b.startIn(ctx, req, model, "")
-}
-
-// startIn is start for a login kept in configDir when it is set: the binary
-// signs in with that login instead of the agent's own.
-func (b *subscriptionBridge) startIn(ctx context.Context, req *Request, model, configDir string) (*subscriptionRun, <-chan Event, error) {
 	binary, err := claudeBinary()
 	if err != nil {
 		return nil, nil, err
@@ -152,10 +144,6 @@ func (b *subscriptionBridge) startIn(ctx context.Context, req *Request, model, c
 	cmd := exec.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
 	cmd.Env = cleanClaudeEnv(os.Environ())
-	if configDir != "" {
-		// later entries win, so this overrides any CLAUDE_CONFIG_DIR inherited
-		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+configDir)
-	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cleanup()
@@ -440,7 +428,7 @@ func (b *subscriptionBridge) findRun(req *Request) (*subscriptionRun, []Part) {
 	// Claude emits message_stop just before its MCP calls are all scheduled.
 	// A very fast client can return a result while the callback is still being
 	// registered; give that tiny race a bounded grace period.
-	for attempt := 0; attempt < 20; attempt++ {
+	for magAttempt := 0; magAttempt < 20; magAttempt++ {
 		var found *subscriptionRun
 		var results []Part
 		b.mu.Lock()
@@ -456,7 +444,7 @@ func (b *subscriptionBridge) findRun(req *Request) (*subscriptionRun, []Part) {
 			found, results = run, append(results, p)
 		}
 		b.mu.Unlock()
-		if found != nil || len(all) == 0 || attempt == 19 {
+		if found != nil || len(all) == 0 || magAttempt == 19 {
 			return found, results
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -569,12 +557,6 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 }
 
 func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, model string, body []byte, usage *Usage) (int, string) {
-	return s.serveClaudeSubscriptionIn(w, r, from, model, "", body, usage)
-}
-
-// serveClaudeSubscriptionIn is serveClaudeSubscription for the login kept in
-// configDir ("" is the agent's own login).
-func (s *Server) serveClaudeSubscriptionIn(w http.ResponseWriter, r *http.Request, from provider.Protocol, model, configDir string, body []byte, usage *Usage) (int, string) {
 	req, err := parse(from, body)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
@@ -587,7 +569,7 @@ func (s *Server) serveClaudeSubscriptionIn(w http.ResponseWriter, r *http.Reques
 	if run != nil {
 		events, err = run.continueWith(results)
 	} else {
-		run, events, err = s.subscription.startIn(r.Context(), req, model, configDir)
+		run, events, err = s.subscription.start(r.Context(), req, model)
 	}
 	if err != nil {
 		return writeError(w, from, 502, "Claude Code: "+err.Error()), err.Error()
