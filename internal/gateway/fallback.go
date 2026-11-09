@@ -9,6 +9,8 @@ package gateway
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"regexp"
 	"sync"
@@ -19,15 +21,53 @@ import (
 
 const fallbackCooldown = time.Minute
 
+// candidate is one attempt: a provider with one key in front, and a model.
 type candidate struct {
-	p     provider.Provider
-	model string
+	p       provider.Provider
+	model   string
+	// account names the key in the call record when its provider has several
+	// enabled keys: the key's name, else its masked form. Empty otherwise.
+	account string
 }
 
-// candidates is the primary and then its fallbacks, those resting after a
-// recent failure moved behind the rest.
+// label is how a skipped attempt is named in the call record.
+func (c candidate) label() string {
+	if c.account == "" {
+		return c.p.ID
+	}
+	return c.p.ID + "(" + c.account + ")"
+}
+
+// keyCandidates is one candidate per enabled key of p, in the order they are
+// tried. A provider with no enabled key (a signed-in account, or one that
+// needs none) is a single candidate, as it always was.
+func keyCandidates(p provider.Provider, model string) []candidate {
+	keys := p.KeysOn()
+	if len(keys) == 0 {
+		return []candidate{{p: p, model: model}}
+	}
+	out := make([]candidate, 0, len(keys))
+	for _, k := range keys {
+		q := p
+		q.Key, q.KeyName, q.Keys = k.Key, k.Name, nil
+		c := candidate{p: q, model: model}
+		if len(keys) > 1 {
+			c.account = k.Name
+			if c.account == "" {
+				c.account = provider.Mask(k.Key)
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// candidates is the primary's keys and then each fallback's, those resting
+// after a recent failure moved behind the rest. A provider's own keys stay
+// together, so its keys are all tried before any fallback; within a provider
+// the resting keys follow the ready ones.
 func (s *Server) candidates(p provider.Provider, model string) []candidate {
-	out := []candidate{{p, model}}
+	groups := [][]candidate{keyCandidates(p, model)}
 	seen := map[string]bool{p.ID + "/" + model: true}
 	for _, id := range p.Fallback {
 		fp, fm, ok := provider.Resolve(id)
@@ -35,20 +75,36 @@ func (s *Server) candidates(p provider.Provider, model string) []candidate {
 			continue
 		}
 		seen[fp.ID+"/"+fm] = true
-		out = append(out, candidate{fp, fm})
+		groups = append(groups, keyCandidates(fp, fm))
 	}
-	if len(out) == 1 {
-		return out
+	if len(groups) == 1 && len(groups[0]) == 1 {
+		return groups[0]
 	}
-	var ready, resting []candidate
-	for _, c := range out {
-		if s.resting(c.p.ID) {
-			resting = append(resting, c)
+	var out, back []candidate
+	for _, g := range groups {
+		var ready, resting []candidate
+		for _, c := range g {
+			if s.resting(restKey(c.p)) {
+				resting = append(resting, c)
+			} else {
+				ready = append(ready, c)
+			}
+		}
+		if len(ready) > 0 {
+			out = append(out, ready...)
+			out = append(out, resting...)
 		} else {
-			ready = append(ready, c)
+			back = append(back, resting...)
 		}
 	}
-	return append(ready, resting...)
+	return append(out, back...)
+}
+
+// restKey names what a failure rests: one key of one provider. Each key rests
+// on its own, so a provider's other keys are still tried at once.
+func restKey(p provider.Provider) string {
+	sum := sha256.Sum256([]byte(p.Key))
+	return p.ID + "\x00" + hex.EncodeToString(sum[:8])
 }
 
 var restingUntil = struct {
@@ -56,15 +112,15 @@ var restingUntil = struct {
 	m map[string]time.Time
 }{m: map[string]time.Time{}}
 
-func (s *Server) resting(id string) bool {
+func (s *Server) resting(key string) bool {
 	restingUntil.Lock()
 	defer restingUntil.Unlock()
-	return time.Now().Before(restingUntil.m[id])
+	return time.Now().Before(restingUntil.m[key])
 }
 
-func (s *Server) rest(id string) {
+func (s *Server) rest(key string) {
 	restingUntil.Lock()
-	restingUntil.m[id] = time.Now().Add(fallbackCooldown)
+	restingUntil.m[key] = time.Now().Add(fallbackCooldown)
 	restingUntil.Unlock()
 }
 

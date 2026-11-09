@@ -35,12 +35,14 @@ type Provider struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon,omitempty"`
 	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Key    string `json:"key"`              // API key, as typed by the user: the front key, tried first
 
-	// KeyName names the front key, and Keys are the other keys in the order
-	// they are tried (see keys.go). Key is always the front one.
-	KeyName string     `json:"keyName,omitempty"`
-	Keys    []KeyEntry `json:"keys,omitempty"`
+	// KeyName names the front key ("personal", "team"); may be empty.
+	KeyName string `json:"keyName,omitempty"`
+
+	// Keys are the other keys, in the order they are tried after the front
+	// one. An Off key is kept but never used. See keys.go.
+	Keys []ExtraKey `json:"keys,omitempty"`
 
 	// Base URLs, one per protocol the vendor serves natively. magpie appends
 	// the usual paths: chat/responses bases end in /v1 (OpenAI style),
@@ -212,7 +214,6 @@ func Save(p Provider) error {
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
-			p = mergeKeys(f.Providers[i], p)
 			f.Providers[i] = p
 			return store(f)
 		}
@@ -265,8 +266,6 @@ func normalize(p Provider) Provider {
 	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
 	p.Name = strings.TrimSpace(p.Name)
 	p.Key = strings.TrimSpace(p.Key)
-	p.KeyName = strings.TrimSpace(p.KeyName)
-	p.Keys = cleanKeys(p.Key, p.Keys)
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
 		if *u != "" && !strings.Contains(*u, "://") {
