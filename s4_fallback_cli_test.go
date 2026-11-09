@@ -8,7 +8,7 @@ import (
 )
 
 func TestS4ProviderFallbackCommand(t *testing.T) {
-	s1CLIEnv(t)
+	magS1CLIEnv(t)
 	if err := provider.Save(provider.Provider{ID: "s4cli", Name: "S4 CLI", Chat: "https://a.example/v1", Key: "sk-s4"}); err != nil {
 		t.Fatal(err)
 	}

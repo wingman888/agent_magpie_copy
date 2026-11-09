@@ -98,7 +98,7 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 
 	var lastErr error
 	for _, u := range urls {
-		ms, err := fetchOneWith(ctx, u, key, anthropic, headers)
+		ms, err := magFetchOneWith(ctx, u, key, anthropic, headers)
 		if err == nil && len(ms) > 0 {
 			return ms, nil
 		}
@@ -116,11 +116,11 @@ func FetchWith(ctx context.Context, base, key string, anthropic bool, headers ma
 }
 
 func fetchOne(ctx context.Context, url, key string, anthropic bool) ([]Model, error) {
-	return fetchOneWith(ctx, url, key, anthropic, nil)
+	return magFetchOneWith(ctx, url, key, anthropic, nil)
 }
 
-// fetchOneWith is fetchOne with extra request headers.
-func fetchOneWith(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
+// magFetchOneWith is fetchOne with extra request headers.
+func magFetchOneWith(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

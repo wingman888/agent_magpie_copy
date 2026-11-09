@@ -20,15 +20,15 @@ import (
 // MaxIcon is the largest picture kept as a provider icon.
 const MaxIcon = 1 << 20
 
-// iconRefPrefix marks an icon value that points at a stored picture.
-const iconRefPrefix = "file:"
+// magIconRefPrefix marks an icon value that points at a stored picture.
+const magIconRefPrefix = "file:"
 
-// iconGrace is how long an unreferenced picture survives: long enough for a
+// magIconGrace is how long an unreferenced picture survives: long enough for a
 // picture chosen in the UI to be saved with its provider.
-const iconGrace = time.Hour
+const magIconGrace = time.Hour
 
-// iconNameRe is the only shape of stored picture name IconFile accepts.
-var iconNameRe = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
+// magIconNameRe is the only shape of stored picture name IconFile accepts.
+var magIconNameRe = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
 
 // IconDir is the folder pictures are stored in.
 func IconDir() string {
@@ -38,7 +38,7 @@ func IconDir() string {
 // IconFile turns a stored picture's name into its path on disk. Anything
 // that is not exactly a name StoreIcon could have produced gives "".
 func IconFile(name string) string {
-	if !iconNameRe.MatchString(name) {
+	if !magIconNameRe.MatchString(name) {
 		return ""
 	}
 	return filepath.Join(IconDir(), name)
@@ -54,7 +54,7 @@ func StoreIcon(data []byte) (string, error) {
 	if len(data) > MaxIcon {
 		return "", fmt.Errorf("the icon is larger than %d KB", MaxIcon>>10)
 	}
-	ext := sniffIcon(data)
+	ext := magSniffIcon(data)
 	if ext == "" {
 		return "", errors.New("the icon is not a PNG, JPEG, GIF, WebP, ICO or SVG picture")
 	}
@@ -71,7 +71,7 @@ func StoreIcon(data []byte) (string, error) {
 	now := time.Now()
 	if _, err := os.Stat(p); err == nil {
 		_ = os.Chtimes(p, now, now)
-		return iconRefPrefix + name, nil
+		return magIconRefPrefix + name, nil
 	}
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
@@ -81,12 +81,12 @@ func StoreIcon(data []byte) (string, error) {
 		os.Remove(tmp)
 		return "", err
 	}
-	return iconRefPrefix + name, nil
+	return magIconRefPrefix + name, nil
 }
 
-// sniffIcon names the picture format from its leading bytes, or "" when the
+// magSniffIcon names the picture format from its leading bytes, or "" when the
 // data is none of the formats magpie takes.
-func sniffIcon(data []byte) string {
+func magSniffIcon(data []byte) string {
 	switch {
 	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
 		return "png"
@@ -98,15 +98,15 @@ func sniffIcon(data []byte) string {
 		return "webp"
 	case bytes.HasPrefix(data, []byte{0, 0, 1, 0}):
 		return "ico"
-	case isSVG(data):
+	case magIsSVG(data):
 		return "svg"
 	}
 	return ""
 }
 
-// isSVG is true when the text opens with an <svg> element, or with an XML
+// magIsSVG is true when the text opens with an <svg> element, or with an XML
 // declaration, comment or doctype and then an <svg> element.
-func isSVG(data []byte) bool {
+func magIsSVG(data []byte) bool {
 	t := bytes.TrimPrefix(data, []byte("\xEF\xBB\xBF"))
 	t = bytes.TrimLeft(t, " \t\r\n")
 	lower := bytes.ToLower(t)
@@ -134,22 +134,22 @@ func BuiltinIcon(name string) bool {
 	return false
 }
 
-// iconRefName returns the stored picture's name when an icon value refers to
+// magIconRefName returns the stored picture's name when an icon value refers to
 // one, and whether that reference resolves to a legal file.
-func iconRefName(icon string) (string, bool) {
-	name, ok := strings.CutPrefix(icon, iconRefPrefix)
+func magIconRefName(icon string) (string, bool) {
+	name, ok := strings.CutPrefix(icon, magIconRefPrefix)
 	if !ok {
 		return "", false
 	}
 	return name, IconFile(name) != ""
 }
 
-// pruneIcons deletes stored pictures that no provider in f refers to and
-// that have not been touched within iconGrace.
-func pruneIcons(f file) {
+// magPruneIcons deletes stored pictures that no provider in f refers to and
+// that have not been touched within magIconGrace.
+func magPruneIcons(f file) {
 	used := map[string]bool{}
 	for _, p := range f.Providers {
-		if name, ok := iconRefName(p.Icon); ok {
+		if name, ok := magIconRefName(p.Icon); ok {
 			used[name] = true
 		}
 	}
@@ -163,7 +163,7 @@ func pruneIcons(f file) {
 			continue
 		}
 		info, err := e.Info()
-		if err != nil || time.Since(info.ModTime()) < iconGrace {
+		if err != nil || time.Since(info.ModTime()) < magIconGrace {
 			continue
 		}
 		os.Remove(filepath.Join(IconDir(), name))

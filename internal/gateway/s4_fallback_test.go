@@ -13,26 +13,26 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// s4Env keeps config, cache and home out of the real ones.
-func s4Env(t *testing.T) {
+// magS4Env keeps config, cache and home out of the real ones.
+func magS4Env(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 }
 
-// s4Upstream answers by the model a request names. Models in fail get that
+// magS4Upstream answers by the model a request names. Models in fail get that
 // status back, with a quota message; models in streamFail open a 200 stream
 // whose first event is a rate-limit error; the rest get a reply. It records
 // the model names it was asked for, in order.
-type s4Upstream struct {
+type magS4Upstream struct {
 	mu         sync.Mutex
 	asked      []string
 	fail       map[string]int
 	streamFail map[string]bool
 }
 
-func (u *s4Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (u *magS4Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(r.Body)
 	var req struct {
 		Model  string `json:"model"`
@@ -61,15 +61,15 @@ func (u *s4Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, `{"id":"s4","object":"chat.completion","model":"`+req.Model+`","choices":[{"index":0,"message":{"role":"assistant","content":"s4 ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 }
 
-func (u *s4Upstream) seen() string {
+func (u *magS4Upstream) seen() string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return strings.Join(u.asked, ",")
 }
 
-// s4Setup saves "backup" (model m2) and "main" (model m1), both served by one
+// magS4Setup saves "backup" (model m2) and "main" (model m1), both served by one
 // upstream, with main's fallback list as given.
-func s4Setup(t *testing.T, up *s4Upstream, fallback ...string) {
+func magS4Setup(t *testing.T, up *magS4Upstream, fallback ...string) {
 	t.Helper()
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
@@ -81,8 +81,8 @@ func s4Setup(t *testing.T, up *s4Upstream, fallback ...string) {
 	}
 }
 
-// s4Post sends one request through the gateway's own handler.
-func s4Post(t *testing.T, s *Server, body string) (int, string) {
+// magS4Post sends one request through the gateway's own handler.
+func magS4Post(t *testing.T, s *Server, body string) (int, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -91,15 +91,15 @@ func s4Post(t *testing.T, s *Server, body string) (int, string) {
 	return rec.Code, rec.Body.String()
 }
 
-const s4Chat = `{"model":"main/m1","messages":[{"role":"user","content":"hi"}]}`
-const s4Stream = `{"model":"main/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+const magS4Chat = `{"model":"main/m1","messages":[{"role":"user","content":"hi"}]}`
+const magS4Stream = `{"model":"main/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 
 func TestS4FallbackServesWhenMainIsOutOfQuota(t *testing.T) {
-	s4Env(t)
-	up := &s4Upstream{fail: map[string]int{"m1": 429}}
-	s4Setup(t, up, "backup/m2")
+	magS4Env(t)
+	up := &magS4Upstream{fail: map[string]int{"m1": 429}}
+	magS4Setup(t, up, "backup/m2")
 	s := New()
-	code, body := s4Post(t, s, s4Chat)
+	code, body := magS4Post(t, s, magS4Chat)
 	if code != 200 || !strings.Contains(body, "s4 ok") {
 		t.Fatalf("status %d body %s, want the fallback's reply", code, body)
 	}
@@ -115,19 +115,19 @@ func TestS4FallbackServesWhenMainIsOutOfQuota(t *testing.T) {
 func TestS4FallbackStatusesAndNoFallbackForBadRequest(t *testing.T) {
 	for _, code := range []int{402, 403, 429, 500, 529} {
 		t.Run(strconv.Itoa(code), func(t *testing.T) {
-			s4Env(t)
-			up := &s4Upstream{fail: map[string]int{"m1": code}}
-			s4Setup(t, up, "backup/m2")
-			if got, body := s4Post(t, New(), s4Chat); got != 200 {
+			magS4Env(t)
+			up := &magS4Upstream{fail: map[string]int{"m1": code}}
+			magS4Setup(t, up, "backup/m2")
+			if got, body := magS4Post(t, New(), magS4Chat); got != 200 {
 				t.Fatalf("%d from main: status %d body %s, want the fallback's 200", code, got, body)
 			}
 		})
 	}
-	s4Env(t)
-	up := &s4Upstream{fail: map[string]int{"m1": 400}}
-	s4Setup(t, up, "backup/m2")
+	magS4Env(t)
+	up := &magS4Upstream{fail: map[string]int{"m1": 400}}
+	magS4Setup(t, up, "backup/m2")
 	s := New()
-	if code, body := s4Post(t, s, s4Chat); code != 400 {
+	if code, body := magS4Post(t, s, magS4Chat); code != 400 {
 		t.Fatalf("status %d body %s, want the 400 passed through", code, body)
 	}
 	if got := up.seen(); got != "m1" {
@@ -139,13 +139,13 @@ func TestS4FallbackStatusesAndNoFallbackForBadRequest(t *testing.T) {
 }
 
 func TestS4AllCandidatesFailReturnsLastError(t *testing.T) {
-	s4Env(t)
-	up := &s4Upstream{fail: map[string]int{"m1": 429, "m2": 503}}
-	s4Setup(t, up, "backup/m2")
+	magS4Env(t)
+	up := &magS4Upstream{fail: map[string]int{"m1": 429, "m2": 503}}
+	magS4Setup(t, up, "backup/m2")
 	s := New()
-	code, body := s4Post(t, s, s4Chat)
+	code, body := magS4Post(t, s, magS4Chat)
 	if code != 503 || !strings.Contains(body, "m2 quota exceeded") {
-		t.Fatalf("status %d body %s, want the last candidate's 503", code, body)
+		t.Fatalf("status %d body %s, want the last magCandidate's 503", code, body)
 	}
 	if c := s.Recent()[0]; c.Provider != "backup" || c.Fallback == "" {
 		t.Fatalf("call record: provider %q fallback %q", c.Provider, c.Fallback)
@@ -153,14 +153,14 @@ func TestS4AllCandidatesFailReturnsLastError(t *testing.T) {
 }
 
 func TestS4FailedProviderIsSkippedForAWhile(t *testing.T) {
-	s4Env(t)
-	up := &s4Upstream{fail: map[string]int{"m1": 429}}
-	s4Setup(t, up, "backup/m2")
+	magS4Env(t)
+	up := &magS4Upstream{fail: map[string]int{"m1": 429}}
+	magS4Setup(t, up, "backup/m2")
 	s := New()
-	if code, _ := s4Post(t, s, s4Chat); code != 200 {
+	if code, _ := magS4Post(t, s, magS4Chat); code != 200 {
 		t.Fatalf("first request: %d", code)
 	}
-	if code, _ := s4Post(t, s, s4Chat); code != 200 {
+	if code, _ := magS4Post(t, s, magS4Chat); code != 200 {
 		t.Fatalf("second request: %d", code)
 	}
 	if got := up.seen(); got != "m1,m2,m2" {
@@ -172,11 +172,11 @@ func TestS4FailedProviderIsSkippedForAWhile(t *testing.T) {
 }
 
 func TestS4StreamErrorAtStartMovesToFallback(t *testing.T) {
-	s4Env(t)
-	up := &s4Upstream{streamFail: map[string]bool{"m1": true}}
-	s4Setup(t, up, "backup/m2")
+	magS4Env(t)
+	up := &magS4Upstream{streamFail: map[string]bool{"m1": true}}
+	magS4Setup(t, up, "backup/m2")
 	s := New()
-	code, body := s4Post(t, s, s4Stream)
+	code, body := magS4Post(t, s, magS4Stream)
 	if code != 200 || !strings.Contains(body, "s4 ok") || strings.Contains(body, "rate limit") {
 		t.Fatalf("status %d body %s, want the fallback's stream with no error sent to the client", code, body)
 	}
@@ -189,11 +189,11 @@ func TestS4StreamErrorAtStartMovesToFallback(t *testing.T) {
 }
 
 func TestS4UnresolvableAndDuplicateFallbackEntriesAreSkipped(t *testing.T) {
-	s4Env(t)
-	up := &s4Upstream{fail: map[string]int{"m1": 429}}
-	s4Setup(t, up, "nope", "ghost/x", "main/m1", "backup/m2", "backup/m2")
+	magS4Env(t)
+	up := &magS4Upstream{fail: map[string]int{"m1": 429}}
+	magS4Setup(t, up, "nope", "ghost/x", "main/m1", "backup/m2", "backup/m2")
 	s := New()
-	if code, body := s4Post(t, s, s4Chat); code != 200 {
+	if code, body := magS4Post(t, s, magS4Chat); code != 200 {
 		t.Fatalf("status %d body %s", code, body)
 	}
 	if got := up.seen(); got != "m1,m2" {

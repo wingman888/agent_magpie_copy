@@ -23,7 +23,7 @@ type PresetDef struct {
 	Catalog   string   `json:"catalog,omitempty"`
 	Website   string   `json:"website,omitempty"`
 	KeysURL   string   `json:"keysUrl,omitempty"`
-	NoKey     bool     `json:"noKey,omitempty"`     // local servers: a key is optional
+	NoKey     bool     `json:"magNoKey,omitempty"`     // local servers: a key is optional
 	Sponsored bool     `json:"sponsored,omitempty"` // shown first, with a tag
 	Note      string   `json:"note,omitempty"`      // one line under the name
 	Regions   []Region `json:"regions,omitempty"`   // base-URL choices (a relay's regional endpoints)

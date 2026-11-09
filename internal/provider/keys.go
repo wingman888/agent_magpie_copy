@@ -21,7 +21,7 @@ type ExtraKey struct {
 }
 
 // current is the keyPos of the provider's current key (the top-level key).
-const current = -1
+const magCurrent = -1
 
 // KeyRef is a key's fingerprint, the name the CLI and the call records use:
 // the first five bytes of its SHA-256, in lowercase hex.
@@ -43,19 +43,19 @@ func ValidKeyProtocol(proto Protocol) bool {
 	return false
 }
 
-func badProtocol(proto Protocol) error {
+func magBadProtocol(proto Protocol) error {
 	return fmt.Errorf("key protocol %q is not one of chat, responses, anthropic, or any", proto)
 }
 
-// isAccount reports whether id is a signed-in agent, which holds no keys.
-func isAccount(id string) bool {
+// magIsAccount reports whether id is a signed-in agent, which holds no keys.
+func magIsAccount(id string) bool {
 	_, ok := find(Accounts(), id)
 	return ok
 }
 
-// tidyKeys trims the key fields, drops empty keys and any extra key that
+// magTidyKeys trims the key fields, drops empty keys and any extra key that
 // repeats the current one.
-func tidyKeys(p *Provider) {
+func magTidyKeys(p *Provider) {
 	p.Key = strings.TrimSpace(p.Key)
 	var out []ExtraKey
 	for _, k := range p.Keys {
@@ -129,7 +129,7 @@ func (p *Provider) keyPos(ref string) (int, bool) {
 		return 0, false
 	}
 	if p.Key != "" && KeyRef(p.Key) == ref {
-		return current, true
+		return magCurrent, true
 	}
 	for i, k := range p.Keys {
 		if KeyRef(k.Key) == ref {
@@ -156,9 +156,9 @@ func (p *Provider) promote(j int, keepOld, offOld bool) {
 	p.Key, p.KeyName, p.KeyProtocol = next.Key, next.Name, next.Protocol
 }
 
-// editKeys runs fn on the stored entry for a provider that holds keys, then
+// magEditKeys runs fn on the stored entry for a provider that holds keys, then
 // saves it.
-func editKeys(id string, fn func(p *Provider) error) error {
+func magEditKeys(id string, fn func(p *Provider) error) error {
 	found, err := Find(id)
 	if err != nil {
 		return err
@@ -173,7 +173,7 @@ func editKeys(id string, fn func(p *Provider) error) error {
 			if err := fn(&q); err != nil {
 				return err
 			}
-			tidyKeys(&q)
+			magTidyKeys(&q)
 			f.Providers[i] = q
 			return store(f)
 		}
@@ -181,11 +181,11 @@ func editKeys(id string, fn func(p *Provider) error) error {
 	return fmt.Errorf("no provider %q", id)
 }
 
-func noKey(p *Provider, ref string) error {
+func magNoKey(p *Provider, ref string) error {
 	return fmt.Errorf("%s has no key %s; magpie provider key %s lists them", p.Name, ref, p.ID)
 }
 
-func needOne(p *Provider) error {
+func magNeedOne(p *Provider) error {
 	return fmt.Errorf("%s needs at least one enabled key; add another key first", p.Name)
 }
 
@@ -197,9 +197,9 @@ func AddKey(id, name, key string, proto Protocol) error {
 		return errors.New("the key is empty")
 	}
 	if !ValidKeyProtocol(proto) {
-		return badProtocol(proto)
+		return magBadProtocol(proto)
 	}
-	return editKeys(id, func(p *Provider) error {
+	return magEditKeys(id, func(p *Provider) error {
 		if _, ok := p.keyPos(KeyRef(key)); ok {
 			return fmt.Errorf("%s already has that key (%s)", p.Name, KeyRef(key))
 		}
@@ -215,14 +215,14 @@ func AddKey(id, name, key string, proto Protocol) error {
 // SetKeyProtocol limits a key to one protocol, or clears the limit with "".
 func SetKeyProtocol(id, keyRef string, proto Protocol) error {
 	if !ValidKeyProtocol(proto) {
-		return badProtocol(proto)
+		return magBadProtocol(proto)
 	}
-	return editKeys(id, func(p *Provider) error {
+	return magEditKeys(id, func(p *Provider) error {
 		pos, ok := p.keyPos(keyRef)
 		if !ok {
-			return noKey(p, keyRef)
+			return magNoKey(p, keyRef)
 		}
-		if pos == current {
+		if pos == magCurrent {
 			p.KeyProtocol = proto
 		} else {
 			p.Keys[pos].Protocol = proto
@@ -234,12 +234,12 @@ func SetKeyProtocol(id, keyRef string, proto Protocol) error {
 // UseKey makes a key the current one. The key it replaces stays on, right
 // after it, with its name and protocol.
 func UseKey(id, keyRef string) error {
-	return editKeys(id, func(p *Provider) error {
+	return magEditKeys(id, func(p *Provider) error {
 		pos, ok := p.keyPos(keyRef)
 		if !ok {
-			return noKey(p, keyRef)
+			return magNoKey(p, keyRef)
 		}
-		if pos != current {
+		if pos != magCurrent {
 			p.promote(pos, true, false)
 		}
 		return nil
@@ -249,18 +249,18 @@ func UseKey(id, keyRef string) error {
 // SetKeyOn switches a key on or off. Turning off the current key hands the
 // job to the next key that is on, and the old one stays, off.
 func SetKeyOn(id, keyRef string, on bool) error {
-	return editKeys(id, func(p *Provider) error {
+	return magEditKeys(id, func(p *Provider) error {
 		pos, ok := p.keyPos(keyRef)
 		if !ok {
-			return noKey(p, keyRef)
+			return magNoKey(p, keyRef)
 		}
-		if pos == current {
+		if pos == magCurrent {
 			if on {
 				return nil
 			}
 			j := p.firstEnabled()
 			if j < 0 {
-				return needOne(p)
+				return magNeedOne(p)
 			}
 			p.promote(j, true, true)
 			return nil
@@ -274,7 +274,7 @@ func SetKeyOn(id, keyRef string, on bool) error {
 			return nil
 		}
 		if p.enabledCount() <= 1 {
-			return needOne(p)
+			return magNeedOne(p)
 		}
 		k.Off = true
 		return nil
@@ -284,21 +284,21 @@ func SetKeyOn(id, keyRef string, on bool) error {
 // RemoveKey deletes a key. The last key that is on cannot go; removing the
 // current key hands the job to the next key that is on.
 func RemoveKey(id, keyRef string) error {
-	return editKeys(id, func(p *Provider) error {
+	return magEditKeys(id, func(p *Provider) error {
 		pos, ok := p.keyPos(keyRef)
 		if !ok {
-			return noKey(p, keyRef)
+			return magNoKey(p, keyRef)
 		}
-		if pos == current {
+		if pos == magCurrent {
 			j := p.firstEnabled()
 			if j < 0 {
-				return needOne(p)
+				return magNeedOne(p)
 			}
 			p.promote(j, false, false)
 			return nil
 		}
 		if !p.Keys[pos].Off && p.enabledCount() <= 1 {
-			return needOne(p)
+			return magNeedOne(p)
 		}
 		p.Keys = append(p.Keys[:pos], p.Keys[pos+1:]...)
 		return nil
@@ -308,12 +308,12 @@ func RemoveKey(id, keyRef string) error {
 // RenameKey names a key; "" clears the name.
 func RenameKey(id, keyRef, name string) error {
 	name = strings.TrimSpace(name)
-	return editKeys(id, func(p *Provider) error {
+	return magEditKeys(id, func(p *Provider) error {
 		pos, ok := p.keyPos(keyRef)
 		if !ok {
-			return noKey(p, keyRef)
+			return magNoKey(p, keyRef)
 		}
-		if pos == current {
+		if pos == magCurrent {
 			p.KeyName = name
 		} else {
 			p.Keys[pos].Name = name
@@ -360,7 +360,7 @@ func (p Provider) KeyPlans(from Protocol, model string) []KeyPlan {
 			cands = append(cands, cand{k.Key, k.Name, k.Protocol})
 		}
 	}
-	fam := familyOf(model)
+	fam := magFamilyOf(model)
 	type ranked struct {
 		plan KeyPlan
 		rank int
@@ -378,7 +378,7 @@ func (p Provider) KeyPlans(from Protocol, model string) []KeyPlan {
 			ref = KeyRef(c.key)
 		}
 		out = append(out, ranked{KeyPlan{Provider: pl, Ref: ref, Name: c.name, Protocol: c.proto, Upstreams: ups},
-			keyRank(fam, c.proto, ups, from)})
+			magKeyRank(fam, c.proto, ups, from)})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].rank < out[j].rank })
 	plans := make([]KeyPlan, len(out))
@@ -403,8 +403,8 @@ func (p Provider) upstreamsFor(kp Protocol) []Protocol {
 	return nil
 }
 
-// keyRank orders keys for a request: lower is better.
-func keyRank(fam string, kp Protocol, ups []Protocol, from Protocol) int {
+// magKeyRank orders keys for a request: lower is better.
+func magKeyRank(fam string, kp Protocol, ups []Protocol, from Protocol) int {
 	switch fam {
 	case "claude":
 		switch kp {
@@ -423,7 +423,7 @@ func keyRank(fam string, kp Protocol, ups []Protocol, from Protocol) int {
 		}
 		return 2
 	}
-	if protoIn(ups, from) {
+	if magProtoIn(ups, from) {
 		return 0
 	}
 	if kp == "" {
@@ -432,11 +432,11 @@ func keyRank(fam string, kp Protocol, ups []Protocol, from Protocol) int {
 	return 2
 }
 
-var openAISeries = regexp.MustCompile(`^o\d`)
+var magOpenAISeries = regexp.MustCompile(`^o\d`)
 
-// familyOf names the model family that decides which key suits a model:
+// magFamilyOf names the model family that decides which key suits a model:
 // "claude", "openai" (GPT, o-series, codex), or "" for anything else.
-func familyOf(model string) string {
+func magFamilyOf(model string) string {
 	m := strings.ToLower(model)
 	if i := strings.LastIndex(m, "/"); i >= 0 {
 		m = m[i+1:]
@@ -444,13 +444,13 @@ func familyOf(model string) string {
 	switch {
 	case strings.Contains(m, "claude"):
 		return "claude"
-	case strings.HasPrefix(m, "gpt"), strings.Contains(m, "codex"), openAISeries.MatchString(m):
+	case strings.HasPrefix(m, "gpt"), strings.Contains(m, "codex"), magOpenAISeries.MatchString(m):
 		return "openai"
 	}
 	return ""
 }
 
-func protoIn(ps []Protocol, p Protocol) bool {
+func magProtoIn(ps []Protocol, p Protocol) bool {
 	for _, x := range ps {
 		if x == p {
 			return true

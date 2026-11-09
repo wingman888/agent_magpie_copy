@@ -9,8 +9,8 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// s1CLIEnv keeps the CLI tests out of the real config, cache and home.
-func s1CLIEnv(t *testing.T) string {
+// magS1CLIEnv keeps the CLI tests out of the real config, cache and home.
+func magS1CLIEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
@@ -20,7 +20,7 @@ func s1CLIEnv(t *testing.T) string {
 }
 
 func TestS1ApplyPairsHeadersAndIcon(t *testing.T) {
-	dir := s1CLIEnv(t)
+	dir := magS1CLIEnv(t)
 	p := provider.Provider{Name: "Acme"}
 	if err := applyPairs(&p, []string{"url=https://a.example/v1", "header.X-Org-Id=acme", "HEADER.x-trace=1"}); err != nil {
 		t.Fatal(err)
@@ -67,11 +67,11 @@ func TestS1ApplyPairsHeadersAndIcon(t *testing.T) {
 }
 
 func TestS1IconArgEmptyResetsAndMissingFails(t *testing.T) {
-	s1CLIEnv(t)
-	if got, err := iconArg(""); err != nil || got != "" {
+	magS1CLIEnv(t)
+	if got, err := magIconArg(""); err != nil || got != "" {
 		t.Fatalf("empty: %q, %v", got, err)
 	}
-	if _, err := iconArg("no-such-icon-or-file"); err == nil {
+	if _, err := magIconArg("no-such-icon-or-file"); err == nil {
 		t.Fatal("an unknown name was accepted")
 	}
 }

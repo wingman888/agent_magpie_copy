@@ -15,9 +15,9 @@ import (
 	"time"
 )
 
-// s3Env gives a test its own home, config and Claude directory, and keeps the
+// magS3Env gives a test its own home, config and Claude directory, and keeps the
 // real claude command out of it.
-func s3Env(t *testing.T) string {
+func magS3Env(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("HOME", filepath.Join(dir, "home"))
@@ -26,42 +26,42 @@ func s3Env(t *testing.T) string {
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(dir, "claude"))
 	oldExe := claudeExecutable
 	claudeExecutable = func() string { return "" }
-	s3ResetCaches()
+	magS3ResetCaches()
 	t.Cleanup(func() {
 		claudeExecutable = oldExe
-		s3ResetCaches()
+		magS3ResetCaches()
 	})
 	return dir
 }
 
-// s3ResetCaches drops what the package remembers between tests.
-func s3ResetCaches() {
+// magS3ResetCaches drops what the package remembers between tests.
+func magS3ResetCaches() {
 	forgetClaudeCredential()
 	forgetClaudeStatus()
-	observeClock.Lock()
-	observeClock.at = time.Time{}
-	observeClock.Unlock()
-	loginUsageCache.Lock()
-	loginUsageCache.by = nil
-	loginUsageCache.Unlock()
+	magObserveClock.Lock()
+	magObserveClock.at = time.Time{}
+	magObserveClock.Unlock()
+	magLoginUsageCache.Lock()
+	magLoginUsageCache.by = nil
+	magLoginUsageCache.Unlock()
 }
 
-// s3JWT builds an unsigned JWT with the given claims.
-func s3JWT(claims map[string]any) string {
+// magS3JWT builds an unsigned JWT with the given claims.
+func magS3JWT(claims map[string]any) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	b, _ := json.Marshal(claims)
 	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
-// s3Access is an access token named name that never needs refreshing.
-func s3Access(name string) string {
-	return s3JWT(map[string]any{"name": name, "exp": int64(4102444800)}) // 2100-01-01
+// magS3Access is an access token named name that never needs refreshing.
+func magS3Access(name string) string {
+	return magS3JWT(map[string]any{"name": name, "exp": int64(4102444800)}) // 2100-01-01
 }
 
-// s3CodexAuth writes Codex CLI's auth file as if signed in as email.
-func s3CodexAuth(t *testing.T, email, name string) {
+// magS3CodexAuth writes Codex CLI's auth file as if signed in as email.
+func magS3CodexAuth(t *testing.T, email, name string) {
 	t.Helper()
-	path := codexAuthPath()
+	path := magCodexAuthPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -69,9 +69,9 @@ func s3CodexAuth(t *testing.T, email, name string) {
 		"auth_mode":      "chatgpt",
 		"OPENAI_API_KEY": nil,
 		"tokens": map[string]any{
-			"id_token": s3JWT(map[string]any{"email": email,
+			"id_token": magS3JWT(map[string]any{"email": email,
 				"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"}}),
-			"access_token":  s3Access(name),
+			"access_token":  magS3Access(name),
 			"refresh_token": "refresh-" + name,
 			"account_id":    "acct-" + name,
 		},
@@ -83,22 +83,22 @@ func s3CodexAuth(t *testing.T, email, name string) {
 	}
 }
 
-// s3AuthName is the name of the access token in Codex CLI's auth file.
-func s3AuthName(t *testing.T) string {
+// magS3AuthName is the name of the access token in Codex CLI's auth file.
+func magS3AuthName(t *testing.T) string {
 	t.Helper()
 	var a codexAuth
-	if !readJSON(codexAuthPath(), &a) {
+	if !readJSON(magCodexAuthPath(), &a) {
 		t.Fatal("no Codex auth file")
 	}
 	name, _ := jwtClaims(a.Tokens.AccessToken)["name"].(string)
 	return name
 }
 
-// s3StashName is the name of the access token magpie keeps for a remembered
+// magS3StashName is the name of the access token magpie keeps for a remembered
 // Codex account.
-func s3StashName(t *testing.T, user string) string {
+func magS3StashName(t *testing.T, user string) string {
 	t.Helper()
-	m, err := readStash("codex", user)
+	m, err := magReadStash("codex", user)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,46 +107,46 @@ func s3StashName(t *testing.T, user string) string {
 	return name
 }
 
-// s3KeepSignIn saves the sign-in agent holds now as user's, the copy a switch
+// magS3KeepSignIn saves the sign-in agent holds now as user's, the copy a switch
 // (or an add) makes when it hands the agent over, so user can be switched back
 // to. Tests that cannot run the agent's own sign-in use it in its place.
-func s3KeepSignIn(t *testing.T, agent, user string) {
+func magS3KeepSignIn(t *testing.T, agent, user string) {
 	t.Helper()
-	login, ok := agentLogin(agent)
+	login, ok := magAgentLogin(agent)
 	if !ok {
 		t.Fatalf("no %s sign-in to keep", agent)
 	}
-	if _, err := writeStash(agent, user, login); err != nil {
+	if _, err := magWriteStash(agent, user, login); err != nil {
 		t.Fatal(err)
 	}
-	f := loadAccounts()
-	i := findRemembered(f.Accounts, agent, user)
+	f := magLoadAccounts()
+	i := magFindRemembered(f.Accounts, agent, user)
 	if i < 0 {
 		t.Fatalf("%s is not remembered", user)
 	}
 	f.Accounts[i].Saved = true
-	if err := storeAccounts(f); err != nil {
+	if err := magStoreAccounts(f); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// s3TwoAccounts remembers a@ first, then signs in as b@, so b@ is current and
+// magS3TwoAccounts remembers a@ first, then signs in as b@, so b@ is current and
 // a@ is remembered with its own saved sign-in.
-func s3TwoAccounts(t *testing.T) {
+func magS3TwoAccounts(t *testing.T) {
 	t.Helper()
-	s3CodexAuth(t, "a@example.com", "a")
-	if err := observeSignIns(true); err != nil {
+	magS3CodexAuth(t, "a@example.com", "a")
+	if err := magObserveSignIns(true); err != nil {
 		t.Fatal(err)
 	}
-	s3KeepSignIn(t, "codex", "a@example.com")
-	s3CodexAuth(t, "b@example.com", "b")
-	if err := observeSignIns(true); err != nil {
+	magS3KeepSignIn(t, "codex", "a@example.com")
+	magS3CodexAuth(t, "b@example.com", "b")
+	if err := magObserveSignIns(true); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// s3Current is the signed-in provider of agent.
-func s3Current(t *testing.T, agent string) Provider {
+// magS3Current is the signed-in provider of agent.
+func magS3Current(t *testing.T, agent string) Provider {
 	t.Helper()
 	for _, p := range Accounts() {
 		if p.Account != nil && p.Account.Agent == agent {
@@ -158,15 +158,15 @@ func s3Current(t *testing.T, agent string) Provider {
 }
 
 func TestS3SwitchKeepsTheRestAndSavesTheOutgoing(t *testing.T) {
-	s3Env(t)
-	s3TwoAccounts(t)
+	magS3Env(t)
+	magS3TwoAccounts(t)
 	// a key the switch must not touch: the rest of Codex's own file
 	var raw map[string]any
-	readJSON(codexAuthPath(), &raw)
+	readJSON(magCodexAuthPath(), &raw)
 	raw["custom"] = "keep"
 	b, _ := json.MarshalIndent(raw, "", "  ")
-	os.WriteFile(codexAuthPath(), b, 0o600)
-	cfg := filepath.Join(filepath.Dir(codexAuthPath()), "config.toml")
+	os.WriteFile(magCodexAuthPath(), b, 0o600)
+	cfg := filepath.Join(filepath.Dir(magCodexAuthPath()), "config.toml")
 	if err := os.WriteFile(cfg, []byte("model = \"gpt-5.5\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -178,18 +178,18 @@ func TestS3SwitchKeepsTheRestAndSavesTheOutgoing(t *testing.T) {
 	if err != nil || got != "a@example.com" {
 		t.Fatalf("SwitchAccount = %q, %v", got, err)
 	}
-	if n := s3AuthName(t); n != "a" {
+	if n := magS3AuthName(t); n != "a" {
 		t.Fatalf("agent is signed in with token %q, want a", n)
 	}
 	var after map[string]any
-	readJSON(codexAuthPath(), &after)
+	readJSON(magCodexAuthPath(), &after)
 	if after["custom"] != "keep" {
 		t.Fatalf("a key outside the sign-in changed: %v", after["custom"])
 	}
 	if b, _ := os.ReadFile(cfg); string(b) != "model = \"gpt-5.5\"\n" {
 		t.Fatalf("config.toml changed: %q", b)
 	}
-	if n := s3StashName(t, "b@example.com"); n != "b" {
+	if n := magS3StashName(t, "b@example.com"); n != "b" {
 		t.Fatalf("the account signed out of kept token %q, want its newest, b", n)
 	}
 	rows := Remembered("codex")
@@ -207,8 +207,8 @@ func TestS3SwitchKeepsTheRestAndSavesTheOutgoing(t *testing.T) {
 }
 
 func TestS3ForgetRefusesTheSignedInAccount(t *testing.T) {
-	s3Env(t)
-	s3TwoAccounts(t)
+	magS3Env(t)
+	magS3TwoAccounts(t)
 	if err := ForgetAccount("codex", "b@example.com"); err == nil {
 		t.Fatal("forgot the account that is signed in")
 	}
@@ -218,7 +218,7 @@ func TestS3ForgetRefusesTheSignedInAccount(t *testing.T) {
 	if err := ForgetAccount("codex", "a@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(stashPath("codex", "a@example.com")); !os.IsNotExist(err) {
+	if _, err := os.Stat(magStashPath("codex", "a@example.com")); !os.IsNotExist(err) {
 		t.Fatalf("the saved sign-in survived forgetting: %v", err)
 	}
 	rows := Remembered("codex")
@@ -228,8 +228,8 @@ func TestS3ForgetRefusesTheSignedInAccount(t *testing.T) {
 }
 
 func TestS3OnAccountServesWithItsOwnSignIn(t *testing.T) {
-	s3Env(t)
-	s3TwoAccounts(t)
+	magS3Env(t)
+	magS3TwoAccounts(t)
 	if err := SetLoginOn("codex", "b@example.com", false); err == nil {
 		t.Fatal("the signed-in account was turned off")
 	}
@@ -240,7 +240,7 @@ func TestS3OnAccountServesWithItsOwnSignIn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := s3Current(t, "codex")
+	p := magS3Current(t, "codex")
 	plans := p.KeyPlans(Responses, "gpt-5.5")
 	if len(plans) != 2 {
 		t.Fatalf("plans = %d, want the signed-in account then the on account", len(plans))
@@ -256,17 +256,17 @@ func TestS3OnAccountServesWithItsOwnSignIn(t *testing.T) {
 	if err := plans[1].Provider.Sign(context.Background(), req, Responses, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := req.Header.Get("Authorization"); got != "Bearer "+s3Access("a") {
+	if got := req.Header.Get("Authorization"); got != "Bearer "+magS3Access("a") {
 		t.Fatalf("on account signed with %q, want its own token", got)
 	}
-	if n := s3AuthName(t); n != "b" {
+	if n := magS3AuthName(t); n != "b" {
 		t.Fatalf("Codex's own file now holds token %q; the on account must not write there", n)
 	}
 }
 
 func TestS3LoginUsagePerAccountAndKeepsLastKnown(t *testing.T) {
-	s3Env(t)
-	s3TwoAccounts(t)
+	magS3Env(t)
+	magS3TwoAccounts(t)
 
 	var mu sync.Mutex
 	hits := 0
@@ -315,11 +315,11 @@ func TestS3LoginUsagePerAccountAndKeepsLastKnown(t *testing.T) {
 	failB = true
 	mu.Unlock()
 
-	loginUsageCache.Lock()
-	for _, e := range loginUsageCache.by {
+	magLoginUsageCache.Lock()
+	for _, e := range magLoginUsageCache.by {
 		e.at = time.Time{}
 	}
-	loginUsageCache.Unlock()
+	magLoginUsageCache.Unlock()
 
 	again := LoginUsage(ctx, "codex")
 	if u := again["b@example.com"]; u.Error != "" || len(u.Windows) != 2 || u.Windows[0].Used != 75 {
@@ -334,7 +334,7 @@ func TestS3LoginUsagePerAccountAndKeepsLastKnown(t *testing.T) {
 }
 
 func TestS3UnknownAgentsAreRefused(t *testing.T) {
-	s3Env(t)
+	magS3Env(t)
 	if err := SetLoginOn("copilot", "x@example.com", true); err == nil {
 		t.Fatal("SetLoginOn accepted copilot")
 	}
@@ -353,9 +353,9 @@ func TestS3UnknownAgentsAreRefused(t *testing.T) {
 }
 
 func TestS3SavedSignInsArePrivate(t *testing.T) {
-	s3Env(t)
-	s3TwoAccounts(t)
-	for _, p := range []string{accountsIndex(), stashPath("codex", "a@example.com")} {
+	magS3Env(t)
+	magS3TwoAccounts(t)
+	for _, p := range []string{magAccountsIndex(), magStashPath("codex", "a@example.com")} {
 		st, err := os.Stat(p)
 		if err != nil {
 			t.Fatal(err)
@@ -367,7 +367,7 @@ func TestS3SavedSignInsArePrivate(t *testing.T) {
 }
 
 func TestS3ClaudeSwitchKeepsOtherCredentialKeys(t *testing.T) {
-	dir := s3Env(t)
+	dir := magS3Env(t)
 	claudeDir := filepath.Join(dir, "claude")
 	who := filepath.Join(dir, "who.json")
 	creds := filepath.Join(claudeDir, ".credentials.json")
@@ -396,16 +396,16 @@ func TestS3ClaudeSwitchKeepsOtherCredentialKeys(t *testing.T) {
 		if err := os.WriteFile(creds, b, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		s3ResetCaches()
+		magS3ResetCaches()
 		claudeExecutable = func() string { return fake }
 	}
 	signIn("c1@example.com", "tok-c1")
-	if err := observeSignIns(true); err != nil {
+	if err := magObserveSignIns(true); err != nil {
 		t.Fatal(err)
 	}
-	s3KeepSignIn(t, "claude", "c1@example.com")
+	magS3KeepSignIn(t, "claude", "c1@example.com")
 	signIn("c2@example.com", "tok-c2")
-	if err := observeSignIns(true); err != nil {
+	if err := magObserveSignIns(true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -424,7 +424,7 @@ func TestS3ClaudeSwitchKeepsOtherCredentialKeys(t *testing.T) {
 	if mcp, _ := raw["mcpOAuth"].(map[string]any); mcp["server"] != "tok-c2" {
 		t.Fatalf("a key outside the sign-in changed: %v", raw["mcpOAuth"])
 	}
-	saved, err := readStash("claude", "c2@example.com")
+	saved, err := magReadStash("claude", "c2@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}

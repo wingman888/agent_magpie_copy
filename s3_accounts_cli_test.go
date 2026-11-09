@@ -18,7 +18,7 @@ func TestS3AccountsCLIRefusesUnknownAgents(t *testing.T) {
 		{"forget", "gemini", "x@example.com"},
 		{"add", "gemini"},
 	} {
-		err := accountsCmd(args)
+		err := magAccountsCmd(args)
 		if err == nil {
 			t.Fatalf("accounts %v: no error for an unknown agent", args)
 		}
@@ -35,7 +35,7 @@ func TestS3AccountsCLIListsNothingWithoutSignIns(t *testing.T) {
 	t.Setenv("HOME", filepath.Join(dir, "home"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(dir, "claude"))
-	if err := accountsCmd(nil); err != nil {
+	if err := magAccountsCmd(nil); err != nil {
 		t.Fatal(err)
 	}
 }

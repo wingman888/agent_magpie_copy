@@ -9,7 +9,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-const accountsUsage = `usage:
+const magAccountsUsage = `usage:
   magpie accounts [claude|codex]              list the subscriptions magpie remembers, with their usage
   magpie accounts switch <agent> <email>      sign the agent in as a remembered account
   magpie accounts on|off <agent> <email>      let a remembered account serve requests at the same time
@@ -17,28 +17,28 @@ const accountsUsage = `usage:
   magpie accounts add <agent>                 sign in to another account, and remember it
   agents: claude (cc), codex`
 
-// accountAgent maps the agent names accounts takes to the agent's id.
-func accountAgent(name string) (string, error) {
+// magAccountAgent maps the agent names accounts takes to the agent's id.
+func magAccountAgent(name string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "claude", "cc":
 		return "claude", nil
 	case "codex":
 		return "codex", nil
 	}
-	return "", fmt.Errorf("unknown agent %q\n\n%s", name, accountsUsage)
+	return "", fmt.Errorf("unknown agent %q\n\n%s", name, magAccountsUsage)
 }
 
-// accountsCmd: `magpie accounts …`
-func accountsCmd(args []string) error {
+// magAccountsCmd: `magpie accounts …`
+func magAccountsCmd(args []string) error {
 	if len(args) == 0 {
-		return listAccounts("")
+		return magListAccounts("")
 	}
 	switch verb := strings.ToLower(args[0]); verb {
 	case "switch", "on", "off", "forget":
 		if len(args) != 3 {
-			return fmt.Errorf("%s", accountsUsage)
+			return fmt.Errorf("%s", magAccountsUsage)
 		}
-		agent, err := accountAgent(args[1])
+		agent, err := magAccountAgent(args[1])
 		if err != nil {
 			return err
 		}
@@ -48,16 +48,16 @@ func accountsCmd(args []string) error {
 			if err != nil {
 				return err
 			}
-			fmt.Println(green.Render("✓"), "signed", agentName(agent), "in as", user)
+			fmt.Println(green.Render("✓"), "signed", magAgentName(agent), "in as", user)
 			fmt.Println(muted.Render("  sessions already running keep the account they started with; restart them to use " + user))
 		case "on", "off":
 			if err := provider.SetLoginOn(agent, args[2], verb == "on"); err != nil {
 				return err
 			}
 			if verb == "on" {
-				fmt.Println(green.Render("✓"), args[2], muted.Render("now serves "+agentName(agent)+" requests alongside the signed-in account"))
+				fmt.Println(green.Render("✓"), args[2], muted.Render("now serves "+magAgentName(agent)+" requests alongside the signed-in account"))
 			} else {
-				fmt.Println(green.Render("✓"), args[2], muted.Render("no longer serves "+agentName(agent)+" requests alongside the signed-in account"))
+				fmt.Println(green.Render("✓"), args[2], muted.Render("no longer serves "+magAgentName(agent)+" requests alongside the signed-in account"))
 			}
 		case "forget":
 			if err := provider.ForgetAccount(agent, args[2]); err != nil {
@@ -68,9 +68,9 @@ func accountsCmd(args []string) error {
 		return nil
 	case "add":
 		if len(args) != 2 {
-			return fmt.Errorf("%s", accountsUsage)
+			return fmt.Errorf("%s", magAccountsUsage)
 		}
-		agent, err := accountAgent(args[1])
+		agent, err := magAccountAgent(args[1])
 		if err != nil {
 			return err
 		}
@@ -78,22 +78,22 @@ func accountsCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), "remembered", user, muted.Render("· "+agentName(agent)))
-		return listAccounts(agent)
+		fmt.Println(green.Render("✓"), "remembered", user, muted.Render("· "+magAgentName(agent)))
+		return magListAccounts(agent)
 	}
-	agent, err := accountAgent(args[0])
+	agent, err := magAccountAgent(args[0])
 	if err != nil {
 		return err
 	}
 	if len(args) > 1 {
-		return fmt.Errorf("too many arguments\n\n%s", accountsUsage)
+		return fmt.Errorf("too many arguments\n\n%s", magAccountsUsage)
 	}
-	return listAccounts(agent)
+	return magListAccounts(agent)
 }
 
-// listAccounts prints the remembered accounts of agent ("" for both), the
+// magListAccounts prints the remembered accounts of agent ("" for both), the
 // signed-in one first, each with its plan and rolling usage.
-func listAccounts(agent string) error {
+func magListAccounts(agent string) error {
 	agents := []string{"claude", "codex"}
 	if agent != "" {
 		agents = []string{agent}
@@ -106,7 +106,7 @@ func listAccounts(agent string) error {
 		}
 		rows := provider.Remembered(a)
 		usage := provider.LoginUsage(ctx, a)
-		fmt.Println(bold.Render(agentName(a)))
+		fmt.Println(bold.Render(magAgentName(a)))
 		if len(rows) == 0 {
 			fmt.Println(muted.Render("  no accounts yet · magpie accounts add " + a))
 			continue
@@ -140,7 +140,7 @@ func listAccounts(agent string) error {
 			fmt.Println(line)
 			if q, ok := usage[r.User]; ok {
 				for _, w := range q.Windows {
-					fmt.Println("      " + muted.Render(fmt.Sprintf("%s  %s used", w.Name, quotaPercent(w))))
+					fmt.Println("      " + muted.Render(fmt.Sprintf("%s  %s used", w.Name, magQuotaPercent(w))))
 				}
 				if q.Error != "" {
 					fmt.Println("      " + muted.Render("usage unavailable: "+q.Error))
@@ -151,15 +151,15 @@ func listAccounts(agent string) error {
 	return nil
 }
 
-func quotaPercent(w provider.QuotaWindow) string {
+func magQuotaPercent(w provider.QuotaWindow) string {
 	if w.Display != "" {
 		return w.Display
 	}
 	return fmt.Sprintf("%.0f%%", w.Used)
 }
 
-// agentName is the agent's name as the user knows it.
-func agentName(agent string) string {
+// magAgentName is the agent's name as the user knows it.
+func magAgentName(agent string) string {
 	switch agent {
 	case "claude":
 		return "Claude Code"

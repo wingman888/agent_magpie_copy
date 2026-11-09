@@ -25,18 +25,18 @@ import (
 	"time"
 )
 
-// rememberedAgents are the agents whose sign-ins magpie remembers.
-var rememberedAgents = []string{"claude", "codex"}
+// magRememberedAgents are the agents whose sign-ins magpie remembers.
+var magRememberedAgents = []string{"claude", "codex"}
 
-// credentialKeys are the top-level keys of an agent's own store that hold the
+// magCredentialKeys are the top-level keys of an agent's own store that hold the
 // sign-in. Switching replaces these and keeps every other key as it was.
-var credentialKeys = map[string][]string{
+var magCredentialKeys = map[string][]string{
 	"codex":  {"tokens", "last_refresh", "auth_mode"},
 	"claude": {"claudeAiOauth"},
 }
 
-// rememberedAccount is one entry of accounts.json.
-type rememberedAccount struct {
+// magRememberedAccount is one entry of accounts.json.
+type magRememberedAccount struct {
 	Agent string `json:"agent"`
 	User  string `json:"user"`
 	Plan  string `json:"plan,omitempty"`
@@ -46,8 +46,8 @@ type rememberedAccount struct {
 	Saved bool `json:"saved,omitempty"`
 }
 
-type accountsFile struct {
-	Accounts []rememberedAccount `json:"accounts"`
+type magAccountsFile struct {
+	Accounts []magRememberedAccount `json:"accounts"`
 }
 
 // RememberedAccount describes a remembered account, for display.
@@ -60,24 +60,24 @@ type RememberedAccount struct {
 	Saved   bool // magpie holds a copy of its sign-in
 }
 
-// accountsMu serializes every change to accounts.json and the accounts
+// magAccountsMu serializes every change to accounts.json and the accounts
 // directory.
-var accountsMu sync.Mutex
+var magAccountsMu sync.Mutex
 
-func accountsDir() string   { return filepath.Join(filepath.Dir(Path()), "accounts") }
-func accountsIndex() string { return filepath.Join(filepath.Dir(Path()), "accounts.json") }
+func magAccountsDir() string   { return filepath.Join(filepath.Dir(Path()), "accounts") }
+func magAccountsIndex() string { return filepath.Join(filepath.Dir(Path()), "accounts.json") }
 
-// stashPath is where a remembered account's sign-in is kept.
-func stashPath(agent, user string) string {
-	return filepath.Join(accountsDir(), agent+"-"+KeyRef(strings.ToLower(user))+".json")
+// magStashPath is where a remembered account's sign-in is kept.
+func magStashPath(agent, user string) string {
+	return filepath.Join(magAccountsDir(), agent+"-"+KeyRef(strings.ToLower(user))+".json")
 }
 
-func codexAuthPath() string {
+func magCodexAuthPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".codex", "auth.json")
 }
 
-func claudeCredentialPath() string {
+func magClaudeCredentialPath() string {
 	dir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if dir == "" {
 		home, _ := os.UserHomeDir()
@@ -86,24 +86,24 @@ func claudeCredentialPath() string {
 	return filepath.Join(dir, ".credentials.json")
 }
 
-func isRememberedAgent(agent string) bool {
+func magIsRememberedAgent(agent string) bool {
 	return agent == "claude" || agent == "codex"
 }
 
-func unknownAgent(agent string) error {
+func magUnknownAgent(agent string) error {
 	return fmt.Errorf("%q has no remembered accounts; the agents with accounts are claude and codex", agent)
 }
 
-func loadAccounts() accountsFile {
-	var f accountsFile
-	if b, err := os.ReadFile(accountsIndex()); err == nil {
+func magLoadAccounts() magAccountsFile {
+	var f magAccountsFile
+	if b, err := os.ReadFile(magAccountsIndex()); err == nil {
 		json.Unmarshal(b, &f)
 	}
 	return f
 }
 
-func storeAccounts(f accountsFile) error {
-	p := accountsIndex()
+func magStoreAccounts(f magAccountsFile) error {
+	p := magAccountsIndex()
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
@@ -117,8 +117,8 @@ func storeAccounts(f accountsFile) error {
 	return os.Chmod(p, 0o600)
 }
 
-// findRemembered finds an account by agent and address, ignoring case.
-func findRemembered(list []rememberedAccount, agent, user string) int {
+// magFindRemembered finds an account by agent and address, ignoring case.
+func magFindRemembered(list []magRememberedAccount, agent, user string) int {
 	for i, r := range list {
 		if r.Agent == agent && strings.EqualFold(r.User, strings.TrimSpace(user)) {
 			return i
@@ -127,26 +127,26 @@ func findRemembered(list []rememberedAccount, agent, user string) int {
 	return -1
 }
 
-// agentSignIn is the account an agent is signed in to now.
-type agentSignIn struct{ user, plan string }
+// magAgentSignIn is the account an agent is signed in to now.
+type magAgentSignIn struct{ user, plan string }
 
-// currentSignIns asks every agent with a remembered account who is signed in.
-func currentSignIns() map[string]agentSignIn {
-	out := map[string]agentSignIn{}
+// magCurrentSignIns asks every agent with a remembered account who is signed in.
+func magCurrentSignIns() map[string]magAgentSignIn {
+	out := map[string]magAgentSignIn{}
 	for _, p := range Accounts() {
 		if p.Account != nil {
-			out[p.Account.Agent] = agentSignIn{user: p.Account.User, plan: p.Account.Plan}
+			out[p.Account.Agent] = magAgentSignIn{user: p.Account.User, plan: p.Account.Plan}
 		}
 	}
 	return out
 }
 
-// agentLogin reads the raw sign-in the agent keeps for itself.
-func agentLogin(agent string) (map[string]any, bool) {
+// magAgentLogin reads the raw sign-in the agent keeps for itself.
+func magAgentLogin(agent string) (map[string]any, bool) {
 	switch agent {
 	case "codex":
 		var m map[string]any
-		if !readJSON(codexAuthPath(), &m) || m == nil {
+		if !readJSON(magCodexAuthPath(), &m) || m == nil {
 			return nil, false
 		}
 		return m, true
@@ -157,12 +157,12 @@ func agentLogin(agent string) (map[string]any, bool) {
 	return nil, false
 }
 
-// writeAgentLogin replaces the sign-in in the agent's own store. The store's
+// magWriteAgentLogin replaces the sign-in in the agent's own store. The store's
 // other contents are the caller's to keep: login must already carry them.
-func writeAgentLogin(agent string, login map[string]any) error {
+func magWriteAgentLogin(agent string, login map[string]any) error {
 	switch agent {
 	case "codex":
-		path := codexAuthPath()
+		path := magCodexAuthPath()
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
@@ -181,23 +181,23 @@ func writeAgentLogin(agent string, login map[string]any) error {
 		}
 		_, loc, ok := readClaudeCredential()
 		if !ok {
-			loc = claudeCredentialLocation{path: claudeCredentialPath()}
+			loc = claudeCredentialLocation{path: magClaudeCredentialPath()}
 			if err := os.MkdirAll(filepath.Dir(loc.path), 0o700); err != nil {
 				return err
 			}
 		}
 		return saveClaudeCredential(loc, c)
 	}
-	return unknownAgent(agent)
+	return magUnknownAgent(agent)
 }
 
-// mergeLogin is cur with the credential keys taken from next.
-func mergeLogin(agent string, cur, next map[string]any) map[string]any {
+// magMergeLogin is cur with the credential keys taken from next.
+func magMergeLogin(agent string, cur, next map[string]any) map[string]any {
 	out := map[string]any{}
 	for k, v := range cur {
 		out[k] = v
 	}
-	for _, k := range credentialKeys[agent] {
+	for _, k := range magCredentialKeys[agent] {
 		if v, ok := next[k]; ok {
 			out[k] = v
 		} else {
@@ -207,18 +207,18 @@ func mergeLogin(agent string, cur, next map[string]any) map[string]any {
 	return out
 }
 
-// writeStash saves a copy of an account's sign-in, and reports whether the
+// magWriteStash saves a copy of an account's sign-in, and reports whether the
 // file changed.
-func writeStash(agent, user string, login map[string]any) (bool, error) {
+func magWriteStash(agent, user string, login map[string]any) (bool, error) {
 	b, err := json.Marshal(login)
 	if err != nil {
 		return false, err
 	}
-	p := stashPath(agent, user)
+	p := magStashPath(agent, user)
 	if old, err := os.ReadFile(p); err == nil && bytes.Equal(old, b) {
 		return false, nil
 	}
-	if err := os.MkdirAll(accountsDir(), 0o700); err != nil {
+	if err := os.MkdirAll(magAccountsDir(), 0o700); err != nil {
 		return false, err
 	}
 	if err := os.WriteFile(p, b, 0o600); err != nil {
@@ -227,8 +227,8 @@ func writeStash(agent, user string, login map[string]any) (bool, error) {
 	return true, os.Chmod(p, 0o600)
 }
 
-func readStash(agent, user string) (map[string]any, error) {
-	b, err := os.ReadFile(stashPath(agent, user))
+func magReadStash(agent, user string) (map[string]any, error) {
+	b, err := os.ReadFile(magStashPath(agent, user))
 	if err != nil {
 		return nil, err
 	}
@@ -242,23 +242,23 @@ func readStash(agent, user string) (map[string]any, error) {
 	return m, nil
 }
 
-// rememberLoginsLocked records every agent's current sign-in: a new account
+// magRememberLoginsLocked records every agent's current sign-in: a new account
 // gets an entry. The signed-in account's refresh token lives only in the
 // agent's own store, so no copy is kept for it; a stale copy left from before
 // it was signed in again is removed. A copy is saved when the account is
-// switched away from (see SwitchAccount). The caller holds accountsMu.
-func rememberLoginsLocked() error {
-	f := loadAccounts()
+// switched away from (see SwitchAccount). The caller holds magAccountsMu.
+func magRememberLoginsLocked() error {
+	f := magLoadAccounts()
 	dirty := false
-	now := currentSignIns()
-	for _, agent := range rememberedAgents {
+	now := magCurrentSignIns()
+	for _, agent := range magRememberedAgents {
 		cur, ok := now[agent]
 		if !ok {
 			continue
 		}
-		i := findRemembered(f.Accounts, agent, cur.user)
+		i := magFindRemembered(f.Accounts, agent, cur.user)
 		if i < 0 {
-			f.Accounts = append(f.Accounts, rememberedAccount{Agent: agent, User: cur.user, Plan: cur.plan})
+			f.Accounts = append(f.Accounts, magRememberedAccount{Agent: agent, User: cur.user, Plan: cur.plan})
 			i = len(f.Accounts) - 1
 			dirty = true
 		} else if cur.plan != "" && f.Accounts[i].Plan != cur.plan {
@@ -266,7 +266,7 @@ func rememberLoginsLocked() error {
 			dirty = true
 		}
 		if f.Accounts[i].Saved {
-			os.Remove(stashPath(agent, cur.user))
+			os.Remove(magStashPath(agent, cur.user))
 			f.Accounts[i].Saved = false
 			dirty = true
 		}
@@ -274,45 +274,45 @@ func rememberLoginsLocked() error {
 	if !dirty {
 		return nil
 	}
-	return storeAccounts(f)
+	return magStoreAccounts(f)
 }
 
-// lockedAccounts runs fn holding accountsMu.
-func lockedAccounts(fn func() error) error {
-	accountsMu.Lock()
-	defer accountsMu.Unlock()
+// magLockedAccounts runs fn holding magAccountsMu.
+func magLockedAccounts(fn func() error) error {
+	magAccountsMu.Lock()
+	defer magAccountsMu.Unlock()
 	return fn()
 }
 
-// observeEvery is how often provider listings look for new sign-ins.
-const observeEvery = 30 * time.Second
+// magObserveEvery is how often provider listings look for new sign-ins.
+const magObserveEvery = 30 * time.Second
 
-var observeClock struct {
+var magObserveClock struct {
 	sync.Mutex
 	at time.Time
 }
 
-// observeSignIns remembers the current sign-ins, at most once per observeEvery
+// magObserveSignIns remembers the current sign-ins, at most once per magObserveEvery
 // unless force is set.
-func observeSignIns(force bool) error {
-	observeClock.Lock()
-	if !force && time.Since(observeClock.at) < observeEvery {
-		observeClock.Unlock()
+func magObserveSignIns(force bool) error {
+	magObserveClock.Lock()
+	if !force && time.Since(magObserveClock.at) < magObserveEvery {
+		magObserveClock.Unlock()
 		return nil
 	}
-	observeClock.at = time.Now()
-	observeClock.Unlock()
-	return lockedAccounts(rememberLoginsLocked)
+	magObserveClock.at = time.Now()
+	magObserveClock.Unlock()
+	return magLockedAccounts(magRememberLoginsLocked)
 }
 
 // Remembered lists the remembered accounts of agent ("" for every agent),
 // after recording any sign-in that is new.
 func Remembered(agent string) []RememberedAccount {
 	var out []RememberedAccount
-	lockedAccounts(func() error {
-		_ = rememberLoginsLocked() // a failed save leaves the list as it was
-		f := loadAccounts()
-		now := currentSignIns()
+	magLockedAccounts(func() error {
+		_ = magRememberLoginsLocked() // a failed save leaves the list as it was
+		f := magLoadAccounts()
+		now := magCurrentSignIns()
 		for _, r := range f.Accounts {
 			if agent != "" && r.Agent != agent {
 				continue
@@ -335,56 +335,56 @@ func Remembered(agent string) []RememberedAccount {
 // replaces is remembered, and takes over the on state of the account that
 // replaces it. It returns the account's address as remembered.
 func SwitchAccount(agent, user string) (string, error) {
-	if !isRememberedAgent(agent) {
-		return "", unknownAgent(agent)
+	if !magIsRememberedAgent(agent) {
+		return "", magUnknownAgent(agent)
 	}
 	var name string
-	err := lockedAccounts(func() error {
-		if err := rememberLoginsLocked(); err != nil {
+	err := magLockedAccounts(func() error {
+		if err := magRememberLoginsLocked(); err != nil {
 			return err
 		}
-		f := loadAccounts()
-		i := findRemembered(f.Accounts, agent, user)
+		f := magLoadAccounts()
+		i := magFindRemembered(f.Accounts, agent, user)
 		if i < 0 {
 			return fmt.Errorf("no remembered %s account %q; magpie accounts %s lists them", agent, strings.TrimSpace(user), agent)
 		}
 		target := f.Accounts[i]
 		name = target.User
-		cur, signedIn := currentSignIns()[agent]
+		cur, signedIn := magCurrentSignIns()[agent]
 		if signedIn && strings.EqualFold(cur.user, target.User) {
 			return nil
 		}
 		if !target.Saved {
 			return fmt.Errorf("magpie holds no sign-in for %s; sign in to it again with magpie accounts add %s", target.User, agent)
 		}
-		next, err := readStash(agent, target.User)
+		next, err := magReadStash(agent, target.User)
 		if err != nil {
 			return fmt.Errorf("magpie cannot read the saved sign-in for %s: %v", target.User, err)
 		}
-		curLogin, curOK := agentLogin(agent)
+		curLogin, curOK := magAgentLogin(agent)
 		// the account signed out of keeps its newest sign-in, saved before the
 		// agent's own copy is replaced
 		if signedIn && curOK {
-			if _, err := writeStash(agent, cur.user, curLogin); err != nil {
+			if _, err := magWriteStash(agent, cur.user, curLogin); err != nil {
 				return err
 			}
 		}
-		if err := writeAgentLogin(agent, mergeLogin(agent, curLogin, next)); err != nil {
+		if err := magWriteAgentLogin(agent, magMergeLogin(agent, curLogin, next)); err != nil {
 			return err
 		}
 		// the account signed out of takes over the on state the target had
 		if signedIn {
-			if j := findRemembered(f.Accounts, agent, cur.user); j >= 0 {
+			if j := magFindRemembered(f.Accounts, agent, cur.user); j >= 0 {
 				f.Accounts[j].On = target.On
 				f.Accounts[j].Saved = curOK
 			}
 		}
 		// the target's sign-in is now the agent's own alone
-		os.Remove(stashPath(agent, target.User))
+		os.Remove(magStashPath(agent, target.User))
 		f.Accounts[i].Saved = false
 		forgetClaudeCredential()
 		forgetClaudeStatus()
-		return storeAccounts(f)
+		return magStoreAccounts(f)
 	})
 	return name, err
 }
@@ -392,51 +392,58 @@ func SwitchAccount(agent, user string) (string, error) {
 // ForgetAccount drops a remembered account and its saved sign-in. The account
 // the agent is signed in to cannot be forgotten.
 func ForgetAccount(agent, user string) error {
-	if !isRememberedAgent(agent) {
-		return unknownAgent(agent)
+	if !magIsRememberedAgent(agent) {
+		return magUnknownAgent(agent)
 	}
-	return lockedAccounts(func() error {
-		if err := rememberLoginsLocked(); err != nil {
+	return magLockedAccounts(func() error {
+		if err := magRememberLoginsLocked(); err != nil {
 			return err
 		}
-		f := loadAccounts()
-		i := findRemembered(f.Accounts, agent, user)
+		f := magLoadAccounts()
+		i := magFindRemembered(f.Accounts, agent, user)
 		if i < 0 {
 			return fmt.Errorf("no remembered %s account %q", agent, strings.TrimSpace(user))
 		}
-		if cur, ok := currentSignIns()[agent]; ok && strings.EqualFold(cur.user, f.Accounts[i].User) {
-			return fmt.Errorf("%s is the account %s is signed in to; sign it out before forgetting it", f.Accounts[i].User, agentName(agent))
+		if cur, ok := magCurrentSignIns()[agent]; ok && strings.EqualFold(cur.user, f.Accounts[i].User) {
+			return fmt.Errorf("%s is the account %s is signed in to; sign it out before forgetting it", f.Accounts[i].User, magAgentName(agent))
 		}
-		os.Remove(stashPath(agent, f.Accounts[i].User))
+		os.Remove(magStashPath(agent, f.Accounts[i].User))
 		f.Accounts = append(f.Accounts[:i], f.Accounts[i+1:]...)
-		return storeAccounts(f)
+		return magStoreAccounts(f)
 	})
 }
+
+// errClaudeNoConcurrent is why Claude Code accounts cannot be turned on: only
+// one sign-in is in use at a time there.
+var errClaudeNoConcurrent = errors.New("Claude Code 暂不支持同时生效（只能有一个登录账号在用）")
 
 // SetLoginOn lets a remembered account serve requests at the same time as the
 // agent's sign-in ("同时生效"), or stops it. The signed-in account always
 // serves requests, so turning it off is refused.
 func SetLoginOn(agent, user string, on bool) error {
-	if !isRememberedAgent(agent) {
-		return unknownAgent(agent)
+	if !magIsRememberedAgent(agent) {
+		return magUnknownAgent(agent)
 	}
-	return lockedAccounts(func() error {
-		if err := rememberLoginsLocked(); err != nil {
+	if agent == "claude" && on {
+		return errClaudeNoConcurrent
+	}
+	return magLockedAccounts(func() error {
+		if err := magRememberLoginsLocked(); err != nil {
 			return err
 		}
-		f := loadAccounts()
-		i := findRemembered(f.Accounts, agent, user)
+		f := magLoadAccounts()
+		i := magFindRemembered(f.Accounts, agent, user)
 		if i < 0 {
 			return fmt.Errorf("no remembered %s account %q", agent, strings.TrimSpace(user))
 		}
-		if cur, ok := currentSignIns()[agent]; ok && strings.EqualFold(cur.user, f.Accounts[i].User) {
+		if cur, ok := magCurrentSignIns()[agent]; ok && strings.EqualFold(cur.user, f.Accounts[i].User) {
 			if !on {
-				return fmt.Errorf("%s is signed in to %s now, and always serves requests", f.Accounts[i].User, agentName(agent))
+				return fmt.Errorf("%s is signed in to %s now, and always serves requests", f.Accounts[i].User, magAgentName(agent))
 			}
 			return nil
 		}
 		f.Accounts[i].On = on
-		return storeAccounts(f)
+		return magStoreAccounts(f)
 	})
 }
 
@@ -445,38 +452,38 @@ func SetLoginOn(agent, user string, on bool) error {
 // that is signed in. A new account joins alongside the ones already
 // remembered: when there are others, it serves requests at the same time.
 func AddAccount(agent string) (string, error) {
-	if !isRememberedAgent(agent) {
-		return "", unknownAgent(agent)
+	if !magIsRememberedAgent(agent) {
+		return "", magUnknownAgent(agent)
 	}
-	exe, args, err := signInCommand(agent)
+	exe, args, err := magSignInCommand(agent)
 	if err != nil {
 		return "", err
 	}
-	var before []rememberedAccount
+	var before []magRememberedAccount
 	// the sign-in replaces the agent's own copy, so the account signed in now
 	// is saved first; it is taken back if the sign-in does not finish
 	var kept string
-	if err := lockedAccounts(func() error {
-		if err := rememberLoginsLocked(); err != nil {
+	if err := magLockedAccounts(func() error {
+		if err := magRememberLoginsLocked(); err != nil {
 			return err
 		}
-		before = loadAccounts().Accounts
-		cur, signedIn := currentSignIns()[agent]
+		before = magLoadAccounts().Accounts
+		cur, signedIn := magCurrentSignIns()[agent]
 		if !signedIn {
 			return nil
 		}
-		login, ok := agentLogin(agent)
+		login, ok := magAgentLogin(agent)
 		if !ok {
 			return nil
 		}
-		if _, err := writeStash(agent, cur.user, login); err != nil {
+		if _, err := magWriteStash(agent, cur.user, login); err != nil {
 			return err
 		}
-		f := loadAccounts()
-		if i := findRemembered(f.Accounts, agent, cur.user); i >= 0 {
+		f := magLoadAccounts()
+		if i := magFindRemembered(f.Accounts, agent, cur.user); i >= 0 {
 			f.Accounts[i].Saved = true
 			kept = cur.user
-			return storeAccounts(f)
+			return magStoreAccounts(f)
 		}
 		return nil
 	}); err != nil {
@@ -486,34 +493,34 @@ func AddAccount(agent string) (string, error) {
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		if kept != "" {
-			lockedAccounts(func() error {
-				os.Remove(stashPath(agent, kept))
-				f := loadAccounts()
-				if i := findRemembered(f.Accounts, agent, kept); i >= 0 {
+			magLockedAccounts(func() error {
+				os.Remove(magStashPath(agent, kept))
+				f := magLoadAccounts()
+				if i := magFindRemembered(f.Accounts, agent, kept); i >= 0 {
 					f.Accounts[i].Saved = false
-					return storeAccounts(f)
+					return magStoreAccounts(f)
 				}
 				return nil
 			})
 		}
-		return "", fmt.Errorf("%s sign-in did not finish: %v", agentName(agent), err)
+		return "", fmt.Errorf("%s sign-in did not finish: %v", magAgentName(agent), err)
 	}
 	var user string
-	err = lockedAccounts(func() error {
-		if err := rememberLoginsLocked(); err != nil {
+	err = magLockedAccounts(func() error {
+		if err := magRememberLoginsLocked(); err != nil {
 			return err
 		}
-		cur, ok := currentSignIns()[agent]
+		cur, ok := magCurrentSignIns()[agent]
 		if !ok {
-			return fmt.Errorf("%s is still signed out", agentName(agent))
+			return fmt.Errorf("%s is still signed out", magAgentName(agent))
 		}
 		user = cur.user
-		f := loadAccounts()
-		i := findRemembered(f.Accounts, agent, cur.user)
+		f := magLoadAccounts()
+		i := magFindRemembered(f.Accounts, agent, cur.user)
 		if i < 0 {
 			return fmt.Errorf("magpie could not remember %s", cur.user)
 		}
-		isNew := findRemembered(before, agent, cur.user) < 0
+		isNew := magFindRemembered(before, agent, cur.user) < 0
 		others := 0
 		for j, r := range f.Accounts {
 			if j != i && r.Agent == agent {
@@ -523,12 +530,12 @@ func AddAccount(agent string) (string, error) {
 		if isNew && others > 0 {
 			f.Accounts[i].On = true
 		}
-		return storeAccounts(f)
+		return magStoreAccounts(f)
 	})
 	return user, err
 }
 
-func signInCommand(agent string) (string, []string, error) {
+func magSignInCommand(agent string) (string, []string, error) {
 	switch agent {
 	case "claude":
 		exe := claudeExecutable()
@@ -543,11 +550,11 @@ func signInCommand(agent string) (string, []string, error) {
 		}
 		return exe, []string{"login"}, nil
 	}
-	return "", nil, unknownAgent(agent)
+	return "", nil, magUnknownAgent(agent)
 }
 
-// agentName is the agent's name as the user knows it.
-func agentName(agent string) string {
+// magAgentName is the agent's name as the user knows it.
+func magAgentName(agent string) string {
 	switch agent {
 	case "claude":
 		return "Claude Code"
@@ -557,17 +564,17 @@ func agentName(agent string) string {
 	return agent
 }
 
-// onAccounts are the remembered accounts of agent that serve requests
+// magOnAccounts are the remembered accounts of agent that serve requests
 // alongside its sign-in, in the order they were saved, as providers that sign
 // with their own sign-in.
-func onAccounts(agent, current string) []Provider {
+func magOnAccounts(agent, magCurrent string) []Provider {
 	var out []Provider
-	for _, r := range loadAccounts().Accounts {
-		if r.Agent != agent || !r.On || !r.Saved || strings.EqualFold(r.User, current) {
+	for _, r := range magLoadAccounts().Accounts {
+		if r.Agent != agent || !r.On || !r.Saved || strings.EqualFold(r.User, magCurrent) {
 			continue
 		}
 		if agent == "codex" {
-			out = append(out, codexProvider(stashPath(agent, r.User), r.User, r.Plan))
+			out = append(out, magCodexProvider(magStashPath(agent, r.User), r.User, r.Plan))
 		}
 	}
 	return out
@@ -577,7 +584,7 @@ func onAccounts(agent, current string) []Provider {
 // account: the agent's current sign-in first, then the accounts that serve
 // alongside it, in the order they were saved.
 func (p Provider) accountPlans() []KeyPlan {
-	ps := append([]Provider{p}, onAccounts(p.Account.Agent, p.Account.User)...)
+	ps := append([]Provider{p}, magOnAccounts(p.Account.Agent, p.Account.User)...)
 	var out []KeyPlan
 	for _, a := range ps {
 		ups := a.Speaks()
@@ -590,15 +597,15 @@ func (p Provider) accountPlans() []KeyPlan {
 	return out
 }
 
-// usageEntry is one agent's last LoginUsage result.
-type usageEntry struct {
+// magUsageEntry is one agent's last LoginUsage result.
+type magUsageEntry struct {
 	at   time.Time
 	byID map[string]SubscriptionQuota
 }
 
-var loginUsageCache struct {
+var magLoginUsageCache struct {
 	sync.Mutex
-	by map[string]*usageEntry
+	by map[string]*magUsageEntry
 }
 
 // LoginUsage reports the rolling usage of each remembered account of agent,
@@ -607,35 +614,39 @@ var loginUsageCache struct {
 // last known about it. An agent without accounts gets an empty map.
 func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota {
 	out := map[string]SubscriptionQuota{}
-	if !isRememberedAgent(agent) {
+	if !magIsRememberedAgent(agent) {
 		return out
 	}
-	c := &loginUsageCache
+	c := &magLoginUsageCache
 	c.Lock()
 	defer c.Unlock()
 	if c.by == nil {
-		c.by = map[string]*usageEntry{}
+		c.by = map[string]*magUsageEntry{}
 	}
 	e := c.by[agent]
 	if e == nil {
-		e = &usageEntry{byID: map[string]SubscriptionQuota{}}
+		e = &magUsageEntry{byID: map[string]SubscriptionQuota{}}
 		c.by[agent] = e
 	}
 	if time.Since(e.at) < time.Minute {
-		return copyQuotas(e.byID)
+		return magCopyQuotas(e.byID)
 	}
 	fresh := map[string]SubscriptionQuota{}
 	for _, r := range Remembered(agent) {
 		var q SubscriptionQuota
 		switch {
 		case agent == "codex" && r.Current:
-			q = timedQuota(ctx, func(ctx context.Context) SubscriptionQuota { return codexSubscriptionUsage(ctx, codexAuthPath()) })
+			q = magTimedQuota(ctx, func(ctx context.Context) SubscriptionQuota { return codexSubscriptionUsage(ctx, magCodexAuthPath()) })
 		case agent == "codex" && r.Saved:
-			q = timedQuota(ctx, func(ctx context.Context) SubscriptionQuota {
-				return codexSubscriptionUsage(ctx, stashPath(agent, r.User))
+			q = magTimedQuota(ctx, func(ctx context.Context) SubscriptionQuota {
+				return codexSubscriptionUsage(ctx, magStashPath(agent, r.User))
 			})
 		case agent == "claude" && r.Current:
-			q = timedQuota(ctx, claudeSubscriptionUsage)
+			q = magTimedQuota(ctx, claudeSubscriptionUsage)
+		case agent == "claude" && r.Saved:
+			q = magTimedQuota(ctx, func(ctx context.Context) SubscriptionQuota {
+				return claudeSavedUsage(ctx, magStashPath(agent, r.User), r.Plan)
+			})
 		default:
 			continue
 		}
@@ -649,17 +660,17 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 		fresh[r.User] = q
 	}
 	e.at, e.byID = time.Now(), fresh
-	return copyQuotas(fresh)
+	return magCopyQuotas(fresh)
 }
 
-// timedQuota runs one account's usage query under subscriptionTimeout.
-func timedQuota(ctx context.Context, fetch func(context.Context) SubscriptionQuota) SubscriptionQuota {
+// magTimedQuota runs one account's usage query under subscriptionTimeout.
+func magTimedQuota(ctx context.Context, fetch func(context.Context) SubscriptionQuota) SubscriptionQuota {
 	ctx, cancel := context.WithTimeout(ctx, subscriptionTimeout)
 	defer cancel()
 	return fetch(ctx)
 }
 
-func copyQuotas(m map[string]SubscriptionQuota) map[string]SubscriptionQuota {
+func magCopyQuotas(m map[string]SubscriptionQuota) map[string]SubscriptionQuota {
 	out := make(map[string]SubscriptionQuota, len(m))
 	for k, v := range m {
 		out[k] = v

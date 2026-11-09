@@ -18,9 +18,9 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 )
 
-// s1Env points magpie's config, cache and home at a fresh temp dir so the
+// magS1Env points magpie's config, cache and home at a fresh temp dir so the
 // tests never read or write the real ones.
-func s1Env(t *testing.T) {
+func magS1Env(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
@@ -30,11 +30,11 @@ func s1Env(t *testing.T) {
 	t.Cleanup(catalog.Reset)
 }
 
-var s1PNG = append([]byte("\x89PNG\r\n\x1a\n"), []byte("s1-png-body")...)
+var magS1PNG = append([]byte("\x89PNG\r\n\x1a\n"), []byte("s1-png-body")...)
 
 func TestS1StoreIconNamesAndReuses(t *testing.T) {
-	s1Env(t)
-	ref, err := StoreIcon(s1PNG)
+	magS1Env(t)
+	ref, err := StoreIcon(magS1PNG)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestS1StoreIconNamesAndReuses(t *testing.T) {
 	if !ok || !regexp.MustCompile(`^[0-9a-f]{16}\.png$`).MatchString(name) {
 		t.Fatalf("icon value %q is not file:<16 hex>.png", ref)
 	}
-	again, err := StoreIcon(s1PNG)
+	again, err := StoreIcon(magS1PNG)
 	if err != nil || again != ref {
 		t.Fatalf("second store: %q, %v; want %q", again, err, ref)
 	}
@@ -66,10 +66,10 @@ func TestS1StoreIconNamesAndReuses(t *testing.T) {
 }
 
 func TestS1StoreIconRejects(t *testing.T) {
-	s1Env(t)
+	magS1Env(t)
 	cases := map[string][]byte{
 		"empty":   nil,
-		"too big": append(append([]byte{}, s1PNG...), make([]byte, MaxIcon)...),
+		"too big": append(append([]byte{}, magS1PNG...), make([]byte, MaxIcon)...),
 		"text":    []byte("just some words"),
 		"html":    []byte("<html><body>hi</body></html>"),
 	}
@@ -81,9 +81,9 @@ func TestS1StoreIconRejects(t *testing.T) {
 }
 
 func TestS1StoreIconFormats(t *testing.T) {
-	s1Env(t)
+	magS1Env(t)
 	cases := map[string][]byte{
-		"png":  s1PNG,
+		"png":  magS1PNG,
 		"jpg":  {0xFF, 0xD8, 0xFF, 0xE0, 1, 2},
 		"gif":  []byte("GIF89a-s1"),
 		"webp": []byte("RIFF\x10\x00\x00\x00WEBPVP8 "),
@@ -104,8 +104,8 @@ func TestS1StoreIconFormats(t *testing.T) {
 }
 
 func TestS1IconsPrunedOnSave(t *testing.T) {
-	s1Env(t)
-	kept, err := StoreIcon(s1PNG)
+	magS1Env(t)
+	kept, err := StoreIcon(magS1PNG)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestS1IconsPrunedOnSave(t *testing.T) {
 }
 
 func TestS1SaveNormalizesHeadersAndCatalog(t *testing.T) {
-	s1Env(t)
+	magS1Env(t)
 	err := Save(Provider{Name: "S1 Relay", Chat: "https://relay.example/v1", Key: "k",
 		Headers: map[string]string{" X-Org-Id ": " acme ", "  ": "dropped"},
 		Catalog: " OpenAI, deepseek,,"})
@@ -178,7 +178,7 @@ func TestS1SaveNormalizesHeadersAndCatalog(t *testing.T) {
 }
 
 func TestS1HeadersSignedOnlyForCustom(t *testing.T) {
-	s1Env(t)
+	magS1Env(t)
 	hdrs := map[string]string{"X-Org-Id": "acme", "authorization": "Bearer other"}
 	ctx := context.Background()
 
@@ -220,9 +220,9 @@ func TestS1HeadersSignedOnlyForCustom(t *testing.T) {
 	}
 }
 
-// s1Serve answers one HTTP/1.1 request on conn with a small model list and
+// magS1Serve answers one HTTP/1.1 request on conn with a small model list and
 // reports the request's header lines exactly as they arrived.
-func s1Serve(conn net.Conn, seen chan<- []string) {
+func magS1Serve(conn net.Conn, seen chan<- []string) {
 	defer conn.Close()
 	r := bufio.NewReader(conn)
 	var lines []string
@@ -250,7 +250,7 @@ func s1Serve(conn net.Conn, seen chan<- []string) {
 }
 
 func TestS1HeaderCaseOnTheWire(t *testing.T) {
-	s1Env(t)
+	magS1Env(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Skip("no loopback listener:", err)
@@ -263,7 +263,7 @@ func TestS1HeaderCaseOnTheWire(t *testing.T) {
 			if err != nil {
 				return
 			}
-			go s1Serve(conn, seen)
+			go magS1Serve(conn, seen)
 		}
 	}()
 
@@ -295,7 +295,7 @@ func TestS1HeaderCaseOnTheWire(t *testing.T) {
 }
 
 func TestS1MultiCatalogNamesAndPrefix(t *testing.T) {
-	s1Env(t)
+	magS1Env(t)
 	cache := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "magpie", "models.json")
 	if err := os.MkdirAll(filepath.Dir(cache), 0o755); err != nil {
 		t.Fatal(err)

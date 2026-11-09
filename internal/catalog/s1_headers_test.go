@@ -38,7 +38,9 @@ func TestS1DecorateMatchesPrefixedIDs(t *testing.T) {
 	if out[1].ID != "vendor/unknown" || out[1].Name != "vendor/unknown" || out[1].Provider != "" {
 		t.Fatalf("unmatched id should pass through: %+v", out[1])
 	}
-	if out[2].Name != "first" {
-		t.Fatalf("the first catalog entry should win: %+v", out[2])
+	// a repeated id takes the last entry, as Decorate always has; the order
+	// across several catalogs is settled before this, in provider.knownModels
+	if out[2].Name != "second" {
+		t.Fatalf("a repeated id should take the last entry: %+v", out[2])
 	}
 }

@@ -187,10 +187,10 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := checkIconable(*p); err != nil {
+		if err := magCheckIconable(*p); err != nil {
 			return err
 		}
-		icon, err := iconArg(rest[1])
+		icon, err := magIconArg(rest[1])
 		if err != nil {
 			return err
 		}
@@ -205,7 +205,7 @@ func providerCmd(args []string) error {
 		}
 		return nil
 	case "key":
-		return keyCmd(rest)
+		return magKeyCmd(rest)
 	case "fallback":
 		if len(rest) < 1 {
 			return fmt.Errorf("magpie provider fallback <id> [provider/model…]")
@@ -224,7 +224,7 @@ func providerCmd(args []string) error {
 			}
 			fmt.Println(green.Render("✓"), p.Name, "fallback saved")
 		}
-		return showFallback(*p)
+		return magShowFallback(*p)
 	case "rm", "remove", "delete":
 		if len(rest) != 1 {
 			return fmt.Errorf("magpie provider rm <id>")
@@ -382,7 +382,7 @@ func showProvider(p provider.Provider) error {
 		}
 		kv("account", who+muted.Render("  from "+p.Account.Agent+"'s own sign-in"))
 	case p.Key != "" && len(p.Keys) > 0:
-		printKeys(p)
+		magPrintKeys(p)
 	case p.Key != "":
 		kv("key", muted.Render(provider.Mask(p.Key)))
 	case p.Ready():
@@ -426,8 +426,8 @@ func showProvider(p provider.Provider) error {
 	return nil
 }
 
-// showFallback lists a provider's fallback models, in the order they are tried.
-func showFallback(p provider.Provider) error {
+// magShowFallback lists a provider's fallback models, in the order they are tried.
+func magShowFallback(p provider.Provider) error {
 	if len(p.Fallback) == 0 {
 		fmt.Println(muted.Render(p.Name+" has no fallback ·"), "magpie provider fallback", p.ID, "<provider/model>…",
 			muted.Render("· tried in order when it cannot answer"))
@@ -440,19 +440,19 @@ func showFallback(p provider.Provider) error {
 	return nil
 }
 
-// checkIconable refuses an icon for a built-in vendor or a signed-in agent:
+// magCheckIconable refuses an icon for a built-in vendor or a signed-in agent:
 // only custom providers carry their own picture.
-func checkIconable(p provider.Provider) error {
+func magCheckIconable(p provider.Provider) error {
 	if p.Preset != "" || p.Account != nil {
 		return fmt.Errorf("仅自定义供应商可设置图标：%s 是预设供应商或已登录的账号", p.Name)
 	}
 	return nil
 }
 
-// iconArg turns what the user typed for an icon into the value to store: a
+// magIconArg turns what the user typed for an icon into the value to store: a
 // local picture is copied into magpie's icons folder; a built-in name is kept
 // as it is; "" means the default icon.
-func iconArg(arg string) (string, error) {
+func magIconArg(arg string) (string, error) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
 		return "", nil
@@ -522,10 +522,10 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "keys":
 			p.KeysURL = v
 		case "icon":
-			if err := checkIconable(*p); err != nil {
+			if err := magCheckIconable(*p); err != nil {
 				return err
 			}
-			icon, err := iconArg(v)
+			icon, err := magIconArg(v)
 			if err != nil {
 				return err
 			}

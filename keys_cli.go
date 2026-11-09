@@ -7,7 +7,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-const keyUsage = `usage:
+const magKeyUsage = `usage:
   magpie provider key <id>                          list the keys, the current one first
   magpie provider key <id> <key>                    change the current key
   magpie provider key <id> add <key> [name=…] [protocol=chat|responses|anthropic]
@@ -19,13 +19,13 @@ const keyUsage = `usage:
                                                     limit a key to one protocol
   <ref> is the key's fingerprint, as the list shows it`
 
-// keyVerbs are the words that make `provider key <id> …` a management command
+// magKeyVerbs are the words that make `provider key <id> …` a management command
 // rather than a new current key.
-var keyVerbs = map[string]bool{"add": true, "use": true, "on": true, "off": true,
+var magKeyVerbs = map[string]bool{"add": true, "use": true, "on": true, "off": true,
 	"rm": true, "remove": true, "delete": true, "rename": true, "protocol": true}
 
-// keyCmd: `magpie provider key <id> …`
-func keyCmd(rest []string) error {
+// magKeyCmd: `magpie provider key <id> …`
+func magKeyCmd(rest []string) error {
 	if len(rest) == 0 {
 		return fmt.Errorf("magpie provider key <id> <key>")
 	}
@@ -38,7 +38,7 @@ func keyCmd(rest []string) error {
 		return fmt.Errorf("magpie provider key <id> <key>")
 	}
 	verb := strings.ToLower(args[0])
-	if len(args) == 1 && !keyVerbs[verb] {
+	if len(args) == 1 && !magKeyVerbs[verb] {
 		// the legacy form: the one key, replaced; a new key takes no name or limit of the old one
 		if strings.TrimSpace(args[0]) != p.Key {
 			p.KeyName, p.KeyProtocol = "", ""
@@ -52,7 +52,7 @@ func keyCmd(rest []string) error {
 	}
 	need := func(n int) error {
 		if len(args) < n {
-			return fmt.Errorf("%s", keyUsage)
+			return fmt.Errorf("%s", magKeyUsage)
 		}
 		return nil
 	}
@@ -61,7 +61,7 @@ func keyCmd(rest []string) error {
 		if err := need(2); err != nil {
 			return err
 		}
-		name, proto, err := keyOptions(args[2:])
+		name, proto, err := magKeyOptions(args[2:])
 		if err != nil {
 			return err
 		}
@@ -106,45 +106,45 @@ func keyCmd(rest []string) error {
 		if err := need(3); err != nil {
 			return err
 		}
-		proto, err := parseKeyProtocol(args[2])
+		proto, err := magParseKeyProtocol(args[2])
 		if err != nil {
 			return err
 		}
 		if err := provider.SetKeyProtocol(p.ID, args[1], proto); err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), "key", muted.Render(args[1]), "limited to", protoLabel(proto))
+		fmt.Println(green.Render("✓"), "key", muted.Render(args[1]), "limited to", magProtoLabel(proto))
 	}
 	return nil
 }
 
-// keyOptions reads the name=… and protocol=… words after a key.
-func keyOptions(words []string) (string, provider.Protocol, error) {
+// magKeyOptions reads the name=… and protocol=… words after a key.
+func magKeyOptions(words []string) (string, provider.Protocol, error) {
 	var name string
 	var proto provider.Protocol
 	for _, w := range words {
 		k, v, ok := strings.Cut(w, "=")
 		if !ok {
-			return "", "", fmt.Errorf("expected name=… or protocol=…, got %q\n\n%s", w, keyUsage)
+			return "", "", fmt.Errorf("expected name=… or protocol=…, got %q\n\n%s", w, magKeyUsage)
 		}
 		switch strings.ToLower(k) {
 		case "name":
 			name = v
 		case "protocol", "proto":
-			p, err := parseKeyProtocol(v)
+			p, err := magParseKeyProtocol(v)
 			if err != nil {
 				return "", "", err
 			}
 			proto = p
 		default:
-			return "", "", fmt.Errorf("unknown key option %q\n\n%s", k, keyUsage)
+			return "", "", fmt.Errorf("unknown key option %q\n\n%s", k, magKeyUsage)
 		}
 	}
 	return name, proto, nil
 }
 
-// parseKeyProtocol reads a key protocol: chat, responses, anthropic, or any/"".
-func parseKeyProtocol(s string) (provider.Protocol, error) {
+// magParseKeyProtocol reads a key protocol: chat, responses, anthropic, or any/"".
+func magParseKeyProtocol(s string) (provider.Protocol, error) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "any" || s == "none" {
 		s = ""
@@ -156,15 +156,15 @@ func parseKeyProtocol(s string) (provider.Protocol, error) {
 	return p, nil
 }
 
-func protoLabel(p provider.Protocol) string {
+func magProtoLabel(p provider.Protocol) string {
 	if p == "" {
 		return "any protocol"
 	}
 	return string(p) + " only"
 }
 
-// printKeys lists a provider's keys, the current one first.
-func printKeys(p provider.Provider) {
+// magPrintKeys lists a provider's keys, the current one first.
+func magPrintKeys(p provider.Provider) {
 	for i, k := range p.KeyList() {
 		label := ""
 		if i == 0 {
@@ -185,7 +185,7 @@ func printKeys(p provider.Provider) {
 		case !k.On:
 			state = "off"
 		}
-		line := fmt.Sprintf("%s %s  %s  %s  %s", mark, k.Ref, muted.Render(k.Mask), name, muted.Render(protoLabel(k.Protocol)))
+		line := fmt.Sprintf("%s %s  %s  %s  %s", mark, k.Ref, muted.Render(k.Mask), name, muted.Render(magProtoLabel(k.Protocol)))
 		if state != "" {
 			line += "  " + muted.Render(state)
 		}

@@ -45,7 +45,7 @@ func (p Provider) knownModels() []catalog.Model {
 	}
 	var out []catalog.Model
 	seen := map[string]bool{}
-	for _, name := range catalogNames(p.Catalog) {
+	for _, name := range magCatalogNames(p.Catalog) {
 		for _, m := range catalog.Provider(name) {
 			if !seen[m.ID] {
 				seen[m.ID] = true

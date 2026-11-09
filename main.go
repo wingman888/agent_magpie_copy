@@ -129,7 +129,7 @@ func run(args []string) error {
 	case "provider":
 		return providerCmd(args)
 	case "accounts":
-		return accountsCmd(args[1:])
+		return magAccountsCmd(args[1:])
 	case "models":
 		return models()
 	case "serve":

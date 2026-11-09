@@ -155,7 +155,7 @@ type accountStatusError struct{ status int }
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
 func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
-	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
+	q := claudeQuotaShell()
 	token, err := claudeToken(ctx)
 	if err != nil {
 		q.Error = err.Error()
@@ -163,13 +163,49 @@ func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
 	}
 	_, plan, _ := claudeIdentity()
 	q.Plan = plan
+	return claudeQuotaFor(ctx, q, token)
+}
+
+// claudeSavedUsage queries with the sign-in magpie keeps a copy of for a
+// Claude Code account that is not the one signed in. The copy is only read,
+// never refreshed or written back, so its refresh token is not rotated here.
+// An expired copy is a failed query.
+func claudeSavedUsage(ctx context.Context, path, plan string) SubscriptionQuota {
+	q := claudeQuotaShell()
+	q.Plan = plan
+	b, err := os.ReadFile(path)
+	if err != nil {
+		q.Error = err.Error()
+		return q
+	}
+	c, ok := parseClaudeCredentials(b)
+	if !ok {
+		q.Error = "the saved sign-in has no access token"
+		return q
+	}
+	if !claudeFresh(c) {
+		q.Error = "the saved sign-in has expired; sign in to it again"
+		return q
+	}
+	return claudeQuotaFor(ctx, q, c.OAuth.AccessToken)
+}
+
+func claudeQuotaShell() SubscriptionQuota {
+	return SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
+}
+
+// claudeUsageURL is Anthropic's usage endpoint; tests point it at a stand-in.
+var claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
+
+// claudeQuotaFor asks Anthropic for the windows of the account holding token.
+func claudeQuotaFor(ctx context.Context, q SubscriptionQuota, token string) SubscriptionQuota {
 	var data struct {
 		FiveHour       *quotaWire `json:"five_hour"`
 		SevenDay       *quotaWire `json:"seven_day"`
 		SevenDayOpus   *quotaWire `json:"seven_day_opus"`
 		SevenDaySonnet *quotaWire `json:"seven_day_sonnet"`
 	}
-	err = accountJSON(ctx, "https://api.anthropic.com/api/oauth/usage", token, map[string]string{
+	err := accountJSON(ctx, claudeUsageURL, token, map[string]string{
 		"anthropic-beta": "oauth-2025-04-20", "user-agent": "magpie",
 	}, &data)
 	if err != nil {

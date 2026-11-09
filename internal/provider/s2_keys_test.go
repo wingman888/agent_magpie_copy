@@ -10,8 +10,8 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 )
 
-// s2Env points config, cache and home at a fresh temp dir.
-func s2Env(t *testing.T) {
+// magS2Env points config, cache and home at a fresh temp dir.
+func magS2Env(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
@@ -21,8 +21,8 @@ func s2Env(t *testing.T) {
 	t.Cleanup(catalog.Reset)
 }
 
-// s2Stored returns the stored entry for id, raw from providers.json.
-func s2Stored(t *testing.T, id string) Provider {
+// magS2Stored returns the stored entry for id, raw from providers.json.
+func magS2Stored(t *testing.T, id string) Provider {
 	t.Helper()
 	for _, p := range load().Providers {
 		if p.ID == id {
@@ -33,7 +33,7 @@ func s2Stored(t *testing.T, id string) Provider {
 	return Provider{}
 }
 
-func s2Keys(p Provider) []string {
+func magS2Keys(p Provider) []string {
 	var out []string
 	for _, k := range p.Keys {
 		out = append(out, k.Key)
@@ -50,7 +50,7 @@ func TestS2KeyRefIsFirstFiveBytesOfSHA256(t *testing.T) {
 }
 
 func TestS2FirstKeyBecomesCurrent(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	// a local base needs no key, so the provider can exist without one
 	if err := Save(Provider{ID: "s2first", Name: "S2 First", Chat: "http://127.0.0.1:9/v1"}); err != nil {
 		t.Fatal(err)
@@ -58,14 +58,14 @@ func TestS2FirstKeyBecomesCurrent(t *testing.T) {
 	if err := AddKey("s2first", "work", "sk-s2-one", ""); err != nil {
 		t.Fatal(err)
 	}
-	p := s2Stored(t, "s2first")
+	p := magS2Stored(t, "s2first")
 	if p.Key != "sk-s2-one" || p.KeyName != "work" || len(p.Keys) != 0 {
 		t.Fatalf("first key not current: %+v", p)
 	}
 }
 
 func TestS2AddKeyRejectsDuplicateAndUnknownProtocol(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	if err := Save(Provider{ID: "s2dup", Name: "S2 Dup", Chat: "https://relay.example/v1", Key: "sk-s2-a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestS2AddKeyRejectsDuplicateAndUnknownProtocol(t *testing.T) {
 }
 
 func TestS2UseKeyKeepsOtherKeysAndLimits(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	if err := Save(Provider{ID: "s2use", Name: "S2 Use", Chat: "https://relay.example/v1", Key: "sk-s2-cur", KeyName: "cur"}); err != nil {
 		t.Fatal(err)
 	}
@@ -100,12 +100,12 @@ func TestS2UseKeyKeepsOtherKeysAndLimits(t *testing.T) {
 	if err := UseKey("s2use", KeyRef("sk-s2-team")); err != nil {
 		t.Fatal(err)
 	}
-	p := s2Stored(t, "s2use")
+	p := magS2Stored(t, "s2use")
 	if p.Key != "sk-s2-team" || p.KeyName != "team" || p.KeyProtocol != Anthropic {
 		t.Fatalf("current key wrong: %+v", p)
 	}
 	want := []string{"sk-s2-cur", "sk-s2-spare"}
-	if got := s2Keys(p); strings.Join(got, ",") != strings.Join(want, ",") {
+	if got := magS2Keys(p); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("extra keys = %v, want %v", got, want)
 	}
 	if p.Keys[0].Name != "cur" || p.Keys[0].Off {
@@ -114,7 +114,7 @@ func TestS2UseKeyKeepsOtherKeysAndLimits(t *testing.T) {
 }
 
 func TestS2SetKeyOnHandsOverAndLastEnabledStays(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	if err := Save(Provider{ID: "s2on", Name: "S2 On", Chat: "https://relay.example/v1", Key: "sk-s2-first"}); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestS2SetKeyOnHandsOverAndLastEnabledStays(t *testing.T) {
 	if err := SetKeyOn("s2on", KeyRef("sk-s2-first"), false); err != nil {
 		t.Fatal(err)
 	}
-	p := s2Stored(t, "s2on")
+	p := magS2Stored(t, "s2on")
 	if p.Key != "sk-s2-second" || len(p.Keys) != 1 || p.Keys[0].Key != "sk-s2-first" || !p.Keys[0].Off {
 		t.Fatalf("hand-over wrong: %+v", p)
 	}
@@ -137,13 +137,13 @@ func TestS2SetKeyOnHandsOverAndLastEnabledStays(t *testing.T) {
 	if err := SetKeyOn("s2on", KeyRef("sk-s2-first"), true); err != nil {
 		t.Fatal(err)
 	}
-	if p := s2Stored(t, "s2on"); p.Keys[0].Off {
+	if p := magS2Stored(t, "s2on"); p.Keys[0].Off {
 		t.Fatal("switching a key back on did not take")
 	}
 }
 
 func TestS2RemoveCurrentHandsOverAndRenameWorks(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	if err := Save(Provider{ID: "s2rm", Name: "S2 Rm", Chat: "https://relay.example/v1", Key: "sk-s2-a", KeyName: "a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -156,13 +156,13 @@ func TestS2RemoveCurrentHandsOverAndRenameWorks(t *testing.T) {
 	if err := RenameKey("s2rm", KeyRef("sk-s2-a"), "ay"); err != nil {
 		t.Fatal(err)
 	}
-	if p := s2Stored(t, "s2rm"); p.KeyName != "ay" || p.Keys[0].Name != "bee" {
+	if p := magS2Stored(t, "s2rm"); p.KeyName != "ay" || p.Keys[0].Name != "bee" {
 		t.Fatalf("rename wrong: %+v", p)
 	}
 	if err := RemoveKey("s2rm", KeyRef("sk-s2-a")); err != nil {
 		t.Fatal(err)
 	}
-	p := s2Stored(t, "s2rm")
+	p := magS2Stored(t, "s2rm")
 	if p.Key != "sk-s2-b" || p.KeyName != "bee" || len(p.Keys) != 0 {
 		t.Fatalf("removing the current key did not hand over: %+v", p)
 	}
@@ -172,7 +172,7 @@ func TestS2RemoveCurrentHandsOverAndRenameWorks(t *testing.T) {
 }
 
 func TestS2SetKeyProtocolSetsAndClears(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	if err := Save(Provider{ID: "s2pr", Name: "S2 Pr", Chat: "https://relay.example/v1", Key: "sk-s2-a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -182,13 +182,13 @@ func TestS2SetKeyProtocolSetsAndClears(t *testing.T) {
 	if err := SetKeyProtocol("s2pr", KeyRef("sk-s2-b"), Chat); err != nil {
 		t.Fatal(err)
 	}
-	if got := s2Stored(t, "s2pr").Keys[0].Protocol; got != Chat {
+	if got := magS2Stored(t, "s2pr").Keys[0].Protocol; got != Chat {
 		t.Fatalf("protocol = %q, want chat", got)
 	}
 	if err := SetKeyProtocol("s2pr", KeyRef("sk-s2-b"), ""); err != nil {
 		t.Fatal(err)
 	}
-	if got := s2Stored(t, "s2pr").Keys[0].Protocol; got != "" {
+	if got := magS2Stored(t, "s2pr").Keys[0].Protocol; got != "" {
 		t.Fatalf("protocol not cleared: %q", got)
 	}
 	if err := SetKeyProtocol("s2pr", KeyRef("sk-s2-a"), Protocol("gemini")); err == nil {
@@ -200,7 +200,7 @@ func TestS2SetKeyProtocolSetsAndClears(t *testing.T) {
 }
 
 func TestS2SaveKeepsKeysItDoesNotKnow(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	if err := Save(Provider{ID: "s2keep", Name: "S2 Keep", Chat: "https://relay.example/v1", Key: "sk-s2-a", KeyName: "a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -211,14 +211,14 @@ func TestS2SaveKeepsKeysItDoesNotKnow(t *testing.T) {
 	if err := Save(Provider{ID: "s2keep", Name: "S2 Keep", Chat: "https://relay.example/v1", Key: "sk-s2-a"}); err != nil {
 		t.Fatal(err)
 	}
-	p := s2Stored(t, "s2keep")
+	p := magS2Stored(t, "s2keep")
 	if len(p.Keys) != 1 || p.Keys[0].Key != "sk-s2-b" || p.Keys[0].Protocol != Anthropic || p.KeyName != "a" {
 		t.Fatalf("Save dropped keys: %+v", p)
 	}
 }
 
 func TestS2KeyPlansOrderByModelAndProtocol(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	p := Provider{ID: "s2plan", Name: "S2 Plan", Chat: "https://relay.example/v1",
 		Anthropic: "https://relay.example", Key: "sk-s2-any",
 		Keys: []ExtraKey{
@@ -253,7 +253,7 @@ func TestS2KeyPlansOrderByModelAndProtocol(t *testing.T) {
 }
 
 func TestS2KeyLimitedToMissingEndpointIsLeftOut(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	p := Provider{ID: "s2none", Name: "S2 None", Chat: "https://relay.example/v1", Key: "sk-s2-x", KeyProtocol: Anthropic}
 	if plans := p.KeyPlans(Chat, "gpt-s2"); len(plans) != 0 {
 		t.Fatalf("an anthropic-only key was planned on an OpenAI-only vendor: %d plans", len(plans))

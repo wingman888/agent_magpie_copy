@@ -117,7 +117,7 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
-	_ = observeSignIns(false) // remember a sign-in that is new since last time
+	_ = magObserveSignIns(false) // remember a sign-in that is new since last time
 	stored := load().Providers
 	picks := map[string]Provider{}
 	var out []Provider
@@ -211,7 +211,7 @@ func Save(p Provider) error {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
-	if !isAccount(p.ID) {
+	if !magIsAccount(p.ID) {
 		if !ValidKeyProtocol(p.KeyProtocol) {
 			return fmt.Errorf("key protocol %q is not one of chat, responses, anthropic, or none", p.KeyProtocol)
 		}
@@ -244,7 +244,7 @@ func Save(p Provider) error {
 					p.KeyProtocol = old.KeyProtocol
 				}
 			}
-			tidyKeys(&p)
+			magTidyKeys(&p)
 			f.Providers[i] = p
 			replaced = true
 			break
@@ -256,7 +256,7 @@ func Save(p Provider) error {
 	if err := store(f); err != nil {
 		return err
 	}
-	pruneIcons(f)
+	magPruneIcons(f)
 	return nil
 }
 
@@ -312,11 +312,11 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
-	p.Catalog = strings.Join(catalogNames(p.Catalog), ",")
-	p.Headers = cleanHeaders(p.Headers)
+	p.Catalog = strings.Join(magCatalogNames(p.Catalog), ",")
+	p.Headers = magCleanHeaders(p.Headers)
 	p.KeyName = strings.TrimSpace(p.KeyName)
-	tidyKeys(&p)
-	if name, ok := strings.CutPrefix(p.Icon, iconRefPrefix); ok && IconFile(name) == "" {
+	magTidyKeys(&p)
+	if name, ok := strings.CutPrefix(p.Icon, magIconRefPrefix); ok && IconFile(name) == "" {
 		p.Icon = "" // a reference that is not a stored picture is not followed
 	}
 	if pr := Preset(p.Preset); pr != nil {
@@ -336,9 +336,9 @@ func normalize(p Provider) Provider {
 	return p
 }
 
-// cleanHeaders trims header names and values and drops entries with no
+// magCleanHeaders trims header names and values and drops entries with no
 // name. An empty map is nil, so it is not written.
-func cleanHeaders(hs map[string]string) map[string]string {
+func magCleanHeaders(hs map[string]string) map[string]string {
 	var out map[string]string
 	for k, v := range hs {
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
@@ -353,9 +353,9 @@ func cleanHeaders(hs map[string]string) map[string]string {
 	return out
 }
 
-// catalogNames splits a catalog value ("openai,deepseek") into its
+// magCatalogNames splits a catalog value ("openai,deepseek") into its
 // models.dev ids, lowercased, in the order given, without repeats.
-func catalogNames(s string) []string {
+func magCatalogNames(s string) []string {
 	var out []string
 	for _, x := range strings.Split(s, ",") {
 		if x = strings.ToLower(strings.TrimSpace(x)); x != "" && !contains(out, x) {

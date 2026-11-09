@@ -15,8 +15,8 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// s3GatewayEnv keeps config, cache, home and Claude's directory out of the real ones.
-func s3GatewayEnv(t *testing.T) string {
+// magS3GatewayEnv keeps config, cache, home and Claude's directory out of the real ones.
+func magS3GatewayEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
@@ -26,15 +26,15 @@ func s3GatewayEnv(t *testing.T) string {
 	return dir
 }
 
-// s3Token is an unsigned JWT whose "name" claim is name, valid for years.
-func s3Token(name string) string {
+// magS3Token is an unsigned JWT whose "name" claim is name, valid for years.
+func magS3Token(name string) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	b, _ := json.Marshal(map[string]any{"name": name, "exp": int64(4102444800)})
 	return h + "." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
-// s3TokenName reads the name claim back out of a token the test made.
-func s3TokenName(tok string) string {
+// magS3TokenName reads the name claim back out of a token the test made.
+func magS3TokenName(tok string) string {
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 {
 		return ""
@@ -49,8 +49,8 @@ func s3TokenName(tok string) string {
 	return name
 }
 
-// s3SignIn writes Codex CLI's auth file as if signed in as email.
-func s3SignIn(t *testing.T, home, email, name string) {
+// magS3SignIn writes Codex CLI's auth file as if signed in as email.
+func magS3SignIn(t *testing.T, home, email, name string) {
 	t.Helper()
 	path := filepath.Join(home, ".codex", "auth.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -59,8 +59,8 @@ func s3SignIn(t *testing.T, home, email, name string) {
 	body := map[string]any{
 		"auth_mode": "chatgpt",
 		"tokens": map[string]any{
-			"id_token":      s3IDToken(email),
-			"access_token":  s3Token(name),
+			"id_token":      magS3IDToken(email),
+			"access_token":  magS3Token(name),
 			"refresh_token": "refresh-" + name,
 			"account_id":    "acct-" + name,
 		},
@@ -71,8 +71,8 @@ func s3SignIn(t *testing.T, home, email, name string) {
 	}
 }
 
-// s3IDToken is an id token carrying the account's email.
-func s3IDToken(email string) string {
+// magS3IDToken is an id token carrying the account's email.
+func magS3IDToken(email string) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	b, _ := json.Marshal(map[string]any{"email": email, "exp": int64(4102444800),
 		"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"}})
@@ -80,14 +80,14 @@ func s3IDToken(email string) string {
 }
 
 func TestS3AccountFailsOverToTheOnAccount(t *testing.T) {
-	dir := s3GatewayEnv(t)
+	dir := magS3GatewayEnv(t)
 	home := filepath.Join(dir, "home")
-	s3SignIn(t, home, "a@example.com", "a")
+	magS3SignIn(t, home, "a@example.com", "a")
 	provider.Remembered("codex") // magpie remembers a
 	// b signs in through magpie's own sign-in, which runs codex from PATH; a
 	// stand-in codex writes b's sign-in where the real one would
 	bHome := filepath.Join(dir, "b-home")
-	s3SignIn(t, bHome, "b@example.com", "b")
+	magS3SignIn(t, bHome, "b@example.com", "b")
 	bin := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestS3AccountFailsOverToTheOnAccount(t *testing.T) {
 	var seen []string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
-		name := s3TokenName(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		name := magS3TokenName(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 		mu.Lock()
 		seen = append(seen, name)
 		mu.Unlock()
@@ -127,7 +127,7 @@ func TestS3AccountFailsOverToTheOnAccount(t *testing.T) {
 	t.Cleanup(func() { provider.CodexBase = oldBase })
 
 	s := New()
-	code, body := s3Post(t, s, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","stream":true}`)
+	code, body := magS3Post(t, s, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","stream":true}`)
 	if code != 200 {
 		t.Fatalf("status %d: %s", code, body)
 	}
@@ -137,7 +137,7 @@ func TestS3AccountFailsOverToTheOnAccount(t *testing.T) {
 	}
 
 	// the next request goes straight to the account that served
-	if code, body := s3Post(t, s, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","stream":true}`); code != 200 {
+	if code, body := magS3Post(t, s, "/v1/responses", `{"model":"codex/gpt-5.5","input":"hi","stream":true}`); code != 200 {
 		t.Fatalf("second request: %d %s", code, body)
 	}
 	mu.Lock()
@@ -147,8 +147,8 @@ func TestS3AccountFailsOverToTheOnAccount(t *testing.T) {
 	}
 }
 
-// s3Post sends one request through the gateway's own handler.
-func s3Post(t *testing.T, s *Server, path, body string) (int, string) {
+// magS3Post sends one request through the gateway's own handler.
+func magS3Post(t *testing.T, s *Server, path, body string) (int, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

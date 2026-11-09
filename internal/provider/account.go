@@ -595,12 +595,12 @@ func codexAccount(home string) (Provider, bool) {
 		return Provider{}, false
 	}
 	id := jwtClaims(a.Tokens.IDToken)
-	return codexProvider(path, claimString(id, "email"), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")), true
+	return magCodexProvider(path, claimString(id, "email"), claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type")), true
 }
 
-// codexProvider is a ChatGPT sign-in whose tokens live in the auth file at
+// magCodexProvider is a ChatGPT sign-in whose tokens live in the auth file at
 // path: Codex CLI's own, or a copy magpie keeps for a remembered account.
-func codexProvider(path, user, plan string) Provider {
+func magCodexProvider(path, user, plan string) Provider {
 	if user == "" {
 		user = "ChatGPT"
 	}

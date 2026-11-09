@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// s4ProvEnv keeps config, cache and home out of the real ones.
-func s4ProvEnv(t *testing.T) {
+// magS4ProvEnv keeps config, cache and home out of the real ones.
+func magS4ProvEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -14,7 +14,7 @@ func s4ProvEnv(t *testing.T) {
 }
 
 func TestS4FallbackListIsCleanedOnSave(t *testing.T) {
-	s4ProvEnv(t)
+	magS4ProvEnv(t)
 	if err := Save(Provider{ID: "s4a", Name: "S4 A", Chat: "https://a.example/v1", Key: "sk-s4",
 		Fallback: []string{"  b/m1 ", "", "b/m1", "c/m2", "   "}}); err != nil {
 		t.Fatal(err)

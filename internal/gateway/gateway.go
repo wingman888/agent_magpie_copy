@@ -58,25 +58,25 @@ func Running() bool {
 
 // Call is one request the gateway handled, for the status views.
 type Call struct {
-	Time              time.Time         `json:"time"`
-	Agent             string            `json:"agent"` // who called, from the client's User-Agent
-	Model             string            `json:"model"`
-	Provider          string            `json:"provider"`
-	From              provider.Protocol `json:"from"`
-	To                provider.Protocol `json:"to"`
-	Status            int               `json:"status"`
-	Millis            int64             `json:"ms"`
-	Error             string            `json:"error,omitempty"`
+	Time     time.Time         `json:"time"`
+	Agent    string            `json:"agent"` // who called, from the client's User-Agent
+	Model    string            `json:"model"`
+	Provider string            `json:"provider"`
+	From     provider.Protocol `json:"from"`
+	To       provider.Protocol `json:"to"`
+	Status   int               `json:"status"`
+	Millis   int64             `json:"ms"`
+	Error    string            `json:"error,omitempty"`
 	// Fallback names the keys that failed before the reply came, when any did;
 	// Provider is the one that finally served the request.
-	Fallback          string            `json:"fallback,omitempty"`
+	Fallback string `json:"fallback,omitempty"`
 	// Key names the key that served the request (its fingerprint when unnamed).
-	Key               string            `json:"key,omitempty"`
-	Usage             Usage             `json:"usage"`
-	RequestBody       string            `json:"requestBody,omitempty"`
-	ResponseBody      string            `json:"responseBody,omitempty"`
-	RequestTruncated  bool              `json:"requestTruncated,omitempty"`
-	ResponseTruncated bool              `json:"responseTruncated,omitempty"`
+	Key               string `json:"key,omitempty"`
+	Usage             Usage  `json:"usage"`
+	RequestBody       string `json:"requestBody,omitempty"`
+	ResponseBody      string `json:"responseBody,omitempty"`
+	RequestTruncated  bool   `json:"requestTruncated,omitempty"`
+	ResponseTruncated bool   `json:"responseTruncated,omitempty"`
 }
 
 // Server is the gateway.
@@ -88,7 +88,7 @@ type Server struct {
 	// known-failing probe on every Claude Code turn.
 	responseOnly map[string]bool
 	// keyCool holds when each provider key last failed (see keys.go).
-	keyCool      map[string]time.Time
+	keyCool map[string]time.Time
 	// providerCool holds when each provider last failed for every key (see fallback.go).
 	providerCool map[string]time.Time
 	subscription *subscriptionBridge
@@ -249,7 +249,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 			}
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 			res.Body.Close()
-			if !retryableKey(res.StatusCode, b) {
+			if !magRetryableKey(res.StatusCode, b) {
 				break
 			}
 			s.coolKey(p.ID, pl.Ref)
@@ -446,8 +446,8 @@ func (s *Server) passthroughOpt(w http.ResponseWriter, r *http.Request, p provid
 	rd, sse := eventStream(res)
 	var first []byte
 	if sse && canRetry {
-		first, rd = peekEvent(rd)
-		if msg, ok := startError(first); ok {
+		first, rd = magPeekEvent(rd)
+		if msg, ok := magStartError(first); ok {
 			msg = p.Name + ": " + msg
 			return writeError(w, proto, http.StatusServiceUnavailable, msg), msg
 		}
@@ -641,7 +641,7 @@ func (s *Server) translateOpt(w http.ResponseWriter, r *http.Request, p provider
 					case ev.Kind == KStart || ev.Kind == KUsage:
 						held = append(held, ev)
 						return
-					case ev.Kind == KError && retryableText(ev.Text):
+					case ev.Kind == KError && magRetryableText(ev.Text):
 						startErr = ev.Text
 						return
 					}

@@ -9,14 +9,14 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// keyCooldown is how long a key that was out of quota, rate limited or
+// magKeyCooldown is how long a key that was out of quota, rate limited or
 // overloaded is passed over in favour of the provider's other keys.
-const keyCooldown = time.Minute
+const magKeyCooldown = time.Minute
 
-// holdWriter passes a reply through to the client, except that when hold is
+// magHoldWriter passes a reply through to the client, except that when hold is
 // set an error status is kept back. The caller can then discard it and try
 // another key without the client having seen anything.
-type holdWriter struct {
+type magHoldWriter struct {
 	dst       http.ResponseWriter
 	hold      bool
 	hdr       http.Header
@@ -26,18 +26,18 @@ type holdWriter struct {
 	buf       bytes.Buffer
 }
 
-func newHoldWriter(dst http.ResponseWriter, hold bool) *holdWriter {
-	return &holdWriter{dst: dst, hold: hold, hdr: http.Header{}}
+func magNewHoldWriter(dst http.ResponseWriter, hold bool) *magHoldWriter {
+	return &magHoldWriter{dst: dst, hold: hold, hdr: http.Header{}}
 }
 
-func (w *holdWriter) Header() http.Header {
+func (w *magHoldWriter) Header() http.Header {
 	if w.committed {
 		return w.dst.Header()
 	}
 	return w.hdr
 }
 
-func (w *holdWriter) WriteHeader(code int) {
+func (w *magHoldWriter) WriteHeader(code int) {
 	if w.status != 0 {
 		return
 	}
@@ -50,7 +50,7 @@ func (w *holdWriter) WriteHeader(code int) {
 }
 
 // commit sends the status and headers to the client, once.
-func (w *holdWriter) commit() {
+func (w *magHoldWriter) commit() {
 	if w.committed {
 		return
 	}
@@ -65,7 +65,7 @@ func (w *holdWriter) commit() {
 	w.dst.WriteHeader(w.status)
 }
 
-func (w *holdWriter) Write(p []byte) (int, error) {
+func (w *magHoldWriter) Write(p []byte) (int, error) {
 	if w.status == 0 {
 		w.WriteHeader(http.StatusOK)
 	}
@@ -75,7 +75,7 @@ func (w *holdWriter) Write(p []byte) (int, error) {
 	return w.dst.Write(p)
 }
 
-func (w *holdWriter) Flush() {
+func (w *magHoldWriter) Flush() {
 	if !w.committed || w.held {
 		return
 	}
@@ -85,7 +85,7 @@ func (w *holdWriter) Flush() {
 }
 
 // release sends a held error reply to the client as it was.
-func (w *holdWriter) release() {
+func (w *magHoldWriter) release() {
 	if !w.held {
 		return
 	}
@@ -94,9 +94,9 @@ func (w *holdWriter) release() {
 	w.dst.Write(w.buf.Bytes())
 }
 
-// retryableKey reports whether a failed reply means this key is out of
+// magRetryableKey reports whether a failed reply means this key is out of
 // quota, rate limited or overloaded, so another key may still get through.
-func retryableKey(status int, body []byte) bool {
+func magRetryableKey(status int, body []byte) bool {
 	switch status {
 	case http.StatusTooManyRequests, http.StatusPaymentRequired, 529, http.StatusServiceUnavailable:
 		return true
@@ -131,7 +131,7 @@ func (s *Server) cooling(providerID, ref string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.keyCool[providerID+"\x00"+ref]
-	return ok && time.Since(t) < keyCooldown
+	return ok && time.Since(t) < magKeyCooldown
 }
 
 // coolLast moves the keys that failed recently behind the others, keeping
@@ -148,28 +148,28 @@ func (s *Server) coolLast(providerID string, plans []provider.KeyPlan) []provide
 	return append(hot, cold...)
 }
 
-// planLabel names a key in the call record: the provider, and the key's name
+// magPlanLabel names a key in the call record: the provider, and the key's name
 // when it has one.
-func planLabel(pl provider.KeyPlan) string {
+func magPlanLabel(pl provider.KeyPlan) string {
 	if pl.Name != "" {
 		return pl.Provider.ID + " (key " + pl.Name + ")"
 	}
 	return pl.Provider.ID
 }
 
-// keyLabel names a key in the call record: its name, else its fingerprint.
-func keyLabel(pl provider.KeyPlan) string {
+// magKeyLabel names a key in the call record: its name, else its fingerprint.
+func magKeyLabel(pl provider.KeyPlan) string {
 	if pl.Name != "" {
 		return pl.Name
 	}
 	return pl.Ref
 }
 
-// pickUpstream chooses the endpoint a key's request goes to, and whether it is
+// magPickUpstream chooses the endpoint a key's request goes to, and whether it is
 // relayed as it is: the client's own protocol when the key can take it, else
 // the first endpoint the key may use, translated. A backend that only streams
 // gets a non-streaming request translated, never relayed.
-func pickUpstream(pl provider.KeyPlan, from provider.Protocol, body []byte) (provider.Protocol, bool) {
+func magPickUpstream(pl provider.KeyPlan, from provider.Protocol, body []byte) (provider.Protocol, bool) {
 	relay := false
 	for _, u := range pl.Upstreams {
 		relay = relay || u == from

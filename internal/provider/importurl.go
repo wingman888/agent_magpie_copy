@@ -81,7 +81,7 @@ func ParseImport(link string) (Provider, error) {
 			return Provider{}, errors.New("the link gives no base URL: it needs chat=, responses= or anthropic=")
 		}
 		var catalogs []string
-		for _, c := range catalogNames(p.Catalog) {
+		for _, c := range magCatalogNames(p.Catalog) {
 			if c == Slug(c) {
 				catalogs = append(catalogs, c)
 			}

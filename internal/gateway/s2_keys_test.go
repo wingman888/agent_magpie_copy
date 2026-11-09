@@ -11,24 +11,24 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// s2Env keeps config, cache and home out of the real ones.
-func s2Env(t *testing.T) {
+// magS2Env keeps config, cache and home out of the real ones.
+func magS2Env(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 }
 
-// s2Upstream records which key and path each request came with. Keys listed
+// magS2Upstream records which key and path each request came with. Keys listed
 // in fail get that status back; count_tokens gets a count.
-type s2Upstream struct {
+type magS2Upstream struct {
 	mu    sync.Mutex
 	keys  []string
 	paths []string
 	fail  map[string]int
 }
 
-func (u *s2Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (u *magS2Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.ReadAll(r.Body)
 	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	u.mu.Lock()
@@ -48,14 +48,14 @@ func (u *s2Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, `{"id":"s2","object":"chat.completion","model":"m1","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 }
 
-func (u *s2Upstream) seen() string {
+func (u *magS2Upstream) seen() string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return strings.Join(u.keys, ",")
 }
 
-// s2Post sends one request through the gateway's own handler.
-func s2Post(t *testing.T, s *Server, path, body string) (int, string) {
+// magS2Post sends one request through the gateway's own handler.
+func magS2Post(t *testing.T, s *Server, path, body string) (int, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -64,9 +64,9 @@ func s2Post(t *testing.T, s *Server, path, body string) (int, string) {
 	return rec.Code, rec.Body.String()
 }
 
-const s2Chat = `{"model":"fake/m1","messages":[{"role":"user","content":"hi"}]}`
+const magS2Chat = `{"model":"fake/m1","messages":[{"role":"user","content":"hi"}]}`
 
-func s2Provider(t *testing.T, up *httptest.Server, key string) {
+func magS2Provider(t *testing.T, up *httptest.Server, key string) {
 	t.Helper()
 	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Chat: up.URL + "/v1", Key: key, KeyName: "home", Models: []string{"m1"}}); err != nil {
 		t.Fatal(err)
@@ -74,23 +74,23 @@ func s2Provider(t *testing.T, up *httptest.Server, key string) {
 }
 
 func TestS2KeyFailoverServesFromSecondKey(t *testing.T) {
-	s2Env(t)
-	up := &s2Upstream{fail: map[string]int{"sk-s2-one": 429}}
+	magS2Env(t)
+	up := &magS2Upstream{fail: map[string]int{"sk-s2-one": 429}}
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
-	s2Provider(t, srv, "sk-s2-one")
+	magS2Provider(t, srv, "sk-s2-one")
 	if err := provider.AddKey("fake", "team", "sk-s2-two", ""); err != nil {
 		t.Fatal(err)
 	}
 	s := New()
-	if code, body := s2Post(t, s, "/v1/chat/completions", s2Chat); code != 200 || !strings.Contains(body, `"hi"`) {
+	if code, body := magS2Post(t, s, "/v1/chat/completions", magS2Chat); code != 200 || !strings.Contains(body, `"hi"`) {
 		t.Fatalf("first request: %d %s", code, body)
 	}
 	c := s.Recent()[0]
 	if c.Provider != "fake" || !strings.Contains(c.Fallback, "fake") || !strings.Contains(c.Fallback, "home") || c.Key != "team" {
 		t.Fatalf("call record = provider %q fallback %q key %q", c.Provider, c.Fallback, c.Key)
 	}
-	if code, _ := s2Post(t, s, "/v1/chat/completions", s2Chat); code != 200 {
+	if code, _ := magS2Post(t, s, "/v1/chat/completions", magS2Chat); code != 200 {
 		t.Fatalf("second request: %d", code)
 	}
 	if got := up.seen(); got != "sk-s2-one,sk-s2-two,sk-s2-two" {
@@ -102,16 +102,16 @@ func TestS2KeyFailoverServesFromSecondKey(t *testing.T) {
 }
 
 func TestS2BadRequestIsNotRetriedWithAnotherKey(t *testing.T) {
-	s2Env(t)
-	up := &s2Upstream{fail: map[string]int{"sk-s2-one": 400}}
+	magS2Env(t)
+	up := &magS2Upstream{fail: map[string]int{"sk-s2-one": 400}}
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
-	s2Provider(t, srv, "sk-s2-one")
+	magS2Provider(t, srv, "sk-s2-one")
 	if err := provider.AddKey("fake", "team", "sk-s2-two", ""); err != nil {
 		t.Fatal(err)
 	}
 	s := New()
-	if code, _ := s2Post(t, s, "/v1/chat/completions", s2Chat); code != 400 {
+	if code, _ := magS2Post(t, s, "/v1/chat/completions", magS2Chat); code != 400 {
 		t.Fatalf("status = %d, want the 400 passed through", code)
 	}
 	if got := up.seen(); got != "sk-s2-one" {
@@ -120,16 +120,16 @@ func TestS2BadRequestIsNotRetriedWithAnotherKey(t *testing.T) {
 }
 
 func TestS2LastKeyErrorReachesClient(t *testing.T) {
-	s2Env(t)
-	up := &s2Upstream{fail: map[string]int{"sk-s2-one": 429, "sk-s2-two": 429}}
+	magS2Env(t)
+	up := &magS2Upstream{fail: map[string]int{"sk-s2-one": 429, "sk-s2-two": 429}}
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
-	s2Provider(t, srv, "sk-s2-one")
+	magS2Provider(t, srv, "sk-s2-one")
 	if err := provider.AddKey("fake", "team", "sk-s2-two", ""); err != nil {
 		t.Fatal(err)
 	}
 	s := New()
-	code, body := s2Post(t, s, "/v1/chat/completions", s2Chat)
+	code, body := magS2Post(t, s, "/v1/chat/completions", magS2Chat)
 	if code != 429 || !strings.Contains(body, "quota") {
 		t.Fatalf("status %d body %s, want the last key's 429", code, body)
 	}
@@ -139,11 +139,11 @@ func TestS2LastKeyErrorReachesClient(t *testing.T) {
 }
 
 func TestS2SwitchedOffKeyIsNeverTried(t *testing.T) {
-	s2Env(t)
-	up := &s2Upstream{fail: map[string]int{"sk-s2-one": 429}}
+	magS2Env(t)
+	up := &magS2Upstream{fail: map[string]int{"sk-s2-one": 429}}
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
-	s2Provider(t, srv, "sk-s2-one")
+	magS2Provider(t, srv, "sk-s2-one")
 	if err := provider.AddKey("fake", "team", "sk-s2-two", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestS2SwitchedOffKeyIsNeverTried(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := New()
-	if code, _ := s2Post(t, s, "/v1/chat/completions", s2Chat); code != 429 {
+	if code, _ := magS2Post(t, s, "/v1/chat/completions", magS2Chat); code != 429 {
 		t.Fatalf("status = %d, want 429 with no other key on", code)
 	}
 	if got := up.seen(); got != "sk-s2-one" {
@@ -160,8 +160,8 @@ func TestS2SwitchedOffKeyIsNeverTried(t *testing.T) {
 }
 
 func TestS2CountTokensSkipsOpenAIOnlyKey(t *testing.T) {
-	s2Env(t)
-	up := &s2Upstream{}
+	magS2Env(t)
+	up := &magS2Upstream{}
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
 	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Chat: srv.URL + "/v1", Anthropic: srv.URL,
@@ -169,7 +169,7 @@ func TestS2CountTokensSkipsOpenAIOnlyKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := New()
-	code, body := s2Post(t, s, "/v1/messages/count_tokens", `{"model":"fake/claude-x","messages":[{"role":"user","content":"hello"}]}`)
+	code, body := magS2Post(t, s, "/v1/messages/count_tokens", `{"model":"fake/claude-x","messages":[{"role":"user","content":"hello"}]}`)
 	if code != 200 || !strings.Contains(body, "input_tokens") {
 		t.Fatalf("status %d body %s", code, body)
 	}
@@ -179,7 +179,7 @@ func TestS2CountTokensSkipsOpenAIOnlyKey(t *testing.T) {
 	if err := provider.AddKey("fake", "ant", "sk-s2-ant", provider.Anthropic); err != nil {
 		t.Fatal(err)
 	}
-	if code, _ := s2Post(t, s, "/v1/messages/count_tokens", `{"model":"fake/claude-x","messages":[{"role":"user","content":"hello"}]}`); code != 200 {
+	if code, _ := magS2Post(t, s, "/v1/messages/count_tokens", `{"model":"fake/claude-x","messages":[{"role":"user","content":"hello"}]}`); code != 200 {
 		t.Fatalf("status %d", code)
 	}
 	if got := up.seen(); got != "sk-s2-ant" || up.paths[0] != "/v1/messages/count_tokens" {

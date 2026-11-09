@@ -9,7 +9,7 @@ import (
 // A key limited to one protocol is planned only on that protocol's endpoint,
 // even when the vendor has both OpenAI-style endpoints.
 func TestR1LimitedKeyUsesOnlyItsEndpoint(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	p := Provider{ID: "r1both", Name: "R1 Both", Chat: "https://relay.example/v1",
 		Responses: "https://relay.example/v1", Anthropic: "https://relay.example",
 		Key: "sk-r1-any",
@@ -35,7 +35,7 @@ func TestR1LimitedKeyUsesOnlyItsEndpoint(t *testing.T) {
 
 // A key limited to a protocol the vendor has no endpoint for is not planned.
 func TestR1LimitedKeyWithoutEndpointIsSkipped(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	p := Provider{ID: "r1chat", Name: "R1 Chat", Chat: "https://relay.example/v1",
 		Key: "sk-r1-chat", KeyProtocol: Chat,
 		Keys: []ExtraKey{{Key: "sk-r1-ant", Protocol: Anthropic}}}
@@ -49,7 +49,7 @@ func TestR1LimitedKeyWithoutEndpointIsSkipped(t *testing.T) {
 // Save keeps headers and fallback a caller left nil, and clears them when the
 // caller gives an empty list or map.
 func TestR1SaveKeepsUnsetHeadersAndFallback(t *testing.T) {
-	s2Env(t)
+	magS2Env(t)
 	base := Provider{ID: "r1save", Name: "R1 Save", Chat: "https://relay.example/v1", Key: "sk-r1-save",
 		Headers: map[string]string{"X-Org-Id": "acme"}, Fallback: []string{"backup/m2"}}
 	if err := Save(base); err != nil {
@@ -83,16 +83,16 @@ func TestR1SaveKeepsUnsetHeadersAndFallback(t *testing.T) {
 // The signed-in account keeps its refresh token only in the agent's own
 // store; a copy appears when magpie switches away from it, and not before.
 func TestR1SignedInAccountHasNoCopy(t *testing.T) {
-	s3Env(t)
-	s3CodexAuth(t, "a@example.com", "a")
-	if err := observeSignIns(true); err != nil {
+	magS3Env(t)
+	magS3CodexAuth(t, "a@example.com", "a")
+	if err := magObserveSignIns(true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(stashPath("codex", "a@example.com")); !os.IsNotExist(err) {
+	if _, err := os.Stat(magStashPath("codex", "a@example.com")); !os.IsNotExist(err) {
 		t.Fatalf("the signed-in account has a copy of its sign-in: %v", err)
 	}
-	s3CodexAuth(t, "b@example.com", "b")
-	if err := observeSignIns(true); err != nil {
+	magS3CodexAuth(t, "b@example.com", "b")
+	if err := magObserveSignIns(true); err != nil {
 		t.Fatal(err)
 	}
 	// a was replaced outside magpie, so it has no copy to switch back to
@@ -103,19 +103,19 @@ func TestR1SignedInAccountHasNoCopy(t *testing.T) {
 
 // Switching away from an account saves its newest sign-in first.
 func TestR1SwitchSavesTheOutgoingSignIn(t *testing.T) {
-	s3Env(t)
-	s3TwoAccounts(t)
+	magS3Env(t)
+	magS3TwoAccounts(t)
 	if err := SetLoginOn("codex", "a@example.com", true); err != nil {
 		t.Fatal(err)
 	}
 	// b is signed in and has no copy yet
-	if _, err := os.Stat(stashPath("codex", "b@example.com")); !os.IsNotExist(err) {
+	if _, err := os.Stat(magStashPath("codex", "b@example.com")); !os.IsNotExist(err) {
 		t.Fatalf("the signed-in account has a copy before any switch: %v", err)
 	}
 	if _, err := SwitchAccount("codex", "a@example.com"); err != nil {
 		t.Fatalf("switch to a: %v", err)
 	}
-	if n := s3StashName(t, "b@example.com"); n != "b" {
+	if n := magS3StashName(t, "b@example.com"); n != "b" {
 		t.Fatalf("the account switched away from kept %q, want b", n)
 	}
 }
