@@ -249,9 +249,6 @@ func geminiResponseText(raw json.RawMessage) string {
 func geminiEffort(budget *int, level string) string {
 	if budget != nil {
 		switch n := *budget; {
-		case n == 0:
-			// thinking off: no effort is requested, and Anthropic sees no thinking
-			return ""
 		case n < 0:
 			return "medium"
 		case n <= 1024:

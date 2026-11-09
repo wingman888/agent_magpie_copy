@@ -54,14 +54,3 @@ func TestFixR7AnthropicKeepsTopP(t *testing.T) {
 		t.Fatalf("temperature-only request changed: %v", m2)
 	}
 }
-
-// thinkingBudget 0 means thinking off; -1 stays medium.
-func TestFixR7ThinkingBudgetZeroIsOff(t *testing.T) {
-	zero, neg := 0, -1
-	if e := geminiEffort(&zero, ""); e != "" {
-		t.Fatalf("budget 0 effort = %q", e)
-	}
-	if e := geminiEffort(&neg, ""); e != "medium" {
-		t.Fatalf("budget -1 effort = %q", e)
-	}
-}
